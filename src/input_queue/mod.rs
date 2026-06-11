@@ -878,6 +878,38 @@ impl<T: Config> InputQueue<T> {
         self.frozen
     }
 
+    /// Re-freezes a queue that was reopened by [`Self::reset_to_frame`],
+    /// restoring `value` (the caller-captured **pre-reopen**
+    /// `last_confirmed_input`) as the frozen value.
+    ///
+    /// This is the **abort-path inverse** of `reset_to_frame` for the N-peer
+    /// hot-join survivor: on a coordinator `JoinAborted`, a survivor that
+    /// already reopened the dropped slot at the activation frame `F` must
+    /// return it to the reserved/frozen state, repeating the identical agreed
+    /// value every survivor shares. The value must be captured by the caller
+    /// **before** the reopen: `reset_to_frame` itself preserves
+    /// `last_confirmed_input`, but any real joiner input confirmed by the
+    /// reopened queue before the abort arrives overwrites it (`add_input`
+    /// tracks the latest confirmed input) — restoring whatever the queue
+    /// currently holds could therefore leak the aborted attempt's input into
+    /// the frozen stream, diverging from survivors that never received it.
+    /// The session separately restores the pre-reopen connection status.
+    ///
+    /// [`Self::freeze_at`] cannot be used for this: a frame-targeted re-freeze
+    /// would look up `confirmed_input` in the ring buffer that
+    /// `reset_to_frame` blanked (or that now holds the aborted attempt's
+    /// frames `>= F`), fail, and report a spurious violation for what is a
+    /// deliberate, specified restore. Any post-reopen ring contents become
+    /// unreachable (a frozen disconnected slot is served from
+    /// `last_confirmed_input` past its connection status `last_frame`, and a
+    /// future re-serve repositions the queue through `reset_to_frame` again,
+    /// which re-blanks the ring). Idempotent given the same `value`.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn refreeze_with_value(&mut self, value: Option<T::Input>) {
+        self.last_confirmed_input = value;
+        self.frozen = true;
+    }
+
     /// Unfreezes this queue, re-enabling [`Self::add_input`].
     ///
     /// This is the counterpart to [`Self::freeze`]. It is used when a slot that
@@ -4770,6 +4802,78 @@ mod hot_join_input_queue_tests {
         let (value, status) = queue.input(f).expect("input at F should be available");
         assert_eq!(value.inp, 42);
         assert_eq!(status, InputStatus::Confirmed);
+    }
+
+    /// `refreeze_with_value` after a `reset_to_frame` reopen restores the
+    /// frozen state with the caller-captured *pre-reopen* frozen value (the
+    /// N-peer survivor `JoinAborted` path), and re-blocks `add_input`. The
+    /// joiner input confirmed by the reopened queue (which overwrote
+    /// `last_confirmed_input`) must NOT leak into the restored value.
+    #[test]
+    fn refreeze_with_value_after_reset_restores_pre_reopen_value() {
+        let mut queue = test_queue(0);
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 7 })),
+            Frame::new(0)
+        );
+        queue.freeze();
+        // The caller captures the agreed frozen value BEFORE the reopen.
+        let pre_reopen_value = queue.last_confirmed_input;
+        assert_eq!(pre_reopen_value, Some(TestInput { inp: 7 }));
+
+        // Reopen at the activation frame (the survivor reopen), then accept the
+        // joiner's real input at F — the aborted attempt's residue, which
+        // overwrites the queue's tracked last-confirmed input.
+        let f = Frame::new(20);
+        queue.reset_to_frame(f);
+        assert!(!queue.is_frozen());
+        assert_eq!(
+            queue.add_input(PlayerInput::new(f, TestInput { inp: 99 })),
+            f
+        );
+        assert_eq!(
+            queue.last_confirmed_input,
+            Some(TestInput { inp: 99 }),
+            "the accepted real input overwrites last_confirmed_input (why the caller must capture pre-reopen)"
+        );
+
+        // Abort: re-freeze with the captured value. The frozen value must be
+        // the PRE-reopen value, and further inputs are silently ignored again
+        // (the frozen no-op returns the existing last_added_frame and mutates
+        // nothing).
+        queue.refreeze_with_value(pre_reopen_value);
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, pre_reopen_value);
+        assert_eq!(
+            queue.add_input(PlayerInput::new(
+                safe_frame_add!(f, 1, "test"),
+                TestInput { inp: 100 }
+            )),
+            f,
+            "a re-frozen queue must ignore inputs (no-op returns last_added_frame)"
+        );
+        assert_eq!(
+            queue.last_confirmed_input, pre_reopen_value,
+            "the ignored input must not alter the restored frozen value"
+        );
+    }
+
+    /// `refreeze_with_value` is idempotent on an already-frozen queue given the
+    /// same value.
+    #[test]
+    fn refreeze_with_value_is_idempotent_when_frozen() {
+        let mut queue = test_queue(0);
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 7 })),
+            Frame::new(0)
+        );
+        queue.freeze();
+        let frozen_value = queue.last_confirmed_input;
+
+        queue.refreeze_with_value(frozen_value);
+
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, frozen_value);
     }
 
     /// Test 6: `reset_to_frame` with a negative frame is a no-op and does not panic.

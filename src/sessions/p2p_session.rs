@@ -99,6 +99,22 @@ pub(crate) const DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES: usize =
 #[cfg(feature = "hot-join")]
 pub(crate) const DEFAULT_HOT_JOIN_ACK_RESENDS: usize = 30;
 
+/// Number of [`poll_remote_clients`](P2PSession::poll_remote_clients) calls over
+/// which an N-peer coordinator re-sends the `JoinCommitted`/`JoinAborted`
+/// lifecycle message to the joiner and every survivor after a serve concludes.
+///
+/// The budget only paces the *proactive* fan-out; delivery to every reopened
+/// participant is reliable-until-converged regardless: a reopened survivor
+/// keeps re-acking `ReactivateSlotAck{h, F}` each poll until it hears the
+/// outcome, and the joiner re-sends its `StateSnapshotAck` likewise — the
+/// coordinator's post-serve responder answers each straggler with one more
+/// lifecycle resend. A survivor must never *guess* the outcome (observed input
+/// progress is not proof of a commit: a live joiner legally feeds a reopened
+/// queue between the reopen and an eventual abort), so the explicit message is
+/// the only close. Small and deterministic for tests.
+#[cfg(feature = "hot-join")]
+pub(crate) const NPEER_JOIN_LIFECYCLE_RESENDS: usize = 10;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum DisconnectEventPolicy {
     Suppress,
@@ -235,6 +251,40 @@ where
     /// [`DEFAULT_HOT_JOIN_ACK_RESENDS`]; configurable via the builder. May be 0
     /// (the joiner acks exactly once, with no loss tolerance).
     ack_resends: usize,
+    /// The single in-flight **N-peer** coordinator serve (one join at a time,
+    /// mesh-wide). `Some` from the moment a `JoinRequest` opens an N-peer serve
+    /// (survivor set non-empty) until commit or abort. While `Some` the
+    /// coordinator is **paused** like the 2-peer serve, but with
+    /// rollback-while-paused semantics (see
+    /// [`advance_frame`](P2PSession::advance_frame)).
+    npeer: Option<NPeerServe<T>>,
+    /// Post-serve `JoinCommitted`/`JoinAborted` announcer + commit responder.
+    /// Lives past the serve so lifecycle delivery tolerates loss; replaced when
+    /// the next N-peer serve concludes, cleared when one opens.
+    npeer_post: Option<NPeerPostServe<T>>,
+    /// One-frame next-serve guard (R3): after an N-peer abort, a new N-peer
+    /// serve may only open once the coordinator's last-saved frame has advanced
+    /// PAST this value, so every attempt's `(handle, F)` pair is unique and
+    /// stale lifecycle messages are discriminable. `Frame::NULL` = no guard.
+    npeer_next_serve_min_frame: Frame,
+    /// Survivor-side pending reactivation for the single in-flight mesh join
+    /// (one join at a time, mesh-wide). Driven by
+    /// [`poll_npeer_survivor`](P2PSession::poll_npeer_survivor) on every
+    /// hot-join session — survivors do not opt in.
+    pending_reactivation: Option<PendingReactivation<T>>,
+    /// Survivor-side per-handle high-water of CLOSED reactivation attempts:
+    /// the highest activation frame `F` whose attempt for the handle this
+    /// session concluded (lifecycle close, implied close, or local
+    /// joiner-death close). A directive with `frame <=` this value is a stale
+    /// straggler of a closed attempt and is rejected: its lifecycle messages
+    /// no longer exist anywhere once the coordinator's next serve supersedes
+    /// the post-serve responder memo, so accepting it would wedge this
+    /// survivor in a never-closeable reopened attempt (and, transitively,
+    /// stall every future join of the slot mesh-wide). Sound because R3 makes
+    /// activation frames strictly monotone across a coordinator's attempts,
+    /// so every genuine new attempt carries a strictly higher frame.
+    /// Bounded: at most one entry per player handle.
+    npeer_closed_attempt_frames: BTreeMap<PlayerHandle, Frame>,
 }
 
 #[cfg(feature = "hot-join")]
@@ -248,6 +298,11 @@ impl<T: Config> Default for HotJoinState<T> {
             serve_timeout_polls: DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS,
             max_snapshot_wire_bytes: DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES,
             ack_resends: DEFAULT_HOT_JOIN_ACK_RESENDS,
+            npeer: None,
+            npeer_post: None,
+            npeer_next_serve_min_frame: Frame::NULL,
+            pending_reactivation: None,
+            npeer_closed_attempt_frames: BTreeMap::new(),
         }
     }
 }
@@ -295,6 +350,151 @@ impl<T: Config> HotJoinState<T> {
                 .iter()
                 .all(|handle| self.reserved_slots.contains(handle))
     }
+}
+
+/// Coordinator-side state for a single in-flight **N-peer** join serve
+/// (chunk N2 of the Session-18 design).
+///
+/// Unlike the 2-peer [`JoinServe`], the snapshot is **not** captured at open:
+/// the activation frame must clear the survivor cap (`F = S + 1` where
+/// `S = L =` the coordinator's last-sent frame, frozen by the pause), but the
+/// saved state at `S` may still embed *predicted* survivor inputs when the
+/// request arrives. The serve therefore pauses first (fixing `L`), then waits —
+/// still paused, with rollback repair running each `advance_frame` — until the
+/// coordinator's own confirmed frame reaches `S` with no misprediction pending,
+/// and only then captures (wait-then-capture). `ReactivateSlot{h, F}`
+/// directives broadcast to survivors from the first poll (F is fixed at open),
+/// shortening the barrier.
+#[cfg(feature = "hot-join")]
+struct NPeerServe<T>
+where
+    T: Config,
+{
+    /// The reserved handle being filled.
+    handle: PlayerHandle,
+    /// The joiner endpoint's address.
+    joiner_addr: T::Address,
+    /// `S = L =` the coordinator's last-sent (= last-saved, gated `EveryFrame`/
+    /// zero-delay) frame at open. The snapshot is captured at exactly `S`.
+    snapshot_frame: Frame,
+    /// `F = S + 1`, the mesh-wide activation frame carried verbatim in every
+    /// `ReactivateSlot` directive and lifecycle message of this attempt.
+    activation_frame: Frame,
+    /// The snapshot, captured once the wait-then-capture gate passes; re-sent
+    /// to the joiner each poll thereafter (reliable retransmit).
+    snapshot: Option<StateSnapshot>,
+    /// Whether the joiner has acked the snapshot (`StateSnapshotAck(S)`).
+    joiner_acked: bool,
+    /// Survivor addresses snapshotted at open: running, non-reserved remote
+    /// endpoints excluding the joiner's address. Fixed for the attempt (used
+    /// for lifecycle fan-out).
+    survivors: std::collections::BTreeSet<T::Address>,
+    /// Survivors that have not yet acked `ReactivateSlot{h, F}`. Directives are
+    /// re-sent to these each poll; a survivor that drops mid-join is pruned
+    /// (its slot freezes via the normal machinery; the join continues).
+    pending_acks: std::collections::BTreeSet<T::Address>,
+    /// Number of polls since the serve opened; aborts at the session's
+    /// configured serve timeout (shared with the 2-peer path).
+    polls_since_serve: usize,
+}
+
+/// Post-serve lifecycle announcer (and committed-case responder) for the most
+/// recently concluded N-peer serve.
+///
+/// Carries `JoinCommitted`/`JoinAborted{h, F}` to the joiner and every survivor
+/// for [`NPEER_JOIN_LIFECYCLE_RESENDS`] polls (best-effort; see the constant's
+/// rationale). The committed memo additionally outlives its resend budget as a
+/// responder: a duplicate `StateSnapshotAck` from the joiner (which re-acks
+/// until it observes the commit) re-arms one more `JoinCommitted` send,
+/// making joiner-side commit delivery effectively reliable for chunk N4.
+#[cfg(feature = "hot-join")]
+struct NPeerPostServe<T>
+where
+    T: Config,
+{
+    /// `true` = `JoinCommitted`, `false` = `JoinAborted`.
+    committed: bool,
+    /// The handle of the concluded attempt.
+    handle: PlayerHandle,
+    /// The activation frame `F` of the concluded attempt.
+    frame: Frame,
+    /// The snapshot frame `S = F - 1` (committed-case responder matching for
+    /// duplicate `StateSnapshotAck`s).
+    snapshot_frame: Frame,
+    /// The joiner's address.
+    joiner_addr: T::Address,
+    /// The survivor fan-out set of the concluded attempt.
+    survivors: std::collections::BTreeSet<T::Address>,
+    /// Remaining announcer resends.
+    resends_left: usize,
+}
+
+/// Survivor-side state for the single in-flight mesh join (chunk N3).
+///
+/// Created when a valid `ReactivateSlot{h, F}` directive arrives; cleared ONLY
+/// by a matching `JoinCommitted` or `JoinAborted` from the directive's
+/// coordinator (whose delivery the re-ack convergence loop makes reliable; see
+/// [`NPEER_JOIN_LIFECYCLE_RESENDS`]). After the survivor acks
+/// (`reopened == true`) it never self-reverts on a timeout guess — a
+/// self-revert can race a commit it has not yet heard about, and the joiner's
+/// protocol-level input acks would then let it prune `pending_output` for
+/// inputs a re-frozen queue silently dropped (permanent silent desync). Nor
+/// does it self-CLEAR on observed input progress — a live joiner legally feeds
+/// the reopened queue before an eventual abort, so progress is not proof of a
+/// commit. The only re-freeze paths are an explicit matching `JoinAborted`
+/// (coordinator authority) and the normal graceful-drop machinery if the
+/// joiner's endpoint later dies post-reopen.
+#[cfg(feature = "hot-join")]
+struct PendingReactivation<T>
+where
+    T: Config,
+{
+    /// The slot to reopen.
+    handle: PlayerHandle,
+    /// The activation frame `F` carried verbatim from the directive.
+    frame: Frame,
+    /// The coordinator that issued the directive. Lifecycle messages
+    /// (`JoinCommitted`/`JoinAborted`) and duplicate directives must come from
+    /// this address to match the attempt.
+    coordinator_addr: T::Address,
+    /// The joiner's address (the registry owner of `handle`).
+    joiner_addr: T::Address,
+    /// The slot's connection status captured immediately before any mutation
+    /// (`disconnected == true`, `last_frame ==` the pre-reopen freeze frame).
+    /// Restored verbatim on a matching `JoinAborted` after reopen.
+    pre_freeze_status: ConnectionStatus,
+    /// The slot's frozen value (queue `last_confirmed_input`) captured
+    /// immediately before any mutation. Restored on a matching `JoinAborted`
+    /// after reopen: the reopened queue's own tracked value is NOT a valid
+    /// restore source, because any joiner input it confirmed before the abort
+    /// overwrote it (see [`InputQueue::refreeze_with_value`]).
+    ///
+    /// [`InputQueue::refreeze_with_value`]: crate::__internal::InputQueue::refreeze_with_value
+    pre_freeze_input: Option<T::Input>,
+    /// Whether the slot has been reopened (and the ack sent). Set once the
+    /// joiner endpoint reaches `Running`.
+    reopened: bool,
+}
+
+/// Whether a reactivated-slot gossip re-seed also arms the per-slot merge
+/// reactivation floor (session-33 round-2 review Finding 1).
+///
+/// The floor's `>= F - 1` re-drop theorem holds only in COMMITTED worlds, so
+/// only commit-evidence callers (coordinator commit, survivor `JoinCommitted`
+/// receipt, commit-evidence implied/local close) may arm it; the pre-commit
+/// survivor reopen seeds only. An aborted attempt therefore never leaves a
+/// floor behind, and the mesh's genuine `{disconnected, f0}` gossip
+/// re-converges the slot — see [`UdpProtocol::arm_reactivation_floor`] for
+/// the full argument and the stall this prevents.
+#[cfg(feature = "hot-join")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum FloorArming {
+    /// Commit evidence in hand: seed the caches AND arm the floor at `F - 1`.
+    CommitEvidence,
+    /// Pre-commit reopen: seed the caches only (the pending-reactivation
+    /// shield owns the attempt window; the floor stays unarmed so an abort
+    /// converges).
+    SeedOnly,
 }
 
 /// Joiner-side hot-join state machine.
@@ -526,6 +726,11 @@ impl<T: Config> P2PSession<T> {
                 serve_timeout_polls: hot_join.serve_timeout_polls,
                 max_snapshot_wire_bytes: hot_join.max_snapshot_wire_bytes,
                 ack_resends: hot_join.ack_resends,
+                npeer: None,
+                npeer_post: None,
+                npeer_next_serve_min_frame: Frame::NULL,
+                pending_reactivation: None,
+                npeer_closed_attempt_frames: BTreeMap::new(),
             },
         })
     }
@@ -605,6 +810,25 @@ impl<T: Config> P2PSession<T> {
                 requests.push(load);
                 return Ok(requests);
             }
+        }
+
+        // N-peer hot-join coordinator PAUSE (chunk N2): like the 2-peer pause
+        // below, the simulation must not advance to a new frame while an N-peer
+        // serve is open — the pause is what freezes the coordinator's last-sent
+        // frame `L` and thereby caps every survivor's confirmed frame at `L`.
+        // UNLIKE the 2-peer pause, rollback repair MUST still run: the serve's
+        // wait-then-capture gate holds the snapshot until the coordinator's own
+        // confirmed frame reaches `S = L` with no misprediction pending, and a
+        // misprediction discovered DURING the wait (a survivor's late input for
+        // a frame <= L differing from the prediction baked into saved state)
+        // would otherwise never be repaired — the wait would deadlock into the
+        // Phase-4 abort or, worse, a gate without the misprediction check would
+        // serve a speculative state. The 2-peer arm below keeps its exact empty
+        // return: its sole remote slot is frozen for the entire serve (no
+        // prediction episodes), so no rollback can pend there.
+        #[cfg(feature = "hot-join")]
+        if self.hot_join.npeer.is_some() {
+            return self.advance_frame_npeer_paused();
         }
 
         // Hot-join host PAUSE: while a join is being served (ack-gated), the solo
@@ -922,6 +1146,13 @@ impl<T: Config> P2PSession<T> {
         if self.hot_join.joiner.is_some() {
             self.poll_hot_join_joiner();
         }
+        // N-peer survivor drain (chunk N3): runs for EVERY hot-join-feature
+        // session, not gated on `accept_hot_join` — survivors are plain P2P
+        // sessions that never opted into serving. The handler itself rejects
+        // directives on a serving coordinator (it owns its slots' lifecycle),
+        // and drains are cheap no-ops on sessions that never receive N-peer
+        // traffic (2-peer hosts/joiners, the coordinator itself).
+        self.poll_npeer_survivor();
     }
 
     /// Aborts an in-flight hot-join serve for `handle`, performing **all**
@@ -1019,6 +1250,40 @@ impl<T: Config> P2PSession<T> {
             // re-send phase below drives retransmission; we must NOT re-capture
             // (the cached snapshot frame must stay stable while paused).
             if self.hot_join.joining.contains_key(&handle) {
+                continue;
+            }
+            // Already serving this handle on the N-peer arm: ignore the
+            // duplicate request (the N-peer serve loop drives retransmission).
+            if self
+                .hot_join
+                .npeer
+                .as_ref()
+                .is_some_and(|serve| serve.handle == handle)
+            {
+                continue;
+            }
+
+            // Arm selection (N2): the N-peer arm is taken iff at least one
+            // running, non-reserved remote endpoint exists besides the joiner's
+            // address (a survivor that must agree on the activation frame). An
+            // empty survivor set falls through to the 2-peer flow below,
+            // byte-identical to today.
+            let survivors = self.npeer_survivor_addrs(&addr);
+            if !survivors.is_empty() {
+                self.try_open_npeer_serve(addr, handle, survivors);
+                continue;
+            }
+            // One join at a time, mesh-wide: while an N-peer serve is open, no
+            // 2-peer serve may open either. Unreachable for a 2-machine mesh
+            // (an N-peer serve requires a survivor, and a 2-machine mesh has
+            // none), so the 2-peer path is byte-identical; this only protects
+            // the mixed case where every survivor died mid-serve and another
+            // reserved handle's request races the open N-peer serve.
+            if self.hot_join.npeer.is_some() {
+                trace!(
+                    "Ignoring 2-peer hot-join request for slot {} while an N-peer serve is open",
+                    handle
+                );
                 continue;
             }
 
@@ -1249,6 +1514,2116 @@ impl<T: Config> P2PSession<T> {
             // endpoint's stale pending_output. See `abort_hot_join_serve`.
             self.abort_hot_join_serve(handle);
         }
+
+        // N-peer serve + post-serve lifecycle (chunk N2). No-ops unless an
+        // N-peer serve (or its post-serve announcer) is live, so the 2-peer
+        // phases above are unaffected.
+        self.poll_npeer_host_serve();
+        self.poll_npeer_post_serve();
+    }
+
+    /// Returns the **survivor set** for a prospective N-peer serve: the
+    /// addresses of every running, non-reserved remote endpoint other than the
+    /// joiner's. Spectators live in a separate registry and are never
+    /// consulted. `BTreeSet` (and the `BTreeMap` walk) keeps iteration
+    /// deterministic.
+    #[cfg(feature = "hot-join")]
+    fn npeer_survivor_addrs(
+        &self,
+        joiner_addr: &T::Address,
+    ) -> std::collections::BTreeSet<T::Address> {
+        let mut survivors = std::collections::BTreeSet::new();
+        for (addr, endpoint) in self.player_reg.remotes.iter() {
+            if addr == joiner_addr {
+                continue;
+            }
+            if !endpoint.is_running() {
+                continue;
+            }
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            survivors.insert(addr.clone());
+        }
+        survivors
+    }
+
+    /// Opens an N-peer serve for `handle` requested by the joiner at `addr`,
+    /// applying the fail-closed gates that make `S = L` (snapshot frame =
+    /// survivor cap) provable. On any gate failure the request is dropped (the
+    /// joiner re-requests every poll, so a transient failure self-heals; a
+    /// configuration failure repeats its violation and the join can never
+    /// complete — honest, never wrong).
+    #[cfg(feature = "hot-join")]
+    fn try_open_npeer_serve(
+        &mut self,
+        addr: T::Address,
+        handle: PlayerHandle,
+        survivors: std::collections::BTreeSet<T::Address>,
+    ) {
+        // One join at a time, mesh-wide (R6): a single coordinator-side N-peer
+        // serve, and never concurrently with a 2-peer serve.
+        if self.hot_join.npeer.is_some() || !self.hot_join.joining.is_empty() {
+            trace!(
+                "Ignoring N-peer hot-join request for slot {} while another serve is open",
+                handle
+            );
+            return;
+        }
+
+        // Gate (R2a): `S = L = last_saved_frame` requires saved state at
+        // exactly the last-sent frame, which only `SaveMode::EveryFrame`
+        // guarantees. Under Sparse saving `last_saved` can trail `L` by up to
+        // `max_prediction`, and serving the older frame would pick
+        // `F = saved + 1 <= L` — a frame survivors may already have committed
+        // frozen (an unrecoverable confirmed-history rewrite). Fail closed.
+        if self.save_mode != SaveMode::EveryFrame {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "N-peer hot-join serve for slot {} requires SaveMode::EveryFrame (configured {:?}); ignoring the join request",
+                handle,
+                self.save_mode
+            );
+            return;
+        }
+
+        // Gate (R2b): the survivor cap is the minimum of the coordinator's
+        // *gossiped* local last-input frames (`local_connect_status[local]
+        // .last_frame`, stamped with input delay folded in), while the snapshot
+        // can only be captured at `last_saved_frame`. The two coincide exactly
+        // when every local slot's last-sent frame equals `last_saved_frame`
+        // (zero input delay, normal advance cadence). With input delay `d > 0`
+        // the gossiped frame runs `d` ahead of the simulation, the cap sits at
+        // a frame the coordinator has not simulated, and no correct snapshot
+        // exists — fail closed (checked dynamically so runtime delay changes
+        // are caught too). A coordinator with no local players gossips no cap
+        // at all (nothing pins survivors during the pause) — also fail closed.
+        let snapshot_frame = self.sync_layer.last_saved_frame();
+        if snapshot_frame.is_null() {
+            // Nothing saved yet; the joiner will re-send. Skip this poll.
+            return;
+        }
+        let mut local_handles = self.player_reg.local_player_handles_iter().peekable();
+        if local_handles.peek().is_none() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::Configuration,
+                "N-peer hot-join serve for slot {} requires at least one local player on the coordinator (the pause caps survivors via the local slots' gossiped last-input frames); ignoring the join request",
+                handle
+            );
+            return;
+        }
+        for local in local_handles {
+            let last_sent = self
+                .local_connect_status
+                .get(local.as_usize())
+                .map_or(Frame::NULL, |status| status.last_frame);
+            if last_sent != snapshot_frame {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::Configuration,
+                    "N-peer hot-join serve for slot {} requires the local slot {}'s last-sent frame ({}) to equal last_saved_frame ({}) — non-zero input delay (or a stalled save cadence) breaks the S = L identity; ignoring the join request",
+                    handle,
+                    local,
+                    last_sent,
+                    snapshot_frame
+                );
+                return;
+            }
+        }
+
+        // Gate (R3): one-frame next-serve guard. After an abort, `(handle, F)`
+        // must be unique per attempt so stale lifecycle messages from the
+        // previous attempt are discriminable; require the coordinator to have
+        // advanced past the aborted attempt's snapshot frame first. The joiner
+        // keeps re-requesting, so this is a bounded delay of one frame.
+        if !self.hot_join.npeer_next_serve_min_frame.is_null()
+            && snapshot_frame <= self.hot_join.npeer_next_serve_min_frame
+        {
+            trace!(
+                "Deferring N-peer hot-join serve for slot {}: last_saved {} has not advanced past the previous attempt's frame {}",
+                handle,
+                snapshot_frame,
+                self.hot_join.npeer_next_serve_min_frame
+            );
+            return;
+        }
+
+        // The joiner endpoint must still exist to receive the serve traffic.
+        if !self.player_reg.remotes.contains_key(&addr) {
+            return;
+        }
+
+        // Gate (round-5 Finding 1): the served slot's pre-attempt freeze must
+        // be mesh-converged AT THIS COORDINATOR before a serve may open.
+        // Everything downstream — the snapshot's byte-truth at `S`, the bound
+        // clamp's `(f0, v0)` uniformity, the survivors' floors and restores —
+        // quantifies over a single agreed freeze, and the convergence
+        // re-adjust is what creates it. Two fail-closed defers (the joiner
+        // re-requests every poll, so both self-heal):
+        // - a survivor still claims the slot CONNECTED: its freeze frame is
+        //   unknown here, and once that survivor's slot reopens its gossip
+        //   flips connected forever — the correction signal would be lost for
+        //   the entire attempt era (a committed attempt then bakes the
+        //   divergence in permanently);
+        // - a survivor's DISCONNECTED claim sits BELOW this coordinator's own
+        //   freeze: this coordinator's mine-down + gap re-simulation is owed,
+        //   and a snapshot captured first would embed history no survivor
+        //   serves. The very next `advance_frame` applies it (the claim has
+        //   already merged), so this defers by about one tick.
+        // A claim ABOVE the local freeze is fine: that survivor owes its own
+        // re-adjust, which the directive acceptance gate on its side defers
+        // until ITS fold converges. Deferral is trace-level (transient
+        // network condition, like the R3 defer above), not a violation.
+        //
+        // NULL-freeze skip: a NULL local freeze (a build-time reserved slot
+        // that was never occupied, or a drop with zero receipts) IS the
+        // global minimum by definition — no peer's freeze can undercut it,
+        // this coordinator's history for the slot is already the convergence
+        // target, and for a never-occupied slot the survivors' claims stay
+        // `{connected, NULL}` forever (there was no drop to gossip), so
+        // waiting on them would wedge the build-time-reserved serve path.
+        {
+            let Some(local_freeze) = self
+                .local_connect_status
+                .get(handle.as_usize())
+                .filter(|status| status.disconnected)
+                .map(|status| status.last_frame)
+            else {
+                trace!(
+                    "Deferring N-peer hot-join serve for slot {}: the slot is not locally frozen/disconnected",
+                    handle
+                );
+                return;
+            };
+            if !local_freeze.is_null() {
+                for survivor in &survivors {
+                    let Some(endpoint) = self.player_reg.remotes.get(survivor) else {
+                        continue;
+                    };
+                    let claim = endpoint.peer_connect_status(handle);
+                    if !claim.disconnected || claim.last_frame < local_freeze {
+                        trace!(
+                            "Deferring N-peer hot-join serve for slot {}: survivor {:?}'s freeze claim {:?} has not converged with the local freeze {} (re-requested next poll)",
+                            handle,
+                            survivor,
+                            claim,
+                            local_freeze
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let activation_frame = safe_frame_add!(snapshot_frame, 1, "try_open_npeer_serve");
+
+        // A concluded-serve memo for an older attempt is superseded the moment
+        // a new serve opens (one join at a time mesh-wide makes them
+        // unambiguous, and the joiner of the previous attempt has had its
+        // announcer window).
+        self.hot_join.npeer_post = None;
+
+        let pending_acks = survivors.clone();
+        self.hot_join.npeer = Some(NPeerServe {
+            handle,
+            joiner_addr: addr.clone(),
+            snapshot_frame,
+            activation_frame,
+            snapshot: None,
+            joiner_acked: false,
+            survivors,
+            pending_acks,
+            polls_since_serve: 0,
+        });
+
+        self.event_queue
+            .push_back(FortressEvent::JoinRequested { handle, addr });
+    }
+
+    /// Returns `true` while a freeze-frame convergence re-adjust whose forced
+    /// re-simulation would start at or below `snapshot_frame` is OWED but not
+    /// yet applied — i.e. the endpoint claim merge has outrun
+    /// [`update_player_disconnects`](Self::update_player_disconnects), which
+    /// runs only inside `advance_frame` (session-33 round-5 review Finding 1,
+    /// coordinator sibling).
+    ///
+    /// This is a read-only dry-run of the re-adjust trigger: for each remote
+    /// slot, fold the running non-reserved endpoints' claims exactly like the
+    /// real fold; the re-adjust fires when no folded endpoint still reports
+    /// the slot connected AND the slot is either locally connected (a
+    /// propagated first freeze) or locally frozen ABOVE the folded minimum (a
+    /// mine-down is owed). The `<= snapshot_frame` reach term scopes it to
+    /// rewrites that would invalidate a snapshot at `snapshot_frame`; the
+    /// serve poll consumes it to defer a capture (pre-capture) or abort the
+    /// serve (post-capture). Allocation-free; called once per serve poll.
+    #[cfg(feature = "hot-join")]
+    fn npeer_owed_freeze_readjust_at_or_below(&self, snapshot_frame: Frame) -> bool {
+        for handle_idx in 0..self.num_players {
+            let handle = PlayerHandle::new(handle_idx);
+            if !matches!(
+                self.player_reg.handles.get(&handle),
+                Some(PlayerType::Remote(_))
+            ) {
+                continue;
+            }
+            let Some(status) = self.local_connect_status.get(handle_idx) else {
+                continue;
+            };
+            let mut queue_connected = true;
+            let mut queue_min_confirmed = Frame::new(i32::MAX);
+            let mut any_folded = false;
+            for endpoint in self.player_reg.remotes.values() {
+                if !endpoint.is_running() {
+                    continue;
+                }
+                if self.hot_join.endpoint_is_reserved(endpoint) {
+                    continue;
+                }
+                let claim = endpoint.peer_connect_status(handle);
+                any_folded = true;
+                queue_connected = queue_connected && !claim.disconnected;
+                queue_min_confirmed = std::cmp::min(queue_min_confirmed, claim.last_frame);
+            }
+            if !any_folded || queue_connected {
+                continue;
+            }
+            let local_connected = !status.disconnected;
+            if local_connected {
+                queue_min_confirmed = std::cmp::min(queue_min_confirmed, status.last_frame);
+            }
+            let readjust_owed = local_connected || status.last_frame > queue_min_confirmed;
+            if readjust_owed
+                && safe_frame_add!(
+                    queue_min_confirmed,
+                    1,
+                    "P2PSession::npeer_owed_freeze_readjust_at_or_below"
+                ) <= snapshot_frame
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drives the open N-peer serve one poll: directive fan-out + ack
+    /// collection, the wait-then-capture snapshot gate, joiner retransmit, the
+    /// commit barrier, and the Phase-4 timeout.
+    #[cfg(feature = "hot-join")]
+    fn poll_npeer_host_serve(&mut self) {
+        // Take the serve out so `self` stays borrowable; put it back unless the
+        // serve concluded this poll.
+        let Some(mut serve) = self.hot_join.npeer.take() else {
+            return;
+        };
+        serve.polls_since_serve = serve.polls_since_serve.saturating_add(1);
+
+        // Prune survivors that died mid-join (their endpoints left Running via
+        // the normal disconnect machinery, which froze their slots): the join
+        // must not wait on a dead peer's ack. They stay in `survivors` so the
+        // lifecycle fan-out still attempts delivery (a no-op on a dead
+        // endpoint).
+        serve.pending_acks.retain(|addr| {
+            self.player_reg
+                .remotes
+                .get(addr)
+                .is_some_and(UdpProtocol::is_running)
+        });
+
+        // Directive fan-out: re-send `ReactivateSlot{h, F}` to every survivor
+        // that has not acked (the serve-cadence retransmit; loss tolerant).
+        for addr in &serve.pending_acks {
+            if let Some(endpoint) = self.player_reg.remotes.get_mut(addr) {
+                endpoint.send_reactivate_slot(serve.handle.as_usize(), serve.activation_frame);
+            }
+        }
+
+        // Collect survivor acks. Drained from every survivor of the attempt
+        // (not only pending ones) so duplicate acks cannot rot in the
+        // single-slot protocol state.
+        for addr in &serve.survivors {
+            let Some(endpoint) = self.player_reg.remotes.get_mut(addr) else {
+                continue;
+            };
+            let Some(ack) = endpoint.take_received_reactivate_slot_ack() else {
+                continue;
+            };
+            if ack.handle == serve.handle.as_usize() && ack.frame == serve.activation_frame {
+                serve.pending_acks.remove(addr);
+            } else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring stale ReactivateSlotAck for slot {} frame {} from {:?} (serving slot {} frame {})",
+                    ack.handle,
+                    ack.frame,
+                    addr,
+                    serve.handle,
+                    serve.activation_frame
+                );
+            }
+        }
+
+        // Freeze-convergence invalidation (session-33 round-5 review
+        // Finding 1, coordinator sibling): endpoint claims merge during the
+        // poll, the capture gate / joiner ack / commit barrier all run HERE
+        // (also during the poll), but the convergence re-adjust those claims
+        // demand runs only inside `advance_frame` — so a lowered freeze
+        // claim's arrival poll can satisfy the capture gate (the fold sees
+        // mesh agreement instantly) while the state rewrite it owes is still
+        // pending. Dry-run the re-adjust trigger every poll:
+        // - owed and NOT yet captured: simply defer the capture this poll (a
+        //   delay, not a protocol change — the next `advance_frame` applies
+        //   the re-adjust, the paused arm repairs, and the gate's
+        //   misprediction term holds the capture until the repair is done);
+        // - owed and already captured (an N>=4 relay lowering landing
+        //   mid-serve): ABORT fail-closed, before the joiner ack is consumed
+        //   and before the commit barrier. Never recapture at the same `S`:
+        //   the joiner applies the FIRST snapshot it receives (duplicates
+        //   are idempotent) and acks by FRAME, so stale bytes already in
+        //   flight are indistinguishable from a recapture. The joiner
+        //   retries; the R3 guard forces a strictly later `(handle, F)`.
+        let owed_readjust = self.npeer_owed_freeze_readjust_at_or_below(serve.snapshot_frame);
+        if owed_readjust && serve.snapshot.is_some() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "N-peer hot-join serve for slot {} aborted: a freeze convergence re-adjust at or below the captured snapshot frame {} is owed (a same-frame recapture would be indistinguishable from the stale bytes already in flight)",
+                serve.handle,
+                serve.snapshot_frame
+            );
+            self.abort_npeer_serve(serve);
+            return;
+        }
+
+        // Wait-then-capture (R1): the snapshot is captured only once the
+        // coordinator's own confirmed frame has reached `S` AND no misprediction
+        // is pending — i.e. saved state at `S` is a fully-confirmed,
+        // non-speculative state. Repair of a pending misprediction happens in
+        // `advance_frame`'s N-peer paused arm; this gate simply waits for it.
+        //
+        // Achievability bound (honest, fail-closed — review minor m3): the
+        // gate transitively needs every survivor's gossiped claims to cover
+        // `S`, and a survivor that hits its prediction cap goes gossip-idle
+        // with whatever claims it last sent. If cross-peer delivery lag
+        // exceeds the prediction window, those pre-cap claims never reach
+        // `S`, the gate starves, and EVERY attempt ends in the Phase-4 abort
+        // below (which fires a Warning violation per attempt, so operators
+        // can see why joins never land). That is the honest outcome — abort
+        // un-pauses and the R3 retry refreshes the claims by about one frame
+        // per attempt — never a wrong `F`.
+        if serve.snapshot.is_none()
+            && !owed_readjust
+            && self.confirmed_frame() >= serve.snapshot_frame
+            && self
+                .sync_layer
+                .check_simulation_consistency(self.disconnect_frame)
+                .is_null()
+        {
+            if self.sync_layer.last_saved_frame() == serve.snapshot_frame {
+                match crate::sessions::hot_join::capture_snapshot_with_max_wire_bytes(
+                    &self.sync_layer,
+                    serve.snapshot_frame,
+                    self.num_players,
+                    self.hot_join.max_snapshot_wire_bytes,
+                ) {
+                    Ok(Some(snapshot)) => serve.snapshot = Some(snapshot),
+                    Ok(None) => {
+                        // No valid saved state at S (should not happen under the
+                        // EveryFrame gate); retry next poll, bounded by Phase 4.
+                    },
+                    Err(e) => {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InternalError,
+                            "Failed to capture N-peer hot-join snapshot at frame {}: {}",
+                            serve.snapshot_frame,
+                            e
+                        );
+                    },
+                }
+            } else {
+                // The pause holds last_saved fixed, so this indicates the serve
+                // opened against a moving frame counter — fail loudly and let
+                // Phase 4 abort rather than serve a wrong F.
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::FrameSync,
+                    "N-peer hot-join serve for slot {}: last_saved_frame {} moved off the pinned snapshot frame {} while paused",
+                    serve.handle,
+                    self.sync_layer.last_saved_frame(),
+                    serve.snapshot_frame
+                );
+            }
+        }
+
+        // Joiner snapshot retransmit + ack collection.
+        if let Some(endpoint) = self.player_reg.remotes.get_mut(&serve.joiner_addr) {
+            if let Some(snapshot) = &serve.snapshot {
+                endpoint.send_state_snapshot(snapshot.clone());
+            }
+            if let Some(acked) = endpoint.take_received_snapshot_ack() {
+                if serve.snapshot.is_some() && acked == serve.snapshot_frame {
+                    serve.joiner_acked = true;
+                } else {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "Ignoring N-peer hot-join ack for frame {} (serving frame {}) on slot {}",
+                        acked,
+                        serve.snapshot_frame,
+                        serve.handle
+                    );
+                }
+            }
+        }
+
+        // Commit barrier: the joiner has the snapshot AND every (live) survivor
+        // has reopened-and-acked. Un-pausing earlier would lift the cap and let
+        // an un-reopened survivor commit `F` frozen (unrecoverable).
+        if serve.joiner_acked && serve.pending_acks.is_empty() {
+            self.commit_npeer_serve(serve);
+            return;
+        }
+
+        // Phase-4 timeout: liveness bound only (never a safety lever) — abort
+        // and let the joiner retry.
+        if serve.polls_since_serve >= self.hot_join.serve_timeout_polls {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "N-peer hot-join serve for slot {} timed out after {} polls (joiner_acked={}, pending survivor acks={}); aborting (slot stays reserved/frozen, coordinator resumes)",
+                serve.handle,
+                self.hot_join.serve_timeout_polls,
+                serve.joiner_acked,
+                serve.pending_acks.len()
+            );
+            self.abort_npeer_serve(serve);
+            return;
+        }
+
+        self.hot_join.npeer = Some(serve);
+    }
+
+    /// Concludes an N-peer serve successfully: reactivates the local slot at
+    /// `F`, announces `JoinCommitted` to the joiner and every survivor, and
+    /// un-pauses (the serve is dropped, not restored).
+    #[cfg(feature = "hot-join")]
+    fn commit_npeer_serve(&mut self, serve: NPeerServe<T>) {
+        let NPeerServe {
+            handle,
+            joiner_addr,
+            snapshot_frame,
+            activation_frame,
+            survivors,
+            ..
+        } = serve;
+
+        // Pre-commit frozen bound, read before the status flip below: needed
+        // to arm the pre-activation serving floor.
+        let frozen_bound = self
+            .local_connect_status
+            .get(handle.as_usize())
+            .map_or(Frame::NULL, |status| status.last_frame);
+
+        // Reactivate the local slot exactly like the 2-peer Phase 3: unfreeze +
+        // reposition the queue at F and mark it connected with
+        // last_frame = F - 1.
+        if let Err(e) = self
+            .sync_layer
+            .reactivate_player_at_frame(handle, activation_frame)
+        {
+            // Should-never-happen (the handle was validated at open). Abort the
+            // attempt rather than half-commit.
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to reactivate N-peer hot-join slot {} at frame {}: {}; aborting the attempt",
+                handle,
+                activation_frame,
+                e
+            );
+            self.abort_npeer_serve(NPeerServe {
+                handle,
+                joiner_addr,
+                snapshot_frame,
+                activation_frame,
+                snapshot: None,
+                joiner_acked: true,
+                pending_acks: std::collections::BTreeSet::new(),
+                survivors,
+                polls_since_serve: 0,
+            });
+            return;
+        }
+        // Arm the pre-activation serving floor (defense-in-depth on the
+        // coordinator: the wait gate + the paused-arm spectator flush make
+        // sub-F requests structurally unreachable here, but the floor keeps
+        // the contract uniform across every reopen site).
+        if let Err(e) =
+            self.sync_layer
+                .set_reactivation_floor(handle, activation_frame, frozen_bound)
+        {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to arm the reactivation floor for N-peer slot {}: {}",
+                handle,
+                e
+            );
+        }
+        if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+            status.disconnected = false;
+            status.last_frame =
+                safe_frame_sub!(activation_frame, 1, "P2PSession::commit_npeer_serve");
+        } else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "N-peer hot-join slot {} has no connection status entry at commit",
+                handle
+            );
+        }
+        // Anchor the reactivated slot's prediction at F, mirroring the 2-peer
+        // Phase 3. Here `F == current_frame` (the pause pinned
+        // current = S + 1 = F), so the next advance's `adjust_gamestate`
+        // early-returns into `reset_prediction()` — no frames are re-simulated
+        // (none were simulated at or past F; the design's invariant-7 caveat),
+        // but every queue's prediction state is re-anchored so the joiner's
+        // first real input at F is accepted and compared.
+        self.disconnect_frame = if self.disconnect_frame.is_null() {
+            activation_frame
+        } else {
+            std::cmp::min(self.disconnect_frame, activation_frame)
+        };
+
+        // Un-stick every endpoint's cached (sticky-disconnected) view of the
+        // reactivated slot — see `reset_reactivated_slot_gossip`. This IS the
+        // commit, so the merge reactivation floor arms here.
+        self.reset_reactivated_slot_gossip(
+            handle,
+            activation_frame,
+            &joiner_addr,
+            FloorArming::CommitEvidence,
+        );
+
+        // Join complete: the slot is no longer reserved; the coordinator
+        // un-pauses (npeer stays None).
+        self.hot_join.reserved_slots.remove(&handle);
+        self.hot_join.npeer_post = Some(NPeerPostServe {
+            committed: true,
+            handle,
+            frame: activation_frame,
+            snapshot_frame,
+            joiner_addr: joiner_addr.clone(),
+            survivors,
+            resends_left: NPEER_JOIN_LIFECYCLE_RESENDS,
+        });
+
+        self.event_queue.push_back(FortressEvent::PeerJoined {
+            handle,
+            addr: joiner_addr,
+        });
+    }
+
+    /// Concludes an N-peer serve unsuccessfully: announces `JoinAborted` to the
+    /// joiner and every survivor, keeps the slot reserved/frozen, clears the
+    /// joiner endpoint's stale `pending_output` (see
+    /// [`abort_hot_join_serve`](Self::abort_hot_join_serve) for why), arms the
+    /// one-frame next-serve guard, and un-pauses.
+    #[cfg(feature = "hot-join")]
+    fn abort_npeer_serve(&mut self, serve: NPeerServe<T>) {
+        let NPeerServe {
+            handle,
+            joiner_addr,
+            snapshot_frame,
+            activation_frame,
+            survivors,
+            ..
+        } = serve;
+
+        if let Some(endpoint) = self.player_reg.remotes.get_mut(&joiner_addr) {
+            endpoint.clear_pending_output();
+        }
+
+        // R3: `(handle, F)` must be unique per attempt — the next serve must
+        // pick a strictly later frame.
+        self.hot_join.npeer_next_serve_min_frame =
+            std::cmp::max(self.hot_join.npeer_next_serve_min_frame, snapshot_frame);
+
+        self.hot_join.npeer_post = Some(NPeerPostServe {
+            committed: false,
+            handle,
+            frame: activation_frame,
+            snapshot_frame,
+            joiner_addr,
+            survivors,
+            resends_left: NPEER_JOIN_LIFECYCLE_RESENDS,
+        });
+        // npeer stays None: the coordinator un-pauses; the slot stays in
+        // `reserved_slots` so the joiner can retry.
+    }
+
+    /// Aborts the open N-peer serve if it is for `handle` (the joiner-endpoint
+    /// `Event::Disconnected` fast path, mirroring the 2-peer
+    /// [`abort_hot_join_serve`](Self::abort_hot_join_serve)). Survivors that
+    /// already reopened still receive `JoinAborted` via the announcer.
+    #[cfg(feature = "hot-join")]
+    fn abort_npeer_serve_for_handle(&mut self, handle: PlayerHandle) {
+        if self
+            .hot_join
+            .npeer
+            .as_ref()
+            .is_some_and(|serve| serve.handle == handle)
+        {
+            if let Some(serve) = self.hot_join.npeer.take() {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "N-peer hot-join serve for slot {} aborted: the joiner endpoint disconnected mid-serve",
+                    handle
+                );
+                self.abort_npeer_serve(serve);
+            }
+        }
+    }
+
+    /// Drives the post-serve lifecycle announcer one poll: re-sends the
+    /// concluded attempt's `JoinCommitted`/`JoinAborted` while the resend
+    /// budget lasts, and responds to stragglers past the budget — a duplicate
+    /// joiner `StateSnapshotAck` (committed case) or a survivor's
+    /// `ReactivateSlotAck` convergence ping (either case) proves the sender
+    /// has not yet observed the lifecycle outcome and re-arms one resend.
+    /// Together with the survivor-side re-ack loop this makes lifecycle
+    /// delivery reliable-until-converged for every reopened participant; the
+    /// memo lives until the next N-peer serve supersedes it.
+    #[cfg(feature = "hot-join")]
+    fn poll_npeer_post_serve(&mut self) {
+        let Some(mut post) = self.hot_join.npeer_post.take() else {
+            return;
+        };
+
+        // Committed-case responder: a duplicate StateSnapshotAck from the
+        // joiner proves it has not yet observed the commit. Only drained while
+        // no 2-peer serve is open for the same endpoint (the 2-peer Phase 3
+        // owns that drain during its own serves).
+        if post.committed
+            && self
+                .hot_join
+                .joining
+                .values()
+                .all(|serve| serve.addr != post.joiner_addr)
+        {
+            if let Some(endpoint) = self.player_reg.remotes.get_mut(&post.joiner_addr) {
+                if let Some(acked) = endpoint.take_received_snapshot_ack() {
+                    if acked == post.snapshot_frame {
+                        post.resends_left = post.resends_left.max(1);
+                    }
+                }
+            }
+        }
+
+        // Survivor responder: a reopened survivor keeps re-acking until it
+        // hears the lifecycle outcome; answer a matching straggler ack with
+        // one more resend.
+        for addr in &post.survivors {
+            let Some(endpoint) = self.player_reg.remotes.get_mut(addr) else {
+                continue;
+            };
+            let Some(ack) = endpoint.take_received_reactivate_slot_ack() else {
+                continue;
+            };
+            if ack.handle == post.handle.as_usize() && ack.frame == post.frame {
+                post.resends_left = post.resends_left.max(1);
+            }
+        }
+
+        if post.resends_left > 0 {
+            post.resends_left -= 1;
+            let handle = post.handle.as_usize();
+            let frame = post.frame;
+            let committed = post.committed;
+            // Joiner first, then survivors in deterministic order.
+            let mut targets: Vec<&T::Address> = Vec::with_capacity(post.survivors.len() + 1); // alloc-bound: bounded by the registry-sized survivor set + 1.
+            targets.push(&post.joiner_addr);
+            targets.extend(post.survivors.iter());
+            for addr in targets {
+                if let Some(endpoint) = self.player_reg.remotes.get_mut(addr) {
+                    if committed {
+                        endpoint.send_join_committed(handle, frame);
+                    } else {
+                        endpoint.send_join_aborted(handle, frame);
+                    }
+                }
+            }
+        }
+
+        self.hot_join.npeer_post = Some(post);
+    }
+
+    /// Re-seeds every remote endpoint's cached connect-status view of a
+    /// reactivated slot to `{connected, F - 1}` — optionally arming the
+    /// per-slot reactivation floor against stale in-flight `disconnected`
+    /// gossip — and bootstraps the JOINER endpoint's caches for every OTHER
+    /// slot. See
+    /// [`UdpProtocol::seed_peer_connect_status_for_reactivation`] for why the
+    /// out-of-band un-stick is required (the gossip merge is deliberately
+    /// sticky-disconnected, so a committed reactivation can never resurrect
+    /// the cached views through gossip alone — `update_player_disconnects`
+    /// would otherwise re-apply the drop on the freshly reopened slot
+    /// forever), and
+    /// [`UdpProtocol::seed_peer_connect_status_for_joiner_bootstrap`] for why
+    /// the rebuilt joiner endpoint's default `{connected, NULL}` caches must
+    /// not enter the folds raw (they pin this session's confirmed frame at
+    /// `NULL` until the joiner's first own gossip — the post-commit
+    /// mesh-wide dip).
+    ///
+    /// `arming` selects whether the floor arms too — commit-evidence callers
+    /// only; see [`FloorArming`] and [`UdpProtocol::arm_reactivation_floor`].
+    #[cfg(feature = "hot-join")]
+    fn reset_reactivated_slot_gossip(
+        &mut self,
+        handle: PlayerHandle,
+        activation_frame: Frame,
+        joiner_addr: &T::Address,
+        arming: FloorArming,
+    ) {
+        let seeded_last_frame = safe_frame_sub!(
+            activation_frame,
+            1,
+            "P2PSession::reset_reactivated_slot_gossip"
+        );
+        for (addr, endpoint) in self.player_reg.remotes.iter_mut() {
+            endpoint.seed_peer_connect_status_for_reactivation(handle, seeded_last_frame);
+            if arming == FloorArming::CommitEvidence {
+                endpoint.arm_reactivation_floor(handle, seeded_last_frame);
+            }
+            if addr != joiner_addr {
+                continue;
+            }
+            // Joiner-endpoint bootstrap for the other slots: live slots are
+            // claimed through at most `S = F - 1` (what the acked snapshot
+            // provably covers), dropped slots keep this session's agreed
+            // frozen view (claiming them connected would block their
+            // mesh-agreed exclusion from the confirmed fold and pin this
+            // session at the old freeze frame).
+            for (idx, local) in self.local_connect_status.iter().enumerate() {
+                let bootstrap_handle = PlayerHandle::new(idx);
+                if bootstrap_handle == handle {
+                    continue;
+                }
+                let status = if local.disconnected {
+                    *local
+                } else {
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: std::cmp::min(local.last_frame, seeded_last_frame),
+                    }
+                };
+                endpoint.seed_peer_connect_status_for_joiner_bootstrap(bootstrap_handle, status);
+            }
+        }
+    }
+
+    /// The N-peer coordinator's paused `advance_frame` body: never advances to
+    /// a new frame (the pause is the survivor cap), but **does** run rollback
+    /// repair so the serve's wait-then-capture gate can be satisfied — a
+    /// misprediction for a frame `<= S` discovered during the wait is repaired
+    /// here (the returned requests carry the rollback's
+    /// `LoadGameState`/`AdvanceFrame`/`SaveGameState` sequence), after which
+    /// saved state at `S` is fully confirmed and servable.
+    ///
+    /// Confirmed inputs are still streamed to spectators (and the replay
+    /// recorder) while paused: the commit reactivates the slot at `F` with its
+    /// pre-`F` ring history blanked, so any spectator frame still owed below
+    /// `F - 1` must be flushed *before* the commit — while the slot's frozen
+    /// branch can still serve it.
+    #[cfg(feature = "hot-join")]
+    fn advance_frame_npeer_paused(&mut self) -> FortressResult<RequestVec<T>> {
+        let mut requests = RequestVec::<T>::new();
+
+        // Inputs arriving for frames the paused coordinator never requested
+        // cannot create mispredictions (prediction episodes only cover
+        // requested frames), so this repairs strictly pre-pause speculation.
+        let confirmed_frame = self.confirmed_frame();
+        let first_incorrect = self
+            .sync_layer
+            .check_simulation_consistency(self.disconnect_frame);
+        if !first_incorrect.is_null() {
+            if let Some(telemetry) = &self.telemetry {
+                for (player, frame) in self
+                    .sync_layer
+                    .players_with_incorrect_predictions(self.disconnect_frame)
+                {
+                    telemetry.on_prediction_miss(player, frame);
+                }
+            }
+            self.adjust_gamestate(first_incorrect, confirmed_frame, &mut requests)?;
+            self.disconnect_frame = Frame::NULL;
+        }
+
+        // Spectator/replay flush (no input discard: `set_last_confirmed_frame`
+        // is deliberately NOT called while paused, so the rollback window and
+        // the snapshot's source data stay intact).
+        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+        self.record_confirmed_inputs(confirmed_frame);
+
+        Ok(requests)
+    }
+
+    /// Survivor side of N-peer hot-join (chunk N3): drains and validates
+    /// `ReactivateSlot` directives, progresses the pending reopen (rearm the
+    /// joiner endpoint → wait `Running` → reopen at `F` → ack), and applies the
+    /// coordinator's `JoinCommitted`/`JoinAborted` lifecycle.
+    #[cfg(feature = "hot-join")]
+    fn poll_npeer_survivor(&mut self) {
+        // Drain everything first (deterministic BTreeMap order), releasing the
+        // endpoint borrows before any session mutation. Draining unconditionally
+        // (even messages this session will reject) keeps the single-slot
+        // protocol state from rotting.
+        let mut directives: Vec<(T::Address, crate::network::messages::ReactivateSlot)> =
+            Vec::new(); // alloc-bound: at most one buffered directive per remote endpoint (registry-sized).
+        let mut committed: Vec<(T::Address, crate::network::messages::JoinCommitted)> = Vec::new(); // alloc-bound: at most one per remote endpoint (registry-sized).
+        let mut aborted: Vec<(T::Address, crate::network::messages::JoinAborted)> = Vec::new(); // alloc-bound: at most one per remote endpoint (registry-sized).
+        for (addr, endpoint) in self.player_reg.remotes.iter_mut() {
+            if let Some(directive) = endpoint.take_received_reactivate_slot() {
+                directives.push((addr.clone(), directive));
+            }
+            if let Some(body) = endpoint.take_received_join_committed() {
+                committed.push((addr.clone(), body));
+            }
+            if let Some(body) = endpoint.take_received_join_aborted() {
+                aborted.push((addr.clone(), body));
+            }
+        }
+
+        for (sender, directive) in directives {
+            self.handle_reactivate_directive(&sender, &directive);
+        }
+        self.progress_pending_reactivation();
+        for (sender, body) in committed {
+            self.handle_join_committed_directive(&sender, &body);
+        }
+        for (sender, body) in aborted {
+            self.handle_join_aborted_directive(&sender, &body);
+        }
+
+        // Lifecycle convergence ping: while reopened-and-pending, keep re-acking
+        // the coordinator every poll. The coordinator's post-serve responder
+        // answers a stray (post-conclusion) ack with one more
+        // `JoinCommitted`/`JoinAborted`, so lifecycle delivery to a reopened
+        // survivor is reliable-until-converged — the survivor itself never
+        // guesses the outcome (a guess could race the true lifecycle message
+        // into a permanent silent desync; observed input progress is NOT proof
+        // of a commit, because a live joiner legally feeds the reopened queue
+        // between the reopen and an eventual abort).
+        if let Some(pending) = &self.hot_join.pending_reactivation {
+            if pending.reopened {
+                let handle = pending.handle.as_usize();
+                let frame = pending.frame;
+                let coordinator = pending.coordinator_addr.clone();
+                if let Some(endpoint) = self.player_reg.remotes.get_mut(&coordinator) {
+                    endpoint.send_reactivate_slot_ack(handle, frame);
+                }
+            }
+        }
+    }
+
+    /// Records that an N-peer reactivation attempt `(handle, frame)` was
+    /// CLOSED on this survivor (lifecycle close, implied close, or local
+    /// joiner-death close), arming the per-handle stale-directive guard. See
+    /// [`HotJoinState::npeer_closed_attempt_frames`].
+    #[cfg(feature = "hot-join")]
+    fn record_closed_npeer_attempt(&mut self, handle: PlayerHandle, frame: Frame) {
+        self.hot_join
+            .npeer_closed_attempt_frames
+            .entry(handle)
+            .and_modify(|closed| *closed = std::cmp::max(*closed, frame))
+            .or_insert(frame);
+    }
+
+    /// Restores a REOPENED slot to its captured pre-reopen reserved state —
+    /// the `JoinAborted` restore, shared by the lifecycle handler, the
+    /// implied-abort close (a strictly-newer same-coordinator directive with
+    /// no commit evidence), and the local joiner-endpoint-death close.
+    ///
+    /// The frozen value is restored from the directive-time capture — the
+    /// reopened queue's own tracked value may already hold a leaked joiner
+    /// input (see [`PendingReactivation::pre_freeze_input`]) — the connection
+    /// status is restored verbatim to the pre-reopen freeze point, the slot
+    /// re-enters `reserved_slots` (the rearmed joiner endpoint must stay
+    /// excluded from the confirmed/disconnect folds), and a forced
+    /// re-simulation from `F` is armed so any speculative frame that embedded
+    /// the aborted attempt's real inputs is recomputed with the restored
+    /// frozen value.
+    #[cfg(feature = "hot-join")]
+    fn restore_pre_reopen_frozen_state(
+        &mut self,
+        handle: PlayerHandle,
+        frame: Frame,
+        pre_freeze_status: ConnectionStatus,
+        pre_freeze_input: Option<T::Input>,
+    ) {
+        if let Err(e) = self
+            .sync_layer
+            .refreeze_player_with_value(handle, pre_freeze_input)
+        {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to re-freeze N-peer slot {} on attempt close: {}",
+                handle,
+                e
+            );
+        }
+        if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+            *status = pre_freeze_status;
+        } else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "N-peer slot {} has no connection status entry at the pre-reopen restore",
+                handle
+            );
+        }
+        self.hot_join.reserved_slots.insert(handle);
+
+        // Speculative frames at/past F may have been simulated with the
+        // joiner's REAL inputs (accepted by the reopened queue before the
+        // close) — values no other survivor will confirm. Force a
+        // re-simulation from F so every such frame is recomputed with the
+        // restored frozen value. (If nothing at/past F was simulated, the next
+        // advance's `adjust_gamestate` early-returns into a prediction reset —
+        // harmless.)
+        self.disconnect_frame = if self.disconnect_frame.is_null() {
+            frame
+        } else {
+            std::cmp::min(self.disconnect_frame, frame)
+        };
+    }
+
+    /// Commit-evidence read for discriminating an unheard reopened attempt's
+    /// outcome (the cap theorem): returns `true` iff this session holds
+    /// evidence that attempt `(handle, frame)` COMMITTED. Two legs, each
+    /// individually sound:
+    ///
+    /// 1. **Confirmed history:**
+    ///    `max(confirmed_frame, last_confirmed_frame) >= F`. While this
+    ///    survivor holds the reopened pending, the bound clamp in
+    ///    [`remote_slot_confirmed_bound`](Self::remote_slot_confirmed_bound)
+    ///    folds every disconnected gossip claim for the slot at the seeded
+    ///    `F - 1`, so in an ABORTED world the confirmed fold cannot cross
+    ///    `F` while the attempt is unresolved: raising any live peer's slot
+    ///    bound to `>= F` requires receiving that peer's inputs at `>= F`,
+    ///    and every such validated `Input` packet first merges that peer's
+    ///    claim for this slot — `{disconnected, f0}` from every participant
+    ///    that has CONCLUDED the attempt (never-reopened peers kept it,
+    ///    reopened peers restore it once the abort reaches them, the
+    ///    coordinator never left it pre-commit) — engaging the clamp. A
+    ///    pre-commit joiner input leak therefore cannot satisfy this leg
+    ///    while any live peer's DISCONNECTED claim is folded, or any folded
+    ///    connected claim is stale at `<= F - 1` (a starved still-pending
+    ///    survivor's seed or a contract-honoring joiner's self-claim, which
+    ///    pins the min raw) — the leg fires only when the world committed
+    ///    (live CONNECTED gossip `>= F` corroborates the leak: the blackout
+    ///    shape where leg 2 has nothing and this leg is load-bearing), or
+    ///    in the coordinator-dead(-or-pruned) shape where EVERY folded live
+    ///    peer is itself a still-pending reopened survivor whose
+    ///    leak-raised connected claim folds raw (the everyone-else-dead
+    ///    corner is its degenerate sub-shape, not the whole region). In the
+    ///    coordinator-DEAD variant the leaked closers commit-arm
+    ///    CONSISTENTLY with each other — living counterparts exist but
+    ///    agree (any starved/restored peer's folded claim would instead
+    ///    pin/clamp everyone below `F` and all closes abort-arm); only the
+    ///    asymmetric coordinator-PRUNED variant (alive and folded in
+    ///    another survivor, link-dead toward this one) has a living
+    ///    divergence counterpart, and it additionally needs a full
+    ///    disconnect-timeout link death plus sustained suppression of the
+    ///    re-ack-driven abort re-delivery. All variants are bounded by the
+    ///    chunk-N4 joiner contract (no self-claim past `F - 1` pre-commit;
+    ///    teardown on coordinator loss). The `max` guards the documented
+    ///    confirmed-frame dip (which can only UNDERSTATE evidence — leg 2
+    ///    is the robustness backstop); F-sanity (`F > max(frozen bound,
+    ///    confirmed, last_confirmed)`, enforced at directive acceptance AND
+    ///    re-checked at both reopen sites — a stale-`F` reopen is cancelled
+    ///    fail-closed, see
+    ///    [`npeer_activation_frame_is_sane`](Self::npeer_activation_frame_is_sane))
+    ///    keeps pre-attempt and pre-reopen history from pre-satisfying it:
+    ///    evidence is only ever consulted for a REOPENED pending attempt,
+    ///    and every reopened pending began its window with
+    ///    `max(confirmed, last_confirmed) < F`.
+    /// 2. **Gossip freeze-frame (session-33 round-2 review Finding 2): any
+    ///    remote endpoint's cached DISCONNECTED claim for `handle` with
+    ///    `last_frame >= F`** — some peer FROZE the slot at or past the
+    ///    activation frame, which only the committed era's re-drop can
+    ///    produce. Soundness (induction over every freeze source in an
+    ///    uncommitted world): an abort restore freezes at the pre-attempt
+    ///    `f0 <= S = F - 1`; a peer that never reopened keeps `f0`; a
+    ///    user-initiated `disconnect_player`/`remove_player` against the
+    ///    in-flight joiner cannot freeze a reopened slot mid-attempt (the
+    ///    public entry points close the attempt first — see
+    ///    [`close_reopened_pending_before_user_disconnect`](Self::close_reopened_pending_before_user_disconnect),
+    ///    the session-33 round-3 induction-gap closure); the only other way
+    ///    a reopened slot re-freezes is a commit-evidence close, which
+    ///    itself requires this evidence — so no FIRST
+    ///    `{disconnected, >= F}` claim can ever arise in an aborted world,
+    ///    leaks included. This leg is what saves an input-starved survivor
+    ///    (zero joiner inputs AND zero `JoinCommitted` received) from
+    ///    misclassifying a committed attempt as aborted once any committed
+    ///    peer's re-drop gossip reaches it — a restore to `(f0, v0)` there
+    ///    would diverge its frozen history from the committed peers' real
+    ///    re-drop and leave its `f0` claims permanently floor-filtered.
+    ///
+    /// **Deliberately NOT evidence — input-receipt terms** (the local
+    /// `last_frame` for the slot, or another peer's CONNECTED claim
+    /// `>= F`): a live joiner legally feeds reopened queues between the
+    /// reopen and an eventual abort (see `poll_npeer_survivor`; the leak
+    /// tests pin the value-safe restore against exactly this), so a received
+    /// input at `>= F` — directly or relayed as a connected claim — exists
+    /// in aborted worlds too. Treating it as commit evidence would convert a
+    /// clean abort into a re-drop that freezes the LEAKED value no other
+    /// peer holds: a silent value divergence, strictly worse than the
+    /// stall this read is balancing against.
+    ///
+    /// `Frame::NULL` terms (-1) are below any valid `F >= 0`, so a rearmed
+    /// endpoint's default caches can never fake evidence.
+    ///
+    /// **Honest residuals (both fail-toward-stall, never desync; both rooted
+    /// in epoch-less gossip — the tracked session-31/32 wire item):**
+    /// - *Starved survivor with no visible re-drop:* a committed attempt in
+    ///   which no `{disconnected, >= F}` claim has reached this survivor by
+    ///   close time — either the symmetric corner (no peer anywhere received
+    ///   a joiner input, every claim sits at `F - 1`) or the blackout
+    ///   variant (the joiner is still alive toward other peers, so nobody
+    ///   has dropped it yet) — takes the abort arm. Serving stays
+    ///   byte-identical in the symmetric corner (every committed peer's
+    ///   re-drop rolls its frozen value to the same `F - 1` phantom = `v0`),
+    ///   but this survivor's `f0` claims are filtered by the committed
+    ///   peers' armed floors, which can pin their confirmed fold at `F - 1`
+    ///   — a stall, not a desync. The abort arm reports a violation when it
+    ///   sees conflicting CONNECTED `>= F` gossip (the blackout fingerprint)
+    ///   so operators get the breadcrumb.
+    /// - *Cross-era straggler (multi-attempt):* a `{disconnected, >= F2}`
+    ///   claim from a previous COMMITTED attempt's era, reordered past the
+    ///   next attempt's reopen seed, can false-positive this read for an
+    ///   ABORTED later attempt. The consequence is the commit arm: an
+    ///   ordinary re-drop at the local receipt whose serving is
+    ///   byte-identical to the restore for a leak-free closer (sync-layer
+    ///   floor + the `F - 1` phantom both serve `(v0', Disconnected)`), with
+    ///   this session's own floor possibly filtering the mesh's lower freeze
+    ///   claims — a stall in the worst case. The confirmed-history leg
+    ///   cannot be poisoned this way: F-sanity requires
+    ///   `F > max(confirmed, last_confirmed)` both at directive acceptance
+    ///   and again at reopen time (a stale-`F` reopen is cancelled
+    ///   fail-closed — see
+    ///   [`npeer_activation_frame_is_sane`](Self::npeer_activation_frame_is_sane)),
+    ///   so every consulted attempt — evidence is only ever read for a
+    ///   REOPENED pending attempt — began its reopened window below `F`,
+    ///   and only post-reopen growth (clamp-capped below `F` while an
+    ///   unresolved attempt is held in an aborted world; real era-`F`
+    ///   confirmations in a committed one) can satisfy leg 1.
+    #[cfg(feature = "hot-join")]
+    fn npeer_attempt_commit_evidence(&self, handle: PlayerHandle, frame: Frame) -> bool {
+        if std::cmp::max(
+            self.confirmed_frame(),
+            self.sync_layer.last_confirmed_frame(),
+        ) >= frame
+        {
+            return true;
+        }
+        self.player_reg.remotes.values().any(|endpoint| {
+            let claim = endpoint.peer_connect_status(handle);
+            claim.disconnected && claim.last_frame >= frame
+        })
+    }
+
+    /// Closes a wedged REOPENED pending attempt whose conclusion this
+    /// survivor provably missed, discriminating the unheard outcome by the
+    /// cap theorem (see [`Self::npeer_attempt_commit_evidence`]): commit
+    /// evidence means the slot committed live mesh-wide — clear the pending,
+    /// re-seed + arm the gossip floor, and leave the slot untouched; no
+    /// commit evidence means the attempt aborted — apply the full pre-reopen
+    /// restore. Either way the close is recorded in the stale-directive
+    /// guard.
+    #[cfg(feature = "hot-join")]
+    fn close_unheard_reopened_attempt(&mut self, committed: bool) {
+        let Some(pending) = self.hot_join.pending_reactivation.take() else {
+            return;
+        };
+        self.record_closed_npeer_attempt(pending.handle, pending.frame);
+        if committed {
+            // The slot committed live; re-seed the cached views exactly like
+            // the lifecycle commit close would have (between the reopen and
+            // the commit, a not-yet-reopened survivor's stale disconnected
+            // gossip may have re-stuck them). This close IS this survivor's
+            // commit evidence, so the merge reactivation floor arms here —
+            // leaving it unarmed would let a stale pre-attempt carrier
+            // re-drop the committed slot below F - 1 afterwards (the round-1
+            // Finding-3 hole).
+            self.reset_reactivated_slot_gossip(
+                pending.handle,
+                pending.frame,
+                &pending.joiner_addr,
+                FloorArming::CommitEvidence,
+            );
+        } else {
+            // Blackout fingerprint (see `npeer_attempt_commit_evidence`):
+            // CONNECTED gossip at/past F is NOT commit evidence (a legal
+            // pre-commit joiner leak produces it in aborted worlds too), but
+            // its presence on an abort-arm close means the attempt MAY have
+            // committed while this survivor was starved of every
+            // discriminating signal — epoch-less gossip cannot tell the two
+            // apart, and a wrong restore in a committed world can stall the
+            // mesh (the committed peers' floors filter this survivor's f0
+            // claims). Surface the breadcrumb for operators.
+            if self.player_reg.remotes.values().any(|endpoint| {
+                let claim = endpoint.peer_connect_status(pending.handle);
+                !claim.disconnected && claim.last_frame >= pending.frame
+            }) {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Closing the unheard reopened attempt for slot {} frame {} as ABORTED despite conflicting connected gossip at/past the activation frame: if the attempt actually committed (input-starved survivor), this restore can stall the mesh until the slot is re-served",
+                    pending.handle,
+                    pending.frame
+                );
+            }
+            self.restore_pre_reopen_frozen_state(
+                pending.handle,
+                pending.frame,
+                pending.pre_freeze_status,
+                pending.pre_freeze_input,
+            );
+        }
+    }
+
+    /// Closes a REOPENED pending reactivation when its JOINER endpoint dies
+    /// (`Event::Disconnected` for the joiner's address) — the survivor-side
+    /// local re-freeze path.
+    ///
+    /// Without this close the pending entry would survive the drop forever:
+    /// its shield permanently exempts the slot from the disconnect-
+    /// convergence fold, and `reopened`-attempts-are-never-superseded blocks
+    /// every future directive for the handle — once the coordinator's
+    /// lifecycle messages are gone (e.g. the coordinator died mid-attempt),
+    /// that is a permanent mesh-wide join wedge for the slot.
+    ///
+    /// The unheard outcome is discriminated by the same cap-theorem evidence
+    /// read as the implied-close in
+    /// [`handle_reactivate_directive`](Self::handle_reactivate_directive) —
+    /// see [`npeer_attempt_commit_evidence`](Self::npeer_attempt_commit_evidence)
+    /// for the two legs (confirmed history, gossip freeze-frame), their
+    /// soundness, and why input-receipt terms (the local `last_frame`, a
+    /// CONNECTED claim `>= F`) are deliberately NOT a third leg — a legal
+    /// pre-commit joiner leak produces them in aborted worlds too, and
+    /// treating them as evidence would freeze the leaked value no other
+    /// peer holds. Commit evidence means the slot
+    /// committed live and this death is the committed era's ordinary
+    /// re-drop — clear the pending, re-seed + arm the gossip floor, and let
+    /// the normal disconnect machinery (the caller's fall-through) freeze
+    /// the slot at the genuinely received frames, convergent with every
+    /// other committed peer. No commit evidence means the attempt aborted or
+    /// can never commit (the coordinator observes the same joiner death and
+    /// aborts) — apply the pre-reopen restore, the same deterministic
+    /// value-safe restore every other reopened survivor applies, converging
+    /// the mesh on the agreed pre-attempt freeze. The gossip leg is what
+    /// keeps an INPUT-STARVED survivor (zero joiner inputs and zero
+    /// `JoinCommitted` received — a dual one-way blackout) from misclassifying
+    /// a committed attempt as aborted whenever any visible peer's claim
+    /// carries the committed era (session-33 round-2 review Finding 2): the
+    /// commit arm's re-drop at the seeded `F - 1` then `min`s the mesh's
+    /// converged freeze down to `F - 1` with the `F - 1` phantom value, byte-
+    /// identical everywhere. The one remaining ambiguous corner — a
+    /// committed attempt in which NO visible claim ever exceeded `F - 1`
+    /// (instant joiner death before any peer this survivor can see received
+    /// an input) — takes the abort arm: serving is still byte-identical
+    /// (every committed peer's re-drop rolls its frozen value to the same
+    /// `F - 1` phantom = the pre-reopen value, and the freeze frames
+    /// converge by the ordinary gossip min), but this survivor's `f0` claims
+    /// are filtered by the committed peers' armed floors, which can pin
+    /// their confirmed fold at `F - 1` — fail-toward-stall, never desync;
+    /// closing it needs per-slot reactivation epochs (the tracked
+    /// session-31/32 wire item).
+    ///
+    /// A PRE-reopen pending is deliberately left untouched: the slot is
+    /// still in the reserved shape and the coordinator's abort timeline owns
+    /// the attempt (the `Event::Disconnected` reserved-slot branch swallows
+    /// the event); if the coordinator is also gone, the pre-reopen pending is
+    /// supersedable by any future directive, so nothing wedges.
+    ///
+    /// The window between a coordinator death and the joiner endpoint's
+    /// death — during which the pending is held and directives for the
+    /// handle stay blocked — is inherent to R4 (a survivor never guesses a
+    /// pending attempt's outcome). Bounding it is the chunk-N4
+    /// joiner-teardown contract: a joiner that loses its coordinator must
+    /// tear down its survivor channels (or simply stop sending) so this
+    /// close fires via the ordinary endpoint timeout.
+    #[cfg(feature = "hot-join")]
+    fn close_reopened_pending_on_joiner_endpoint_death(&mut self, addr: &T::Address) {
+        let Some(pending) = &self.hot_join.pending_reactivation else {
+            return;
+        };
+        if !pending.reopened || pending.joiner_addr != *addr {
+            return;
+        }
+        let committed = self.npeer_attempt_commit_evidence(pending.handle, pending.frame);
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "Joiner endpoint at {:?} died while the reopened reactivation for slot {} frame {} was pending; closing the attempt locally as {}",
+            addr,
+            pending.handle,
+            pending.frame,
+            if committed { "committed" } else { "aborted" }
+        );
+        self.close_unheard_reopened_attempt(committed);
+    }
+
+    /// Closes a REOPENED pending reactivation before a user-initiated
+    /// disconnect/removal touches the attempt's joiner (session-33 round-3
+    /// review Finding 2) — the public [`disconnect_player`](Self::disconnect_player)
+    /// and [`remove_player`](Self::remove_player) entry points call this
+    /// first whenever the kicked handle's address is the pending attempt's
+    /// joiner address.
+    ///
+    /// Without the close-first, the kick would freeze the reopened slot at
+    /// its LOCAL RECEIPT — which a legal pre-commit joiner input leak can
+    /// have raised to `>= F` — while `pending_reactivation` stayed held: an
+    /// unmodeled freeze source minting a `{disconnected, >= F}` claim in a
+    /// possibly-ABORTED world (the exact claim the
+    /// [`npeer_attempt_commit_evidence`](Self::npeer_attempt_commit_evidence)
+    /// induction proves cannot otherwise exist), poisoning other survivors'
+    /// close discrimination, and leaving a frozen slot under a held pending
+    /// (a later implied-commit close would re-seed a slot the user
+    /// explicitly removed).
+    ///
+    /// The close discriminates the unheard outcome with the same evidence
+    /// read as the joiner-endpoint-death close; the caller then applies the
+    /// user's request to the post-close state. After an abort-arm close the
+    /// slot is back in the reserved/dropped pre-attempt shape, so the kick
+    /// reports it already disconnected/removed — the user's intent (this
+    /// player is gone) already holds. After a commit-arm close the slot is
+    /// live and the kick proceeds as the committed era's ordinary
+    /// user-driven drop (whose freeze frame is `>= F - 1`, the genuine
+    /// committed-era class the merge floor theorem covers). Every other
+    /// shape is byte-identical to the unguarded behavior: no pending, a
+    /// pending for a different joiner address, or a PRE-reopen pending
+    /// (the slot is still frozen/disconnected, so the existing
+    /// already-disconnected guards fail the call closed before any state
+    /// changes).
+    #[cfg(feature = "hot-join")]
+    fn close_reopened_pending_before_user_disconnect(&mut self, addr: &T::Address) {
+        let Some(pending) = &self.hot_join.pending_reactivation else {
+            return;
+        };
+        if !pending.reopened || pending.joiner_addr != *addr {
+            return;
+        }
+        let committed = self.npeer_attempt_commit_evidence(pending.handle, pending.frame);
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "User-initiated disconnect/removal targets the joiner at {:?} while the reopened reactivation for slot {} frame {} is pending; closing the attempt locally as {} first",
+            addr,
+            pending.handle,
+            pending.frame,
+            if committed { "committed" } else { "aborted" }
+        );
+        self.close_unheard_reopened_attempt(committed);
+    }
+
+    /// N-peer activation-frame sanity predicate, shared by directive
+    /// ACCEPTANCE and both REOPEN sites (session-33 round-4 review
+    /// Finding 1): returns `true` iff `frame` is a real frame strictly past
+    /// the slot's frozen bound, this session's instantaneous confirmed fold,
+    /// and the sync layer's discard high-water — i.e. reopening the slot at
+    /// `frame` cannot reposition the queue into history this session already
+    /// confirmed or discarded.
+    ///
+    /// Why re-checking at REOPEN time is load-bearing and not redundant: the
+    /// acceptance-time check is protected by the coordinator's pause (no
+    /// inputs at/past `F` until the commit, and the commit requires this
+    /// survivor's ack) — but the pause also ends at the ABORT, and abort
+    /// delivery to a PRE-reopen survivor is best-effort only (the announcer's
+    /// bounded resend burst; the survivor re-ack convergence loop arms only
+    /// after the reopen). A pre-reopen survivor that misses `JoinAborted`
+    /// keeps the pending held while its confirmed fold legitimately crosses
+    /// `F` (the frozen slot folds `None`: locally disconnected, joiner
+    /// endpoint reserved-excluded, every live claim disconnected — byte-safe
+    /// by itself). A LATE reopen (the joiner<->survivor handshake completing
+    /// after the abort) would then reposition the queue below confirmed
+    /// history and arm `disconnect_frame = F`, after which `adjust_gamestate`
+    /// re-targets a discarded state every advance — a probe-confirmed
+    /// permanent wedge (`SynchronizedInputsFailed`, then `WrongSavedFrame`
+    /// forever, unhealed by the eventual restore). The reopen-time re-check
+    /// turns that into a fail-closed cancel.
+    #[cfg(feature = "hot-join")]
+    fn npeer_activation_frame_is_sane(&self, frame: Frame, frozen_bound: Frame) -> bool {
+        !frame.is_null()
+            && frame.as_i32() >= 0
+            && frame > frozen_bound
+            && frame > self.confirmed_frame()
+            && frame > self.sync_layer.last_confirmed_frame()
+    }
+
+    /// Validates and applies a `ReactivateSlot{h, F}` directive (fail-closed:
+    /// anything suspicious is ignored with a violation and no state change).
+    #[cfg(feature = "hot-join")]
+    fn handle_reactivate_directive(
+        &mut self,
+        sender: &T::Address,
+        directive: &crate::network::messages::ReactivateSlot,
+    ) {
+        let handle = PlayerHandle::new(directive.handle);
+        let frame = directive.frame;
+
+        // A serving coordinator owns its reserved slots' lifecycle; it never
+        // takes reopen directives from the mesh.
+        if self.hot_join.accept_hot_join {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ReactivateSlot for slot {} from {:?}: this session serves hot-joins (coordinator role)",
+                handle,
+                sender
+            );
+            return;
+        }
+        if !handle.is_valid_player_for(self.num_players) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ReactivateSlot for out-of-range slot {} from {:?}",
+                handle,
+                sender
+            );
+            return;
+        }
+        // The slot must be a remote player (its owner is the joiner address).
+        let joiner_addr = match self.player_reg.handles.get(&handle) {
+            Some(PlayerType::Remote(addr)) => addr.clone(),
+            Some(PlayerType::Local) | Some(PlayerType::Spectator(_)) | None => {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring ReactivateSlot for non-remote slot {} from {:?}",
+                    handle,
+                    sender
+                );
+                return;
+            },
+        };
+        // The joiner cannot direct its own slot's reactivation — only a
+        // coordinator (a different peer) carries that authority.
+        if *sender == joiner_addr {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ReactivateSlot for slot {} sent by the slot owner {:?}",
+                handle,
+                sender
+            );
+            return;
+        }
+
+        // Duplicate / conflicting attempt handling.
+        if let Some(pending) = &self.hot_join.pending_reactivation {
+            let matches = pending.handle == handle
+                && pending.frame == frame
+                && pending.coordinator_addr == *sender;
+            if matches {
+                // Duplicate directive: re-ack if already reopened (ack-loss
+                // tolerance); otherwise the rearm/reopen is already in motion.
+                if pending.reopened {
+                    let coordinator = pending.coordinator_addr.clone();
+                    if let Some(endpoint) = self.player_reg.remotes.get_mut(&coordinator) {
+                        endpoint.send_reactivate_slot_ack(handle.as_usize(), frame);
+                    }
+                }
+                return;
+            }
+            // A different attempt while one is pending. A NOT-yet-reopened
+            // pending attempt may be superseded by (a) a STRICTLY NEWER
+            // directive from the SAME coordinator (it aborted the previous
+            // attempt and opened a retry — its abort may have been lost; the
+            // coordinator is the attempt's authority, and R3 makes its
+            // activation frames strictly monotone across attempts, so
+            // `frame > pending.frame` is exactly the genuine-retry test — a
+            // delayed duplicate of an OLDER attempt re-validating here would
+            // reopen a frame whose lifecycle messages no longer exist) or
+            // (b) a DIFFERENT sender's directive once the pending
+            // coordinator's endpoint is gone (takeover). A stale
+            // same-coordinator duplicate stays frame-ordered even when that
+            // coordinator has since died — R3's monotonicity is a property of
+            // the sender, not of its liveness.
+            //
+            // A REOPENED attempt is normally closed only by its own lifecycle
+            // messages (whose delivery the re-ack loop makes reliable) — with
+            // ONE exception: a strictly-newer directive from the same
+            // coordinator PROVES the pending attempt already concluded
+            // (one-join-at-a-time means the coordinator cannot be serving a
+            // second attempt while the first is open, and R3 orders them), so
+            // the survivor missed the lifecycle close (e.g. it was lost and
+            // the new serve destroyed the post-serve responder). The unheard
+            // outcome is discriminated by the CAP THEOREM — see
+            // `npeer_attempt_commit_evidence` for the two evidence legs
+            // (confirmed history, gossip freeze-frame), their soundness, the
+            // honest residuals, and why input-receipt terms (local
+            // `last_frame` / CONNECTED claims `>= F`) are deliberately NOT
+            // evidence (a legal pre-commit joiner leak produces them in
+            // aborted worlds too). No cache-resetting rearm can be in flight
+            // here (the single pending slot blocks every other directive
+            // while it is held).
+            let coordinator_alive = self
+                .player_reg
+                .remotes
+                .get(&pending.coordinator_addr)
+                .is_some_and(UdpProtocol::is_running);
+            let same_coordinator = pending.coordinator_addr == *sender;
+            let newer_same_coordinator = same_coordinator && frame > pending.frame;
+            if pending.reopened {
+                if !newer_same_coordinator {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "Ignoring ReactivateSlot for slot {} frame {} from {:?}: reopened attempt for slot {} frame {} from {:?} is still pending",
+                        handle,
+                        frame,
+                        sender,
+                        pending.handle,
+                        pending.frame,
+                        pending.coordinator_addr
+                    );
+                    return;
+                }
+                let committed = self.npeer_attempt_commit_evidence(pending.handle, pending.frame);
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "ReactivateSlot for slot {} frame {} from {:?} implies the reopened pending attempt for slot {} frame {} concluded (lifecycle close was missed); closing it locally as {}",
+                    handle,
+                    frame,
+                    sender,
+                    pending.handle,
+                    pending.frame,
+                    if committed { "committed" } else { "aborted" }
+                );
+                self.close_unheard_reopened_attempt(committed);
+                // Fall through: the new directive is validated freshly below
+                // (after an implied COMMIT the slot is live, so the
+                // frozen/disconnected gate fail-closed-rejects it until the
+                // mesh's genuine re-drop lands and a retransmit re-arrives).
+            } else if newer_same_coordinator || (!coordinator_alive && !same_coordinator) {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Replacing stale pre-reopen pending reactivation for slot {} frame {} from {:?} with directive for slot {} frame {} from {:?}",
+                    pending.handle,
+                    pending.frame,
+                    pending.coordinator_addr,
+                    handle,
+                    frame,
+                    sender
+                );
+                self.hot_join.pending_reactivation = None;
+            } else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring ReactivateSlot for slot {} frame {} from {:?}: attempt for slot {} frame {} from {:?} is still pending",
+                    handle,
+                    frame,
+                    sender,
+                    pending.handle,
+                    pending.frame,
+                    pending.coordinator_addr
+                );
+                return;
+            }
+        }
+
+        // Stale-straggler guard: a directive at or below the highest CLOSED
+        // attempt frame for this handle is a delayed duplicate of a concluded
+        // attempt (the coordinator re-sends directives every poll while a
+        // serve is open). Accepting it would reopen an attempt whose
+        // lifecycle messages no longer exist anywhere. R3 monotonicity makes
+        // every genuine new attempt strictly newer.
+        if let Some(&closed) = self.hot_join.npeer_closed_attempt_frames.get(&handle) {
+            if frame <= closed {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring ReactivateSlot for slot {} from {:?}: frame {} is at or below the closed-attempt high-water {}",
+                    handle,
+                    sender,
+                    frame,
+                    closed
+                );
+                return;
+            }
+        }
+
+        // The slot must currently be frozen + disconnected (a dropped/reserved
+        // slot) — reopening a live slot would corrupt confirmed history.
+        let Some(status) = self.local_connect_status.get(handle.as_usize()).copied() else {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::InternalError,
+                "Ignoring ReactivateSlot for slot {}: no connection status entry",
+                handle
+            );
+            return;
+        };
+        if !status.disconnected || !self.sync_layer.player_is_frozen(handle) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ReactivateSlot for slot {} from {:?}: slot is not frozen/disconnected (disconnected={}, frozen={})",
+                handle,
+                sender,
+                status.disconnected,
+                self.sync_layer.player_is_frozen(handle)
+            );
+            return;
+        }
+        // F sanity: must be a real frame strictly past the slot's frozen
+        // bound and this survivor's confirmed frame (the cap guarantees the
+        // latter for an honest coordinator; violating either would rewrite
+        // committed history). `confirmed_frame()` is instantaneous and can
+        // transiently DIP below the discard high-water during endpoint-cache
+        // churn, so the sync layer's assigned `last_confirmed_frame` — the
+        // frame whose history may already be discarded — is floored too
+        // (defense-in-depth against a buggy/hostile coordinator timing a
+        // directive into a dip; an honest coordinator's F clears both by the
+        // cap argument). Honest limit of the defense (session-33 round-2
+        // review): `last_confirmed_frame` is itself ASSIGNED from the dipped
+        // instantaneous read on every advance (`set_last_confirmed_frame`),
+        // not max-held, so a coordinator that times a directive into a
+        // multi-advance dip can shrink this floor too — the residue is
+        // byzantine-coordinator-only (an honest coordinator's F clears any
+        // true high-water by the cap argument regardless). The shared
+        // predicate (`npeer_activation_frame_is_sane`) is RE-CHECKED at both
+        // reopen sites: this acceptance-time pass holds only while the
+        // coordinator's pause does, and the pause also ends at the abort
+        // (session-33 round-4 review Finding 1).
+        if !self.npeer_activation_frame_is_sane(frame, status.last_frame) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring ReactivateSlot for slot {} from {:?}: activation frame {} is not past the frozen bound {}, confirmed frame {}, and discard high-water {}",
+                handle,
+                sender,
+                frame,
+                status.last_frame,
+                self.confirmed_frame(),
+                self.sync_layer.last_confirmed_frame()
+            );
+            return;
+        }
+
+        // Pre-attempt freeze-convergence gate (session-33 round-5 review
+        // Finding 1): everything in the attempt machinery quantifies over a
+        // single mesh-agreed pre-attempt freeze `(f0, v0)` — the bound clamp's
+        // byte-safety proof, the abort restore, the reactivation floor, the
+        // evidence induction — but survivors routinely freeze a dying peer's
+        // slot at DIFFERENT frames, and the freeze-frame convergence re-adjust
+        // (`update_player_disconnects` -> mine-down + frozen-value re-roll +
+        // gap re-simulation) is what creates the agreement. Accepting a
+        // directive before this survivor's freeze has converged would let the
+        // held pending suspend that very mechanism (the fold shield) while the
+        // slot goes mesh-agreed-excluded — after which this survivor's
+        // confirmed fold crosses the un-converged gap carrying receipts no
+        // other peer serves (silent confirmed-state divergence), and the
+        // deferred mine-down later targets already-confirmed history (the
+        // `WrongSavedFrame` wedge). Fail closed instead, with no pending and
+        // no closed-attempt high-water: the coordinator re-sends the directive
+        // every poll, and the generic (pending-free) re-adjust runs in the
+        // very next `advance_frame` once the lagging claim lands — the gate
+        // self-heals in about one round-trip. Convergence here means: no
+        // running fold-visible endpoint still claims the slot CONNECTED (its
+        // freeze would be unknown), and no folded DISCONNECTED claim sits
+        // BELOW the local freeze frame (this survivor's own re-adjust is
+        // owed). A folded claim ABOVE the local freeze is fine — that peer
+        // owes its own re-adjust, which the directive/serve gates on ITS side
+        // cover. An empty fold passes vacuously (the N == 2 post-drop shape,
+        // mirroring the mesh-agreed arm of the confirmed fold), and so does a
+        // NULL local freeze: NULL is the global minimum by definition — no
+        // hidden freeze can undercut it, so this survivor's history for the
+        // slot is already the convergence target.
+        if !status.last_frame.is_null() {
+            let mut any_connected_claim = false;
+            let mut claim_min: Option<Frame> = None;
+            for endpoint in self.player_reg.remotes.values() {
+                if !endpoint.is_running() {
+                    continue;
+                }
+                if self.hot_join.endpoint_is_reserved(endpoint) {
+                    continue;
+                }
+                let claim = endpoint.peer_connect_status(handle);
+                if !claim.disconnected {
+                    any_connected_claim = true;
+                }
+                claim_min = Some(match claim_min {
+                    Some(min) => std::cmp::min(min, claim.last_frame),
+                    None => claim.last_frame,
+                });
+            }
+            let readjust_owed = claim_min.is_some_and(|min| min < status.last_frame);
+            if any_connected_claim || readjust_owed {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Ignoring ReactivateSlot for slot {} from {:?}: the slot's pre-attempt freeze is not yet mesh-converged (a running peer still claims it connected: {}, lowest folded freeze claim {:?} vs local freeze {}); the per-poll directive retransmit self-heals once convergence lands",
+                    handle,
+                    sender,
+                    any_connected_claim,
+                    claim_min,
+                    status.last_frame
+                );
+                return;
+            }
+        }
+
+        // Re-arm the joiner endpoint when it is terminal (same-address rejoin,
+        // exactly like the coordinator's `rearm_dropped_slot_for_rejoin`); a
+        // Running or still-synchronizing endpoint is left alone (rearming a
+        // live channel would reset a working handshake).
+        match self.player_reg.remotes.get_mut(&joiner_addr) {
+            Some(endpoint) => {
+                if endpoint.is_synchronized() && !endpoint.is_running() {
+                    if let Err(e) = endpoint.rearm_for_rejoin() {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InternalError,
+                            "Failed to re-arm joiner endpoint at {:?} for N-peer reactivation of slot {}: {}",
+                            joiner_addr,
+                            handle,
+                            e
+                        );
+                        return;
+                    }
+                }
+            },
+            None => {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Ignoring ReactivateSlot for slot {}: no remote endpoint at owner address {:?}",
+                    handle,
+                    joiner_addr
+                );
+                return;
+            },
+        }
+
+        // While the attempt is pending (slot not yet live), treat the joiner
+        // endpoint as reserved: it is excluded from the confirmed-frame and
+        // disconnect-convergence folds (its freshly reset `{connected, NULL}`
+        // status cache would otherwise pin this survivor's confirmed frame at
+        // NULL), its `Event::Disconnected` is swallowed (the coordinator's
+        // abort timeline owns a dying joiner pre-reopen), and its sync-timeout
+        // event is suppressed — exactly the build-time reserved-slot shape.
+        self.hot_join.reserved_slots.insert(handle);
+
+        self.hot_join.pending_reactivation = Some(PendingReactivation {
+            handle,
+            frame,
+            coordinator_addr: sender.clone(),
+            joiner_addr,
+            pre_freeze_status: status,
+            pre_freeze_input: self.sync_layer.player_last_confirmed_input(handle),
+            reopened: false,
+        });
+    }
+
+    /// Progresses the pending reactivation: once the joiner endpoint is
+    /// `Running`, reopen the slot at `F` and ack the coordinator. Reopening is
+    /// gated on the live channel so the survivor never goes "real" on a slot it
+    /// cannot receive inputs for (Agreement B).
+    #[cfg(feature = "hot-join")]
+    fn progress_pending_reactivation(&mut self) {
+        let Some(pending) = &self.hot_join.pending_reactivation else {
+            return;
+        };
+        if pending.reopened {
+            return;
+        }
+        let joiner_running = self
+            .player_reg
+            .remotes
+            .get(&pending.joiner_addr)
+            .is_some_and(UdpProtocol::is_running);
+        if !joiner_running {
+            return;
+        }
+
+        let handle = pending.handle;
+        let frame = pending.frame;
+        let coordinator = pending.coordinator_addr.clone();
+        let joiner_addr = pending.joiner_addr.clone();
+        let frozen_bound = pending.pre_freeze_status.last_frame;
+
+        // Re-validate F against CURRENT confirmed history before any
+        // mutation (session-33 round-4 review Finding 1): the acceptance-time
+        // F-sanity was protected by the coordinator's pause, but the pause
+        // also ends at the ABORT, and a pre-reopen survivor that missed
+        // `JoinAborted` (bounded resend burst; the re-ack loop arms only
+        // after the reopen) keeps this pending held while its confirmed fold
+        // legitimately crosses `F` (the frozen slot is excluded from the
+        // fold). Reopening now would reposition the queue below
+        // already-confirmed/discarded history and arm a forced re-simulation
+        // from `F` that `adjust_gamestate` can never satisfy — a permanent
+        // wedge (probe-confirmed: `SynchronizedInputsFailed`, then
+        // `WrongSavedFrame` forever). Fail closed instead: cancel the attempt
+        // exactly like the reactivate-failure arm below (slot stays frozen
+        // AND reserved; no closed-attempt high-water — a live retry directive
+        // at a genuinely newer F re-validates from this reserved shape, and a
+        // stale-(h, F) duplicate re-fails acceptance F-sanity).
+        //
+        // Cancelling here is provably safe in BOTH worlds: this path runs
+        // only while `!pending.reopened`, i.e. BEFORE this survivor's
+        // reopen-ack, and the coordinator's commit barrier requires every
+        // live survivor's ack — so the attempt cannot have committed
+        // anywhere. The world is either still open (the serve then aborts on
+        // its own Phase-4 timeout without our ack) or already aborted; a
+        // cancelled pre-ack attempt strands nothing. The only other shape is
+        // the pre-existing documented commit-after-prune divergence (the
+        // coordinator pruned this survivor's pending ack mid-serve), where
+        // this survivor's history has already diverged and staying frozen is
+        // strictly safer than reopening into its own confirmed history.
+        if !self.npeer_activation_frame_is_sane(frame, frozen_bound) {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Cancelling the pending N-peer reactivation for slot {} at frame {}: the activation frame is no longer past the frozen bound {}, confirmed frame {}, and discard high-water {} (the attempt's conclusion was never heard); the slot stays frozen/reserved",
+                handle,
+                frame,
+                frozen_bound,
+                self.confirmed_frame(),
+                self.sync_layer.last_confirmed_frame()
+            );
+            self.hot_join.pending_reactivation = None;
+            return;
+        }
+
+        if let Err(e) = self.sync_layer.reactivate_player_at_frame(handle, frame) {
+            // Should-never-happen (validated at directive time): fail closed by
+            // cancelling the attempt — the slot stays frozen/reserved (and
+            // deliberately RESERVED: the rearmed-Running joiner endpoint must
+            // remain excluded from the confirmed/disconnect folds, exactly as
+            // after a pre-reopen abort), and the coordinator's serve aborts on
+            // its own timeout. No closed-attempt high-water is recorded here:
+            // the attempt is still OPEN on the coordinator, whose per-poll
+            // directive retransmit may legitimately retry the same `(h, F)`
+            // from this reserved shape — recording would block that retry.
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to reactivate N-peer slot {} at frame {} on survivor: {}; cancelling the pending reactivation",
+                handle,
+                frame,
+                e
+            );
+            self.hot_join.pending_reactivation = None;
+            return;
+        }
+        // Arm the pre-activation serving floor: unlike the wait-gated
+        // coordinator, nothing gates a survivor's receipt at reopen — a
+        // late-arriving misprediction below F (or a lagging spectator/replay
+        // flush) legitimately asks for pre-activation frames afterwards, and
+        // they must present exactly as the pre-reopen simulation presented
+        // them. See `SyncLayer::set_reactivation_floor`.
+        if let Err(e) = self
+            .sync_layer
+            .set_reactivation_floor(handle, frame, frozen_bound)
+        {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "Failed to arm the reactivation floor for N-peer slot {}: {}",
+                handle,
+                e
+            );
+        }
+        if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+            status.disconnected = false;
+            status.last_frame =
+                safe_frame_sub!(frame, 1, "P2PSession::progress_pending_reactivation");
+        } else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "N-peer slot {} has no connection status entry at survivor reopen",
+                handle
+            );
+        }
+        // The slot is live again: hand it back to the normal machinery (the
+        // joiner endpoint re-enters the folds, and a joiner endpoint dying
+        // post-reopen is handled by the ordinary graceful-drop path).
+        self.hot_join.reserved_slots.remove(&handle);
+        // Force a re-simulation from F (session-33 review Finding 1): unlike
+        // the paused coordinator, this survivor kept advancing under the cap
+        // and has typically SIMULATED frames >= F with the frozen value. The
+        // reset blanked the queue's prediction episode, so without an armed
+        // rollback the joiner's real inputs from F are stored but never
+        // COMPARED (`add_input` only compares against an open episode) — the
+        // speculation would be kept forever, silently diverging from peers
+        // that simulate F.. with the real inputs. The armed rollback
+        // re-simulates F..current with the episode-anchored frozen prediction
+        // (byte-identical values — `last_confirmed_input` is preserved) and
+        // leaves an episode at F, so the real inputs are compared and
+        // reconciled. Mirrors the coordinator commit and the abort restore.
+        self.disconnect_frame = if self.disconnect_frame.is_null() {
+            frame
+        } else {
+            std::cmp::min(self.disconnect_frame, frame)
+        };
+        // Un-stick this survivor's cached (sticky-disconnected) views of the
+        // reopened slot — see `reset_reactivated_slot_gossip`. (Between this
+        // reopen and the commit, a not-yet-reopened survivor's gossip can
+        // re-stick them; the commit-receipt re-seeds.) SeedOnly: this reopen
+        // is PRE-commit — the merge reactivation floor must not arm before
+        // commit evidence, or an aborted attempt would leave the floor
+        // filtering the mesh's genuine f0 drop gossip forever and pin this
+        // survivor's confirmed frame at F - 1 (session-33 round-2 review
+        // Finding 1). The pending shield covers this window instead.
+        self.reset_reactivated_slot_gossip(handle, frame, &joiner_addr, FloorArming::SeedOnly);
+
+        if let Some(p) = self.hot_join.pending_reactivation.as_mut() {
+            p.reopened = true;
+        }
+        if let Some(endpoint) = self.player_reg.remotes.get_mut(&coordinator) {
+            endpoint.send_reactivate_slot_ack(handle.as_usize(), frame);
+        }
+    }
+
+    /// Applies a `JoinCommitted{h, F}`: a matching one completes the pending
+    /// attempt (the slot stays live). Stale/mismatched ones are ignored.
+    #[cfg(feature = "hot-join")]
+    fn handle_join_committed_directive(
+        &mut self,
+        sender: &T::Address,
+        body: &crate::network::messages::JoinCommitted,
+    ) {
+        let Some(pending) = &self.hot_join.pending_reactivation else {
+            // Normal: the coordinator re-sends the lifecycle message several
+            // times; every resend after the first lands here.
+            trace!(
+                "Ignoring JoinCommitted for slot {} frame {} from {:?} with no pending reactivation",
+                body.handle,
+                body.frame,
+                sender
+            );
+            return;
+        };
+        let matches = pending.handle.as_usize() == body.handle
+            && pending.frame == body.frame
+            && pending.coordinator_addr == *sender;
+        if !matches {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring stale JoinCommitted for slot {} frame {} from {:?} (pending attempt: slot {} frame {} from {:?})",
+                body.handle,
+                body.frame,
+                sender,
+                pending.handle,
+                pending.frame,
+                pending.coordinator_addr
+            );
+            return;
+        }
+        let pending_handle = pending.handle;
+        let pending_frame = pending.frame;
+        let pending_joiner_addr = pending.joiner_addr.clone();
+        if !pending.reopened {
+            // The commit barrier requires our ack, so a matching commit
+            // without a local reopen means the coordinator (or the channel)
+            // misbehaved. Reopen now anyway: staying frozen while the mesh
+            // commits the slot live would let our confirmed history diverge
+            // (the gossip-min barrier would confirm frozen values for frames
+            // other peers confirm as real); reopening at worst stalls us until
+            // the joiner's inputs arrive. Stall over desync.
+            let handle = pending.handle;
+            let frame = pending.frame;
+            let frozen_bound = pending.pre_freeze_status.last_frame;
+            // ... UNLESS the activation frame is no longer past this
+            // session's confirmed history (session-33 round-4 review
+            // Finding 1: an aborted-unheard pre-reopen survivor legitimately
+            // confirms past F). A defensive reopen at a stale F would
+            // reposition the queue below confirmed/discarded history and
+            // permanently wedge the session (the probe's `WrongSavedFrame`
+            // loop) — strictly worse than any stall. The claimed commit is
+            // untrusted here by construction (a genuine commit is impossible
+            // without our ack; the only honest-world shape is the documented
+            // commit-after-prune divergence, where the divergence already
+            // happened and staying frozen is strictly safer). Cancel
+            // fail-closed: slot stays frozen AND reserved, no closed-attempt
+            // high-water (any stale-(h, F) straggler re-fails acceptance
+            // F-sanity; a genuinely newer directive re-validates fresh).
+            if !self.npeer_activation_frame_is_sane(frame, frozen_bound) {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "JoinCommitted for slot {} frame {} from {:?} arrived before this survivor reopened/acked AND the activation frame is no longer past the frozen bound {}, confirmed frame {}, and discard high-water {}; cancelling the pending reactivation fail-closed (the slot stays frozen/reserved)",
+                    body.handle,
+                    body.frame,
+                    sender,
+                    frozen_bound,
+                    self.confirmed_frame(),
+                    self.sync_layer.last_confirmed_frame()
+                );
+                self.hot_join.pending_reactivation = None;
+                return;
+            }
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "JoinCommitted for slot {} frame {} from {:?} arrived before this survivor reopened/acked; reopening defensively",
+                body.handle,
+                body.frame,
+                sender
+            );
+            if let Err(e) = self.sync_layer.reactivate_player_at_frame(handle, frame) {
+                // Should-never-happen (handle pre-validated). The slot stays
+                // frozen AND deliberately reserved — the rearmed-Running
+                // joiner endpoint must remain excluded from the
+                // confirmed/disconnect folds (un-reserving would let its
+                // caches pin this survivor's confirmed frame), and a future
+                // directive re-validates from this exact reserved shape. No
+                // closed-attempt high-water is recorded here either: the
+                // serve may still be open coordinator-side, and its per-poll
+                // directive retransmit may legitimately retry the same
+                // `(h, F)` from this reserved shape.
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "Failed to defensively reactivate N-peer slot {} at frame {}: {}",
+                    handle,
+                    frame,
+                    e
+                );
+                self.hot_join.pending_reactivation = None;
+                return;
+            }
+            if let Err(e) = self
+                .sync_layer
+                .set_reactivation_floor(handle, frame, frozen_bound)
+            {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "Failed to arm the reactivation floor for N-peer slot {}: {}",
+                    handle,
+                    e
+                );
+            }
+            if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+                status.disconnected = false;
+                status.last_frame = safe_frame_sub!(
+                    frame,
+                    1,
+                    "P2PSession::handle_join_committed_directive reopen"
+                );
+            } else {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "N-peer slot {} has no connection status entry at defensive reopen",
+                    handle
+                );
+            }
+            self.hot_join.reserved_slots.remove(&handle);
+            // Same forced re-simulation from F as `progress_pending_reactivation`
+            // (Finding 1): this survivor too may hold frozen-value speculation
+            // for frames >= F that must be compared against the joiner's real
+            // inputs.
+            self.disconnect_frame = if self.disconnect_frame.is_null() {
+                frame
+            } else {
+                std::cmp::min(self.disconnect_frame, frame)
+            };
+        }
+        // Re-seed the cached views at the commit: between this survivor's
+        // reopen and the commit, a not-yet-reopened survivor's disconnected
+        // gossip may have re-stuck them (the merge is sticky-disconnected).
+        // The receipt is this survivor's commit evidence: the merge
+        // reactivation floor arms here (and not at the reopen above).
+        let handle = pending_handle;
+        let frame = pending_frame;
+        self.reset_reactivated_slot_gossip(
+            handle,
+            frame,
+            &pending_joiner_addr,
+            FloorArming::CommitEvidence,
+        );
+        self.hot_join.pending_reactivation = None;
+        // The attempt is closed: arm the stale-straggler guard against the
+        // directive duplicates still in flight.
+        self.record_closed_npeer_attempt(handle, frame);
+    }
+
+    /// Applies a `JoinAborted{h, F}`: a matching one cancels the pending
+    /// attempt — restoring the pre-reopen frozen state if the slot was already
+    /// reopened. Stale/mismatched ones are ignored.
+    #[cfg(feature = "hot-join")]
+    fn handle_join_aborted_directive(
+        &mut self,
+        sender: &T::Address,
+        body: &crate::network::messages::JoinAborted,
+    ) {
+        let Some(pending) = &self.hot_join.pending_reactivation else {
+            trace!(
+                "Ignoring JoinAborted for slot {} frame {} from {:?} with no pending reactivation",
+                body.handle,
+                body.frame,
+                sender
+            );
+            return;
+        };
+        let matches = pending.handle.as_usize() == body.handle
+            && pending.frame == body.frame
+            && pending.coordinator_addr == *sender;
+        if !matches {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Ignoring stale JoinAborted for slot {} frame {} from {:?} (pending attempt: slot {} frame {} from {:?})",
+                body.handle,
+                body.frame,
+                sender,
+                pending.handle,
+                pending.frame,
+                pending.coordinator_addr
+            );
+            return;
+        }
+
+        let handle = pending.handle;
+        let frame = pending.frame;
+        let pre_freeze_status = pending.pre_freeze_status;
+        let pre_freeze_input = pending.pre_freeze_input;
+        let reopened = pending.reopened;
+        self.hot_join.pending_reactivation = None;
+        // The attempt is closed: arm the stale-straggler guard against the
+        // directive duplicates still in flight.
+        self.record_closed_npeer_attempt(handle, frame);
+
+        if !reopened {
+            // Pre-reopen abort: nothing was mutated besides the rearm and the
+            // reserved-slot membership. Keep both — the slot remains in the
+            // exact build-time reserved shape (frozen queue, disconnected
+            // status, re-synchronizable endpoint, reserved membership), ready
+            // for the joiner's retry.
+            return;
+        }
+
+        // Post-reopen abort: restore the slot to its pre-reopen reserved
+        // state (captured frozen value, verbatim status, reserved membership,
+        // forced re-simulation from F) — see the shared helper.
+        self.restore_pre_reopen_frozen_state(handle, frame, pre_freeze_status, pre_freeze_input);
     }
 
     /// Joiner side of hot-join: once synchronized with the host, request a
@@ -1544,7 +3919,19 @@ impl<T: Config> P2PSession<T> {
                 }
                 .into());
             },
-            PlayerType::Remote(_) => {},
+            PlayerType::Remote(addr) => {
+                // N-peer survivor: a REOPENED pending reactivation for this
+                // endpoint is closed FIRST, so the removal applies to the
+                // post-close state instead of freezing the slot mid-attempt
+                // (session-33 round-3 review Finding 2; see the method docs).
+                #[cfg(feature = "hot-join")]
+                {
+                    let addr = addr.clone();
+                    self.close_reopened_pending_before_user_disconnect(&addr);
+                }
+                #[cfg(not(feature = "hot-join"))]
+                let _ = addr;
+            },
         }
 
         // Verify the player isn't already removed/disconnected. Using
@@ -1617,7 +4004,18 @@ impl<T: Config> P2PSession<T> {
             }
             .into()),
             // a remote player can only be disconnected if not already disconnected, since there is some additional logic attached
-            Some(PlayerType::Remote(_)) => {
+            Some(PlayerType::Remote(addr)) => {
+                // N-peer survivor: a REOPENED pending reactivation for this
+                // endpoint is closed FIRST, so the kick applies to the
+                // post-close state instead of freezing the slot mid-attempt
+                // (session-33 round-3 review Finding 2; see the method docs).
+                #[cfg(feature = "hot-join")]
+                {
+                    let addr = addr.clone();
+                    self.close_reopened_pending_before_user_disconnect(&addr);
+                }
+                #[cfg(not(feature = "hot-join"))]
+                let _ = addr;
                 let status = self
                     .local_connect_status
                     .get(player_handle.as_usize())
@@ -3394,6 +5792,15 @@ impl<T: Config> P2PSession<T> {
                     // DesyncDetection::Off the map is empty, so this is a no-op.
                     self.local_checksum_history
                         .retain(|&frame, _| frame < disconnect_frame);
+
+                    // Round-5 Finding 1 (coordinator sibling) backstop: this
+                    // rewrite invalidates an already-captured N-peer snapshot
+                    // at or above `disconnect_frame` — abort that serve
+                    // fail-closed (see the helper for the discrimination
+                    // argument and why the serve-poll's owed check dominates
+                    // this in every derived ordering).
+                    #[cfg(feature = "hot-join")]
+                    self.abort_npeer_serve_if_snapshot_invalidated(disconnect_frame);
                 }
             },
             PlayerType::Spectator(addr) => {
@@ -3913,19 +6320,110 @@ impl<T: Config> P2PSession<T> {
     /// activates; folding them would pin the bound to `Frame::NULL` forever
     /// (e.g. a host whose joiner abandons the join mid-handshake), so they are
     /// skipped — matching how `remote_is_connected` and `check_initial_sync`
-    /// gate them out. **Fold asymmetry (cross-reference):**
-    /// [`Self::update_player_disconnects`]' endpoint fold does NOT have this
-    /// reserved-endpoint guard. Unreachable today (hot-join in an `N >= 3`
-    /// mesh is build-rejected, so a reserved endpoint never coexists with the
-    /// multi-survivor convergence fold), but a future mesh-hot-join
-    /// implementation must align the two folds or a reserved endpoint's
-    /// default `{connected, NULL}` cache will both block mesh agreement and
-    /// mine convergence overrides down to `NULL` there.
+    /// gate them out. **Fold alignment (cross-reference):**
+    /// [`Self::update_player_disconnects`]' endpoint fold carries the same
+    /// reserved-endpoint guard (aligned when the N-peer survivor machinery made
+    /// reserved endpoints coexist with multi-survivor folds): without it, a
+    /// reserved endpoint's default `{connected, NULL}` cache would both block
+    /// mesh agreement and mine convergence overrides down to `NULL` there.
     fn remote_slot_confirmed_bound(
         &self,
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
     ) -> Option<Frame> {
+        // N-peer pending-reactivation shield, bound leg (companion to the
+        // fold shield in `update_player_disconnects`): while this survivor
+        // holds the REOPENED attempt `(handle, F)`, the attempt owns the
+        // slot's status, but the paused coordinator (and any not-yet-reopened
+        // survivor) keeps gossiping the pre-attempt `{disconnected, f0}`
+        // truth, re-sticking this session's caches (the merge floor is
+        // deliberately NOT armed pre-commit — see
+        // `UdpProtocol::arm_reactivation_floor`). Folding those claims raw
+        // would dip this survivor's confirmed bound to `f0` for the whole
+        // attempt, freezing its own advance and stalling spectator/replay
+        // flushes mid-join. They are therefore folded CLAMPED to the seeded
+        // `F - 1` — the value the reopen seed stamped and the commit-receipt
+        // re-seed would restore — never skipped (session-33 round-3 review
+        // Finding 1: a skip removes the cap with the dip, and a post-reopen
+        // ABORTED world then lets a leaked survivor confirm past `F`).
+        //
+        // Soundness, quantified over BOTH worlds:
+        // - **Aborted (or still-open) world:** the clamp guarantees
+        //   `confirmed < F` while the pending is held, so the eventual
+        //   restore (`disconnect_frame = min(.., F)`) never re-simulates a
+        //   frame this session already confirmed. The cap is engaged before
+        //   `confirmed` could cross `F`: crossing requires every live peer's
+        //   slot bound `>= F`, hence receiving each live peer's inputs at
+        //   `>= F` — and every validated `Input` packet merges that peer's
+        //   full connect-status vector first (`UdpProtocol::on_input` hoists
+        //   the merge), delivering its `{disconnected, f0}` claim for
+        //   `handle` (every participant that has CONCLUDED the attempt holds
+        //   `{disconnected, f0}` in an aborted world: never-reopened peers
+        //   kept it, reopened peers restore it once the abort reaches them,
+        //   the coordinator never left it pre-commit — but a STILL-PENDING
+        //   reopened peer that has not heard the abort keeps gossiping a
+        //   CONNECTED claim the legal leak may have raised past `F`, which
+        //   folds raw; see the residual below). The lone
+        //   exception — `disconnect_requested` packets skip the merge — still
+        //   caps: the cache then retains the reopen seed `{connected, F-1}`
+        //   (nothing else writes it), which folds at `F - 1` anyway. Frames
+        //   in `(f0, F)` confirmed under the clamp are frozen-served
+        //   byte-identically on every peer (the sync-layer reactivation
+        //   floor serves `(v0, Disconnected)` there), so nothing leaks —
+        //   `(f0, v0)` is mesh-uniform here as a real precondition, not an
+        //   assumption: directive acceptance and the serve open both
+        //   fail-closed-defer until the slot's freeze convergence has landed
+        //   (session-33 round-5 review Finding 1), with the N>=4
+        //   fold-pruning relay lowering the documented residual.
+        //   Residual (the true boundary): the cap requires at least one
+        //   folded DISCONNECTED claim — or a folded STALE connected claim
+        //   `<= F - 1` (a starved still-pending survivor's reopen seed, or
+        //   a contract-honoring joiner's self-claim), which pins the min
+        //   raw. A still-pending reopened survivor folds a CONNECTED claim
+        //   the legal leak may have raised past `F`, and connected claims
+        //   never clamp — so the uncapped region is: coordinator dead (or
+        //   pruned from this fold) AND every folded live peer itself a
+        //   still-pending reopened leak-fed survivor; only-the-joiner-left
+        //   (everyone-else-dead) is its degenerate sub-shape, not the whole
+        //   region. Consequence: in the coordinator-DEAD shape every
+        //   survivor that crosses `F` holds the same leg-1 evidence and the
+        //   eventual closes COMMIT-ARM CONSISTENTLY with each other (if any
+        //   folded peer were starved/restored, its claim would instead
+        //   pin/clamp everyone below `F` and all closes abort-arm) — no
+        //   disagreeing live counterpart. The asymmetric coordinator-PRUNED
+        //   variant (alive and folded in another survivor's fold, link-dead
+        //   toward this one) does have a living divergence counterpart, but
+        //   additionally requires a full disconnect-timeout link death plus
+        //   sustained suppression of the per-poll re-ack-driven abort
+        //   re-delivery. All variants are bounded by the chunk-N4 joiner
+        //   contract (no self-claim past `F - 1` pre-commit; teardown on
+        //   coordinator loss), and resolution defers to the
+        //   joiner-endpoint-death close.
+        // - **Committed world:** the clamp is transiently conservative — the
+        //   bound holds at `F - 1` until the `JoinCommitted` receipt clears
+        //   the pending (~1 RTT, the same conservative-lag class as the rest
+        //   of the design), after which the re-seed + armed floor take over
+        //   and the bound follows the normal rules. A committed-era re-drop
+        //   claim `{disconnected, >= F}` arriving early is also clamped —
+        //   conservative, and the evidence read
+        //   (`npeer_attempt_commit_evidence`) reads the raw caches, so close
+        //   discrimination is unaffected.
+        // - **Mid-attempt (the dip the shield was built for):** the clamp is
+        //   `F - 1`, not `f0`, so the spectator/replay flush keeps draining
+        //   through `F - 1` (pinned by the spectator-flush test).
+        #[cfg(feature = "hot-join")]
+        let attempt_clamp = self
+            .hot_join
+            .pending_reactivation
+            .as_ref()
+            .filter(|pending| pending.reopened && pending.handle == handle)
+            .map(|pending| {
+                safe_frame_sub!(
+                    pending.frame,
+                    1,
+                    "P2PSession::remote_slot_confirmed_bound pending clamp"
+                )
+            });
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
         for endpoint in self.player_reg.remotes.values() {
@@ -3937,12 +6435,20 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             let status = endpoint.peer_connect_status(handle);
+            #[cfg(not(feature = "hot-join"))]
+            let folded_frame = status.last_frame;
+            #[cfg(feature = "hot-join")]
+            let folded_frame = if status.disconnected {
+                attempt_clamp.unwrap_or(status.last_frame)
+            } else {
+                status.last_frame
+            };
             if !status.disconnected {
                 any_reports_connected = true;
             }
             gossip_min = Some(match gossip_min {
-                Some(gossip) => std::cmp::min(gossip, status.last_frame),
-                None => status.last_frame,
+                Some(gossip) => std::cmp::min(gossip, folded_frame),
+                None => folded_frame,
             });
         }
         match (local_status.disconnected, any_reports_connected, gossip_min) {
@@ -3991,6 +6497,144 @@ impl<T: Config> P2PSession<T> {
             })
     }
 
+    /// Applies a freeze-frame convergence re-adjust to a RESERVED (or
+    /// pre-reopen-pending) hot-join slot WITHOUT the generic disconnect
+    /// path's endpoint teardown (session-33 round-5 review Finding 1).
+    ///
+    /// The generic re-adjust route (`disconnect_player_with_policy` ->
+    /// `disconnect_player_at_frames`) calls `endpoint.disconnect()` on the
+    /// slot's registry endpoint — for a reserved/rearmed slot that endpoint
+    /// is the (re-)armed JOINER channel, and `Disconnected` is a terminal
+    /// protocol state with no reconnect edge, so the teardown silently bricks
+    /// the slot's rejoinability (the `Suppress` re-adjust path never re-arms)
+    /// and kills any in-flight attempt handshake. The convergence itself is
+    /// exactly four effects, applied here verbatim from the generic path:
+    ///
+    /// 1. mine `local_connect_status[handle].last_frame` DOWN to the folded
+    ///    global-minimum freeze frame;
+    /// 2. re-roll the frozen value to the dropped peer's input confirmed at
+    ///    that frame (`SyncLayer::set_frozen_value_at` — fail-safe when the
+    ///    target was already discarded, identical to the generic path);
+    /// 3. arm `disconnect_frame` so the gap re-simulates with the agreed
+    ///    value (and prune the now-stale local checksum history — F11);
+    /// 4. abort an open N-peer serve whose CAPTURED snapshot the rewrite
+    ///    invalidates (see
+    ///    [`abort_npeer_serve_if_snapshot_invalidated`](Self::abort_npeer_serve_if_snapshot_invalidated)).
+    ///
+    /// If the slot is held by a PRE-reopen pending reactivation, the
+    /// pending's captured `pre_freeze_status`/`pre_freeze_input` are
+    /// REFRESHED to the converged values: the reopen's floor arming, the
+    /// reopen-time F re-checks, and (decisively) the post-reopen abort
+    /// RESTORE all read the capture, and restoring a stale-high freeze would
+    /// resurrect exactly the divergence the convergence just healed.
+    ///
+    /// The defensive `!disconnected` arm is unreachable by construction
+    /// (reserved and pre-reopen-pending slots are frozen + disconnected); it
+    /// fails closed with no state change, and the recompute-per-call fold
+    /// retries on the next advance.
+    #[cfg(feature = "hot-join")]
+    fn converge_reserved_slot_freeze(&mut self, handle: PlayerHandle, agreed_last_frame: Frame) {
+        let converged_status = {
+            let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "Invalid player handle {} in converge_reserved_slot_freeze - ignoring",
+                    handle
+                );
+                return;
+            };
+            if !status.disconnected {
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::InternalError,
+                    "Reserved/pending hot-join slot {} is unexpectedly connected during freeze convergence; skipping the re-adjust",
+                    handle
+                );
+                return;
+            }
+            status.last_frame = std::cmp::min(status.last_frame, agreed_last_frame);
+            *status
+        };
+        let converged_last_frame = converged_status.last_frame;
+        self.sync_layer
+            .set_frozen_value_at(handle, converged_last_frame);
+        if self.sync_layer.current_frame() > converged_last_frame {
+            let disconnect_frame = safe_frame_add!(
+                converged_last_frame,
+                1,
+                "P2PSession::converge_reserved_slot_freeze"
+            );
+            self.disconnect_frame = if self.disconnect_frame.is_null() {
+                disconnect_frame
+            } else {
+                std::cmp::min(self.disconnect_frame, disconnect_frame)
+            };
+            // F11 (mirrors `disconnect_player_at_frames`): the frozen-value
+            // re-roll retroactively changed the slot's confirmed input at
+            // every frame >= disconnect_frame, so locally stored checksums
+            // for those frames are stale.
+            self.local_checksum_history
+                .retain(|&frame, _| frame < disconnect_frame);
+            self.abort_npeer_serve_if_snapshot_invalidated(disconnect_frame);
+        }
+        let refreshed_input = self.sync_layer.player_last_confirmed_input(handle);
+        if let Some(pending) = self
+            .hot_join
+            .pending_reactivation
+            .as_mut()
+            .filter(|pending| !pending.reopened && pending.handle == handle)
+        {
+            pending.pre_freeze_status = converged_status;
+            pending.pre_freeze_input = refreshed_input;
+        }
+    }
+
+    /// Aborts the open N-peer serve if a confirmed-history rewrite at
+    /// `disconnect_frame` invalidates its already-CAPTURED snapshot
+    /// (session-33 round-5 review Finding 1, coordinator sibling).
+    ///
+    /// A re-adjust (or propagated freeze) whose forced re-simulation starts
+    /// at or below the snapshot frame `S` rewrites state the captured bytes
+    /// embed. Re-capturing at the same `S` is NOT discriminable: the joiner
+    /// applies the FIRST snapshot it receives (duplicates are idempotent) and
+    /// acks by FRAME, so once the stale bytes may be in flight, a fresh ack
+    /// can vouch for either byte stream. The only sound move is the
+    /// fail-closed ABORT — the joiner retries, and the R3 next-serve guard
+    /// forces the retry onto a strictly later `(handle, F)`.
+    ///
+    /// Pre-capture rewrites need no abort: the wait-then-capture gate's
+    /// misprediction term (`check_simulation_consistency(disconnect_frame)`)
+    /// holds the capture until the paused-arm repair has re-simulated the
+    /// gap, and the owed-re-adjust deferral in
+    /// [`poll_npeer_host_serve`](Self::poll_npeer_host_serve) keeps the gate
+    /// from passing in the merge-to-apply window. This hook is the backstop
+    /// for rewrites applied AFTER a capture — every ordering derived so far
+    /// is caught earlier by the serve-poll's owed check (claims merge before
+    /// the serve poll, which runs before `update_player_disconnects`), so
+    /// this is defense-in-depth at the single chokepoint every
+    /// `disconnect_frame` arming passes through.
+    #[cfg(feature = "hot-join")]
+    fn abort_npeer_serve_if_snapshot_invalidated(&mut self, disconnect_frame: Frame) {
+        let invalidated = self.hot_join.npeer.as_ref().is_some_and(|serve| {
+            serve.snapshot.is_some() && disconnect_frame <= serve.snapshot_frame
+        });
+        if !invalidated {
+            return;
+        }
+        if let Some(serve) = self.hot_join.npeer.take() {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "N-peer hot-join serve for slot {} aborted: a freeze convergence re-adjust rewrote confirmed history from frame {} <= the captured snapshot frame {} (a same-frame recapture would be indistinguishable from the stale bytes already in flight)",
+                serve.handle,
+                disconnect_frame,
+                serve.snapshot_frame
+            );
+            self.abort_npeer_serve(serve);
+        }
+    }
+
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
@@ -4001,23 +6645,82 @@ impl<T: Config> P2PSession<T> {
 
         for handle_idx in 0..self.num_players {
             let handle = PlayerHandle::new(handle_idx);
+
+            // N-peer reactivation shield — REOPENED attempts only (session-33
+            // round-5 review Finding 1). While this survivor holds the
+            // REOPENED attempt for `handle`, the attempt owns the slot's
+            // status: the paused coordinator (and any not-yet-reopened
+            // survivor) keeps gossiping the slot's pre-attempt `disconnected`
+            // state until the attempt concludes, and folding that stale
+            // gossip here would re-apply the drop and re-freeze the
+            // just-reopened LIVE slot, wedging the attempt.
+            //
+            // Both windows, both worlds:
+            // - PRE-reopen (NOT skipped): the slot is still frozen +
+            //   disconnected, and the freeze-frame convergence re-adjust IS
+            //   the correctness mechanism — survivors freeze a dying peer's
+            //   slot at different frames, and the global-min mine-down +
+            //   frozen-value re-roll + gap re-simulation are what make the
+            //   mesh's `(f0, v0)` uniform. Skipping it here (the pre-round-5
+            //   filter) deferred the re-adjust while the slot's
+            //   confirmed-fold exclusion stood, letting this survivor confirm
+            //   the un-converged gap with receipts no other peer serves
+            //   (silent confirmed divergence in committed worlds) and arming
+            //   the deferred mine-down against already-confirmed history (the
+            //   `WrongSavedFrame` wedge in aborted ones). The acceptance-time
+            //   convergence gate (`handle_reactivate_directive`) makes a
+            //   pending-held re-adjust unreachable on a full mesh; if one
+            //   lands anyway (the documented N>=4 fold-pruning relay class —
+            //   a lowering relayed through a peer this session cannot fold),
+            //   the dedicated arm below applies the convergence WITHOUT the
+            //   generic endpoint teardown and refreshes the pending's
+            //   captured pre-freeze snapshot, so a later abort restores the
+            //   CONVERGED freeze (`converge_reserved_slot_freeze`).
+            // - REOPENED (skipped): in a committed world the commit re-seeds
+            //   `{connected, F - 1}` mesh-wide and the freeze era is over; in
+            //   an aborted world the restore re-asserts the (refreshed)
+            //   captured freeze and the next pending-free call of this fold
+            //   re-derives any convergence the reopened window deferred —
+            //   recompute-per-call, nothing latched. Residual (documented): a
+            //   lowering that first arrives DURING the reopened window
+            //   requires the same N>=4 relay double-failure (acceptance was
+            //   convergence-gated and full-mesh claims are monotone-down),
+            //   and its post-restore re-adjust then targets confirmed history
+            //   — the identical wedge the relay residual produces through the
+            //   generic disconnect path with no attempt involved.
+            #[cfg(feature = "hot-join")]
+            if self
+                .hot_join
+                .pending_reactivation
+                .as_ref()
+                .is_some_and(|pending| pending.reopened && pending.handle == handle)
+            {
+                continue;
+            }
+
             let mut queue_connected = true;
             let mut queue_min_confirmed = Frame::new(i32::MAX);
 
             // check all player connection status for every remote player
             //
-            // Fold asymmetry (cross-reference): unlike
-            // `remote_slot_confirmed_bound`, this fold does NOT skip reserved
-            // hot-join endpoints. Unreachable divergence today — hot-join in
-            // an `N >= 3` mesh is build-rejected, so a reserved endpoint never
-            // coexists with this multi-survivor convergence fold — but a
-            // future mesh-hot-join implementation must align the two folds
-            // (skip reserved endpoints here too), or a reserved endpoint's
-            // freshly reset `{connected, NULL}` cache will block
-            // `queue_connected` from flipping AND mine `queue_min_confirmed`
-            // down to `NULL`.
+            // Fold alignment (N-peer hot-join): like
+            // `remote_slot_confirmed_bound`, this fold skips reserved hot-join
+            // endpoints. A reserved (or N-peer rearmed) endpoint that reaches
+            // `Running` before its joiner activates holds a freshly reset
+            // `{connected, NULL}` status cache for EVERY slot; folding it would
+            // block `queue_connected` from ever flipping (vetoing mesh
+            // disconnect agreement) AND mine `queue_min_confirmed` down to
+            // `NULL` (corrupting the converged freeze frame). For 2-peer
+            // topologies the skip is outcome-identical: the only remote
+            // endpoint being reserved leaves the fold empty, so
+            // `queue_connected` keeps its `true` initializer — exactly what
+            // folding the reserved endpoint's all-connected default produced.
             for endpoint in self.player_reg.remotes.values() {
                 if !endpoint.is_running() {
+                    continue;
+                }
+                #[cfg(feature = "hot-join")]
+                if self.hot_join.endpoint_is_reserved(endpoint) {
                     continue;
                 }
                 let con_status = endpoint.peer_connect_status(handle);
@@ -4050,6 +6753,26 @@ impl<T: Config> P2PSession<T> {
                 // If so, we need to re-adjust. This can happen when we e.g. detect our own disconnect at frame n
                 // and later receive a disconnect notification for frame n-1.
                 if local_connected || local_min_confirmed > queue_min_confirmed {
+                    // A reserved hot-join slot (the coordinator's rearmed
+                    // slot, a survivor's accepted-or-cancelled attempt slot)
+                    // converges WITHOUT the generic endpoint teardown: the
+                    // slot's registry endpoint is the (re-)armed JOINER
+                    // channel, and `disconnect()`ing it would brick the
+                    // slot's rejoinability (terminal state, and the Suppress
+                    // re-adjust path never re-arms). The pre-reopen-pending
+                    // case is the same route (acceptance reserves the slot).
+                    // See `converge_reserved_slot_freeze`.
+                    #[cfg(feature = "hot-join")]
+                    if self.hot_join.reserved_slots.contains(&handle)
+                        || self
+                            .hot_join
+                            .pending_reactivation
+                            .as_ref()
+                            .is_some_and(|pending| !pending.reopened && pending.handle == handle)
+                    {
+                        self.converge_reserved_slot_freeze(handle, queue_min_confirmed);
+                        continue;
+                    }
                     let Some(PlayerType::Remote(addr)) = self.player_reg.handles.get(&handle)
                     else {
                         continue;
@@ -4290,6 +7013,14 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
+                // N-peer survivor: a REOPENED pending reactivation whose JOINER
+                // endpoint died is closed locally FIRST — the abort-evidence
+                // arm re-freezes + re-reserves the slot (the reserved-slot
+                // branch below then swallows the event), while the
+                // commit-evidence arm clears the pending and falls through to
+                // the ordinary drop of the live slot. See the method docs.
+                #[cfg(feature = "hot-join")]
+                self.close_reopened_pending_on_joiner_endpoint_death(&addr);
                 // Hot-join: a reserved-but-unfilled slot's endpoint dropping is
                 // EXPECTED (the joiner is absent or abandoned the join). The slot
                 // is already frozen/disconnected, so treat this as a no-op: abort
@@ -4309,9 +7040,15 @@ impl<T: Config> P2PSession<T> {
                     // serving this slot would see a full `pending_output` on every
                     // `send_input` and raise an internal disconnect on every frame
                     // (the same storm the Phase-4 timeout guards against). See
-                    // `abort_hot_join_serve`.
+                    // `abort_hot_join_serve`. The N-peer counterpart additionally
+                    // fans `JoinAborted` out to survivors that may already have
+                    // reopened. On a survivor, a pre-reopen pending reactivation
+                    // for these handles stays pending: the slot is already
+                    // frozen/reserved and the coordinator's abort timeline owns
+                    // the attempt.
                     for handle in player_handles.iter() {
                         self.abort_hot_join_serve(*handle);
+                        self.abort_npeer_serve_for_handle(*handle);
                     }
                     return;
                 }
@@ -8407,5 +11144,5585 @@ mod tests {
             advantage_when_connected, 42,
             "a connected+running endpoint's seeded average must be counted"
         );
+    }
+
+    // ==========================================
+    // N-peer mesh coordination tests (chunks N2 + N3)
+    // ==========================================
+    //
+    // These exercise the coordinator-side N-peer serve orchestration and the
+    // survivor-side reactivation response with a real 3-peer mesh: coordinator
+    // A (local 0), survivor B (local 1), and joiner C (local 2). Sessions are
+    // wired through an in-src deterministic routing bus (instant, loss-free
+    // delivery with selective per-message-kind blocking) and a manually
+    // advanced clock injected via `ProtocolConfig::clock`.
+    //
+    // The N>=3 build guards STAY in force for the public API; the coordinator
+    // is built through the `#[cfg(test)]`-only
+    // `start_p2p_session_skip_hot_join_build_guards_for_test` bypass.
+    //
+    // The joiner role is driven MANUALLY through raw `UdpProtocol` endpoints
+    // (sync handshake, `JoinRequest`, `StateSnapshotAck`, real inputs): the
+    // real joiner-session apply path (buffer-then-apply on `JoinCommitted`,
+    // bridge-frame simulation, un-defer-all) is chunk N4 and intentionally
+    // absent. Manual driving also lets tests withhold exactly one protocol
+    // step (e.g. never ack the snapshot) to force abort paths
+    // deterministically.
+    #[cfg(feature = "hot-join")]
+    mod npeer_mesh {
+        use super::*;
+        use crate::network::messages::{JoinAborted, JoinCommitted, MessageBody, ReactivateSlot};
+        use crate::sessions::config::SyncConfig;
+        use crate::time_sync::TimeSyncConfig;
+        use crate::InputStatus;
+        use std::collections::{BTreeSet, VecDeque};
+        use std::sync::Mutex;
+        use web_time::{Duration, Instant};
+
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+        fn addr_a() -> SocketAddr {
+            test_addr(9301)
+        }
+        fn addr_b() -> SocketAddr {
+            test_addr(9302)
+        }
+        fn addr_c() -> SocketAddr {
+            test_addr(9303)
+        }
+        fn addr_d() -> SocketAddr {
+            test_addr(9304)
+        }
+
+        /// C's constant pre-drop input: the agreed frozen value for its slot is
+        /// therefore exactly this, independent of the precise freeze frame.
+        const C_FROZEN_INPUT: u8 = 37;
+        /// C's post-rejoin input — distinct from the frozen value so every
+        /// "real inputs flow" assertion is non-vacuous.
+        const C_REJOIN_INPUT: u8 = 99;
+
+        // ------------------------------------------------------------------
+        // Deterministic in-src infrastructure (clock + routing bus)
+        // ------------------------------------------------------------------
+
+        /// Manually advanced clock shared by every protocol in a test via
+        /// `ProtocolConfig::clock` (in-src analog of the integration tests'
+        /// `TestClock`).
+        #[derive(Clone)]
+        struct MeshClock {
+            now: Arc<Mutex<Instant>>,
+            /// Deterministic [`ProtocolConfig::protocol_rng_seed`] dispenser
+            /// (see [`MeshClock::protocol_config`]).
+            next_protocol_seed: Arc<std::sync::atomic::AtomicU64>,
+        }
+
+        impl MeshClock {
+            fn new() -> Self {
+                Self {
+                    now: Arc::new(Mutex::new(Instant::now())),
+                    next_protocol_seed: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                }
+            }
+
+            fn advance(&self, duration: Duration) {
+                *self.now.lock().expect("MeshClock mutex poisoned") += duration;
+            }
+
+            /// Returns a protocol config carrying the injected mock clock AND
+            /// a distinct, deterministic `protocol_rng_seed` per call
+            /// (single-threaded fixtures construct sessions/endpoints in a
+            /// fixed order, so seed assignment is reproducible). Seeding
+            /// removes the harness's last entropy-fed input: without it,
+            /// protocol magic numbers and sync-request randoms come from the
+            /// thread-local RNG, which seeds itself from wall-clock timing
+            /// entropy — every other input here is already virtualized by the
+            /// injected clock and the in-memory bus (session-33 round-6 test
+            /// hermeticity).
+            fn protocol_config(&self) -> ProtocolConfig {
+                let now = Arc::clone(&self.now);
+                ProtocolConfig {
+                    clock: Some(Arc::new(move || {
+                        *now.lock().expect("MeshClock mutex poisoned")
+                    })),
+                    protocol_rng_seed: Some(
+                        self.next_protocol_seed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    ..ProtocolConfig::default()
+                }
+            }
+        }
+
+        /// Returns a stable name for a message body, used by the bus's
+        /// selective drop filter (in-src code can match `MessageBody`
+        /// directly).
+        fn body_kind(body: &MessageBody) -> &'static str {
+            match body {
+                MessageBody::SyncRequest(_) => "SyncRequest",
+                MessageBody::SyncReply(_) => "SyncReply",
+                MessageBody::Input(_) => "Input",
+                MessageBody::InputAck(_) => "InputAck",
+                MessageBody::QualityReport(_) => "QualityReport",
+                MessageBody::QualityReply(_) => "QualityReply",
+                MessageBody::ChecksumReport(_) => "ChecksumReport",
+                MessageBody::KeepAlive => "KeepAlive",
+                MessageBody::JoinRequest(_) => "JoinRequest",
+                MessageBody::StateSnapshot(_) => "StateSnapshot",
+                MessageBody::StateSnapshotAck(_) => "StateSnapshotAck",
+                MessageBody::ReactivateSlot(_) => "ReactivateSlot",
+                MessageBody::ReactivateSlotAck(_) => "ReactivateSlotAck",
+                MessageBody::JoinCommitted(_) => "JoinCommitted",
+                MessageBody::JoinAborted(_) => "JoinAborted",
+            }
+        }
+
+        type Inboxes = BTreeMap<SocketAddr, VecDeque<(SocketAddr, Message)>>;
+        type BlockSet = BTreeSet<(SocketAddr, SocketAddr, &'static str)>;
+
+        /// Shared in-memory routing bus: any number of [`MeshSocket`]s attach
+        /// at addresses over time (a vacated address can be re-attached by a
+        /// returning joiner), delivery is instant and deterministic, and
+        /// `(from, to, kind)` triples can be selectively blocked.
+        #[derive(Clone, Default)]
+        struct MeshBus {
+            inboxes: Arc<Mutex<Inboxes>>,
+            blocked: Arc<Mutex<BlockSet>>,
+        }
+
+        impl MeshBus {
+            fn new() -> Self {
+                Self::default()
+            }
+
+            fn socket(&self, addr: SocketAddr) -> MeshSocket {
+                MeshSocket {
+                    addr,
+                    bus: self.clone(),
+                }
+            }
+
+            fn block(&self, from: SocketAddr, to: SocketAddr, kind: &'static str) {
+                self.blocked
+                    .lock()
+                    .expect("MeshBus mutex poisoned")
+                    .insert((from, to, kind));
+            }
+
+            fn unblock(&self, from: SocketAddr, to: SocketAddr, kind: &'static str) {
+                self.blocked
+                    .lock()
+                    .expect("MeshBus mutex poisoned")
+                    .remove(&(from, to, kind));
+            }
+        }
+
+        struct MeshSocket {
+            addr: SocketAddr,
+            bus: MeshBus,
+        }
+
+        impl NonBlockingSocket<SocketAddr> for MeshSocket {
+            fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
+                if self
+                    .bus
+                    .blocked
+                    .lock()
+                    .expect("MeshBus mutex poisoned")
+                    .contains(&(self.addr, *addr, body_kind(&msg.body)))
+                {
+                    return;
+                }
+                self.bus
+                    .inboxes
+                    .lock()
+                    .expect("MeshBus mutex poisoned")
+                    .entry(*addr)
+                    .or_default()
+                    .push_back((self.addr, msg.clone()));
+            }
+
+            fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+                self.bus
+                    .inboxes
+                    .lock()
+                    .expect("MeshBus mutex poisoned")
+                    .get_mut(&self.addr)
+                    .map(|queue| queue.drain(..).collect())
+                    .unwrap_or_default()
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Shadow game state (the "user side" of the request contract)
+        // ------------------------------------------------------------------
+
+        /// Minimal deterministic game: the state folds every advanced frame's
+        /// inputs, and every save/load goes through the request cells — so two
+        /// peers' shadow states at a frame are byte-equal iff they simulated
+        /// identical input streams.
+        #[derive(Default)]
+        struct Shadow {
+            state: u8,
+            /// Frame -> state captured by that frame's `SaveGameState`
+            /// (rollback re-saves overwrite — the repaired truth).
+            states: BTreeMap<i32, u8>,
+        }
+
+        fn next_state(state: u8, inputs: &[(u8, InputStatus)]) -> u8 {
+            inputs
+                .iter()
+                .fold(state.wrapping_mul(31).wrapping_add(7), |acc, (inp, _)| {
+                    acc.wrapping_add(*inp)
+                })
+        }
+
+        fn apply_requests(requests: &RequestVec<TestConfig>, shadow: &mut Shadow) {
+            for request in requests.iter() {
+                match request {
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        cell.save(*frame, Some(shadow.state), Some(u128::from(shadow.state)));
+                        shadow.states.insert(frame.as_i32(), shadow.state);
+                    },
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        shadow.state = cell.load().expect("loaded cell must hold a state");
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        shadow.state = next_state(shadow.state, inputs);
+                    },
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Manual joiner (chunk N4 stands in for the real joiner session)
+        // ------------------------------------------------------------------
+
+        /// Drives the joiner role at the protocol level: sync handshakes,
+        /// `JoinRequest`, snapshot receipt + ack, lifecycle drains, and real
+        /// inputs for slot 2. See the module docs for why this is manual.
+        struct ManualJoiner {
+            // Boxed because `UdpProtocol::send_all_messages` takes
+            // `&mut Box<dyn NonBlockingSocket<_>>`.
+            socket: Box<dyn NonBlockingSocket<SocketAddr>>,
+            protos: BTreeMap<SocketAddr, UdpProtocol<TestConfig>>,
+            status: Vec<ConnectionStatus>,
+        }
+
+        impl ManualJoiner {
+            fn new(bus: &MeshBus, addr: SocketAddr) -> Self {
+                Self {
+                    socket: Box::new(bus.socket(addr)),
+                    protos: BTreeMap::new(),
+                    status: vec![ConnectionStatus::default(); 3],
+                }
+            }
+
+            /// Creates + starts synchronizing a protocol endpoint toward
+            /// `peer` (which owns player `peer_handle`).
+            fn connect(&mut self, peer: SocketAddr, peer_handle: usize, clock: &MeshClock) {
+                let mut proto = UdpProtocol::<TestConfig>::new(
+                    vec![PlayerHandle::new(peer_handle)],
+                    peer,
+                    3, // num_players
+                    1, // local players (the joiner's own slot)
+                    8, // max_prediction
+                    Duration::from_secs(2),
+                    Duration::from_millis(500),
+                    60,
+                    DesyncDetection::Off,
+                    SyncConfig::default(),
+                    clock.protocol_config(),
+                    TimeSyncConfig::default(),
+                )
+                .expect("manual joiner protocol should construct");
+                proto.synchronize().expect("fresh protocol synchronizes");
+                self.protos.insert(peer, proto);
+            }
+
+            fn pump(&mut self) {
+                for (from, msg) in self.socket.receive_all_messages() {
+                    if let Some(proto) = self.protos.get_mut(&from) {
+                        proto.handle_message(&msg);
+                    }
+                }
+                for proto in self.protos.values_mut() {
+                    // Drain (and drop) protocol events; the manual joiner only
+                    // needs the state machine driven.
+                    let _ = proto.poll(&self.status).count();
+                    proto.send_all_messages(&mut self.socket);
+                }
+            }
+
+            fn proto_mut(&mut self, peer: SocketAddr) -> &mut UdpProtocol<TestConfig> {
+                self.protos
+                    .get_mut(&peer)
+                    .expect("manual joiner protocol exists for peer")
+            }
+
+            fn is_running(&self, peer: SocketAddr) -> bool {
+                self.protos.get(&peer).is_some_and(UdpProtocol::is_running)
+            }
+
+            /// Sends slot 2's real input for `frame` to every connected peer,
+            /// gossiping `last_frame = frame` for all slots (a live joiner's
+            /// connect-status claims; the gossip-min folds keep the claim
+            /// bounded by each receiver's own receipt, so an optimistic claim
+            /// is safe).
+            fn send_input(&mut self, frame: Frame, value: u8) {
+                for status in &mut self.status {
+                    status.last_frame = frame;
+                }
+                let mut inputs = BTreeMap::new();
+                inputs.insert(PlayerHandle::new(2), PlayerInput::new(frame, value));
+                let status = self.status.clone();
+                for proto in self.protos.values_mut() {
+                    proto.send_input(&inputs, &status);
+                    proto.send_all_messages(&mut self.socket);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Mesh fixture
+        // ------------------------------------------------------------------
+
+        /// Coordinator + survivor pair (C's lifecycle differs per test).
+        struct Duo {
+            bus: MeshBus,
+            clock: MeshClock,
+            a: P2PSession<TestConfig>,
+            b: P2PSession<TestConfig>,
+            a_shadow: Shadow,
+            b_shadow: Shadow,
+            a_events: Vec<FortressEvent<TestConfig>>,
+            b_events: Vec<FortressEvent<TestConfig>>,
+        }
+
+        impl Duo {
+            fn poll_round(&mut self, joiner: Option<&mut ManualJoiner>) {
+                self.a.poll_remote_clients();
+                self.a_events.extend(self.a.events());
+                self.b.poll_remote_clients();
+                self.b_events.extend(self.b.events());
+                if let Some(joiner) = joiner {
+                    joiner.pump();
+                }
+                self.clock.advance(POLL_INTERVAL);
+            }
+
+            /// Adds inputs + advances both sessions once (either may be
+            /// throttled or paused — requests are applied regardless).
+            fn advance_both(&mut self, a_input: u8, b_input: u8) {
+                self.a
+                    .add_local_input(PlayerHandle::new(0), a_input)
+                    .expect("A local input");
+                let requests = self.a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut self.a_shadow);
+                self.b
+                    .add_local_input(PlayerHandle::new(1), b_input)
+                    .expect("B local input");
+                let requests = self.b.advance_frame().expect("B advance");
+                apply_requests(&requests, &mut self.b_shadow);
+            }
+        }
+
+        /// Builds the 3-peer mesh (A coordinator, B survivor, C full session),
+        /// synchronizes it, advances `pre_drop_rounds` lockstep rounds, then
+        /// gracefully drops C on both A and B and advances a few more rounds.
+        /// Returns the duo, ready for a rejoin attempt.
+        fn mesh_with_dropped_slot(serve_timeout_polls: usize, pre_drop_rounds: u32) -> Duo {
+            mesh_with_dropped_slot_opts(serve_timeout_polls, pre_drop_rounds, false, false).0
+        }
+
+        /// [`mesh_with_dropped_slot`] with VALUE-VARYING C inputs — the
+        /// round-5 de-blind: with varying inputs, any freeze-frame
+        /// disagreement the staging or the machinery produces becomes
+        /// byte-visible in every downstream shadow/snapshot comparison
+        /// instead of being masked by the constant `C_FROZEN_INPUT`. (The
+        /// staging's drop itself is one frame ASYMMETRIC — A's receipt runs
+        /// one ahead of B's at the removal — so a varying-input mesh
+        /// genuinely exercises the generic convergence re-adjust during the
+        /// post-drop rounds.) Tests that assert the served frozen VALUE
+        /// (`C_FROZEN_INPUT`) keep the constant staging, where the value is
+        /// freeze-frame-independent by construction.
+        fn mesh_with_dropped_slot_varying(serve_timeout_polls: usize, pre_drop_rounds: u32) -> Duo {
+            mesh_with_dropped_slot_opts(serve_timeout_polls, pre_drop_rounds, false, true).0
+        }
+
+        /// [`mesh_with_dropped_slot`] with a spectator registered on the
+        /// survivor B (handle 3 at `addr_d`), driven at the protocol level by
+        /// the returned manual endpoint (spectator endpoints gate B's initial
+        /// sync, so it must complete the handshake; the caller keeps pumping
+        /// it so the endpoint stays alive for the flush under test).
+        fn mesh_with_dropped_slot_with_spectator(
+            serve_timeout_polls: usize,
+            pre_drop_rounds: u32,
+        ) -> (Duo, ManualJoiner) {
+            let (duo, spectator) =
+                mesh_with_dropped_slot_opts(serve_timeout_polls, pre_drop_rounds, true, false);
+            (
+                duo,
+                spectator.expect("spectator driver exists when requested"),
+            )
+        }
+
+        fn mesh_with_dropped_slot_opts(
+            serve_timeout_polls: usize,
+            pre_drop_rounds: u32,
+            spectator_on_b: bool,
+            varying_c_input: bool,
+        ) -> (Duo, Option<ManualJoiner>) {
+            let bus = MeshBus::new();
+            let clock = MeshClock::new();
+
+            let a = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_hot_join(true)
+                .with_hot_join_serve_timeout_polls(serve_timeout_polls)
+                .expect("serve timeout")
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Local, PlayerHandle::new(0))
+                .expect("A local")
+                .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                .expect("A remote B")
+                .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                .expect("A remote C")
+                // N>=3 hot-join construction is publicly build-rejected (the
+                // S20 guards stay); the test-only bypass reaches the N2/N3
+                // machinery under test.
+                .start_p2p_session_skip_hot_join_build_guards_for_test(bus.socket(addr_a()))
+                .expect("A builds");
+
+            let mut b_builder = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("B remote A")
+                .add_player(PlayerType::Local, PlayerHandle::new(1))
+                .expect("B local")
+                .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                .expect("B remote C");
+            if spectator_on_b {
+                b_builder = b_builder
+                    .add_player(PlayerType::Spectator(addr_d()), PlayerHandle::new(3))
+                    .expect("B spectator");
+            }
+            let b = b_builder
+                .start_p2p_session(bus.socket(addr_b()))
+                .expect("B builds (a plain survivor needs no bypass)");
+
+            let mut c = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("C remote A")
+                .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                .expect("C remote B")
+                .add_player(PlayerType::Local, PlayerHandle::new(2))
+                .expect("C local")
+                .start_p2p_session(bus.socket(addr_c()))
+                .expect("C builds");
+
+            let mut duo = Duo {
+                bus,
+                clock,
+                a,
+                b,
+                a_shadow: Shadow::default(),
+                b_shadow: Shadow::default(),
+                a_events: Vec::new(),
+                b_events: Vec::new(),
+            };
+            let mut c_shadow = Shadow::default();
+
+            // The spectator endpoint gates B's initial sync, so it must be
+            // driven at the protocol level (the `ManualJoiner` harness speaks
+            // the same `UdpProtocol` handshake a real spectator session would).
+            let mut spectator = spectator_on_b.then(|| {
+                let mut spectator = ManualJoiner::new(&duo.bus.clone(), addr_d());
+                spectator.connect(addr_b(), 1, &duo.clock.clone());
+                spectator
+            });
+
+            // Initial synchronization of all three sessions (condition-driven
+            // with a generous cap — session-33 round-6).
+            for _ in 0..300 {
+                duo.poll_round(None);
+                c.poll_remote_clients();
+                let _ = c.events().count();
+                if let Some(spectator) = spectator.as_mut() {
+                    spectator.pump();
+                }
+                if duo.a.current_state() == SessionState::Running
+                    && duo.b.current_state() == SessionState::Running
+                    && c.current_state() == SessionState::Running
+                {
+                    break;
+                }
+            }
+            assert_eq!(duo.a.current_state(), SessionState::Running, "A syncs");
+            assert_eq!(duo.b.current_state(), SessionState::Running, "B syncs");
+            assert_eq!(c.current_state(), SessionState::Running, "C syncs");
+
+            // Advance the full mesh in lockstep. By default C's input is
+            // CONSTANT so the slot's agreed frozen value is C_FROZEN_INPUT
+            // regardless of the precise freeze frame — NOTE (round-5
+            // de-blind disclosure): this constant deliberately MASKS
+            // freeze-frame asymmetry (the staged drop below is in fact one
+            // frame asymmetric, healed by the generic convergence re-adjust
+            // during the post-drop rounds). Tests that assert the served
+            // frozen VALUE need the mask; value-sensitivity is exercised by
+            // `varying_c_input` (the flagship happy path) and by the
+            // dedicated asymmetric staging
+            // (`mesh_with_asymmetric_dropped_slot`).
+            for i in 0..pre_drop_rounds {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                    c.poll_remote_clients();
+                    let _ = c.events().count();
+                    if let Some(spectator) = spectator.as_mut() {
+                        spectator.pump();
+                    }
+                }
+                duo.advance_both(10 + (i as u8), 20 + (i as u8));
+                let c_input = if varying_c_input {
+                    c_varying_input(c.current_frame().as_i32())
+                } else {
+                    C_FROZEN_INPUT
+                };
+                c.add_local_input(PlayerHandle::new(2), c_input)
+                    .expect("C local input");
+                let requests = c.advance_frame().expect("C advance");
+                apply_requests(&requests, &mut c_shadow);
+            }
+            assert!(
+                duo.a.current_frame().as_i32() >= 3,
+                "mesh advanced pre-drop (A at {})",
+                duo.a.current_frame()
+            );
+
+            // Graceful drop of C on both survivors; C's session goes away.
+            duo.a
+                .remove_player(PlayerHandle::new(2))
+                .expect("A removes C");
+            duo.b
+                .remove_player(PlayerHandle::new(2))
+                .expect("B removes C");
+            drop(c);
+            duo.a_events.extend(duo.a.events());
+            duo.b_events.extend(duo.b.events());
+
+            // A (the hot-join host) re-armed + re-reserved the slot; B (a plain
+            // survivor) left its endpoint terminal.
+            assert!(
+                duo.a
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "A re-reserves the dropped slot"
+            );
+            assert!(
+                !duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "B does not reserve (plain survivor)"
+            );
+
+            // Both keep advancing with the slot frozen.
+            for i in 0..4_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                    if let Some(spectator) = spectator.as_mut() {
+                        spectator.pump();
+                    }
+                }
+                duo.advance_both(50 + i, 60 + i);
+            }
+
+            (duo, spectator)
+        }
+
+        /// Drives the joiner's sync handshake toward `peer` until both sides
+        /// are Running (bounded; asserts on exhaustion).
+        fn sync_joiner_with(duo: &mut Duo, joiner: &mut ManualJoiner, peer: SocketAddr) {
+            // Condition-driven with a generous cap (session-33 round-6).
+            for _ in 0..300 {
+                duo.poll_round(Some(joiner));
+                let session_side_running = if peer == addr_a() {
+                    duo.a
+                        .player_reg
+                        .remotes
+                        .get(&addr_c())
+                        .is_some_and(UdpProtocol::is_running)
+                } else {
+                    duo.b
+                        .player_reg
+                        .remotes
+                        .get(&addr_c())
+                        .is_some_and(UdpProtocol::is_running)
+                };
+                if joiner.is_running(peer) && session_side_running {
+                    return;
+                }
+            }
+            let session_side = if peer == addr_a() { &duo.a } else { &duo.b };
+            panic!(
+                "manual joiner failed to synchronize with {peer:?} — \
+                 joiner endpoint (state, roundtrips left, outstanding randoms, magic, \
+                 remote magic): {:?}; session-side endpoint for the joiner: {:?}",
+                joiner
+                    .protos
+                    .get(&peer)
+                    .map(UdpProtocol::sync_debug_snapshot),
+                session_side
+                    .player_reg
+                    .remotes
+                    .get(&addr_c())
+                    .map(UdpProtocol::sync_debug_snapshot),
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // Tests
+        // ------------------------------------------------------------------
+
+        /// Happy path: C drops gracefully, rejoins; A pauses + waits for its
+        /// confirmed frame to reach S, serves; B re-arms + re-syncs the joiner
+        /// endpoint, reopens at F, acks; the joiner acks the snapshot; A
+        /// commits, un-pauses, and both A's and B's slot-2 queues accept C's
+        /// real inputs from F onward with byte-identical confirmed values.
+        ///
+        /// Runs on the VALUE-VARYING staging (round-5 de-blind): the staged
+        /// drop is one frame asymmetric, so this flagship test now also pins
+        /// the generic freeze convergence — any frame/value disagreement
+        /// surfaces in the snapshot byte-equality assert instead of being
+        /// masked by a constant input.
+        #[test]
+        fn npeer_happy_path_rejoin_reactivates_all_survivors_at_one_frame() {
+            let mut duo = mesh_with_dropped_slot_varying(600, 6);
+
+            // --- Rejoin: manual joiner attaches at C's address, syncs to A.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+
+            // --- JoinRequest opens an N-peer serve (survivor set = {B}).
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let (serve_s, serve_f) = {
+                let serve = duo
+                    .a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .expect("N-peer serve opens on the JoinRequest");
+                assert_eq!(
+                    serve.survivors,
+                    BTreeSet::from([addr_b()]),
+                    "survivor set is exactly B"
+                );
+                (serve.snapshot_frame, serve.activation_frame)
+            };
+            assert_eq!(
+                serve_f,
+                Frame::new(serve_s.as_i32() + 1),
+                "F = S + 1 (the activation frame clears the survivor cap)"
+            );
+            assert_eq!(
+                serve_s,
+                duo.a.sync_layer.last_saved_frame(),
+                "S = the coordinator's last-saved (= last-sent) frame"
+            );
+            assert!(
+                duo.a_events
+                    .iter()
+                    .any(|e| matches!(e, FortressEvent::JoinRequested { handle, .. } if *handle == PlayerHandle::new(2))),
+                "A emits JoinRequested"
+            );
+
+            // --- The pause: A's frame counter is pinned for the entire serve.
+            let paused_at = duo.a.current_frame();
+            duo.a
+                .add_local_input(PlayerHandle::new(0), 70)
+                .expect("A local input");
+            let requests = duo.a.advance_frame().expect("A paused advance");
+            apply_requests(&requests, &mut duo.a_shadow);
+            assert_eq!(
+                duo.a.current_frame(),
+                paused_at,
+                "the N-peer serve pauses the coordinator"
+            );
+
+            // --- B receives the directive: re-arms the joiner endpoint
+            // (terminal -> Synchronizing) and goes pending (slot reserved).
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(71, 81);
+                if duo.b.hot_join.pending_reactivation.is_some() {
+                    break;
+                }
+            }
+            {
+                let pending = duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .expect("B holds a pending reactivation");
+                assert_eq!(pending.handle, PlayerHandle::new(2));
+                assert_eq!(pending.frame, serve_f, "the directive carries F verbatim");
+                assert_eq!(pending.coordinator_addr, addr_a());
+                assert!(
+                    !pending.reopened,
+                    "no reopen before the joiner channel is up"
+                );
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the pending slot is reserved on B (fold-skip + event-swallow)"
+            );
+            {
+                let endpoint = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr_c())
+                    .expect("B's joiner endpoint exists");
+                assert!(
+                    !endpoint.is_running() && !endpoint.is_synchronized(),
+                    "B re-armed the joiner endpoint (Synchronizing, not terminal)"
+                );
+            }
+
+            // --- The joiner now syncs to B (deliberately created AFTER B's
+            // re-arm: the production joiner-side survivor-endpoint sequencing
+            // is chunk N4); B reopens at F and acks once Running-with-joiner.
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(72, 82);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened after its joiner endpoint reached Running (pending: {:?}, b-side endpoint running/synced: {:?}, c2 proto_b running: {})",
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|p| (p.handle, p.frame, p.reopened)),
+                duo.b
+                    .player_reg
+                    .remotes
+                    .get(&addr_c())
+                    .map(|e| (e.is_running(), e.is_synchronized())),
+                c2.is_running(addr_b())
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot-2 queue is live"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(serve_f.as_i32() - 1),
+                },
+                "B reopened the slot at F (connected, last_frame = F - 1)"
+            );
+            assert!(
+                !duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the reopened slot is no longer reserved on B"
+            );
+
+            // --- Wait-then-capture: A serves the snapshot at exactly S once
+            // its confirmed frame caught up; the joiner receives it.
+            let mut snapshot = None;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(73, 83);
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    snapshot = Some(snap);
+                    break;
+                }
+            }
+            let snapshot = snapshot.expect("the joiner receives the snapshot");
+            assert_eq!(snapshot.frame, serve_s, "the snapshot is at S = F - 1");
+            let (served_state, _) = crate::network::codec::decode::<u8>(&snapshot.state_bytes)
+                .expect("snapshot state decodes");
+            assert_eq!(
+                Some(&served_state),
+                duo.b_shadow.states.get(&serve_s.as_i32()),
+                "the served state at S byte-equals the survivor's state at S (fully confirmed, never speculative)"
+            );
+
+            // --- The joiner acks; A commits only once the joiner acked AND
+            // every survivor acked; A un-pauses and announces JoinCommitted.
+            c2.proto_mut(addr_a()).send_state_snapshot_ack(serve_s);
+            c2.pump();
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "the serve committed");
+            assert!(
+                duo.a_events
+                    .iter()
+                    .any(|e| matches!(e, FortressEvent::PeerJoined { handle, .. } if *handle == PlayerHandle::new(2))),
+                "A emits PeerJoined at commit"
+            );
+            assert_eq!(
+                duo.a.local_connect_status[2],
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(serve_f.as_i32() - 1),
+                },
+                "A reactivated its own slot at F"
+            );
+            assert!(
+                !duo.a.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "A's slot-2 queue is live"
+            );
+
+            // --- The joiner contributes real inputs from F onward; both
+            // survivors' queues accept them and the commit lifecycle reaches
+            // both the joiner and B.
+            let mut commit_seen = false;
+            for k in 0..14_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(74, 84);
+                if c2
+                    .proto_mut(addr_a())
+                    .take_received_join_committed()
+                    .is_some_and(|body| body.handle == 2 && body.frame == serve_f)
+                {
+                    commit_seen = true;
+                }
+                if duo.a.confirmed_frame() >= serve_f && duo.b.confirmed_frame() >= serve_f {
+                    break;
+                }
+            }
+            assert!(commit_seen, "the joiner observes JoinCommitted{{2, F}}");
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "B's pending reactivation cleared on JoinCommitted"
+            );
+            assert!(
+                duo.a.current_frame() > paused_at,
+                "A un-paused and advanced after the commit"
+            );
+            assert!(
+                duo.a.confirmed_frame() >= serve_f && duo.b.confirmed_frame() >= serve_f,
+                "both survivors confirm past F (A {}, B {})",
+                duo.a.confirmed_frame(),
+                duo.b.confirmed_frame()
+            );
+
+            // The desync pin: both survivors confirm C's REAL input at F (not
+            // the frozen value) — the byte-identical activation agreement.
+            let a_input = duo
+                .a
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(2), serve_f)
+                .expect("A confirmed slot-2 input at F")
+                .input;
+            let b_input = duo
+                .b
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(2), serve_f)
+                .expect("B confirmed slot-2 input at F")
+                .input;
+            assert_eq!(a_input, C_REJOIN_INPUT, "A committed C's real input at F");
+            assert_eq!(b_input, C_REJOIN_INPUT, "B committed C's real input at F");
+
+            // And the confirmed STATES agree (the shadow checksum equivalent).
+            let probe = serve_f.as_i32() + 1;
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree on the state at F + 1"
+            );
+        }
+
+        /// Survivor speculation repair on the commit path (session-33 review
+        /// Finding 1, probe-confirmed): with CONSTANT local inputs (held
+        /// buttons / idle — the most common real input pattern) a survivor
+        /// that speculated past `F` with the frozen value has no coincidental
+        /// misprediction on any OTHER slot to drag it into a rollback, so the
+        /// reopen itself must arm the forced re-simulation from `F`
+        /// (`disconnect_frame = min(.., F)`) exactly like the coordinator
+        /// commit and the abort restore do. Without the arming, the joiner's
+        /// real inputs land in a queue with no open prediction episode
+        /// (`add_input` only compares against an episode), `first_incorrect`
+        /// is never set, and the survivor permanently keeps its frozen-value
+        /// speculation for frames >= F — a silent byte divergence at F + 1 on
+        /// the HAPPY path. The varying-input happy-path test masks this: its
+        /// coordinator input changes at exactly F, and that unrelated
+        /// misprediction-rollback coincidentally re-simulates the joiner slot.
+        #[test]
+        fn npeer_commit_with_constant_inputs_resimulates_survivor_speculation_from_f() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            // From here on every local input is CONSTANT, so repeat-last
+            // prediction is correct for both live slots at every frame >= the
+            // serve window — no coincidental rollback can mask a missing
+            // forced re-simulation of the joiner slot.
+            const A_HELD: u8 = 70;
+            const B_HELD: u8 = 80;
+            for _ in 0..3_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                }
+                duo.advance_both(A_HELD, B_HELD);
+            }
+
+            // --- Rejoin: manual joiner attaches at C's address, syncs to A.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+
+            // --- Directive reaches B; B keeps advancing under the cap with
+            // the held inputs (speculating frames >= F with the frozen value).
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(A_HELD, B_HELD);
+                if duo.b.hot_join.pending_reactivation.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "B holds a pending reactivation"
+            );
+
+            // --- Joiner syncs to B; B reopens at F and acks.
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(A_HELD, B_HELD);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened after its joiner endpoint reached Running"
+            );
+            // Precondition pin: B genuinely speculated past F before the
+            // reopen (the finding's reachability condition — production-always
+            // whenever max_prediction >= 2 and the serve outlasts ~1 frame).
+            assert!(
+                duo.b.current_frame() > serve_f,
+                "B speculated past F before the reopen (current {}, F {})",
+                duo.b.current_frame(),
+                serve_f
+            );
+
+            // --- Joiner acks the snapshot; A commits and un-pauses.
+            let mut snapshot = None;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(A_HELD, B_HELD);
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    snapshot = Some(snap);
+                    break;
+                }
+            }
+            let snapshot = snapshot.expect("the joiner receives the snapshot");
+            c2.proto_mut(addr_a())
+                .send_state_snapshot_ack(snapshot.frame);
+            c2.pump();
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "the serve committed");
+
+            // --- The joiner feeds real inputs from F; both survivors keep
+            // advancing with the held inputs until both confirm past F.
+            for k in 0..14_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(A_HELD, B_HELD);
+                if duo.a.confirmed_frame() >= serve_f && duo.b.confirmed_frame() >= serve_f {
+                    break;
+                }
+            }
+            assert!(
+                duo.a.confirmed_frame() >= serve_f && duo.b.confirmed_frame() >= serve_f,
+                "both survivors confirm past F (A {}, B {})",
+                duo.a.confirmed_frame(),
+                duo.b.confirmed_frame()
+            );
+
+            // Both committed C's REAL input at F...
+            let a_input = duo
+                .a
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(2), serve_f)
+                .expect("A confirmed slot-2 input at F")
+                .input;
+            let b_input = duo
+                .b
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(2), serve_f)
+                .expect("B confirmed slot-2 input at F")
+                .input;
+            assert_eq!(a_input, C_REJOIN_INPUT, "A committed C's real input at F");
+            assert_eq!(b_input, C_REJOIN_INPUT, "B committed C's real input at F");
+
+            // ...and the STATES at F + 1 byte-agree: B's frozen-value
+            // speculation of frame F was re-simulated with the real input
+            // (the reopen armed `disconnect_frame = F`), not silently kept.
+            let probe = serve_f.as_i32() + 1;
+            let a_state = duo.a_shadow.states.get(&probe);
+            let b_state = duo.b_shadow.states.get(&probe);
+            assert!(
+                a_state.is_some() && b_state.is_some(),
+                "both survivors simulated past F + 1"
+            );
+            assert_eq!(
+                a_state, b_state,
+                "A and B byte-agree on the state at F + 1 (constant-input commit must force the survivor's re-simulation from F)"
+            );
+        }
+
+        /// Wait-then-capture (R1): a coordinator with a pending misprediction
+        /// at serve-open repairs it WHILE PAUSED (the paused `advance_frame`
+        /// surfaces the rollback's `LoadGameState`) and only then captures —
+        /// the serve never embeds speculative survivor inputs.
+        ///
+        /// RED-provability (verified by hand, see the session report): with
+        /// the wait gate neutralized (capture at open), the snapshot-state
+        /// assertion fails (stale state served); with the paused-rollback arm
+        /// neutralized (2-peer-style empty return), the LoadGameState
+        /// assertion fails and the capture deadlocks into the Phase-4 abort.
+        #[test]
+        fn npeer_serve_waits_for_confirmed_and_repairs_misprediction_while_paused() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            // Block B -> A inputs, then let B advance with a NEW input value:
+            // A's prediction for B (repeat-last) is now wrong for that frame.
+            duo.bus.block(addr_b(), addr_a(), "Input");
+            for _ in 0..3 {
+                duo.poll_round(None);
+            }
+            // B advances one frame with a changed input; A advances two frames
+            // on stale predictions of B.
+            duo.advance_both(90, 200);
+            for _ in 0..3 {
+                duo.poll_round(None);
+            }
+            duo.advance_both(91, 201);
+
+            // Rejoin while the misprediction is outstanding.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_s = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .snapshot_frame;
+
+            // The wait gate holds: B's inputs through S have not arrived, so
+            // A's confirmed frame trails S and nothing may be captured.
+            for _ in 0..5 {
+                duo.poll_round(Some(&mut c2));
+                let serve = duo.a.hot_join.npeer.as_ref().expect("serve stays open");
+                assert!(
+                    serve.snapshot.is_none(),
+                    "the serve must NOT capture while confirmed < S (confirmed {}, S {})",
+                    duo.a.confirmed_frame(),
+                    serve_s
+                );
+            }
+            assert!(duo.a.confirmed_frame() < serve_s);
+
+            // Unblock: B's held inputs (including the mispredicted frame)
+            // re-deliver via its pending-output retransmit. The PAUSED advance
+            // must then surface the repair rollback — without ever advancing
+            // to a new frame.
+            duo.bus.unblock(addr_b(), addr_a(), "Input");
+            let paused_frame = duo.a.current_frame();
+            let mut repair_seen = false;
+            for _ in 0..20 {
+                duo.poll_round(Some(&mut c2));
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 92)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A paused advance");
+                if requests
+                    .iter()
+                    .any(|request| matches!(request, FortressRequest::LoadGameState { .. }))
+                {
+                    repair_seen = true;
+                }
+                apply_requests(&requests, &mut duo.a_shadow);
+                assert_eq!(
+                    duo.a.current_frame(),
+                    paused_frame,
+                    "rollback-while-paused never advances to a new frame"
+                );
+                if repair_seen {
+                    break;
+                }
+            }
+            assert!(
+                repair_seen,
+                "the paused coordinator surfaces the misprediction-repair rollback"
+            );
+
+            // The capture now fires — at exactly S, with the REPAIRED state
+            // (byte-equal to B's ground truth at S, which B never mispredicted).
+            let mut captured = None;
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if let Some(serve) = duo.a.hot_join.npeer.as_ref() {
+                    if let Some(snapshot) = &serve.snapshot {
+                        captured = Some(snapshot.clone());
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            let snapshot = captured.expect("the serve captures after the repair");
+            assert_eq!(snapshot.frame, serve_s, "captured at exactly S");
+            let (served_state, _) = crate::network::codec::decode::<u8>(&snapshot.state_bytes)
+                .expect("snapshot state decodes");
+            assert_eq!(
+                Some(&served_state),
+                duo.b_shadow.states.get(&serve_s.as_i32()),
+                "the served state embeds B's REAL inputs at S, not A's stale prediction"
+            );
+        }
+
+        /// Pre-ack abort: B received the directive (re-armed + pending) but
+        /// its joiner channel never comes up, so it never acks; A's Phase-4
+        /// timeout aborts; `JoinAborted` clears B's pending attempt with the
+        /// slot's frozen state untouched, and A's next-serve guard forces the
+        /// retry onto a strictly later activation frame.
+        #[test]
+        fn npeer_pre_ack_abort_leaves_survivor_reserved_and_guards_next_serve() {
+            // Serve budget: outlasts the pre-abort assertions (~7 polls) and
+            // expires inside the exhaust loop below.
+            let mut duo = mesh_with_dropped_slot(14, 6);
+
+            let f_pre = duo.b.local_connect_status[2];
+            assert!(f_pre.disconnected, "slot 2 is dropped on B");
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+
+            // Stale-ack discrimination on the coordinator: a wrong-frame ack
+            // must not count as the survivor's reopen ack.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .send_reactivate_slot_ack(2, Frame::new(serve_f.as_i32() + 7));
+            for _ in 0..2 {
+                duo.poll_round(Some(&mut c2));
+            }
+            assert!(
+                duo.a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.pending_acks.contains(&addr_b())),
+                "a mismatched ReactivateSlotAck frame is ignored (B still pending)"
+            );
+
+            // B is pending but never reopens (the joiner never syncs to B).
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(95, 96);
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| !pending.reopened),
+                "B is pending and unreopened"
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot stays frozen pre-reopen"
+            );
+
+            // Commit barrier pin: the JOINER acks the snapshot, but B's reopen
+            // ack is still missing — the serve must NOT commit (un-pausing
+            // here would lift the survivor cap and let B commit F frozen).
+            let mut joiner_acked = false;
+            for _ in 0..4 {
+                if let Some(snapshot) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    c2.proto_mut(addr_a())
+                        .send_state_snapshot_ack(snapshot.frame);
+                    c2.pump();
+                    joiner_acked = true;
+                }
+                duo.poll_round(Some(&mut c2));
+                if joiner_acked {
+                    break;
+                }
+            }
+            assert!(joiner_acked, "the joiner received and acked the snapshot");
+            duo.poll_round(Some(&mut c2));
+            assert!(
+                duo.a.hot_join.npeer.as_ref().is_some_and(
+                    |serve| serve.joiner_acked && serve.pending_acks.contains(&addr_b())
+                ),
+                "the joiner ack alone must NOT commit while a survivor ack is pending"
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "A's slot stays reserved pre-commit"
+            );
+
+            // Exhaust the serve budget -> abort.
+            for _ in 0..20 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "Phase-4 aborts the serve");
+            assert!(
+                duo.a
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot stays reserved on A after the abort"
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .npeer_post
+                    .as_ref()
+                    .is_some_and(|post| !post.committed && post.frame == serve_f),
+                "A announces JoinAborted{{2, F}}"
+            );
+
+            // The JoinAborted reaches B: pending cleared, slot byte-identical
+            // to its pre-attempt reserved/frozen shape.
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "JoinAborted clears B's pre-ack pending attempt"
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot is still frozen"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], f_pre,
+                "B's slot status is untouched by the aborted attempt"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot stays reserved on B (rejoinable)"
+            );
+
+            // R3 next-serve guard, part 1: an IMMEDIATE retry (before the
+            // coordinator advances a single frame) must be deferred — opening
+            // it would reuse the aborted attempt's exact (handle, F) pair and
+            // make its stale lifecycle messages indistinguishable.
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            for _ in 0..3 {
+                duo.poll_round(Some(&mut c2));
+            }
+            assert!(
+                duo.a.hot_join.npeer.is_none(),
+                "a retry before the coordinator advances past the aborted frame is deferred"
+            );
+
+            // R3 next-serve guard, part 2: once A advances, the retry opens on
+            // a strictly later activation frame than the aborted attempt.
+            for i in 0..3_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(97 + i, 98 + i);
+            }
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_some() {
+                    break;
+                }
+            }
+            let retry = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("the retry opens a fresh serve");
+            assert!(
+                retry.activation_frame > serve_f,
+                "the retry's F ({}) must be strictly later than the aborted attempt's ({})",
+                retry.activation_frame,
+                serve_f
+            );
+        }
+
+        /// Post-ack abort: B reopened + acked, but the JOINER never acks the
+        /// snapshot, so A's Phase-4 timeout aborts after B's reopen. The
+        /// matching `JoinAborted` must restore B's slot byte-identically
+        /// (frozen queue with the preserved agreed value, pre-reopen
+        /// connection status, reserved membership) and repair any speculative
+        /// frame that embedded the joiner's real input.
+        #[test]
+        fn npeer_post_ack_abort_refreezes_survivor_byte_identically() {
+            // Serve budget: long enough for the directive + the joiner's
+            // B-channel sync + the reopen + the leaked input (~25 polls), yet
+            // short enough to expire inside the abort-wait loop below.
+            let mut duo = mesh_with_dropped_slot(40, 6);
+
+            let pre_status = duo.b.local_connect_status[2];
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+
+            // Let B receive the directive and re-arm, then bring the joiner's
+            // B-channel up so B reopens and acks. B does NOT advance in this
+            // window (only A, whose paused advance is a repair-only no-op): B
+            // must still have prediction-window headroom at the leak below so
+            // it genuinely SIMULATES the leaked input — the divergence the
+            // abort must repair.
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 53)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A paused advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                c2.is_running(addr_b()),
+                "the joiner's B-channel reached Running"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // The joiner leaks a REAL input at F to the reopened B queue, and B
+            // then simulates F (and beyond) with the leaked value — exactly the
+            // speculative divergence the abort must undo.
+            c2.send_input(serve_f, C_REJOIN_INPUT);
+            for _ in 0..3 {
+                duo.poll_round(Some(&mut c2));
+            }
+            duo.advance_both(53, 112);
+            duo.advance_both(53, 113);
+            assert_eq!(
+                duo.b.local_connect_status[2].last_frame, serve_f,
+                "B's reopened queue accepted the joiner's real input at F"
+            );
+            assert!(
+                duo.b_shadow.states.contains_key(&(serve_f.as_i32() + 1)),
+                "B simulated past F with the leaked input (current {})",
+                duo.b.current_frame()
+            );
+
+            // The joiner NEVER acks the snapshot -> Phase-4 abort.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "Phase-4 aborts the serve");
+
+            // JoinAborted reaches B: the reopened slot is restored to its
+            // pre-reopen reserved shape, byte-identically.
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "JoinAborted clears B's attempt"
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B re-froze the slot"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "B restored the pre-reopen connection status verbatim"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot is reserved again on B"
+            );
+
+            // The restored frozen VALUE is the pre-reopen agreed value: B's
+            // next advances must feed slot 2 with C_FROZEN_INPUT (Disconnected),
+            // not the leaked real input.
+            let mut frozen_checked = false;
+            for i in 0..8_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 53)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 113 + i)
+                    .expect("B local input");
+                let requests = duo.b.advance_frame().expect("B advance");
+                for request in requests.iter() {
+                    if let FortressRequest::AdvanceFrame { inputs } = request {
+                        let (value, status) = inputs[2];
+                        assert_eq!(
+                            value, C_FROZEN_INPUT,
+                            "B's slot-2 value reverted to the agreed frozen input"
+                        );
+                        assert_eq!(status, InputStatus::Disconnected);
+                        frozen_checked = true;
+                    }
+                }
+                apply_requests(&requests, &mut duo.b_shadow);
+            }
+            assert!(frozen_checked, "B advanced at least one frame post-abort");
+
+            // No-desync pin: the speculative frame that embedded the joiner's
+            // real input was re-simulated with the frozen value (the abort
+            // armed a forced rollback at F), so A's and B's states at F + 1
+            // byte-agree.
+            let probe = serve_f.as_i32() + 1;
+            for _ in 0..20 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(53, 121);
+                if duo.a_shadow.states.contains_key(&probe)
+                    && duo.b_shadow.states.contains_key(&probe)
+                    && duo.a.confirmed_frame().as_i32() > probe
+                    && duo.b.confirmed_frame().as_i32() > probe
+                {
+                    break;
+                }
+            }
+            // Liveness pin (session-33 round-2 review Finding 1 / Nit 2): the
+            // recovery wait above must be an ASSERTION, not just a loop-break —
+            // a survivor whose confirmed frame stays pinned at F - 1 after the
+            // abort (the reopen-armed gossip floor filtering the genuine
+            // pre-attempt drop gossip forever) otherwise slips through, because
+            // the byte-agreement below can pass on speculative shadow states.
+            assert!(
+                duo.b.confirmed_frame().as_i32() > probe,
+                "B's confirmed frame must recover past F after the abort (got {}, F = {})",
+                duo.b.confirmed_frame(),
+                serve_f
+            );
+            assert!(
+                duo.a.confirmed_frame().as_i32() > probe,
+                "A's confirmed frame must recover past F after the abort (got {}, F = {})",
+                duo.a.confirmed_frame(),
+                serve_f
+            );
+            let a_state = duo.a_shadow.states.get(&probe);
+            let b_state = duo.b_shadow.states.get(&probe);
+            assert!(
+                a_state.is_some() && b_state.is_some(),
+                "both survivors simulated past F + 1 after the abort"
+            );
+            assert_eq!(
+                a_state, b_state,
+                "post-abort states at F + 1 byte-agree (the leaked real input was rolled back)"
+            );
+        }
+
+        /// Post-reopen abort LIVENESS (session-33 round-2 review Finding 1,
+        /// probe-confirmed): after a reopened survivor's attempt aborts, the
+        /// mesh's genuine pre-attempt drop gossip `{disconnected, f0}` (with
+        /// `f0 < F - 1` — the production-default shape) must be re-adopted so
+        /// the slot re-converges to mesh-agreed exclusion and BOTH peers'
+        /// confirmed frames recover past `F`. A reactivation floor armed at
+        /// the (pre-commit) reopen and never disarmed on the abort filters
+        /// that gossip forever: the survivor's cached views stay
+        /// `{connected, F - 1}`, the slot is never mesh-agreed-excluded, its
+        /// confirmed frame pins at `F - 1`, and the whole mesh stalls behind
+        /// it over healthy links. The floor must therefore arm only at
+        /// commit-evidence points (an aborted world never arms one), which
+        /// this test pins both ways: no floor survives the abort, and the
+        /// mesh fully re-converges and resumes after it.
+        #[test]
+        fn npeer_post_reopen_abort_reconverges_genuine_drop_gossip_and_mesh_resumes() {
+            let mut duo = mesh_with_dropped_slot(40, 6);
+            let pre_status = duo.b.local_connect_status[2];
+            let f0 = pre_status.last_frame;
+
+            // --- Reach a REOPENED pending on B (the byte-identity abort
+            // test's choreography).
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            assert!(
+                f0.as_i32() < serve_f.as_i32() - 1,
+                "precondition: the pre-attempt freeze frame ({}) is strictly below F - 1 ({}) — the production-default abort shape",
+                f0,
+                serve_f.as_i32() - 1
+            );
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 53)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A paused advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // --- The joiner never acks the snapshot -> Phase-4 abort; the
+            // JoinAborted restore re-freezes B.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "Phase-4 aborts the serve");
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "JoinAborted clears B's attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "B restored the pre-reopen connection status verbatim"
+            );
+
+            // --- Mechanism pin: an ABORTED world leaves NO reactivation
+            // floor armed on B (the floor's `>= F - 1` threshold theorem is
+            // valid only in committed worlds; armed here it would filter the
+            // genuine f0 convergence below forever).
+            for addr in [addr_a(), addr_c()] {
+                let floor = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("B endpoint exists")
+                    .reactivation_floor_for_test(PlayerHandle::new(2));
+                assert!(
+                    floor.is_null(),
+                    "no reactivation floor may outlive an aborted attempt on B's endpoint {:?} (got {})",
+                    addr,
+                    floor
+                );
+            }
+
+            // --- Liveness: the slot re-converges to the genuine pre-attempt
+            // drop state and BOTH confirmed frames recover past F.
+            let probe = serve_f.as_i32() + 1;
+            for _ in 0..120 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(53, 131);
+                if duo.a.confirmed_frame().as_i32() > probe
+                    && duo.b.confirmed_frame().as_i32() > probe
+                {
+                    break;
+                }
+            }
+            let b_view_of_a = duo
+                .b
+                .player_reg
+                .remotes
+                .get(&addr_a())
+                .expect("B's A endpoint")
+                .peer_connect_status(PlayerHandle::new(2));
+            assert!(
+                b_view_of_a.disconnected,
+                "B re-adopted A's genuine {{disconnected, f0}} gossip for the slot (got connected at {})",
+                b_view_of_a.last_frame
+            );
+            assert_eq!(
+                b_view_of_a.last_frame, f0,
+                "the re-adopted freeze frame is the pre-attempt f0"
+            );
+            assert!(
+                duo.b.confirmed_frame().as_i32() > probe,
+                "B's confirmed frame must recover past F after the abort (got {}, F = {})",
+                duo.b.confirmed_frame(),
+                serve_f
+            );
+            assert!(
+                duo.a.confirmed_frame().as_i32() > probe,
+                "A's confirmed frame must recover past F after the abort (got {}, F = {})",
+                duo.a.confirmed_frame(),
+                serve_f
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1 after the aborted attempt"
+            );
+        }
+
+        /// Bound-clamp regression (session-33 round-3 review Finding 1): a
+        /// reopened survivor whose attempt ABORTED but whose `JoinAborted`
+        /// delivery is delayed (a short selective-loss burst — the responder
+        /// re-sends per re-ack, so delivery is only deferred, never lost)
+        /// must keep its confirmed frame strictly BELOW `F` while the pending
+        /// is held — even when the un-paused coordinator streams real inputs
+        /// at/past `F` and the joiner (whose abort teardown is chunk-N4
+        /// scope) keeps legally leaking inputs `>= F` into the reopened
+        /// queue.
+        ///
+        /// The round-2 bound shield SKIPPED the coordinator's re-stuck
+        /// `{disconnected, f0}` claim wholesale, so the only folded gossip
+        /// term for the slot was the joiner's own connected self-claim
+        /// `>= F`: B confirmed (discarded history for, spectator-flushed,
+        /// checksummed) frames built from leaked inputs no other peer will
+        /// ever confirm — silent confirmed-state byte divergence — and the
+        /// late `JoinAborted` restore then re-simulated frames B had already
+        /// confirmed (an S1 violation). The clamp folds shielded
+        /// disconnected claims at the seeded `F - 1` instead of skipping
+        /// them, restoring the cap while keeping the f0-dip fix (pinned by
+        /// the spectator-flush test).
+        #[test]
+        fn npeer_survivor_with_unresolved_abort_and_leaked_inputs_never_confirms_past_f() {
+            let mut duo = mesh_with_dropped_slot(40, 6);
+            let pre_status = duo.b.local_connect_status[2];
+            let f0 = pre_status.last_frame;
+
+            // The delayed lifecycle close: JoinAborted toward B is blocked
+            // until the test delivers it.
+            duo.bus.block(addr_a(), addr_b(), "JoinAborted");
+
+            // --- Reach a REOPENED pending on B (the abort-probe
+            // choreography).
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            assert!(
+                f0.as_i32() < serve_f.as_i32() - 1,
+                "precondition: the pre-attempt freeze frame ({}) is strictly below F - 1 ({})",
+                f0,
+                serve_f.as_i32() - 1
+            );
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 54)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A paused advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // --- The joiner never acks the snapshot -> Phase-4 abort on A.
+            // The blocked JoinAborted keeps B's pending held.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "Phase-4 aborts the serve");
+
+            // --- The unresolved-abort window: A (un-paused) streams real
+            // inputs at/past F, the joiner keeps leaking inputs >= F into
+            // B's reopened queue, and B's confirmed frame must stay capped
+            // below F the whole time.
+            for k in 0..8_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(55, 132);
+                assert!(
+                    duo.b.hot_join.pending_reactivation.is_some(),
+                    "precondition: the blocked JoinAborted keeps B's attempt pending"
+                );
+                assert!(
+                    duo.b.confirmed_frame() < serve_f,
+                    "B must not confirm at/past F while the aborted attempt is unresolved (got {}, F = {})",
+                    duo.b.confirmed_frame(),
+                    serve_f
+                );
+            }
+
+            // --- Deliver the delayed JoinAborted: the restore applies to a
+            // confirmed history that never crossed F (no confirmed-state
+            // rewrite), and the slot re-enters the pre-attempt shape.
+            duo.bus.unblock(addr_a(), addr_b(), "JoinAborted");
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the delivered JoinAborted closes B's attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "B restored the pre-reopen connection status verbatim"
+            );
+
+            // --- Liveness + byte-identity: the abort world re-converges,
+            // both confirmed frames recover past F, and the shadows agree at
+            // F + 1 (the frames the leak would have poisoned).
+            let probe = serve_f.as_i32() + 1;
+            for _ in 0..120 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(56, 133);
+                if duo.a.confirmed_frame().as_i32() > probe
+                    && duo.b.confirmed_frame().as_i32() > probe
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.confirmed_frame().as_i32() > probe,
+                "B's confirmed frame recovers past F after the delivered abort (got {}, F = {})",
+                duo.b.confirmed_frame(),
+                serve_f
+            );
+            assert!(
+                duo.a.confirmed_frame().as_i32() > probe,
+                "A's confirmed frame recovers past F after the abort (got {}, F = {})",
+                duo.a.confirmed_frame(),
+                serve_f
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1 after the delayed abort delivery"
+            );
+        }
+
+        /// Stages the session-33 round-4 review Finding 1 choreography on B:
+        /// a PRE-reopen pending whose abort conclusion B never hears, held
+        /// while B's confirmed frame legitimately crosses the attempt's
+        /// activation frame `F`.
+        ///
+        /// Choreography: `JoinAborted` A->B is blocked; the joiner handshakes
+        /// with A ONLY, so B accepts the directive but its joiner endpoint
+        /// never goes `Running` and the pending stays pre-reopen (a
+        /// pre-reopen survivor has no re-ack convergence loop, so nothing
+        /// ever re-delivers the lost abort); the joiner never acks the
+        /// snapshot, so the serve Phase-4 aborts and A un-pauses; A's stream
+        /// then drives B's confirmed frame past `F` — byte-safe by itself,
+        /// because the frozen slot folds `None` (locally disconnected, the
+        /// rearmed joiner endpoint reserved-excluded, A's claim
+        /// disconnected). Returns the joiner driver (connected to A only),
+        /// the activation frame `F`, and B's captured pre-attempt slot-2
+        /// status.
+        fn reach_pre_reopen_pending_with_confirmed_past_f(
+            duo: &mut Duo,
+        ) -> (ManualJoiner, Frame, ConnectionStatus) {
+            let pre_status = duo.b.local_connect_status[2];
+
+            duo.bus.block(addr_a(), addr_b(), "JoinAborted");
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+
+            // B accepts the directive; the joiner<->B handshake never
+            // starts, so the pending stays PRE-reopen.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| !pending.reopened),
+                "precondition: B holds the PRE-reopen pending"
+            );
+
+            // The joiner never acks the snapshot -> Phase-4 abort on A. B
+            // has not acked either (the ack is sent at reopen), so the
+            // attempt provably never committed anywhere.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "Phase-4 aborts the serve");
+
+            // A un-pauses and streams real inputs; the frozen slot is
+            // excluded from B's confirmed fold, so B's confirmed frame
+            // crosses F while the blocked JoinAborted keeps the pre-reopen
+            // pending held.
+            for _ in 0..30 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(55, 132);
+                if duo.b.confirmed_frame().as_i32() > serve_f.as_i32() + 1 {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| !pending.reopened),
+                "precondition: the unheard abort keeps the pre-reopen pending held"
+            );
+            assert!(
+                duo.b.confirmed_frame() > serve_f,
+                "precondition: B's confirmed frame crossed F while the abort stayed unheard (got {}, F = {})",
+                duo.b.confirmed_frame(),
+                serve_f
+            );
+
+            (c2, serve_f, pre_status)
+        }
+
+        /// Session-33 round-4 review Finding 1 (Critical, probe-confirmed):
+        /// the LATE reopen after an unheard abort must be rejected by the
+        /// reopen-time F re-validation. Pre-fix,
+        /// `progress_pending_reactivation` reopened the slot at the stale `F`
+        /// the moment the delayed joiner<->B handshake completed —
+        /// repositioning the queue below B's confirmed history and arming
+        /// `disconnect_frame = F`, after which every `advance_frame` failed
+        /// forever (`SynchronizedInputsFailed`, then `WrongSavedFrame` after
+        /// the restore — a permanent wedge on a healthy session). With the
+        /// re-check the reopen is REJECTED and the attempt is cancelled
+        /// fail-closed: pending cleared, slot verbatim frozen + reserved, no
+        /// closed-attempt high-water, and the session keeps advancing with
+        /// its confirmed stream intact and byte-identical to the
+        /// coordinator's.
+        #[test]
+        fn npeer_late_reopen_after_unheard_abort_is_cancelled_fail_closed() {
+            let mut duo = mesh_with_dropped_slot(40, 6);
+            let (mut c2, serve_f, pre_status) =
+                reach_pre_reopen_pending_with_confirmed_past_f(&mut duo);
+
+            // --- The LATE joiner<->B handshake completes: the reopen gate
+            // (joiner endpoint Running) opens at the stale F.
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                let concluded = match duo.b.hot_join.pending_reactivation.as_ref() {
+                    None => true,
+                    Some(pending) => pending.reopened,
+                };
+                if concluded {
+                    break;
+                }
+            }
+            assert!(
+                !duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B must NOT reopen slot 2 at the stale F (F = {}, confirmed = {})",
+                serve_f,
+                duo.b.confirmed_frame()
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the stale-F attempt is cancelled fail-closed"
+            );
+
+            // --- Fail-closed shape: verbatim frozen status, frozen queue,
+            // reserved membership (the rearmed joiner endpoint stays
+            // excluded from the folds), and NO closed-attempt high-water
+            // (the attempt was never heard closing; a genuine retry
+            // directive at a newer F re-validates from this exact reserved
+            // shape).
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "slot 2 keeps its pre-attempt frozen status verbatim"
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "slot 2's queue stays frozen"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "slot 2 stays reserved"
+            );
+            assert!(
+                !duo.b
+                    .hot_join
+                    .npeer_closed_attempt_frames
+                    .contains_key(&PlayerHandle::new(2)),
+                "the fail-closed cancel records no closed-attempt high-water"
+            );
+
+            // --- The joiner leaks real inputs at/past F: the frozen queue
+            // ignores them, nothing resurrects the cancelled attempt, and
+            // B's session keeps advancing.
+            for k in 0..8_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(56, 133);
+                assert!(
+                    duo.b.hot_join.pending_reactivation.is_none(),
+                    "no leaked input resurrects the cancelled attempt"
+                );
+            }
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "the leak cannot touch the cancelled slot (receipts are gated on connected)"
+            );
+
+            // --- The delayed JoinAborted finally lands: with the pending
+            // gone it is the no-pending no-op.
+            duo.bus.unblock(addr_a(), addr_b(), "JoinAborted");
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the late JoinAborted does not resurrect the attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "the late JoinAborted is a harmless no-op on the cancelled attempt"
+            );
+
+            // --- Liveness + mesh-wide consistency: both sessions keep
+            // advancing (advance_both fails the test on any Err), both
+            // confirmed streams keep growing, the slot stays frozen on BOTH
+            // peers, and the shadows byte-agree across the window the wedge
+            // used to occupy.
+            let a_confirmed_before = duo.a.confirmed_frame();
+            let b_confirmed_before = duo.b.confirmed_frame();
+            for _ in 0..12 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(57, 134);
+            }
+            assert!(
+                duo.b.confirmed_frame() > b_confirmed_before,
+                "B's confirmed stream keeps growing after the cancel (was {}, now {})",
+                b_confirmed_before,
+                duo.b.confirmed_frame()
+            );
+            assert!(
+                duo.a.confirmed_frame() > a_confirmed_before,
+                "A's confirmed stream keeps growing (was {}, now {})",
+                a_confirmed_before,
+                duo.a.confirmed_frame()
+            );
+            assert!(
+                duo.a.sync_layer.player_is_frozen(PlayerHandle::new(2))
+                    && duo.a.local_connect_status[2].disconnected,
+                "the slot is frozen on the coordinator too"
+            );
+            assert_eq!(
+                duo.a.local_connect_status[2], duo.b.local_connect_status[2],
+                "the slot's frozen view is consistent mesh-wide"
+            );
+            let probe = serve_f.as_i32() + 1;
+            assert!(
+                duo.a_shadow.states.contains_key(&probe)
+                    && duo.b_shadow.states.contains_key(&probe),
+                "both shadows saved frame F + 1"
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1 (the frames the stale reopen would have corrupted)"
+            );
+        }
+
+        /// Session-33 round-4 review Finding 1, the second reopen site: the
+        /// DEFENSIVE reopen in `handle_join_committed_directive` must apply
+        /// the same F re-validation. A `JoinCommitted` matching a PRE-reopen
+        /// pending is already a protocol violation (the commit barrier
+        /// requires this survivor's reopen-ack, which was never sent), so
+        /// the message is untrusted; if the activation frame is ALSO no
+        /// longer past B's confirmed history, reopening "defensively" would
+        /// reposition the queue below confirmed history and permanently
+        /// wedge the session (the probe's `WrongSavedFrame` loop) — strictly
+        /// worse than any stall the defensive reopen exists to avoid. The
+        /// fabricated-commit shape is staged through the lifecycle test seam
+        /// exactly like `npeer_survivor_ignores_mismatched_lifecycle_messages`.
+        #[test]
+        fn npeer_defensive_reopen_below_confirmed_history_is_cancelled_fail_closed() {
+            let mut duo = mesh_with_dropped_slot(40, 6);
+            let (mut c2, serve_f, pre_status) =
+                reach_pre_reopen_pending_with_confirmed_past_f(&mut duo);
+
+            // --- A JoinCommitted for the held attempt arrives (fabricated:
+            // the real serve aborted, and B never acked — a commit without
+            // this survivor's ack is exactly the coordinator/channel
+            // misbehavior the defensive arm guards).
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_join_committed_for_test(JoinCommitted {
+                    handle: 2,
+                    frame: serve_f,
+                });
+            duo.b.poll_remote_clients();
+
+            // --- The stale-F defensive reopen is rejected: cancelled
+            // fail-closed instead (pre-fix this reopened the slot below
+            // confirmed history: status {connected, F - 1}, queue unfrozen,
+            // reserved membership dropped, commit-arm re-seed +
+            // closed-attempt high-water).
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B must NOT defensively reopen slot 2 below its confirmed history (F = {}, confirmed = {})",
+                serve_f,
+                duo.b.confirmed_frame()
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the stale-F attempt is cancelled fail-closed"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "slot 2 keeps its pre-attempt frozen status verbatim"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "slot 2 stays reserved"
+            );
+            assert!(
+                !duo.b
+                    .hot_join
+                    .npeer_closed_attempt_frames
+                    .contains_key(&PlayerHandle::new(2)),
+                "the fail-closed cancel records no closed-attempt high-water"
+            );
+
+            // --- Liveness: the session keeps advancing; the late
+            // JoinAborted is a no-op; the mesh stays byte-consistent.
+            duo.bus.unblock(addr_a(), addr_b(), "JoinAborted");
+            let b_confirmed_before = duo.b.confirmed_frame();
+            for _ in 0..12 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(58, 135);
+            }
+            assert!(
+                duo.b.confirmed_frame() > b_confirmed_before,
+                "B keeps advancing after the fail-closed cancel (was {}, now {})",
+                b_confirmed_before,
+                duo.b.confirmed_frame()
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "nothing resurrects the cancelled attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "slot 2 stays in the pre-attempt frozen shape"
+            );
+            let probe = serve_f.as_i32() + 1;
+            assert!(
+                duo.a_shadow.states.contains_key(&probe),
+                "the byte-agreement probe is non-vacuous"
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1"
+            );
+        }
+
+        /// Stages a reopened pending reactivation on B with a legal
+        /// pre-commit joiner input leak at `F` (the serve stays open — the
+        /// generous timeout keeps the attempt mid-flight), returning the
+        /// joiner driver and the activation frame. Shared by the
+        /// user-initiated-kick tests (session-33 round-3 review Finding 2).
+        fn reach_reopened_pending_with_leaked_input(duo: &mut Duo) -> (ManualJoiner, Frame) {
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(57, 134);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(58, 135);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // The legal pre-commit leak: the joiner streams its real input at
+            // F into B's reopened queue (the poisonous receipt a mid-attempt
+            // kick would otherwise freeze).
+            for _ in 0..10 {
+                c2.send_input(serve_f, C_REJOIN_INPUT);
+                duo.poll_round(Some(&mut c2));
+                if duo.b.local_connect_status[2].last_frame >= serve_f {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.local_connect_status[2].last_frame >= serve_f,
+                "precondition: B's local receipt for the reopened slot reached F via the leak (got {}, F = {})",
+                duo.b.local_connect_status[2].last_frame,
+                serve_f
+            );
+            (c2, serve_f)
+        }
+
+        /// User-initiated freeze guard (session-33 round-3 review Finding 2):
+        /// `disconnect_player` on a slot held by a REOPENED pending
+        /// reactivation must close the attempt first through the same
+        /// evidence-discriminated close the joiner-death path uses, then
+        /// apply the user's request to the post-close state. Mid-attempt
+        /// there is no commit evidence, so the close takes the abort arm —
+        /// the verbatim pre-reopen restore — and the kick then reports the
+        /// slot as already disconnected. Without the guard the kick froze
+        /// the slot at the LEAKED receipt `>= F` while the pending stayed
+        /// held: a `{disconnected, >= F}` claim in an aborted world — the
+        /// exact shape the commit-evidence induction proves cannot otherwise
+        /// exist — which another survivor's close would read as commit
+        /// evidence (the mistaken-commit residual class).
+        #[test]
+        fn npeer_disconnect_player_on_reopened_pending_slot_closes_attempt_first() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let slot = PlayerHandle::new(2);
+            let pre_status = duo.b.local_connect_status[2];
+
+            // Non-pending control: with NO attempt in flight the dropped
+            // slot's public-API semantics are untouched (fail-closed at the
+            // existing already-disconnected guards).
+            assert!(
+                matches!(
+                    duo.b.disconnect_player(slot),
+                    Err(FortressError::InvalidRequestStructured {
+                        kind: InvalidRequestKind::AlreadyDisconnected { .. }
+                    })
+                ),
+                "control: disconnect_player on the dropped non-pending slot is already-disconnected"
+            );
+
+            let (mut c2, serve_f) = reach_reopened_pending_with_leaked_input(&mut duo);
+
+            // --- The mid-attempt kick: the attempt must close FIRST (abort
+            // arm — no commit evidence exists), then the kick applies to the
+            // post-close state.
+            let result = duo.b.disconnect_player(slot);
+            assert!(
+                matches!(
+                    result,
+                    Err(FortressError::InvalidRequestStructured {
+                        kind: InvalidRequestKind::AlreadyDisconnected { .. }
+                    })
+                ),
+                "a mid-attempt disconnect_player closes the attempt first (abort arm restores the drop), then reports already-disconnected (got {result:?})"
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the user kick closed the reopened attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "the close restored the pre-reopen connection status verbatim (NOT the leaked >= F receipt; F = {serve_f})"
+            );
+            assert!(
+                duo.b.hot_join.reserved_slots.contains(&slot),
+                "the abort arm re-reserved the slot"
+            );
+            assert_eq!(
+                duo.b.current_state(),
+                SessionState::Running,
+                "the rejected kick must not halt the session (the Halt policy never ran)"
+            );
+            drop(c2.protos.remove(&addr_b()));
+        }
+
+        /// [`npeer_disconnect_player_on_reopened_pending_slot_closes_attempt_first`]
+        /// for the second public entry point: `remove_player` on a slot held
+        /// by a REOPENED pending reactivation closes the attempt first
+        /// (abort arm mid-attempt) and then reports the slot as already
+        /// removed — never a mid-attempt freeze at the leaked receipt.
+        #[test]
+        fn npeer_remove_player_on_reopened_pending_slot_closes_attempt_first() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let slot = PlayerHandle::new(2);
+            let pre_status = duo.b.local_connect_status[2];
+
+            // Non-pending control: existing semantics untouched.
+            assert!(
+                matches!(
+                    duo.b.remove_player(slot),
+                    Err(FortressError::InvalidRequestStructured {
+                        kind: InvalidRequestKind::PlayerAlreadyRemoved { .. }
+                    })
+                ),
+                "control: remove_player on the dropped non-pending slot is already-removed"
+            );
+
+            let (mut c2, serve_f) = reach_reopened_pending_with_leaked_input(&mut duo);
+
+            let result = duo.b.remove_player(slot);
+            assert!(
+                matches!(
+                    result,
+                    Err(FortressError::InvalidRequestStructured {
+                        kind: InvalidRequestKind::PlayerAlreadyRemoved { .. }
+                    })
+                ),
+                "a mid-attempt remove_player closes the attempt first (abort arm restores the drop), then reports already-removed (got {result:?})"
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the user removal closed the reopened attempt"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "the close restored the pre-reopen connection status verbatim (NOT the leaked >= F receipt; F = {serve_f})"
+            );
+            assert!(
+                duo.b.hot_join.reserved_slots.contains(&slot),
+                "the abort arm re-reserved the slot"
+            );
+            assert_eq!(
+                duo.b.current_state(),
+                SessionState::Running,
+                "the rejected removal must not halt the session"
+            );
+            drop(c2.protos.remove(&addr_b()));
+        }
+
+        /// Floor lifecycle (session-33 round-2 review Finding 1): the
+        /// per-slot gossip reactivation floor arms ONLY at commit-evidence
+        /// points. While a survivor's attempt is reopened-but-unconcluded the
+        /// floor stays NULL (the pending shield owns that window, and an
+        /// abort must leave the mesh free to re-converge on f0); the
+        /// `JoinCommitted` receipt — the survivor's commit evidence — arms it
+        /// at `F - 1` on every endpoint, exactly like the coordinator's own
+        /// commit does.
+        #[test]
+        fn npeer_reactivation_floor_arms_at_commit_receipt_not_at_reopen() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let slot = PlayerHandle::new(2);
+
+            // B must not hear the commit until the test says so.
+            duo.bus.block(addr_a(), addr_b(), "JoinCommitted");
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(71, 81);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(72, 82);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // --- Reopened but unconcluded: floors NULL on every B endpoint.
+            for addr in [addr_a(), addr_c()] {
+                let floor = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("B endpoint exists")
+                    .reactivation_floor_for_test(slot);
+                assert!(
+                    floor.is_null(),
+                    "B's reopen is pre-commit: no reactivation floor may be armed yet on endpoint {:?} (got {})",
+                    addr,
+                    floor
+                );
+            }
+
+            // --- The joiner acks the snapshot; the barrier commits on A,
+            // arming A's floors.
+            let mut snapshot = None;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(73, 83);
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    snapshot = Some(snap);
+                    break;
+                }
+            }
+            let snapshot = snapshot.expect("the joiner receives the snapshot");
+            c2.proto_mut(addr_a())
+                .send_state_snapshot_ack(snapshot.frame);
+            c2.pump();
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "the serve committed on A");
+            let expected_floor = Frame::new(serve_f.as_i32() - 1);
+            for addr in [addr_b(), addr_c()] {
+                let floor = duo
+                    .a
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("A endpoint exists")
+                    .reactivation_floor_for_test(slot);
+                assert_eq!(
+                    floor, expected_floor,
+                    "A's commit armed the reactivation floor at F - 1 on endpoint {addr:?}"
+                );
+            }
+            // B still has not heard the commit: pending held, floors NULL.
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "B's pending is held while JoinCommitted is blocked"
+            );
+            for addr in [addr_a(), addr_c()] {
+                let floor = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("B endpoint exists")
+                    .reactivation_floor_for_test(slot);
+                assert!(
+                    floor.is_null(),
+                    "still no commit evidence on B: floor on endpoint {:?} must stay NULL (got {})",
+                    addr,
+                    floor
+                );
+            }
+
+            // --- Deliver the commit receipt: B's floors arm at F - 1.
+            duo.bus.unblock(addr_a(), addr_b(), "JoinCommitted");
+            for _ in 0..10 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the JoinCommitted receipt closes B's attempt"
+            );
+            for addr in [addr_a(), addr_c()] {
+                let floor = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr)
+                    .expect("B endpoint exists")
+                    .reactivation_floor_for_test(slot);
+                assert_eq!(
+                    floor, expected_floor,
+                    "B's commit receipt armed the reactivation floor at F - 1 on endpoint {addr:?}"
+                );
+            }
+        }
+
+        /// Commit-evidence discrimination under input starvation (session-33
+        /// round-2 review Finding 2): an attempt COMMITS but survivor B
+        /// receives zero joiner inputs (joiner->B loss) and zero
+        /// `JoinCommitted` copies (coordinator->B selective loss) before the
+        /// joiner endpoint dies. B's local evidence (confirmed frame /
+        /// discard high-water) is then capped at `F - 1`, but once the joiner
+        /// dies toward the coordinator first (the committed era's natural
+        /// detection order under a joiner crash), A's ordinary re-drop
+        /// freezes the slot at its real receipt `>= F` and gossips
+        /// `{disconnected, >= F}` to B — a claim NO uncommitted world can
+        /// produce (an abort restore freezes at `f0 <= F - 1`; no first
+        /// `>= F` freeze exists absent a commit, leaks included). The
+        /// joiner-death close must read that gossip leg and take the COMMIT
+        /// arm — the ordinary re-drop at the local receipt (`F - 1`), NOT the
+        /// pre-attempt restore to `(f0, v0)` — after which the ordinary
+        /// gossip min converges the whole mesh to `(F - 1, frozen value)` and
+        /// both peers resume past `F` byte-identically. Restoring `f0`
+        /// instead diverges B's frozen history from the committed peers'
+        /// (whose armed floors then filter B's stale `f0` claims forever — a
+        /// permanent stall): the repo principle is stall over desync, but
+        /// here the commit is provable from the caches, so neither is
+        /// acceptable.
+        #[test]
+        fn npeer_starved_survivor_joiner_death_uses_gossip_commit_evidence() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let slot = PlayerHandle::new(2);
+            let pre_status = duo.b.local_connect_status[2];
+            let f0 = pre_status.last_frame;
+
+            // The dual blackout: B never hears the commit and never receives
+            // a joiner input. (The joiner's B-channel still handshakes — sync
+            // messages are not blocked — so B reopens and the barrier
+            // commits.)
+            duo.bus.block(addr_a(), addr_b(), "JoinCommitted");
+            duo.bus.block(addr_c(), addr_b(), "Input");
+
+            // --- Standard rejoin through B's reopen + ack.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            let seeded = Frame::new(serve_f.as_i32() - 1);
+            assert!(
+                f0 < seeded,
+                "precondition: f0 ({}) < F - 1 ({}) so the two close arms are distinguishable",
+                f0,
+                seeded
+            );
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(71, 81);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(72, 82);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened + acked"
+            );
+
+            // --- The joiner acks the snapshot; the barrier commits on A.
+            let mut snapshot = None;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(73, 83);
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    snapshot = Some(snap);
+                    break;
+                }
+            }
+            let snapshot = snapshot.expect("the joiner receives the snapshot");
+            c2.proto_mut(addr_a())
+                .send_state_snapshot_ack(snapshot.frame);
+            c2.pump();
+            for _ in 0..6 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "the serve committed on A");
+
+            // --- The joiner streams real inputs from F: they reach A only.
+            for k in 0..3_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(74, 84);
+            }
+
+            // Starvation preconditions, pinned explicitly.
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B still holds the reopened attempt (no JoinCommitted got through)"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2].last_frame, seeded,
+                "B received ZERO joiner inputs (local receipt is still the seeded F - 1)"
+            );
+            assert!(
+                duo.b.confirmed_frame() < serve_f,
+                "B's confirmed frame is capped below F (no local commit evidence; got {})",
+                duo.b.confirmed_frame()
+            );
+
+            // --- The joiner dies toward A FIRST (the committed era's natural
+            // crash-detection order): A's endpoint times out, A re-drops the
+            // slot at its real receipt >= F, and its gossip carries the
+            // committed era's {disconnected, >= F} freeze claim to B.
+            c2.protos.remove(&addr_a());
+            for _ in 0..120 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(75, 85);
+                if duo.a.local_connect_status[2].disconnected {
+                    break;
+                }
+            }
+            assert!(
+                duo.a.local_connect_status[2].disconnected,
+                "A re-dropped the slot when the joiner died"
+            );
+            assert!(
+                duo.a.local_connect_status[2].last_frame >= serve_f,
+                "A's re-drop froze at its real receipt (got {}, F = {})",
+                duo.a.local_connect_status[2].last_frame,
+                serve_f
+            );
+            for _ in 0..10 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(75, 85);
+                let claim = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr_a())
+                    .expect("B's A endpoint")
+                    .peer_connect_status(slot);
+                if claim.disconnected && claim.last_frame >= serve_f {
+                    break;
+                }
+            }
+            let b_view_of_a = duo
+                .b
+                .player_reg
+                .remotes
+                .get(&addr_a())
+                .expect("B's A endpoint")
+                .peer_connect_status(slot);
+            assert!(
+                b_view_of_a.disconnected && b_view_of_a.last_frame >= serve_f,
+                "the committed era's re-drop gossip reached B (claim disconnected={} at {}, F = {})",
+                b_view_of_a.disconnected,
+                b_view_of_a.last_frame,
+                serve_f
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B's attempt is still pending (its joiner channel is alive)"
+            );
+
+            // --- Now the joiner dies toward B too: B's joiner-endpoint close
+            // must discriminate COMMITTED from the gossip freeze-frame leg.
+            for _ in 0..120 {
+                duo.poll_round(None);
+                duo.advance_both(76, 86);
+                if duo.b.hot_join.pending_reactivation.is_none()
+                    && duo.b.local_connect_status[2].disconnected
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the joiner endpoint's death closed B's attempt"
+            );
+            assert!(
+                duo.b.local_connect_status[2].disconnected,
+                "B re-dropped the slot"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2].last_frame, seeded,
+                "B closed the attempt as COMMITTED: the committed era's re-drop freezes at the local receipt F - 1, not the pre-attempt f0 ({})",
+                f0
+            );
+            assert!(
+                !duo.b.hot_join.reserved_slots.contains(&slot),
+                "the commit arm does not re-reserve the slot (this was the committed era's ordinary drop)"
+            );
+
+            // --- Convergence: the ordinary gossip min settles the WHOLE mesh
+            // at (F - 1, frozen value); both peers resume and byte-agree
+            // past F.
+            let probe = serve_f.as_i32() + 1;
+            let mut b_frozen_value_checked = false;
+            for _ in 0..120 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                }
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 76)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 86)
+                    .expect("B local input");
+                let requests = duo.b.advance_frame().expect("B advance");
+                for request in requests.iter() {
+                    if let FortressRequest::AdvanceFrame { inputs } = request {
+                        let (value, status) = inputs[2];
+                        assert_eq!(
+                            value, C_FROZEN_INPUT,
+                            "B serves the converged frozen value for the re-dropped slot"
+                        );
+                        assert_eq!(status, InputStatus::Disconnected);
+                        b_frozen_value_checked = true;
+                    }
+                }
+                apply_requests(&requests, &mut duo.b_shadow);
+                if duo.a.confirmed_frame().as_i32() > probe
+                    && duo.b.confirmed_frame().as_i32() > probe
+                    && duo.a_shadow.states.contains_key(&probe)
+                    && duo.b_shadow.states.contains_key(&probe)
+                {
+                    break;
+                }
+            }
+            assert!(
+                b_frozen_value_checked,
+                "B advanced at least one frame post-close"
+            );
+            assert_eq!(
+                duo.a.local_connect_status[2].last_frame, seeded,
+                "A's freeze frame converged down to B's F - 1 (the committed mesh's re-drop min)"
+            );
+            assert!(
+                duo.b.confirmed_frame().as_i32() > probe
+                    && duo.a.confirmed_frame().as_i32() > probe,
+                "both peers resumed past F (A {}, B {})",
+                duo.a.confirmed_frame(),
+                duo.b.confirmed_frame()
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1 (the starved survivor joined the committed era's converged re-drop — no silent divergence)"
+            );
+        }
+
+        /// Stale-attempt discrimination (R3): lifecycle messages whose
+        /// `(handle, frame)` or sender do not match the pending attempt are
+        /// ignored with no state change.
+        #[test]
+        fn npeer_survivor_ignores_mismatched_lifecycle_messages() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+
+            // Reach the reopened state on B.
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(130, 140);
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(131, 141);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened"
+            );
+
+            // Pending-attempt shield: re-stick B's cached view of A's claim
+            // for slot 2 to the pre-attempt disconnected state (exactly what a
+            // not-yet-reopened survivor's gossip, the paused coordinator's
+            // multi-slot connect-status nudge, or a reordered stale packet
+            // would deliver mid-attempt). The disconnect-propagation fold must
+            // NOT re-apply the drop to the reopened slot while the attempt is
+            // pending — without the `update_player_disconnects` shield this
+            // re-freezes the slot and wedges the attempt.
+            let restick = ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(serve_f.as_i32() - 3),
+            };
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_peer_connect_status_for_tests(PlayerHandle::new(2), restick);
+            duo.b
+                .add_local_input(PlayerHandle::new(1), 142)
+                .expect("B local input");
+            let requests = duo.b.advance_frame().expect("B advance");
+            apply_requests(&requests, &mut duo.b_shadow);
+            assert!(
+                !duo.b.local_connect_status[2].disconnected,
+                "the pending-attempt shield keeps the reopened slot connected against stale disconnect gossip"
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "the reopened slot stays unfrozen under stale disconnect gossip"
+            );
+
+            let wrong_frame = Frame::new(serve_f.as_i32() + 5);
+
+            // A JoinAborted with a mismatched F (staged via the test seam on
+            // the coordinator's endpoint — the genuine wire path cannot forge
+            // one) must be ignored: still pending, still reopened, still live.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_join_aborted_for_test(JoinAborted {
+                    handle: 2,
+                    frame: wrong_frame,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened && pending.frame == serve_f),
+                "a mismatched-frame JoinAborted is ignored"
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "the slot stays live after the stale JoinAborted"
+            );
+
+            // A JoinCommitted with a mismatched F is likewise ignored.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_join_committed_for_test(JoinCommitted {
+                    handle: 2,
+                    frame: wrong_frame,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "a mismatched-frame JoinCommitted is ignored"
+            );
+
+            // A correctly-framed JoinAborted from the WRONG SENDER (the joiner
+            // itself) is ignored: lifecycle authority is attempt-scoped to the
+            // coordinator address.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_c())
+                .expect("B's joiner endpoint")
+                .set_received_join_aborted_for_test(JoinAborted {
+                    handle: 2,
+                    frame: serve_f,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "a JoinAborted from a non-coordinator sender is ignored"
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "the slot stays live after the forged JoinAborted"
+            );
+        }
+
+        /// Local joiner-endpoint-death close (session-33 review Finding 6):
+        /// a survivor whose REOPENED pending attempt loses BOTH its
+        /// coordinator (death — no lifecycle message will ever arrive) and
+        /// then its joiner endpoint must close the attempt locally off the
+        /// joiner endpoint's `Event::Disconnected`: re-freeze the slot
+        /// byte-identically to the agreed pre-attempt state (the same restore
+        /// every other reopened survivor applies), clear the pending entry
+        /// (un-wedging the shield and every future directive for the handle),
+        /// record the closed-attempt high-water, and resume. Without the
+        /// close the pending survives forever: the shield permanently exempts
+        /// the slot from the disconnect fold and `reopened`-never-superseded
+        /// blocks every future rejoin of the slot mesh-wide.
+        ///
+        /// The remaining window — between the coordinator's death and the
+        /// joiner endpoint's death — is inherent to R4 (a survivor never
+        /// guesses a pending attempt's outcome); bounding it is the chunk-N4
+        /// joiner-teardown contract (a joiner that loses its coordinator must
+        /// tear down its survivor channels so this close fires).
+        #[test]
+        fn npeer_survivor_refreezes_and_unwedges_when_joiner_dies_after_coordinator_death() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let pre_status = duo.b.local_connect_status[2];
+            assert!(pre_status.disconnected, "slot 2 starts dropped on B");
+
+            // --- Reach a REOPENED pending on B.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened && pending.frame == serve_f),
+                "B reopened for the attempt"
+            );
+
+            // The joiner leaks a real input at F into B's reopened queue, so
+            // the re-freeze below must demonstrably restore the AGREED value,
+            // not the leaked one.
+            c2.send_input(serve_f, C_REJOIN_INPUT);
+            for _ in 0..3 {
+                duo.poll_round(Some(&mut c2));
+            }
+
+            // --- The coordinator DIES before any lifecycle message: B polls
+            // alone (with the joiner still alive) until A's endpoint times
+            // out and slot 0 drops via the ordinary machinery. The pending
+            // attempt is now unfinishable-by-lifecycle.
+            let poll_b_solo = |duo: &mut Duo, joiner: Option<&mut ManualJoiner>| {
+                duo.b.poll_remote_clients();
+                duo.b_events.extend(duo.b.events());
+                if let Some(joiner) = joiner {
+                    joiner.pump();
+                }
+                duo.clock.advance(POLL_INTERVAL);
+            };
+            for _ in 0..60 {
+                poll_b_solo(&mut duo, Some(&mut c2));
+                if duo.b.local_connect_status[0].disconnected {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.local_connect_status[0].disconnected,
+                "B dropped the dead coordinator's slot via the normal machinery"
+            );
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "the pending attempt is still held (no lifecycle message can arrive)"
+            );
+
+            // --- The joiner endpoint then dies too: B must close the attempt
+            // locally — byte-identical pre-attempt re-freeze + cleared
+            // pending + recorded high-water.
+            for _ in 0..60 {
+                poll_b_solo(&mut duo, None);
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the joiner endpoint's death closes the wedged reopened attempt"
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B re-froze the slot"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2], pre_status,
+                "B restored the pre-attempt connection status verbatim (not the joiner-era receipt)"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot is reserved again on B (rejoinable)"
+            );
+
+            // --- B RESUMES solo: both remote slots are excluded (mesh-agreed
+            // drops), and the re-frozen slot feeds the AGREED value, not the
+            // leaked one.
+            let mut frozen_checked = false;
+            let start = duo.b.current_frame();
+            for i in 0..8_u8 {
+                poll_b_solo(&mut duo, None);
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 210 + i)
+                    .expect("B local input");
+                let requests = duo.b.advance_frame().expect("B advance");
+                for request in requests.iter() {
+                    if let FortressRequest::AdvanceFrame { inputs } = request {
+                        let (value, status) = inputs[2];
+                        assert_eq!(
+                            value, C_FROZEN_INPUT,
+                            "the re-frozen slot feeds the agreed value, not the leaked joiner input"
+                        );
+                        assert_eq!(status, InputStatus::Disconnected);
+                        frozen_checked = true;
+                    }
+                }
+                apply_requests(&requests, &mut duo.b_shadow);
+            }
+            assert!(frozen_checked, "B advanced at least one frame post-close");
+            assert!(
+                duo.b.current_frame() > start,
+                "B resumed advancing after both deaths"
+            );
+
+            // --- Un-wedge pin: a future directive for the slot (a takeover
+            // coordinator's retry at a strictly newer frame) is ACCEPTED —
+            // the closed attempt no longer blocks the handle.
+            let f_retry = Frame::new(
+                duo.b
+                    .confirmed_frame()
+                    .as_i32()
+                    .max(serve_f.as_i32())
+                    .saturating_add(10),
+            );
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot {
+                    handle: 2,
+                    frame: f_retry,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f_retry),
+                "a strictly-newer future directive is accepted — the slot is no longer wedged"
+            );
+        }
+
+        /// Drives the standard rejoin up to B's reopened pending: blocks
+        /// `A -> B` inputs first, lets A advance `blocked_frames` frames with
+        /// CHANGED inputs (B's repeat-last predictions of A are then wrong for
+        /// exactly those sub-F frames), opens the serve, and brings B to the
+        /// reopened state. Returns `(joiner, F)`. The caller unblocks to
+        /// trigger the sub-F misprediction rollback under test.
+        fn reopened_survivor_with_pending_sub_f_misprediction(
+            duo: &mut Duo,
+            blocked_frames: u8,
+        ) -> (ManualJoiner, Frame) {
+            duo.bus.block(addr_a(), addr_b(), "Input");
+            for i in 0..blocked_frames {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                }
+                // A's inputs CHANGE during the blocked window; B's own stay
+                // constant (no reverse misprediction).
+                duo.advance_both(240 + i, 80);
+            }
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("N-peer serve opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(250, 80);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened"
+            );
+            assert!(
+                duo.b.current_frame() > serve_f,
+                "B speculated past F before the reopen (current {}, F {})",
+                duo.b.current_frame(),
+                serve_f
+            );
+            (c2, serve_f)
+        }
+
+        /// Unblocks `A -> B`, drives B until the sub-F misprediction rollback
+        /// fires, and asserts every re-simulated pre-activation frame of the
+        /// reopened slot presents EXACTLY as the pre-reopen simulation did:
+        /// the agreed frozen value with `Disconnected` status. Returns the
+        /// rollback's load frame.
+        fn assert_sub_f_rollback_serves_frozen_disconnected(
+            duo: &mut Duo,
+            c2: &mut ManualJoiner,
+            serve_f: Frame,
+            expected_at_or_past_f: Option<u8>,
+        ) -> Frame {
+            duo.bus.unblock(addr_a(), addr_b(), "Input");
+            let mut load_frame = Frame::NULL;
+            for _ in 0..12 {
+                duo.poll_round(Some(c2));
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 80)
+                    .expect("B local input");
+                let requests = duo
+                    .b
+                    .advance_frame()
+                    .expect("B's sub-F rollback must be servable (reactivated slots present pre-activation frames with the frozen value)");
+                let mut cursor = Frame::NULL;
+                for request in requests.iter() {
+                    match request {
+                        FortressRequest::LoadGameState { frame, .. } => {
+                            load_frame = *frame;
+                            cursor = *frame;
+                        },
+                        FortressRequest::AdvanceFrame { inputs } => {
+                            if !cursor.is_null() {
+                                let (value, status) = inputs[2];
+                                if cursor < serve_f {
+                                    assert_eq!(
+                                        value, C_FROZEN_INPUT,
+                                        "re-simulated pre-activation frame {} must use the agreed frozen value",
+                                        cursor
+                                    );
+                                    assert_eq!(
+                                        status,
+                                        InputStatus::Disconnected,
+                                        "re-simulated pre-activation frame {} must present Disconnected (as the original simulation did), not a prediction",
+                                        cursor
+                                    );
+                                } else if let Some(expected) = expected_at_or_past_f {
+                                    assert_eq!(
+                                        value, expected,
+                                        "re-simulated frame {} at/past F must use the joiner's real input",
+                                        cursor
+                                    );
+                                }
+                                cursor = Frame::new(cursor.as_i32() + 1);
+                            }
+                        },
+                        FortressRequest::SaveGameState { .. } => {},
+                    }
+                }
+                apply_requests(&requests, &mut duo.b_shadow);
+                if !load_frame.is_null() {
+                    break;
+                }
+            }
+            assert!(
+                !load_frame.is_null(),
+                "the late-arriving sub-F misprediction triggered a rollback on B"
+            );
+            assert!(
+                load_frame < serve_f,
+                "the rollback crossed the activation frame (loaded {}, F {})",
+                load_frame,
+                serve_f
+            );
+            load_frame
+        }
+
+        /// Sub-F rollback on a reopened slot, status flavor (session-33
+        /// review Finding 5): BEFORE any joiner input is confirmed, a
+        /// late-arriving misprediction below F rolls B back across
+        /// pre-activation frames. The reopened (blanked) queue would serve
+        /// them as `(frozen value, Predicted)` — value-correct but
+        /// status-divergent from every peer that never rolled back (the
+        /// original simulation presented `Disconnected`; status-sensitive
+        /// games silently diverge). The reactivation floor must present them
+        /// as `(frozen value, Disconnected)`, byte-identical to the
+        /// pre-reopen simulation.
+        #[test]
+        fn npeer_sub_f_rollback_before_joiner_inputs_presents_disconnected_status() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let (mut c2, serve_f) = reopened_survivor_with_pending_sub_f_misprediction(&mut duo, 2);
+
+            // No joiner inputs yet: the rollback's pre-activation frames hit
+            // the empty reopened queue.
+            assert_sub_f_rollback_serves_frozen_disconnected(&mut duo, &mut c2, serve_f, None);
+
+            // The repaired sub-F history byte-agrees with A's (which never
+            // rolled back): the floor served exactly the values A simulated.
+            let probe = serve_f.as_i32() - 1;
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree on the repaired state at F - 1"
+            );
+        }
+
+        /// Sub-F rollback on a reopened slot, hard-error flavor (session-33
+        /// review Finding 5): once the joiner's real inputs occupy the
+        /// reopened ring (oldest frame = F), a sub-F request hits the
+        /// queue's "requested frame is before oldest" guard, fails
+        /// `synchronized_inputs`, and every `advance_frame` returns
+        /// `SynchronizedInputsFailed` until the rollback window moves — a
+        /// hard session error on a healthy mesh. The reactivation floor must
+        /// serve the pre-activation frames instead.
+        #[test]
+        fn npeer_sub_f_rollback_after_joiner_inputs_is_servable() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let (mut c2, serve_f) = reopened_survivor_with_pending_sub_f_misprediction(&mut duo, 2);
+
+            // The joiner's real input at F lands in B's reopened queue
+            // BEFORE the rollback (the ring's oldest frame is now F).
+            c2.send_input(serve_f, C_REJOIN_INPUT);
+            for _ in 0..3 {
+                duo.poll_round(Some(&mut c2));
+            }
+            assert_eq!(
+                duo.b.local_connect_status[2].last_frame, serve_f,
+                "B's reopened queue confirmed the joiner's real input at F"
+            );
+            // Drain the AT-F reconciliation rollback first (the reopen armed a
+            // forced re-simulation from F — the Finding-1 fix — and the real
+            // input at F just mispredicted against the frozen episode); the
+            // helper below must catch the SUB-F rollback specifically.
+            for _ in 0..2 {
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 80)
+                    .expect("B local input");
+                let requests = duo
+                    .b
+                    .advance_frame()
+                    .expect("B advance (at-F reconciliation)");
+                apply_requests(&requests, &mut duo.b_shadow);
+            }
+
+            assert_sub_f_rollback_serves_frozen_disconnected(
+                &mut duo,
+                &mut c2,
+                serve_f,
+                Some(C_REJOIN_INPUT),
+            );
+        }
+
+        /// Spectator flush across a reopen (session-33 review Finding 4): a
+        /// reopened survivor whose spectator stream lags behind the
+        /// activation frame must still be able to drain the owed
+        /// pre-activation frames — `confirmed_inputs` on the blanked ring
+        /// would return `NoConfirmedInput`, the error propagates out of
+        /// `advance_frame`, `next_spectator_frame` never advances, and every
+        /// subsequent `advance_frame` fails forever. The reactivation floor
+        /// serves the owed frames with the captured frozen value (exactly
+        /// what the pre-reopen frozen branch streamed).
+        #[test]
+        fn npeer_reopened_survivor_with_spectator_flushes_pre_activation_frames() {
+            let (mut duo, mut spectator) = mesh_with_dropped_slot_with_spectator(600, 6);
+
+            // Stall B's confirmed frame (and with it the spectator stream)
+            // below S: block A -> B inputs while A advances with CONSTANT
+            // inputs — no misprediction (the late arrivals match B's
+            // predictions), purely a confirmed-frame lag.
+            duo.bus.block(addr_a(), addr_b(), "Input");
+            for _ in 0..3_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                    spectator.pump();
+                }
+                duo.advance_both(53, 80);
+            }
+
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let (serve_s, serve_f) = {
+                let serve = duo.a.hot_join.npeer.as_ref().expect("N-peer serve opens");
+                (serve.snapshot_frame, serve.activation_frame)
+            };
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                spectator.pump();
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                spectator.pump();
+                duo.advance_both(53, 80);
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened),
+                "B reopened"
+            );
+            // The Finding-4 precondition: the spectator stream is owed frames
+            // strictly below F - 1 at the reopen.
+            assert!(
+                duo.b.next_spectator_frame < Frame::new(serve_s.as_i32()),
+                "B's spectator stream lags below S at the reopen (next {}, S {})",
+                duo.b.next_spectator_frame,
+                serve_s
+            );
+
+            // Unblock: A's retransmits recover B's confirmed frame past the
+            // owed window (no rollback — the inputs match B's predictions);
+            // the joiner contributes real inputs from F. Every B advance must
+            // stay servable while the flush drains the owed pre-activation
+            // frames.
+            duo.bus.unblock(addr_a(), addr_b(), "Input");
+            for k in 0..14_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                    spectator.pump();
+                }
+                duo.b
+                    .add_local_input(PlayerHandle::new(1), 80)
+                    .expect("B local input");
+                let requests = duo
+                    .b
+                    .advance_frame()
+                    .expect("B's advance must stay servable while the spectator flush drains pre-activation frames");
+                apply_requests(&requests, &mut duo.b_shadow);
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 53)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+                if duo.b.next_spectator_frame >= serve_f {
+                    break;
+                }
+            }
+            // `next >= F` means every owed pre-activation frame (<= F - 1 =
+            // S) was drained — exactly the window the blanked ring could not
+            // serve.
+            assert!(
+                duo.b.next_spectator_frame >= serve_f,
+                "B's spectator stream drained the pre-activation window (next {}, F {})",
+                duo.b.next_spectator_frame,
+                serve_f
+            );
+        }
+
+        /// One join at a time (R6): while an N-peer serve is open, a
+        /// JoinRequest for a DIFFERENT reserved handle is ignored (no second
+        /// serve, neither N-peer nor 2-peer).
+        #[test]
+        fn npeer_second_join_request_is_ignored_while_serve_open() {
+            let bus = MeshBus::new();
+            let clock = MeshClock::new();
+
+            // A: local 0, survivor B (remote 1), and TWO reserved slots on two
+            // distinct machines (C: 2, D: 3).
+            let mut a = SessionBuilder::<TestConfig>::new()
+                .with_num_players(4)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_hot_join(true)
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Local, PlayerHandle::new(0))
+                .expect("A local")
+                .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                .expect("A remote B")
+                .add_reserved_player(addr_c(), PlayerHandle::new(2))
+                .expect("A reserved C")
+                .add_reserved_player(addr_d(), PlayerHandle::new(3))
+                .expect("A reserved D")
+                .start_p2p_session_skip_hot_join_build_guards_for_test(bus.socket(addr_a()))
+                .expect("A builds");
+
+            let mut b = SessionBuilder::<TestConfig>::new()
+                .with_num_players(4)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("B remote A")
+                .add_player(PlayerType::Local, PlayerHandle::new(1))
+                .expect("B local")
+                .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                .expect("B remote C")
+                .add_player(PlayerType::Remote(addr_d()), PlayerHandle::new(3))
+                .expect("B remote D")
+                .start_p2p_session(bus.socket(addr_b()))
+                .expect("B builds");
+
+            // Drive A <-> B sync (B itself stays Synchronizing forever — its C
+            // and D endpoints have no peers — but A's B-endpoint reaches
+            // Running, which is all the survivor set needs).
+            // Condition-driven with a generous cap (session-33 round-6).
+            for _ in 0..300 {
+                a.poll_remote_clients();
+                let _ = a.events().count();
+                b.poll_remote_clients();
+                let _ = b.events().count();
+                clock.advance(POLL_INTERVAL);
+                if a.current_state() == SessionState::Running {
+                    break;
+                }
+            }
+            assert_eq!(
+                a.current_state(),
+                SessionState::Running,
+                "A reaches Running"
+            );
+
+            // A advances a few frames so a serve is openable.
+            let mut a_shadow = Shadow::default();
+            for i in 0..3_u8 {
+                a.add_local_input(PlayerHandle::new(0), i).expect("A input");
+                let requests = a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut a_shadow);
+                a.poll_remote_clients();
+                let _ = a.events().count();
+                clock.advance(POLL_INTERVAL);
+            }
+
+            // Open the N-peer serve for slot 2 (staged via the test seam; the
+            // wire path is exercised by the full-mesh tests above).
+            a.player_reg
+                .remotes
+                .get_mut(&addr_c())
+                .expect("A's C endpoint")
+                .set_pending_join_request_for_test(2);
+            a.poll_remote_clients();
+            assert!(
+                a.hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.handle == PlayerHandle::new(2)),
+                "the first request opens an N-peer serve for slot 2"
+            );
+
+            // A second request for a DIFFERENT reserved handle is ignored
+            // while the serve is open.
+            a.player_reg
+                .remotes
+                .get_mut(&addr_d())
+                .expect("A's D endpoint")
+                .set_pending_join_request_for_test(3);
+            a.poll_remote_clients();
+            assert!(
+                a.hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.handle == PlayerHandle::new(2)),
+                "the open serve is undisturbed"
+            );
+            assert!(
+                a.hot_join.joining.is_empty(),
+                "no 2-peer serve opened for the second request"
+            );
+
+            // A duplicate request for the SAME handle is also a no-op: the
+            // serve neither re-opens nor RESETS. `polls_since_serve` must
+            // strictly increase across the duplicate (a hypothetically reset
+            // serve would re-enter this poll at exactly 1, so a bare `> 0`
+            // could not detect the reset half).
+            let polls_before_duplicate = a
+                .hot_join
+                .npeer
+                .as_ref()
+                .map(|serve| serve.polls_since_serve)
+                .expect("serve open before the duplicate");
+            a.player_reg
+                .remotes
+                .get_mut(&addr_c())
+                .expect("A's C endpoint")
+                .set_pending_join_request_for_test(2);
+            a.poll_remote_clients();
+            assert!(
+                a.hot_join.npeer.as_ref().is_some_and(|serve| {
+                    serve.handle == PlayerHandle::new(2)
+                        && serve.polls_since_serve > polls_before_duplicate
+                }),
+                "a duplicate request neither re-opens nor resets the serve"
+            );
+        }
+
+        /// Stale same-coordinator directive discrimination (session-33 review
+        /// Finding 2, ordering (a)): the coordinator re-sends a directive
+        /// every poll, so duplicates of an ABORTED attempt's `(h, F1)` remain
+        /// in flight when the retry `(h, F2 > F1)` opens. A delayed `(h, F1)`
+        /// arriving while `(h, F2)` is pending pre-reopen must NOT supersede
+        /// it — R3 makes frames strictly monotone across a coordinator's
+        /// attempts, so only a STRICTLY NEWER frame is a genuine retry. A
+        /// stale supersede would reopen at F1 and ack into a void (the
+        /// attempt-1 abort responder was destroyed when attempt 2 opened),
+        /// wedging the survivor and stalling the mesh permanently.
+        #[test]
+        fn npeer_stale_same_coordinator_directive_cannot_supersede_newer_pending() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            let stage = |duo: &mut Duo, frame: Frame| {
+                duo.b
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_a())
+                    .expect("B's coordinator endpoint")
+                    .set_received_reactivate_slot_for_test(ReactivateSlot { handle: 2, frame });
+                duo.b.poll_remote_clients();
+            };
+
+            let f_newer = Frame::new(duo.b.confirmed_frame().as_i32() + 10);
+            let f_stale = Frame::new(duo.b.confirmed_frame().as_i32() + 5);
+
+            // The (newer) retry attempt is pending pre-reopen.
+            stage(&mut duo, f_newer);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f_newer && !pending.reopened),
+                "the newer directive is pending pre-reopen"
+            );
+
+            // A delayed duplicate of the OLDER attempt arrives from the same
+            // coordinator: it must be ignored as stale, not supersede.
+            stage(&mut duo, f_stale);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f_newer),
+                "a stale same-coordinator directive (frame {} <= pending {}) must not supersede the pending attempt",
+                f_stale,
+                f_newer
+            );
+
+            // Positive control: a strictly newer same-coordinator directive IS
+            // a genuine retry and supersedes the pre-reopen pending.
+            let f_retry = Frame::new(f_newer.as_i32() + 3);
+            stage(&mut duo, f_retry);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f_retry),
+                "a strictly newer same-coordinator directive supersedes the pre-reopen pending"
+            );
+
+            // The frame order binds the same coordinator even once its
+            // endpoint has died (R3 monotonicity is a property of the sender,
+            // not of its liveness): only a DIFFERENT sender may take over a
+            // dead coordinator's pre-reopen pending. A stale same-coordinator
+            // duplicate delivered after the death must still be ignored.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .force_synchronizing_for_tests();
+            stage(&mut duo, f_stale);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f_retry),
+                "a stale same-coordinator duplicate must not supersede via the dead-coordinator takeover arm"
+            );
+        }
+
+        /// Closed-attempt high-water guard (session-33 review Finding 2,
+        /// ordering (b)): after a survivor consumes an attempt's lifecycle
+        /// close (here `JoinAborted{h, F1}`), a straggling duplicate directive
+        /// `(h, F1)` landing in the post-close window must be rejected — its
+        /// lifecycle messages no longer exist anywhere once the next serve
+        /// supersedes the coordinator's responder memo, so accepting it would
+        /// wedge the survivor in a never-closeable reopened attempt. R3
+        /// monotonicity makes every genuine new attempt strictly newer than
+        /// any closed one.
+        #[test]
+        fn npeer_directive_at_or_below_closed_attempt_frame_is_rejected() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            let stage = |duo: &mut Duo, frame: Frame| {
+                duo.b
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_a())
+                    .expect("B's coordinator endpoint")
+                    .set_received_reactivate_slot_for_test(ReactivateSlot { handle: 2, frame });
+                duo.b.poll_remote_clients();
+            };
+
+            // Attempt 1 goes pending, then closes via a matching JoinAborted.
+            let f1 = Frame::new(duo.b.confirmed_frame().as_i32() + 5);
+            stage(&mut duo, f1);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f1),
+                "attempt 1 is pending"
+            );
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_join_aborted_for_test(JoinAborted {
+                    handle: 2,
+                    frame: f1,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the matching JoinAborted closes attempt 1"
+            );
+
+            // A straggling duplicate of the CLOSED attempt's directive arrives
+            // (the coordinator re-sent it every poll while the attempt was
+            // open): it must be rejected, not freshly accepted.
+            stage(&mut duo, f1);
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "a directive at the closed attempt's frame ({}) is a stale straggler and must be rejected",
+                f1
+            );
+
+            // Positive control: the genuine retry (strictly newer frame) is
+            // accepted.
+            let f2 = Frame::new(f1.as_i32() + 1);
+            stage(&mut duo, f2);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.frame == f2),
+                "the genuine retry (frame {} > closed {}) is accepted",
+                f2,
+                f1
+            );
+        }
+
+        /// Implied close of a wedged REOPENED attempt (session-33 review
+        /// Finding 2, ordering (c)): B reopened for attempt 1 but the
+        /// `JoinAborted{h, F1}` is lost (here: blocked), and attempt 2 then
+        /// destroys the abort responder. Attempt 2's directive `(h, F2 > F1)`
+        /// from the same coordinator PROVES attempt 1 concluded
+        /// (one-join-at-a-time + R3), and the survivor's confirmed frame
+        /// discriminates the outcome (the pause caps confirmed <= S1 < F1
+        /// while attempt 1 is open, and a post-abort slot's gossip bound
+        /// re-sticks at the old freeze frame < F1; only a commit lets
+        /// confirmed reach F1). Here confirmed < F1, so B applies the implied
+        /// ABORT restore and then accepts attempt 2 — the retry must commit
+        /// end to end instead of wedging the mesh forever.
+        #[test]
+        fn npeer_reopened_survivor_heals_from_lost_abort_via_newer_directive() {
+            // Serve budget 40: attempt 1 must Phase-4 abort (the joiner never
+            // acks its snapshot), and attempt 2 must commit well within it.
+            let mut duo = mesh_with_dropped_slot(40, 6);
+
+            // The lifecycle loss under test: A's JoinAborted never reaches B.
+            duo.bus.block(addr_a(), addr_b(), "JoinAborted");
+
+            // --- Attempt 1: B reopens + acks; the joiner never acks the
+            // snapshot, so A Phase-4 aborts; B never hears it.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f1 = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("attempt 1 opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened && pending.frame == serve_f1),
+                "B reopened for attempt 1"
+            );
+            // Joiner-endpoint bootstrap pin (review minor m2): without the
+            // all-slot cache bootstrap at the reopen, the rearmed joiner
+            // endpoint's default `{connected, NULL}` caches enter B's folds
+            // here and collapse B's confirmed frame to NULL — gossip-silencing
+            // B and starving the coordinator's capture gate mesh-wide.
+            assert!(
+                !duo.b.confirmed_frame().is_null(),
+                "B's confirmed frame stays real after the reopen (the joiner-endpoint caches were bootstrapped)"
+            );
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(duo.a.hot_join.npeer.is_none(), "attempt 1 Phase-4 aborts");
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened && pending.frame == serve_f1),
+                "B still pends attempt 1 (the JoinAborted was lost)"
+            );
+
+            // --- A alone advances past the R3 guard (B's confirmed frame is
+            // pinned at the old freeze frame by its wedged reopened slot —
+            // the finding's f0-pin — so B must keep its remaining prediction
+            // headroom for the healed retry below); the joiner retries;
+            // attempt 2 opens at a strictly later frame and destroys the
+            // attempt-1 abort responder.
+            for i in 0..3_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.a
+                    .add_local_input(PlayerHandle::new(0), 150 + i)
+                    .expect("A local input");
+                let requests = duo.a.advance_frame().expect("A advance");
+                apply_requests(&requests, &mut duo.a_shadow);
+            }
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_some() {
+                    break;
+                }
+            }
+            let serve_f2 = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("attempt 2 opens")
+                .activation_frame;
+            assert!(serve_f2 > serve_f1, "attempt 2 is strictly newer (R3)");
+
+            // --- Attempt 2's directive must close the wedged attempt-1
+            // pending (implied abort: B's confirmed is pinned below F1) and
+            // be accepted; B reopens at F2 and acks; the joiner acks its new
+            // snapshot; attempt 2 COMMITS.
+            let mut snapshot = None;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                duo.advance_both(170, 180);
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    snapshot = Some(snap);
+                    break;
+                }
+            }
+            let snapshot = snapshot.expect("the joiner receives attempt 2's snapshot");
+            c2.proto_mut(addr_a())
+                .send_state_snapshot_ack(snapshot.frame);
+            c2.pump();
+            for _ in 0..20 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.a.hot_join.npeer.is_none(),
+                "attempt 2 concluded on the coordinator"
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .npeer_post
+                    .as_ref()
+                    .is_some_and(|post| post.committed && post.frame == serve_f2),
+                "attempt 2 COMMITTED (B's ack arrived — the wedge is healed)"
+            );
+
+            // --- The joiner feeds real inputs from F2; the commit lifecycle
+            // clears B's pending; both survivors confirm C's real input at F2
+            // and byte-agree past it.
+            for k in 0..14_i32 {
+                c2.send_input(Frame::new(serve_f2.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(190, 191);
+                if duo.a.confirmed_frame() >= serve_f2 && duo.b.confirmed_frame() >= serve_f2 {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "B's pending cleared by attempt 2's JoinCommitted"
+            );
+            let b_input = duo
+                .b
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(2), serve_f2)
+                .expect("B confirmed slot-2 input at F2")
+                .input;
+            assert_eq!(b_input, C_REJOIN_INPUT, "B committed C's real input at F2");
+            let probe = serve_f2.as_i32() + 1;
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree on the state at F2 + 1 after the healed retry"
+            );
+        }
+
+        /// Implied COMMIT close (the other arm of the Finding-2 ordering (c)
+        /// discrimination): when a strictly-newer same-coordinator directive
+        /// arrives at a survivor whose wedged reopened pending has COMMIT
+        /// evidence (confirmed >= F1 — impossible for an aborted attempt: the
+        /// pause caps confirmed below F while the attempt is open, and a
+        /// post-abort slot's bound re-sticks at the old freeze frame), the
+        /// survivor must close the pending WITHOUT re-freezing (the slot
+        /// committed live mesh-wide; restoring the pre-reopen frozen value
+        /// would silently diverge) and fail-closed-reject the directive while
+        /// the slot is live.
+        #[test]
+        fn npeer_newer_directive_with_commit_evidence_closes_stale_reopened_pending() {
+            let mut duo = mesh_with_dropped_slot(40, 6);
+
+            // Reach a REOPENED pending on B for attempt 1 (block A -> B
+            // lifecycle so the pending stays held past the conclusion).
+            duo.bus.block(addr_a(), addr_b(), "JoinAborted");
+            duo.bus.block(addr_a(), addr_b(), "JoinCommitted");
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f1 = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect("attempt 1 opens")
+                .activation_frame;
+            for _ in 0..4 {
+                duo.poll_round(Some(&mut c2));
+            }
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                    && c2.is_running(addr_b())
+                {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened && pending.frame == serve_f1),
+                "B reopened for attempt 1"
+            );
+
+            // Manufacture the commit-evidence state: every folded view of
+            // every slot (B's own receipts and its cached views of A's and
+            // C's claims) confirms through F1 + 2 — exactly the state a
+            // committed era reaches once the joiner's inputs flow. (The wire
+            // path cannot produce this for an aborted attempt: the pause caps
+            // confirmed <= S1 < F1 until conclusion, and after an abort the
+            // re-stuck disconnected gossip pins the slot's bound at the old
+            // freeze frame.)
+            let evidence = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(serve_f1.as_i32() + 2),
+            };
+            for handle in 0..3 {
+                duo.b.local_connect_status[handle].disconnected = false;
+                duo.b.local_connect_status[handle].last_frame = evidence.last_frame;
+                for endpoint in duo.b.player_reg.remotes.values_mut() {
+                    endpoint.set_peer_connect_status_for_tests(PlayerHandle::new(handle), evidence);
+                }
+            }
+            assert!(
+                duo.b.confirmed_frame() >= serve_f1,
+                "commit evidence in place (confirmed {} >= F1 {})",
+                duo.b.confirmed_frame(),
+                serve_f1
+            );
+
+            // A strictly-newer directive from the same coordinator arrives
+            // (staged: the real attempt-2 serve shape is pinned end-to-end by
+            // the lost-abort heal test). B must close the stale pending as
+            // COMMITTED — slot stays live, no re-freeze — and fail-closed
+            // reject the directive itself (the slot is not frozen).
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot {
+                    handle: 2,
+                    frame: Frame::new(serve_f1.as_i32() + 4),
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the newer directive closes the stale reopened pending (implied commit)"
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "the committed slot stays LIVE — an implied-commit close must not re-freeze it"
+            );
+            assert!(
+                !duo.b.local_connect_status[2].disconnected,
+                "the committed slot's status stays connected"
+            );
+        }
+
+        /// Survivor fail-closed validation: directives for non-frozen slots,
+        /// non-remote slots, out-of-range handles, or with insane activation
+        /// frames are ignored with no state change — and a serving coordinator
+        /// never takes directives at all.
+        #[test]
+        fn npeer_survivor_rejects_invalid_reactivate_directives() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+
+            let stage = |duo: &mut Duo, handle: usize, frame: Frame| {
+                duo.b
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_a())
+                    .expect("B's coordinator endpoint")
+                    .set_received_reactivate_slot_for_test(ReactivateSlot { handle, frame });
+                duo.b.poll_remote_clients();
+            };
+
+            let sane_frame = Frame::new(duo.b.confirmed_frame().as_i32() + 10);
+
+            // (a) A directive for a CONNECTED slot (A's slot 0) is ignored.
+            // Staged via the OTHER endpoint (addr_c) so the sender is not the
+            // slot owner — this must reach (and be rejected by) the
+            // frozen/disconnected validation specifically, not the
+            // owner-self-direct check.
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_c())
+                .expect("B's C endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot {
+                    handle: 0,
+                    frame: sane_frame,
+                });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "a directive for a connected slot is ignored"
+            );
+            assert!(
+                !duo.b.local_connect_status[0].disconnected,
+                "slot 0 is untouched"
+            );
+
+            // (b) A directive for B's LOCAL slot is ignored.
+            stage(&mut duo, 1, sane_frame);
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "a directive for a local slot is ignored"
+            );
+
+            // (c) An out-of-range handle is ignored.
+            stage(&mut duo, 7, sane_frame);
+            assert!(duo.b.hot_join.pending_reactivation.is_none());
+
+            // (d) An activation frame at/below the slot's frozen bound is
+            // ignored (would rewrite committed history).
+            let frozen_bound = duo.b.local_connect_status[2].last_frame;
+            stage(&mut duo, 2, frozen_bound);
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "F <= the frozen bound is rejected"
+            );
+            assert!(duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)));
+
+            // (e) A NULL activation frame is ignored.
+            stage(&mut duo, 2, Frame::NULL);
+            assert!(duo.b.hot_join.pending_reactivation.is_none());
+
+            // (f) An activation frame at/below B's confirmed frame is ignored.
+            let confirmed = duo.b.confirmed_frame();
+            assert!(confirmed.as_i32() > 0, "B has confirmed frames");
+            stage(&mut duo, 2, confirmed);
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "F <= the survivor's confirmed frame is rejected"
+            );
+
+            // (f2) The F-sanity floor is monotone (review minor m1):
+            // `confirmed_frame()` can transiently DIP during endpoint-cache
+            // churn — manufacture a dip (one cached view collapses to NULL)
+            // and stage F at the sync layer's discard high-water, which the
+            // dipped instantaneous read no longer covers. It must still be
+            // rejected: history at/below the high-water may already be
+            // discarded.
+            let high_water = duo.b.sync_layer.last_confirmed_frame();
+            assert!(high_water.as_i32() > 0, "B has a discard high-water");
+            let real_view = duo
+                .b
+                .player_reg
+                .remotes
+                .get(&addr_a())
+                .expect("B's coordinator endpoint")
+                .peer_connect_status(PlayerHandle::new(0));
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(0),
+                    ConnectionStatus::default(),
+                );
+            assert!(
+                duo.b.confirmed_frame() < high_water,
+                "the manufactured dip is in place (confirmed {}, high-water {})",
+                duo.b.confirmed_frame(),
+                high_water
+            );
+            stage(&mut duo, 2, high_water);
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "F <= the discard high-water is rejected even during a confirmed-frame dip"
+            );
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_peer_connect_status_for_tests(PlayerHandle::new(0), real_view);
+
+            // (g) Positive control (non-vacuity): a sane directive through the
+            // same seam DOES create the pending attempt.
+            stage(&mut duo, 2, sane_frame);
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.handle == PlayerHandle::new(2)
+                        && pending.frame == sane_frame),
+                "a valid directive is accepted (the rejections above are non-vacuous)"
+            );
+
+            // (h) A serving coordinator never takes directives: stage one on
+            // A for its own reserved slot — it must be rejected even though
+            // the slot IS frozen + disconnected there.
+            duo.a
+                .player_reg
+                .remotes
+                .get_mut(&addr_b())
+                .expect("A's B endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot {
+                    handle: 2,
+                    frame: sane_frame,
+                });
+            duo.a.poll_remote_clients();
+            assert!(
+                duo.a.hot_join.pending_reactivation.is_none(),
+                "a coordinator (accept_hot_join) rejects reopen directives"
+            );
+            assert!(
+                duo.a.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "A's reserved slot is untouched"
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // Session-33 round-5 review Finding 1: pre-attempt freeze-frame
+        // convergence (asymmetric, value-varying drop staging + tests)
+        // ------------------------------------------------------------------
+
+        /// C's frame-dependent input for the asymmetric staging: strictly
+        /// varying so any freeze-frame disagreement between survivors is
+        /// VALUE-visible. The symmetric staging's constant input
+        /// (`C_FROZEN_INPUT`) deliberately masks exactly this class — the
+        /// round-5 review's structural-blindness finding.
+        fn c_varying_input(frame: i32) -> u8 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // test: deterministic small frame numbers; wrapping is fine.
+            130_u8.wrapping_add(frame as u8)
+        }
+
+        /// Builds the 3-peer mesh like [`mesh_with_dropped_slot`], but stages
+        /// the drop ASYMMETRICALLY with VALUE-VARYING C inputs plus a one-way
+        /// `Input` burst — the shape the round-5 review proved the
+        /// symmetric/constant staging is structurally blind to:
+        ///
+        /// - the LOW side removes C first, freezing slot 2 at its own receipt
+        ///   `f0_low`;
+        /// - C keeps advancing inside its prediction window, feeding the HIGH
+        ///   side three more varying inputs;
+        /// - the HIGH side then removes C, freezing at `f0_high = f0_low + 3`;
+        /// - `low -> high` `Input` traffic (the connect-status claim carrier)
+        ///   is blocked from BEFORE the first removal, so the low freezer's
+        ///   `{disconnected, f0_low}` claim — the trigger of the high
+        ///   freezer's convergence re-adjust (status mine-down + frozen-value
+        ///   re-roll + gap re-simulation) — stays withheld until the caller
+        ///   unblocks it.
+        ///
+        /// `survivor_freezes_high = true` puts the un-converged HIGH freeze on
+        /// the survivor B (the coordinator A holds the agreed minimum);
+        /// `false` mirrors it onto the coordinator A. Both A and B have
+        /// advanced past `f0_high`, so the divergent gap frames exist in both
+        /// shadows (asserted, with a non-vacuity divergence assert at the
+        /// gap's top frame).
+        fn mesh_with_asymmetric_dropped_slot(
+            serve_timeout_polls: usize,
+            survivor_freezes_high: bool,
+        ) -> (Duo, Frame, Frame) {
+            let bus = MeshBus::new();
+            let clock = MeshClock::new();
+
+            let a = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_hot_join(true)
+                .with_hot_join_serve_timeout_polls(serve_timeout_polls)
+                .expect("serve timeout")
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Local, PlayerHandle::new(0))
+                .expect("A local")
+                .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                .expect("A remote B")
+                .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                .expect("A remote C")
+                .start_p2p_session_skip_hot_join_build_guards_for_test(bus.socket(addr_a()))
+                .expect("A builds");
+
+            let b = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("B remote A")
+                .add_player(PlayerType::Local, PlayerHandle::new(1))
+                .expect("B local")
+                .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                .expect("B remote C")
+                .start_p2p_session(bus.socket(addr_b()))
+                .expect("B builds (a plain survivor needs no bypass)");
+
+            let mut c = SessionBuilder::<TestConfig>::new()
+                .with_num_players(3)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("C remote A")
+                .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                .expect("C remote B")
+                .add_player(PlayerType::Local, PlayerHandle::new(2))
+                .expect("C local")
+                .start_p2p_session(bus.socket(addr_c()))
+                .expect("C builds");
+
+            let mut duo = Duo {
+                bus,
+                clock,
+                a,
+                b,
+                a_shadow: Shadow::default(),
+                b_shadow: Shadow::default(),
+                a_events: Vec::new(),
+                b_events: Vec::new(),
+            };
+            let mut c_shadow = Shadow::default();
+
+            // Condition-driven with a generous cap (session-33 round-6).
+            for _ in 0..300 {
+                duo.poll_round(None);
+                c.poll_remote_clients();
+                let _ = c.events().count();
+                if duo.a.current_state() == SessionState::Running
+                    && duo.b.current_state() == SessionState::Running
+                    && c.current_state() == SessionState::Running
+                {
+                    break;
+                }
+            }
+            assert_eq!(duo.a.current_state(), SessionState::Running, "A syncs");
+            assert_eq!(duo.b.current_state(), SessionState::Running, "B syncs");
+            assert_eq!(c.current_state(), SessionState::Running, "C syncs");
+
+            // Lockstep pre-drop rounds with VARYING C input.
+            for i in 0..6_u32 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                    c.poll_remote_clients();
+                    let _ = c.events().count();
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                // test: bounded loop counter.
+                duo.advance_both(10 + (i as u8), 20 + (i as u8));
+                let c_frame = c.current_frame().as_i32();
+                c.add_local_input(PlayerHandle::new(2), c_varying_input(c_frame))
+                    .expect("C local input");
+                let requests = c.advance_frame().expect("C advance");
+                apply_requests(&requests, &mut c_shadow);
+            }
+            for _ in 0..3 {
+                duo.poll_round(None);
+                c.poll_remote_clients();
+                let _ = c.events().count();
+            }
+
+            // One-way burst: the LOW freezer's claim/input traffic toward the
+            // HIGH freezer is withheld from before the first removal.
+            let (low_addr, high_addr) = if survivor_freezes_high {
+                (addr_a(), addr_b())
+            } else {
+                (addr_b(), addr_a())
+            };
+            duo.bus.block(low_addr, high_addr, "Input");
+
+            // The LOW side removes C at its own receipt.
+            if survivor_freezes_high {
+                duo.a
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("A removes C");
+            } else {
+                duo.b
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("B removes C");
+            }
+            let f0_low = if survivor_freezes_high {
+                duo.a.local_connect_status[2].last_frame
+            } else {
+                duo.b.local_connect_status[2].last_frame
+            };
+
+            // C keeps advancing inside its prediction window: three more
+            // VARYING inputs reach only the HIGH freezer.
+            for _ in 0..3 {
+                let c_frame = c.current_frame().as_i32();
+                c.add_local_input(PlayerHandle::new(2), c_varying_input(c_frame))
+                    .expect("C local input (post-low-removal)");
+                let requests = c
+                    .advance_frame()
+                    .expect("C advances inside its prediction window");
+                apply_requests(&requests, &mut c_shadow);
+                for _ in 0..2 {
+                    c.poll_remote_clients();
+                    let _ = c.events().count();
+                    duo.poll_round(None);
+                }
+            }
+
+            // The HIGH side removes C at its (now higher) receipt.
+            if survivor_freezes_high {
+                duo.b
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("B removes C");
+            } else {
+                duo.a
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("A removes C");
+            }
+            let f0_high = if survivor_freezes_high {
+                duo.b.local_connect_status[2].last_frame
+            } else {
+                duo.a.local_connect_status[2].last_frame
+            };
+            drop(c);
+            duo.a_events.extend(duo.a.events());
+            duo.b_events.extend(duo.b.events());
+
+            assert!(
+                f0_low < f0_high,
+                "staging precondition: asymmetric freeze (low {f0_low}, high {f0_high})"
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "A re-reserves the dropped slot (coordinator rearm)"
+            );
+
+            // Both keep advancing past the divergent gap. Each stays inside
+            // its prediction window: the burst pins the HIGH side's confirmed
+            // fold near f0_low (the withheld claim is still CONNECTED there).
+            for i in 0..4_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                }
+                duo.advance_both(50 + i, 60 + i);
+            }
+
+            // Staging non-vacuity: both shadows simulated the whole gap, and
+            // the value-varying asymmetric freeze produces REAL divergence
+            // (frozen-value vs real-input simulation) pending the heal under
+            // test.
+            for g in (f0_low.as_i32() + 1)..=f0_high.as_i32() {
+                assert!(
+                    duo.a_shadow.states.contains_key(&g),
+                    "A simulated gap frame {g}"
+                );
+                assert!(
+                    duo.b_shadow.states.contains_key(&g),
+                    "B simulated gap frame {g}"
+                );
+            }
+            assert_ne!(
+                duo.a_shadow.states.get(&f0_high.as_i32()),
+                duo.b_shadow.states.get(&f0_high.as_i32()),
+                "staging precondition: the asymmetric freeze diverges the shadows at the gap's top frame"
+            );
+
+            (duo, f0_low, f0_high)
+        }
+
+        /// Session-33 round-5 review Finding 1 (Critical), survivor side: a
+        /// held PRE-reopen pending must not suspend the slot's freeze-frame
+        /// convergence. Staged with the REAL machinery: an asymmetric,
+        /// value-varying drop (B froze slot 2 HIGH at its own receipt, A at
+        /// the agreed minimum `f0_low`) plus a one-way A->B `Input` burst that
+        /// withholds A's `{disconnected, f0_low}` claim until after the
+        /// directive lands. Pre-fix, the any-pending fold shield deferred B's
+        /// re-adjust indefinitely: once A's claim arrived, the slot went
+        /// mesh-agreed-excluded and B's confirmed fold crossed the gap
+        /// `(f0_low, f0_high]` carrying B's own receipts — inputs no other
+        /// peer serves — silent confirmed-state divergence. Post-fix, the
+        /// acceptance-time convergence gate fail-closed-rejects the directive
+        /// while the freeze is un-converged (the per-poll retransmit
+        /// self-heals), the generic re-adjust heals B the moment the claim
+        /// arrives, and the SAME serve then completes from the converged
+        /// shape — byte-agreement restored mesh-wide.
+        #[test]
+        fn npeer_asymmetric_freeze_unconverged_directive_defers_and_mesh_reconverges() {
+            let (mut duo, f0_low, f0_high) = mesh_with_asymmetric_dropped_slot(600, true);
+
+            // The joiner syncs to A and requests slot 2; the directive fan-out
+            // begins (only `Input` is blocked A->B, not `ReactivateSlot`).
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let serve_f = duo
+                .a
+                .hot_join
+                .npeer
+                .as_ref()
+                .expect(
+                    "N-peer serve opens (A holds the agreed minimum, so the open is not deferred)",
+                )
+                .activation_frame;
+
+            // Give the directive several polls to land on B. Pre-fix it is
+            // accepted UN-converged (the pending then shields the slot);
+            // post-fix the convergence gate rejects every retransmit until
+            // A's claim arrives. No assert here — the symptom below decides.
+            for _ in 0..8 {
+                duo.poll_round(Some(&mut c2));
+            }
+
+            // The burst ends: A's {disconnected, f0_low} claim reaches B.
+            duo.bus.unblock(addr_a(), addr_b(), "Input");
+            for i in 0..6_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(70 + i, 80 + i);
+            }
+
+            // B's confirmed fold crossed the gap (the frozen slot is excluded
+            // once mesh-agreed), so any gap divergence is CONFIRMED state.
+            assert!(
+                duo.b.confirmed_frame() > f0_high,
+                "B's confirmed frame crossed the gap (got {}, gap top {})",
+                duo.b.confirmed_frame(),
+                f0_high
+            );
+
+            // THE SYMPTOM PIN (red pre-fix): the gap frames must byte-agree —
+            // B re-simulates them with the agreed frozen value v(f0_low) the
+            // moment convergence lands, exactly like a pending-free survivor.
+            for g in (f0_low.as_i32() + 1)..=f0_high.as_i32() {
+                assert_eq!(
+                    duo.a_shadow.states.get(&g),
+                    duo.b_shadow.states.get(&g),
+                    "A and B must byte-agree at gap frame {g} after the freeze convergence (a held pre-reopen pending must not suspend the re-adjust)"
+                );
+            }
+            assert_eq!(
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: f0_low,
+                },
+                "B's slot-2 freeze converges down to the mesh minimum f0_low = {f0_low}"
+            );
+
+            // Liveness: the SAME serve completes once convergence landed. The
+            // joiner syncs to B; the retransmitted directive validates from
+            // the converged shape; B reopens and acks; the joiner acks the
+            // snapshot; A commits. All reopen/commit steps are poll-driven.
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            // Condition-driven completion loop (session-33 round-6): generous
+            // cap + stall diagnostics, same per-iteration drive as before.
+            for _ in 0..600 {
+                duo.poll_round(Some(&mut c2));
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    c2.proto_mut(addr_a()).send_state_snapshot_ack(snap.frame);
+                    c2.pump();
+                }
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            duo.a_events.extend(duo.a.events());
+            assert!(
+                duo.a.hot_join.npeer.is_none(),
+                "the serve concludes once acceptance was deferred to the converged shape — \
+                 stalled stages: a_snapshot_captured={}, b_pending_reopened={:?}, \
+                 c2_running_to_b={}",
+                duo.a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.snapshot.is_some()),
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|pending| pending.reopened),
+                c2.is_running(addr_b()),
+            );
+            assert!(
+                duo.a_events.iter().any(|e| matches!(
+                    e,
+                    FortressEvent::PeerJoined { handle, .. } if *handle == PlayerHandle::new(2)
+                )),
+                "the attempt COMMITS (deferral is a delay, not a denial) — post-serve memo: {:?}",
+                duo.a
+                    .hot_join
+                    .npeer_post
+                    .as_ref()
+                    .map(|post| (post.committed, post.frame)),
+            );
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot is live after the commit"
+            );
+
+            // Real inputs flow post-commit; the mesh stays byte-consistent.
+            for k in 0..8_i32 {
+                c2.send_input(Frame::new(serve_f.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(110, 111);
+            }
+            let probe = serve_f.as_i32() + 1;
+            assert!(
+                duo.a_shadow.states.contains_key(&probe)
+                    && duo.b_shadow.states.contains_key(&probe),
+                "both shadows saved F + 1"
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1"
+            );
+        }
+
+        /// Session-33 round-5 review Finding 1, the acceptance-time
+        /// convergence gate's own pin: a directive arriving while the slot's
+        /// pre-attempt freeze is un-converged must be rejected WITHOUT
+        /// creating a pending. The gate (not the pre-reopen convergence arm)
+        /// is what closes the early-reopen ordering: an un-converged pending
+        /// whose joiner channel comes up fast reopens BEFORE the lagging
+        /// claim arrives, the slot flips to the attempt's shield + clamp, and
+        /// the deferred re-adjust then survives the whole attempt era (in a
+        /// committed world the re-seed erases its trigger permanently). With
+        /// the gate, a pending can only ever begin converged, so the reopened
+        /// window starts from mesh-uniform `(f0, v0)` at N = 3 by
+        /// construction.
+        #[test]
+        fn npeer_unconverged_freeze_rejects_directive_until_claims_land() {
+            let (mut duo, f0_low, f0_high) = mesh_with_asymmetric_dropped_slot(600, true);
+
+            // Joiner -> A; the serve opens (A holds the agreed minimum) and
+            // the directive retransmits to B every poll.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            for _ in 0..10 {
+                duo.poll_round(Some(&mut c2));
+            }
+            assert!(
+                duo.a.hot_join.npeer.is_some(),
+                "precondition: the serve is open and fanning out directives"
+            );
+
+            // THE GATE PIN: while A's {disconnected, f0_low} claim is
+            // withheld (B still holds A's stale CONNECTED view of the slot),
+            // every directive retransmit must be rejected — no pending, slot
+            // untouched.
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "the directive must be rejected while the slot's freeze is un-converged (no pending may exist)"
+            );
+            assert_eq!(
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: f0_high,
+                },
+                "the rejected directive leaves the slot untouched"
+            );
+
+            // The burst ends: the claim lands, the (pending-free) generic
+            // re-adjust converges B, and the next retransmit is accepted —
+            // with the pending's capture taken from the CONVERGED freeze.
+            duo.bus.unblock(addr_a(), addr_b(), "Input");
+            // Condition-driven acceptance loop (session-33 round-6): generous
+            // cap + stall diagnostics, same per-iteration drive as before.
+            for i in 0..60_u8 {
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(70 + i, 80 + i);
+                if duo.b.hot_join.pending_reactivation.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "the retransmitted directive is accepted once convergence lands — \
+                 stalled stages: b_slot_status={:?}, a_serve_open={}, b_confirmed={}",
+                duo.b.local_connect_status[2],
+                duo.a.hot_join.npeer.is_some(),
+                duo.b.confirmed_frame(),
+            );
+            let pending = duo
+                .b
+                .hot_join
+                .pending_reactivation
+                .as_ref()
+                .expect("the retransmitted directive is accepted once convergence lands");
+            assert_eq!(
+                pending.pre_freeze_status,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: f0_low,
+                },
+                "the pending's captured pre-freeze snapshot is the CONVERGED freeze"
+            );
+            assert_eq!(
+                pending.pre_freeze_input,
+                Some(c_varying_input(f0_low.as_i32())),
+                "the captured frozen value is the converged v(f0_low)"
+            );
+        }
+
+        /// Session-33 round-5 review Finding 1, coordinator sibling: the
+        /// coordinator must not capture (or commit) a snapshot embedding
+        /// un-converged freeze history. Mirror staging: A froze slot 2 HIGH,
+        /// B holds the agreed minimum, and the B->A `Input` burst withholds
+        /// B's `{disconnected, f0_low}` claim. Pre-fix, the claim's arrival
+        /// poll both lifts the wait-then-capture gate (the fold sees
+        /// mesh-agreement instantly) and leaves the convergence re-adjust
+        /// owed until the next `advance_frame` — so a poll-paced mesh
+        /// captures the STALE state at `S` and commits it before A ever
+        /// heals, while the commit's gossip re-seed erases the claim and the
+        /// re-adjust never runs: the joiner bases on (and A keeps) history no
+        /// other survivor serves. Post-fix, the serve never opens against a
+        /// still-CONNECTED survivor claim (open-time convergence gate), the
+        /// owed re-adjust defers the capture (delay, not a protocol change),
+        /// and the serve that completes serves the HEALED state.
+        #[test]
+        fn npeer_coordinator_heals_freeze_convergence_before_capturing_snapshot() {
+            let (mut duo, f0_low, f0_high) = mesh_with_asymmetric_dropped_slot(600, false);
+
+            // The joiner syncs to A and starts requesting slot 2. Pre-fix the
+            // serve opens immediately (S covers the divergent gap); post-fix
+            // the open is deferred while B's claim is still CONNECTED at A.
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            for _ in 0..8 {
+                duo.poll_round(Some(&mut c2));
+            }
+            if let Some(serve) = duo.a.hot_join.npeer.as_ref() {
+                // Pre-fix path: the serve opened against the withheld claim.
+                // The capture must still be starved (B's stale-connected
+                // claim pins A's confirmed fold below S).
+                assert!(
+                    serve.snapshot.is_none(),
+                    "precondition: no snapshot is captured while B's claim is withheld"
+                );
+                assert!(
+                    serve.snapshot_frame >= f0_high,
+                    "staging: the snapshot frame S = {} covers the divergent gap (f0_high = {})",
+                    serve.snapshot_frame,
+                    f0_high
+                );
+            }
+
+            // Pre-fix path continued: B accepts the early directive (B IS the
+            // agreed minimum — its own gate passes) and, with the joiner's
+            // B-channel up, REOPENS before the burst ends — the slot's gossip
+            // then flips `{connected, F - 1}` and B's `{disconnected, f0_low}`
+            // claim is never delivered: the coordinator's convergence trigger
+            // is erased for the whole attempt era. Post-fix the serve never
+            // opened, so no pending exists and this phase is a bounded no-op.
+            let mut connected_to_b = false;
+            for _ in 0..30 {
+                duo.poll_round(Some(&mut c2));
+                if !connected_to_b && duo.b.hot_join.pending_reactivation.is_some() {
+                    c2.connect(addr_b(), 1, &duo.clock.clone());
+                    connected_to_b = true;
+                }
+                if duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened)
+                {
+                    break;
+                }
+                if !connected_to_b {
+                    break;
+                }
+            }
+
+            // The burst ends: whatever B's claims now say (the erased-trigger
+            // pre-fix shape, or the still-frozen post-fix shape) reaches A
+            // together with B's buffered inputs. Keep re-requesting (the
+            // joiner's normal retry), sync the joiner to B once a directive
+            // creates the pending (post-fix path; after B's endpoint re-arm,
+            // like the production joiner sequencing), take + ack each
+            // snapshot as it arrives, and advance only every third iteration
+            // — polls alone drive the capture gate, the joiner ack, and the
+            // commit barrier, while the convergence re-adjust runs only
+            // inside `advance_frame` (the pre-fix hole this test pins).
+            duo.bus.unblock(addr_b(), addr_a(), "Input");
+            let mut first_snapshot: Option<crate::network::messages::StateSnapshot> = None;
+            let mut joined = false;
+            // Condition-driven drive loop (session-33 round-6): the
+            // deterministic path joins at iteration 21 — the cap is ~28x
+            // headroom, not pacing. It exists so a liveness stall fails
+            // attributably (stage diagnostics in the assert below) instead of
+            // riding a tight budget.
+            for i in 0..600_u32 {
+                duo.poll_round(Some(&mut c2));
+                if !connected_to_b && duo.b.hot_join.pending_reactivation.is_some() {
+                    c2.connect(addr_b(), 1, &duo.clock.clone());
+                    connected_to_b = true;
+                }
+                if let Some(snap) = c2.proto_mut(addr_a()).take_received_snapshot() {
+                    c2.proto_mut(addr_a()).send_state_snapshot_ack(snap.frame);
+                    c2.pump();
+                    if first_snapshot.is_none() {
+                        first_snapshot = Some(snap);
+                    }
+                }
+                duo.a_events.extend(duo.a.events());
+                if duo.a_events.iter().any(|e| {
+                    matches!(
+                        e,
+                        FortressEvent::PeerJoined { handle, .. } if *handle == PlayerHandle::new(2)
+                    )
+                }) {
+                    joined = true;
+                    break;
+                }
+                if i % 6 == 5 {
+                    c2.proto_mut(addr_a()).send_join_request(2);
+                    c2.pump();
+                }
+                if i % 3 == 2 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    // test: bounded loop counter.
+                    duo.advance_both(70 + (i % 8) as u8, 80 + (i % 8) as u8);
+                }
+            }
+            assert!(
+                joined,
+                "the join completes (deferral is a delay, not a denial) — stalled stages: \
+                 connected_to_b={}, b_pending_reopened={:?}, a_serve_open={}, \
+                 a_snapshot_captured={}, joiner_received_snapshot={}, a_frame={}, b_frame={}",
+                connected_to_b,
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|pending| pending.reopened),
+                duo.a.hot_join.npeer.is_some(),
+                duo.a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.snapshot.is_some()),
+                first_snapshot.is_some(),
+                duo.a.current_frame(),
+                duo.b.current_frame(),
+            );
+            assert!(
+                c2.is_running(addr_b()),
+                "the joiner's survivor channel is up (slot-2 inputs can flow to B)"
+            );
+            let first_snapshot = first_snapshot.expect("the joiner received a snapshot");
+
+            // THE SYMPTOM PINS (red pre-fix):
+            // 1. The FIRST snapshot the joiner received (the one it applies —
+            //    duplicates are idempotent) must byte-equal the survivors'
+            //    agreed state at its frame. Pre-fix it is A's un-healed
+            //    real-receipt history for the gap — state no other peer
+            //    serves.
+            let (served_state, _) =
+                crate::network::codec::decode::<u8>(&first_snapshot.state_bytes)
+                    .expect("snapshot state decodes");
+            assert_eq!(
+                Some(&served_state),
+                duo.b_shadow.states.get(&first_snapshot.frame.as_i32()),
+                "the served snapshot at S = {} must byte-equal the survivor truth (the coordinator heals its freeze convergence BEFORE capturing)",
+                first_snapshot.frame
+            );
+            // 2. The coordinator's own confirmed gap history must converge to
+            //    the mesh minimum (pre-fix the commit's gossip re-seed erases
+            //    the trigger and A keeps the divergent gap forever).
+            for g in (f0_low.as_i32() + 1)..=f0_high.as_i32() {
+                assert_eq!(
+                    duo.a_shadow.states.get(&g),
+                    duo.b_shadow.states.get(&g),
+                    "A and B must byte-agree at gap frame {g} (the owed re-adjust must run before the slot's freeze era closes)"
+                );
+            }
+
+            // Liveness + post-join consistency: the slot is live both sides;
+            // real inputs flow; a fresh shared frame byte-agrees.
+            assert!(
+                !duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot is live after the commit"
+            );
+            assert!(
+                !duo.a.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "A's slot is live after the commit"
+            );
+            let activation = Frame::new(duo.b.local_connect_status[2].last_frame.as_i32() + 1);
+            for k in 0..8_i32 {
+                c2.send_input(Frame::new(activation.as_i32() + k), C_REJOIN_INPUT);
+                for _ in 0..3 {
+                    duo.poll_round(Some(&mut c2));
+                }
+                duo.advance_both(90, 91);
+            }
+            let probe = activation.as_i32() + 1;
+            assert!(
+                duo.a_shadow.states.contains_key(&probe)
+                    && duo.b_shadow.states.contains_key(&probe),
+                "both shadows saved F + 1"
+            );
+            assert_eq!(
+                duo.a_shadow.states.get(&probe),
+                duo.b_shadow.states.get(&probe),
+                "A and B byte-agree at F + 1"
+            );
+        }
+
+        /// Builds the symmetric converged drop in a TIGHT shape: varying C
+        /// inputs, symmetric removal at the same receipt `f0`, NO post-drop
+        /// advances (so the survivors' confirmed frames stay at ~`f0` and a
+        /// one-frame convergence re-adjust stays inside the rollback window),
+        /// and a poll-only loop until B's cached view of A's claim for slot 2
+        /// is the converged `{disconnected, f0}` (delivered by the
+        /// connect-status nudge).
+        fn mesh_with_converged_drop_tight() -> (Duo, Frame) {
+            let (mut duo, f0_low, f0_high) = {
+                // Reuse the asymmetric builder's mesh construction by staging
+                // symmetrically here instead: build the same trio inline.
+                let bus = MeshBus::new();
+                let clock = MeshClock::new();
+
+                let a = SessionBuilder::<TestConfig>::new()
+                    .with_num_players(3)
+                    .expect("num players")
+                    .with_protocol_config(clock.protocol_config())
+                    .with_hot_join(true)
+                    .with_hot_join_serve_timeout_polls(600)
+                    .expect("serve timeout")
+                    .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                    .add_player(PlayerType::Local, PlayerHandle::new(0))
+                    .expect("A local")
+                    .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                    .expect("A remote B")
+                    .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                    .expect("A remote C")
+                    .start_p2p_session_skip_hot_join_build_guards_for_test(bus.socket(addr_a()))
+                    .expect("A builds");
+
+                let b = SessionBuilder::<TestConfig>::new()
+                    .with_num_players(3)
+                    .expect("num players")
+                    .with_protocol_config(clock.protocol_config())
+                    .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                    .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                    .expect("B remote A")
+                    .add_player(PlayerType::Local, PlayerHandle::new(1))
+                    .expect("B local")
+                    .add_player(PlayerType::Remote(addr_c()), PlayerHandle::new(2))
+                    .expect("B remote C")
+                    .start_p2p_session(bus.socket(addr_b()))
+                    .expect("B builds");
+
+                let mut c = SessionBuilder::<TestConfig>::new()
+                    .with_num_players(3)
+                    .expect("num players")
+                    .with_protocol_config(clock.protocol_config())
+                    .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                    .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                    .expect("C remote A")
+                    .add_player(PlayerType::Remote(addr_b()), PlayerHandle::new(1))
+                    .expect("C remote B")
+                    .add_player(PlayerType::Local, PlayerHandle::new(2))
+                    .expect("C local")
+                    .start_p2p_session(bus.socket(addr_c()))
+                    .expect("C builds");
+
+                let mut duo = Duo {
+                    bus,
+                    clock,
+                    a,
+                    b,
+                    a_shadow: Shadow::default(),
+                    b_shadow: Shadow::default(),
+                    a_events: Vec::new(),
+                    b_events: Vec::new(),
+                };
+                let mut c_shadow = Shadow::default();
+
+                // Condition-driven with a generous cap (session-33 round-6).
+                for _ in 0..300 {
+                    duo.poll_round(None);
+                    c.poll_remote_clients();
+                    let _ = c.events().count();
+                    if duo.a.current_state() == SessionState::Running
+                        && duo.b.current_state() == SessionState::Running
+                        && c.current_state() == SessionState::Running
+                    {
+                        break;
+                    }
+                }
+                assert_eq!(duo.a.current_state(), SessionState::Running, "A syncs");
+                assert_eq!(duo.b.current_state(), SessionState::Running, "B syncs");
+                assert_eq!(c.current_state(), SessionState::Running, "C syncs");
+
+                for i in 0..6_u32 {
+                    for _ in 0..3 {
+                        duo.poll_round(None);
+                        c.poll_remote_clients();
+                        let _ = c.events().count();
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    // test: bounded loop counter.
+                    duo.advance_both(10 + (i as u8), 20 + (i as u8));
+                    let c_frame = c.current_frame().as_i32();
+                    c.add_local_input(PlayerHandle::new(2), c_varying_input(c_frame))
+                        .expect("C local input");
+                    let requests = c.advance_frame().expect("C advance");
+                    apply_requests(&requests, &mut c_shadow);
+                }
+                for _ in 0..3 {
+                    duo.poll_round(None);
+                    c.poll_remote_clients();
+                    let _ = c.events().count();
+                }
+
+                // Symmetric removal at the same fully-delivered receipt.
+                duo.a
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("A removes C");
+                duo.b
+                    .remove_player(PlayerHandle::new(2))
+                    .expect("B removes C");
+                drop(c);
+                duo.a_events.extend(duo.a.events());
+                duo.b_events.extend(duo.b.events());
+
+                let f0_a = duo.a.local_connect_status[2].last_frame;
+                let f0_b = duo.b.local_connect_status[2].last_frame;
+                (duo, f0_a, f0_b)
+            };
+            assert_eq!(
+                f0_low, f0_high,
+                "staging precondition: the symmetric removal froze both sides at the same frame"
+            );
+            let f0 = f0_low;
+
+            // Poll-only convergence: the nudge delivers both disconnected
+            // claims; NO advances, so both confirmed frames stay at ~f0.
+            // Condition-driven with a generous cap (session-33 round-6).
+            for _ in 0..120 {
+                duo.poll_round(None);
+                let a_view = duo
+                    .b
+                    .player_reg
+                    .remotes
+                    .get(&addr_a())
+                    .expect("B's coordinator endpoint")
+                    .peer_connect_status(PlayerHandle::new(2));
+                if a_view.disconnected && a_view.last_frame == f0 {
+                    break;
+                }
+            }
+            let a_view = duo
+                .b
+                .player_reg
+                .remotes
+                .get(&addr_a())
+                .expect("B's coordinator endpoint")
+                .peer_connect_status(PlayerHandle::new(2));
+            assert_eq!(
+                a_view,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: f0,
+                },
+                "staging precondition: B folded A's converged {{disconnected, f0}} claim"
+            );
+
+            (duo, f0)
+        }
+
+        /// Session-33 round-5 review Finding 1, the pre-reopen convergence
+        /// arm: a freeze-frame lowering that lands while a PRE-reopen pending
+        /// is held (the N>=4 relay image — at N=3 the acceptance-time
+        /// convergence gate makes this unreachable, so the lowered claim is
+        /// staged through the endpoint test seam) must be APPLIED, not
+        /// deferred: status mine-down, frozen-value re-roll, forced
+        /// re-simulation — all WITHOUT the generic path's endpoint teardown
+        /// (which would kill the re-armed joiner endpoint and brick the
+        /// attempt), and the pending's captured pre-freeze snapshot must be
+        /// REFRESHED so a post-reopen abort restores the CONVERGED freeze
+        /// (the captured-vs-live staleness called out by the round-5 brief).
+        #[test]
+        fn npeer_pre_reopen_pending_applies_late_freeze_convergence_without_teardown() {
+            let (mut duo, f0) = mesh_with_converged_drop_tight();
+
+            // The tight staging never advances post-drop, so B's own
+            // `{disconnected, f0}` claim has no input carrier toward A (and
+            // B's nudge is off: B's OWN fold is already mesh-agreed). Seed
+            // A's cached view directly — the production carrier is B's
+            // ordinary input gossip (any advancing mesh delivers it, and the
+            // pre-existing stale-connected confirmed-fold pin blocks the
+            // serve's capture until it has).
+            duo.a
+                .player_reg
+                .remotes
+                .get_mut(&addr_b())
+                .expect("A's survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(2),
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: f0,
+                    },
+                );
+
+            // Open a serve + deliver the directive so B holds a PRE-reopen
+            // pending (the joiner never syncs to B).
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            // Condition-driven staging loop (session-33 round-6): generous
+            // cap + stall diagnostics, same per-iteration drive as before.
+            for _ in 0..100 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| !pending.reopened),
+                "precondition: B holds the PRE-reopen pending — stalled stages: \
+                 b_pending_reopened={:?}, a_serve_open={}, b_slot_status={:?}",
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|pending| pending.reopened),
+                duo.a.hot_join.npeer.is_some(),
+                duo.b.local_connect_status[2],
+            );
+
+            // The relay image: a peer B cannot fold re-gossips the agreed
+            // freeze one frame LOWER through A's claim. One frame keeps the
+            // owed re-simulation inside B's rollback window (B's confirmed
+            // is still ~f0 — the tight staging never advanced post-drop).
+            let lowered = Frame::new(f0.as_i32() - 1);
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(2),
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: lowered,
+                    },
+                );
+
+            // One survivor advance applies the convergence (the fold runs
+            // inside `advance_frame`); the re-adjust's rollback is part of
+            // the same call's requests.
+            duo.b
+                .add_local_input(PlayerHandle::new(1), 77)
+                .expect("B local input");
+            let requests = duo
+                .b
+                .advance_frame()
+                .expect("B advances (the one-frame re-adjust stays inside the rollback window)");
+            apply_requests(&requests, &mut duo.b_shadow);
+
+            // THE MECHANISM PINS (red pre-fix: the any-pending shield skipped
+            // all of this):
+            // 1. Status mined down to the relayed minimum.
+            assert_eq!(
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: lowered,
+                },
+                "the held pre-reopen pending must not suspend the status mine-down"
+            );
+            // 2. Frozen value re-rolled to the converged frame's input
+            //    (varying staging => the values genuinely differ).
+            assert_eq!(
+                duo.b
+                    .sync_layer
+                    .player_last_confirmed_input(PlayerHandle::new(2)),
+                Some(c_varying_input(lowered.as_i32())),
+                "the frozen value re-rolls to v(f0 - 1)"
+            );
+            // 3. The pending's captured pre-freeze snapshot is REFRESHED, so
+            //    a later abort restores the CONVERGED freeze, not the stale
+            //    capture.
+            let pending = duo
+                .b
+                .hot_join
+                .pending_reactivation
+                .as_ref()
+                .expect("the pending survives the convergence");
+            assert!(!pending.reopened, "the pending is still pre-reopen");
+            assert_eq!(
+                pending.pre_freeze_status,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: lowered,
+                },
+                "pre_freeze_status is refreshed to the converged freeze"
+            );
+            assert_eq!(
+                pending.pre_freeze_input,
+                Some(c_varying_input(lowered.as_i32())),
+                "pre_freeze_input is refreshed to the converged frozen value"
+            );
+            // 4. NO endpoint teardown: the re-armed joiner endpoint survives
+            //    (the generic re-adjust path would `disconnect()` it — a
+            //    terminal state with no reconnect edge).
+            let joiner_endpoint = duo
+                .b
+                .player_reg
+                .remotes
+                .get(&addr_c())
+                .expect("B's joiner endpoint exists");
+            assert!(
+                !joiner_endpoint.is_synchronized() || joiner_endpoint.is_running(),
+                "the convergence must not tear down the re-armed joiner endpoint (it stays synchronizing/running, never terminal)"
+            );
+            // 5. The slot stays frozen + reserved (the convergence is a
+            //    re-adjust of the freeze, not an attempt-state change).
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "the slot stays frozen"
+            );
+            assert!(
+                duo.b
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot stays reserved"
+            );
+        }
+
+        /// Session-33 round-5 review Finding 1, coordinator sibling's abort
+        /// arm: a freeze-frame lowering whose re-adjust touches frames at or
+        /// below the snapshot frame `S` while the serve already CAPTURED must
+        /// abort the serve fail-closed — never recapture at the same `S`: the
+        /// joiner applies the FIRST snapshot it receives (duplicates are
+        /// idempotent) and acks by FRAME, so once stale bytes may be in
+        /// flight, a same-`S` recapture is indistinguishable from the stale
+        /// serve. Post-capture lowerings need N>=4 (relay) — at N=3 the
+        /// open-time gate plus the pre-capture deferral close the window — so
+        /// the lowered claim is staged through the endpoint test seam.
+        #[test]
+        fn npeer_post_capture_freeze_readjust_aborts_serve_fail_closed() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let f0 = duo.a.local_connect_status[2].last_frame;
+
+            // Open the serve and drive it to the CAPTURED state; B reopens
+            // and acks; the joiner receives the snapshot but does NOT ack
+            // yet (the commit barrier stays open).
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            c2.connect(addr_a(), 0, &duo.clock.clone());
+            sync_joiner_with(&mut duo, &mut c2, addr_a());
+            c2.proto_mut(addr_a()).send_join_request(2);
+            c2.pump();
+            duo.poll_round(Some(&mut c2));
+            let (serve_s, serve_f) = {
+                let serve = duo.a.hot_join.npeer.as_ref().expect("N-peer serve opens");
+                (serve.snapshot_frame, serve.activation_frame)
+            };
+            c2.connect(addr_b(), 1, &duo.clock.clone());
+            let mut received_snapshot = false;
+            // Condition-driven staging loop (session-33 round-6): generous
+            // cap + stall diagnostics, same per-iteration drive as before.
+            for i in 0..600_u32 {
+                duo.poll_round(Some(&mut c2));
+                // The capture gate also requires no pending misprediction;
+                // the repair runs only inside `advance_frame` (the paused
+                // arm), so interleave advances while B has prediction
+                // headroom (A's paused advance never moves its frame).
+                if i % 3 == 2
+                    && duo.b.current_frame().as_i32() - duo.b.confirmed_frame().as_i32() < 6
+                {
+                    #[allow(clippy::cast_possible_truncation)]
+                    // test: bounded loop counter.
+                    duo.advance_both(40 + (i % 8) as u8, 41 + (i % 8) as u8);
+                }
+                if c2.proto_mut(addr_a()).take_received_snapshot().is_some() {
+                    received_snapshot = true;
+                }
+                let b_reopened = duo
+                    .b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .is_some_and(|pending| pending.reopened);
+                let a_captured = duo
+                    .a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.snapshot.is_some());
+                if received_snapshot && b_reopened && a_captured {
+                    break;
+                }
+            }
+            assert!(
+                duo.a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.snapshot.is_some()),
+                "precondition: the snapshot is captured (and possibly in flight) — stalled \
+                 stages: joiner_received_snapshot={}, b_pending_reopened={:?}, a_serve_open={}",
+                received_snapshot,
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|pending| pending.reopened),
+                duo.a.hot_join.npeer.is_some(),
+            );
+            assert!(
+                received_snapshot,
+                "precondition: the joiner holds the (about to be stale) snapshot bytes"
+            );
+
+            // The relay image lands POST-capture: B's claim for slot 2
+            // re-gossips one frame lower than the agreed freeze.
+            duo.a
+                .player_reg
+                .remotes
+                .get_mut(&addr_b())
+                .expect("A's survivor endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(2),
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(f0.as_i32() - 1),
+                    },
+                );
+
+            // The joiner's ack races in — pre-fix the next poll takes it and
+            // COMMITS the stale snapshot; post-fix the serve-poll detects the
+            // owed re-adjust BEFORE the ack is consumed and aborts.
+            c2.proto_mut(addr_a()).send_state_snapshot_ack(serve_s);
+            c2.pump();
+            // Condition-driven conclusion loop (session-33 round-6): generous
+            // cap + stall diagnostics, same per-iteration drive as before.
+            for _ in 0..60 {
+                duo.poll_round(Some(&mut c2));
+                if duo.a.hot_join.npeer.is_none() {
+                    break;
+                }
+            }
+            duo.a_events.extend(duo.a.events());
+            assert!(
+                duo.a.hot_join.npeer.is_none(),
+                "the serve concludes one way or the other — stalled stages: \
+                 a_snapshot_captured={}, post_serve_memo={:?}",
+                duo.a
+                    .hot_join
+                    .npeer
+                    .as_ref()
+                    .is_some_and(|serve| serve.snapshot.is_some()),
+                duo.a
+                    .hot_join
+                    .npeer_post
+                    .as_ref()
+                    .map(|post| (post.committed, post.frame)),
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .npeer_post
+                    .as_ref()
+                    .is_some_and(|post| !post.committed && post.frame == serve_f),
+                "the serve must ABORT fail-closed (never commit, never recapture at the same S) when a post-capture re-adjust invalidates the snapshot"
+            );
+            assert!(
+                !duo.a_events.iter().any(|e| matches!(
+                    e,
+                    FortressEvent::PeerJoined { handle, .. } if *handle == PlayerHandle::new(2)
+                )),
+                "no PeerJoined: the stale snapshot must not commit"
+            );
+            assert!(
+                duo.a
+                    .hot_join
+                    .reserved_slots
+                    .contains(&PlayerHandle::new(2)),
+                "the slot stays reserved on A (the joiner can retry)"
+            );
+            assert!(
+                duo.a.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "A's slot stays frozen"
+            );
+
+            // The abort announcement reaches B: the reopened pending closes
+            // and the slot restores to its pre-reopen frozen shape.
+            // Condition-driven close loop (session-33 round-6): generous cap
+            // + stall diagnostics, same per-iteration drive as before.
+            for _ in 0..100 {
+                duo.poll_round(Some(&mut c2));
+                if duo.b.hot_join.pending_reactivation.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_none(),
+                "JoinAborted closes B's reopened pending — stalled stages: \
+                 b_pending_reopened={:?}, b_slot_status={:?}",
+                duo.b
+                    .hot_join
+                    .pending_reactivation
+                    .as_ref()
+                    .map(|pending| pending.reopened),
+                duo.b.local_connect_status[2],
+            );
+            assert!(
+                duo.b.sync_layer.player_is_frozen(PlayerHandle::new(2)),
+                "B's slot re-freezes on the abort restore"
+            );
+        }
     }
 }

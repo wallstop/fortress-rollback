@@ -196,6 +196,38 @@ pub(crate) struct ReactivateSlotAck {
     pub frame: Frame,
 }
 
+/// Coordinator → joiner + survivors: the N-peer join for `handle` at activation
+/// frame `frame` is committed (every survivor reopened and acked, the joiner
+/// acked the snapshot, and the coordinator reactivated the slot locally).
+///
+/// `frame` is the activation frame `F` of the attempt, carried for attempt
+/// discrimination: receivers ignore a `JoinCommitted` whose `(handle, frame)`
+/// does not match their pending attempt (a stale resend from an earlier serve).
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JoinCommitted {
+    /// The player handle (slot index) whose join committed.
+    pub handle: usize,
+    /// The activation frame `F` of the committed attempt.
+    pub frame: Frame,
+}
+
+/// Coordinator → joiner + survivors: the N-peer join for `handle` at activation
+/// frame `frame` is aborted (serve timeout or joiner loss before commit). A
+/// survivor that already reopened the slot restores its pre-reopen frozen state;
+/// the joiner discards its buffered snapshot and may retry.
+///
+/// `frame` is the activation frame `F` of the aborted attempt (see
+/// [`JoinCommitted`] for the attempt-discrimination contract).
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JoinAborted {
+    /// The player handle (slot index) whose join aborted.
+    pub handle: usize,
+    /// The activation frame `F` of the aborted attempt.
+    pub frame: Frame,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MessageBody {
     SyncRequest(SyncRequest),
@@ -216,6 +248,10 @@ pub(crate) enum MessageBody {
     ReactivateSlot(ReactivateSlot),
     #[cfg(feature = "hot-join")]
     ReactivateSlotAck(ReactivateSlotAck),
+    #[cfg(feature = "hot-join")]
+    JoinCommitted(JoinCommitted),
+    #[cfg(feature = "hot-join")]
+    JoinAborted(JoinAborted),
 }
 
 /// A messages that [`NonBlockingSocket`] sends and receives. When implementing [`NonBlockingSocket`],

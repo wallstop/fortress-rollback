@@ -46,7 +46,8 @@ use crate::network::messages::{
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
-    JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
+    JoinAborted, JoinCommitted, JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot,
+    StateSnapshotAck,
 };
 use crate::Frame;
 
@@ -628,6 +629,16 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
             handle: read_usize(bytes, &mut cursor, "reactivate_slot_ack.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "reactivate_slot_ack.frame")?),
         }),
+        #[cfg(feature = "hot-join")]
+        13 => MessageBody::JoinCommitted(JoinCommitted {
+            handle: read_usize(bytes, &mut cursor, "join_committed.handle")?,
+            frame: Frame::new(read_i32(bytes, &mut cursor, "join_committed.frame")?),
+        }),
+        #[cfg(feature = "hot-join")]
+        14 => MessageBody::JoinAborted(JoinAborted {
+            handle: read_usize(bytes, &mut cursor, "join_aborted.handle")?,
+            frame: Frame::new(read_i32(bytes, &mut cursor, "join_aborted.frame")?),
+        }),
         other => {
             return Err(decode_message_error(format!(
                 "unknown message body variant {}",
@@ -1090,8 +1101,8 @@ mod tests {
 mod hot_join_tests {
     use super::*;
     use crate::network::messages::{
-        JoinRequest, Message, MessageBody, MessageHeader, ReactivateSlot, ReactivateSlotAck,
-        StateSnapshot, StateSnapshotAck,
+        JoinAborted, JoinCommitted, JoinRequest, Message, MessageBody, MessageHeader,
+        ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
     };
 
     fn roundtrip(original: Message) {
@@ -1317,6 +1328,96 @@ mod hot_join_tests {
         let original = Message {
             header: MessageHeader { magic: 0xABCD },
             body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0); // trailing byte
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_roundtrips_join_committed() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::JoinCommitted(JoinCommitted {
+                handle: 2,
+                frame: Frame::new(42),
+            }),
+        });
+    }
+
+    #[test]
+    fn decode_message_roundtrips_join_aborted() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::JoinAborted(JoinAborted {
+                handle: 2,
+                frame: Frame::new(42),
+            }),
+        });
+    }
+
+    /// A `JoinCommitted` buffer truncated mid-`frame` (the `handle` is present but
+    /// the trailing `i32` is missing) must be rejected, never panicking or reading
+    /// out of bounds. Mirrors `decode_message_rejects_truncated_reactivate_slot`.
+    #[test]
+    fn decode_message_rejects_truncated_join_committed() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&13_u32.to_le_bytes()); // MessageBody::JoinCommitted
+        bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
+                                                       // frame (i32) omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `JoinAborted` buffer truncated mid-`frame` must likewise be rejected.
+    #[test]
+    fn decode_message_rejects_truncated_join_aborted() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&14_u32.to_le_bytes()); // MessageBody::JoinAborted
+        bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
+                                                       // frame (i32) omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A valid `JoinCommitted` buffer with an extra trailing byte must be rejected
+    /// by the trailing-bytes check.
+    #[test]
+    fn decode_message_rejects_trailing_bytes_after_join_committed() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::JoinCommitted(JoinCommitted {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        };
+        let mut bytes = encode(&original).unwrap();
+        bytes.push(0); // trailing byte
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A valid `JoinAborted` buffer with an extra trailing byte must be rejected
+    /// by the trailing-bytes check.
+    #[test]
+    fn decode_message_rejects_trailing_bytes_after_join_aborted() {
+        let original = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::JoinAborted(JoinAborted {
                 handle: 1,
                 frame: Frame::new(7),
             }),

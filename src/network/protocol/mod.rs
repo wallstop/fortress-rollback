@@ -21,7 +21,8 @@ use crate::network::messages::{
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
-    JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
+    JoinAborted, JoinCommitted, JoinRequest, ReactivateSlot, ReactivateSlotAck, StateSnapshot,
+    StateSnapshotAck,
 };
 use crate::rle;
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
@@ -233,15 +234,57 @@ where
     #[cfg(feature = "hot-join")]
     received_snapshot_ack: Option<Frame>,
     /// A `ReactivateSlot` received from the peer, awaiting drain.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     received_reactivate_slot: Option<ReactivateSlot>,
     /// A `ReactivateSlotAck` received from the peer, awaiting drain.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     received_reactivate_slot_ack: Option<ReactivateSlotAck>,
+    /// A `JoinCommitted` received from the peer, awaiting drain.
+    #[cfg(feature = "hot-join")]
+    received_join_committed: Option<JoinCommitted>,
+    /// A `JoinAborted` received from the peer, awaiting drain.
+    #[cfg(feature = "hot-join")]
+    received_join_aborted: Option<JoinAborted>,
+    /// Per-slot reactivation floor for the gossip merge: the agreed
+    /// pre-activation bound (`F - 1`) of the most recent reactivation of each
+    /// slot whose COMMIT this session has local evidence of, armed by
+    /// [`arm_reactivation_floor`](Self::arm_reactivation_floor) and monotone
+    /// (`max`) across reactivations. While armed for a slot, the merge
+    /// ignores incoming `disconnected` claims whose freeze frame is STRICTLY
+    /// below the floor: those are stale pre-reactivation carriers (packets in
+    /// flight at the sender's status flip — every retransmit rebuilds the
+    /// status at send time, so only genuinely in-flight packets can be stale)
+    /// that would otherwise permanently re-stick the cache and re-drop the
+    /// just-reactivated live slot. Sound threshold: every commit participant
+    /// stamps its local receipt for the slot at exactly `F - 1` when it
+    /// reopens, so a GENUINE post-reactivation re-drop's freeze frame — a
+    /// `min` over participants' receipts — is always `>= F - 1`, while every
+    /// pre-attempt claim carries the old freeze frame `f0 <= S = F - 1`.
+    ///
+    /// **Lifecycle (commit-evidence-only arming; session-33 round-2 review
+    /// Finding 1):** the threshold theorem is valid only in COMMITTED worlds,
+    /// so the floor arms exactly when this session acquires commit evidence
+    /// (coordinator commit; survivor `JoinCommitted` receipt; commit-evidence
+    /// implied/local close) and NEVER at the pre-commit reopen. In an aborted
+    /// world the mesh's live convergence target IS the pre-attempt
+    /// `f0 < F - 1` — a floor armed at reopen would filter it forever,
+    /// pinning the survivor's confirmed frame at `F - 1` and stalling the
+    /// whole mesh behind it. Window coverage: pre-reopen the slot is
+    /// reserved/frozen at the f0 truth; from reopen to commit evidence the
+    /// session's pending-reactivation shield keeps the disconnect fold off
+    /// the slot (a re-stuck cache is tolerated and re-seeded at the
+    /// evidence point); from commit evidence on, the floor filters; an abort
+    /// restores the f0 truth with the floor still unarmed, so the genuine
+    /// drop gossip re-converges. The single ambiguous corner is `f0 == F - 1`
+    /// exactly (a serve opened at the very freeze frame, i.e. the coordinator
+    /// never advanced between the drop and the rejoin): a stale carrier is
+    /// then indistinguishable from an instant post-commit re-drop without
+    /// per-slot reactivation epochs in the gossip — the same no-epoch root
+    /// cause as the session-31/32 residual corners, tracked as the epoch
+    /// wire-format future-work item. Bounded: `num_players` entries,
+    /// validated at construction.
+    #[cfg(feature = "hot-join")]
+    reactivation_floor: Vec<Frame>,
     /// When `true`, `on_input` ignores incoming `Input` messages entirely (no
     /// decode, recv, ack, or `Event::Input`). A hot-joiner sets this on its host
     /// endpoint while it is still `HotJoining` so it neither processes nor *acks*
@@ -632,6 +675,13 @@ impl<T: Config> UdpProtocol<T> {
             #[cfg(feature = "hot-join")]
             received_reactivate_slot_ack: None,
             #[cfg(feature = "hot-join")]
+            received_join_committed: None,
+            #[cfg(feature = "hot-join")]
+            received_join_aborted: None,
+            #[cfg(feature = "hot-join")]
+            // alloc-bound: `num_players` is validated at session construction (mirrors `peer_connect_status`).
+            reactivation_floor: vec![Frame::NULL; num_players],
+            #[cfg(feature = "hot-join")]
             defer_input_processing: false,
         })
     }
@@ -730,6 +780,25 @@ impl<T: Config> UdpProtocol<T> {
         self.remote_magic = 1;
     }
 
+    /// Test-only: a compact snapshot of the synchronization-relevant endpoint
+    /// state — `(state name, remaining sync roundtrips, outstanding sync
+    /// randoms, local magic, learned remote magic)` — consumed by harness
+    /// stall diagnostics (for example the npeer mesh's `sync_joiner_with`),
+    /// so a starved handshake reports WHICH side wedged and on what instead
+    /// of a bare budget-exhaustion panic. Gated to the hot-join feature with
+    /// its only consumers (the crate denies dead code in default-feature
+    /// test builds).
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn sync_debug_snapshot(&self) -> (&'static str, u32, usize, u16, u16) {
+        (
+            self.state.as_str(),
+            self.sync_remaining_roundtrips,
+            self.sync_random_requests.len(),
+            self.magic,
+            self.remote_magic,
+        )
+    }
+
     /// Test-only: forces this endpoint into `Synchronizing`, the canonical
     /// non-running state a survivor endpoint occupies after a hot-join rearm
     /// (`rearm_for_rejoin` rebuilds via `new` → `Initializing` → `synchronize()`
@@ -818,16 +887,32 @@ impl<T: Config> UdpProtocol<T> {
     /// reconnect edge. After a graceful drop the endpoint is `Disconnected` (then
     /// `Shutdown`) and can never sync, ack, or serve a snapshot again. This method
     /// reconstructs the endpoint through [`new`](Self::new) — reusing every
-    /// retained construction parameter — so the result is byte-for-byte equivalent
-    /// to a freshly built reserved endpoint (fresh magic, empty send/recv/pending
-    /// queues, reset sync counters and timers, cleared hot-join scratch state),
-    /// then calls [`synchronize`](Self::synchronize) to return to `Synchronizing`.
+    /// retained construction parameter — so the result is equivalent to a freshly
+    /// built reserved endpoint (empty send/recv/pending queues, reset sync
+    /// counters and timers, cleared hot-join scratch state), then calls
+    /// [`synchronize`](Self::synchronize) to return to `Synchronizing`.
     ///
     /// Rebuilding through the constructor — rather than resetting fields one by one
     /// — is deliberate: it guarantees no runtime state from the previous
     /// connection can leak into the new one, and it stays correct automatically if
-    /// `new` gains or drops fields. With a deterministic `protocol_rng_seed` the
-    /// rebuilt endpoint re-seeds identically, preserving reproducible behavior.
+    /// `new` gains or drops fields.
+    ///
+    /// # Era fence (the rebuilt endpoint's magic is guaranteed fresh)
+    ///
+    /// The rebuilt endpoint must NEVER reuse the previous era's magic. If the
+    /// vacating peer is still live when the slot re-arms (a voluntary leave: the
+    /// session removed the player while the remote process keeps running briefly),
+    /// that peer still holds the OLD magic as its learned `remote_magic`. With a
+    /// reused magic it would accept and answer the rebuilt endpoint's sync
+    /// handshake; the rebuilt endpoint would then complete synchronization against
+    /// the doomed peer and lock `remote_magic` to it — permanently filtering out
+    /// the future rejoiner (a silent liveness blackhole). With a deterministic
+    /// `protocol_rng_seed`, naive reconstruction re-seeds identically and reuses
+    /// the magic EVERY time, so this path CONTINUES the endpoint's RNG stream
+    /// across the rebuild instead of re-seeding, and (for both seeded and
+    /// thread-local RNG) re-rolls until the magic differs from the previous era's
+    /// — deterministic configs stay fully reproducible, and the unseeded
+    /// 1-in-65535 organic magic reuse is excluded too.
     ///
     /// # Errors
     ///
@@ -841,7 +926,7 @@ impl<T: Config> UdpProtocol<T> {
         // Construct the replacement BEFORE mutating `self`: if `new` fails (the
         // should-never-happen serialization path) the existing endpoint is left
         // untouched rather than half-reset.
-        let rebuilt = Self::new(
+        let mut rebuilt = Self::new(
             self.handles.to_vec(),
             self.peer_addr.clone(),
             self.num_players,
@@ -855,6 +940,27 @@ impl<T: Config> UdpProtocol<T> {
             self.protocol_config.clone(),
             self.time_sync_config,
         )?;
+
+        // Era fence (see the rustdoc): continue the deterministic RNG stream
+        // across the rebuild (instead of restarting it from the seed) and
+        // guarantee a fresh-era magic, so a still-live previous-era peer can
+        // never answer — and wedge — the rebuilt endpoint's handshake.
+        let old_magic = self.magic;
+        if self.protocol_rng.is_some() {
+            rebuilt.protocol_rng = self.protocol_rng.take();
+        }
+        let mut magic: u16 = match &mut rebuilt.protocol_rng {
+            Some(rng) => rng.gen(),
+            None => random(),
+        };
+        while magic == 0 || magic == old_magic {
+            magic = match &mut rebuilt.protocol_rng {
+                Some(rng) => rng.gen(),
+                None => random(),
+            };
+        }
+        rebuilt.magic = magic;
+
         *self = rebuilt;
         self.synchronize()
     }
@@ -1589,6 +1695,10 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::ReactivateSlot(body) => self.on_reactivate_slot(body),
             #[cfg(feature = "hot-join")]
             MessageBody::ReactivateSlotAck(body) => self.on_reactivate_slot_ack(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::JoinCommitted(body) => self.on_join_committed(body),
+            #[cfg(feature = "hot-join")]
+            MessageBody::JoinAborted(body) => self.on_join_aborted(body),
         }
     }
 
@@ -1679,11 +1789,32 @@ impl<T: Config> UdpProtocol<T> {
         if body.disconnect_requested {
             return;
         }
-        for (local, remote) in self
+        #[cfg(feature = "hot-join")]
+        let floors = &self.reactivation_floor;
+        for (slot, (local, remote)) in self
             .peer_connect_status
             .iter_mut()
             .zip(body.peer_connect_status.iter())
+            .enumerate()
         {
+            // Reactivation floor (N-peer hot-join): ignore stale DISCONNECTED
+            // claims from before the slot's most recent committed
+            // reactivation — see `reactivation_floor` for the threshold
+            // soundness argument and the one ambiguous equality corner.
+            // Without this, a single pre-attempt packet reordered past the
+            // final reactivation seed re-sticks the cache (the merge is
+            // deliberately sticky-disconnected) and permanently re-drops the
+            // live slot.
+            #[cfg(feature = "hot-join")]
+            if remote.disconnected
+                && floors
+                    .get(slot)
+                    .is_some_and(|floor| !floor.is_null() && remote.last_frame < *floor)
+            {
+                continue;
+            }
+            #[cfg(not(feature = "hot-join"))]
+            let _ = slot;
             if remote.disconnected || local.disconnected {
                 if local.disconnected && remote.disconnected {
                     // Both views are freeze frames: take the lower so a relayed
@@ -2023,20 +2154,30 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `ReactivateSlot`, store it for the orchestration layer to drain
     /// via [`take_received_reactivate_slot`](Self::take_received_reactivate_slot).
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     fn on_reactivate_slot(&mut self, body: &ReactivateSlot) {
         self.received_reactivate_slot = Some(body.clone());
     }
 
     /// Upon receiving a `ReactivateSlotAck`, store it for the orchestration layer to
     /// drain via [`take_received_reactivate_slot_ack`](Self::take_received_reactivate_slot_ack).
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     fn on_reactivate_slot_ack(&mut self, body: &ReactivateSlotAck) {
         self.received_reactivate_slot_ack = Some(body.clone());
+    }
+
+    /// Upon receiving a `JoinCommitted`, store it for the orchestration layer to
+    /// drain via [`take_received_join_committed`](Self::take_received_join_committed).
+    #[cfg(feature = "hot-join")]
+    fn on_join_committed(&mut self, body: &JoinCommitted) {
+        self.received_join_committed = Some(body.clone());
+    }
+
+    /// Upon receiving a `JoinAborted`, store it for the orchestration layer to
+    /// drain via [`take_received_join_aborted`](Self::take_received_join_aborted).
+    #[cfg(feature = "hot-join")]
+    fn on_join_aborted(&mut self, body: &JoinAborted) {
+        self.received_join_aborted = Some(body.clone());
     }
 
     /// Returns the frame of the last received input
@@ -2088,9 +2229,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Queues a `ReactivateSlot` reopening `handle` at `frame`. No-op unless `Running`.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     pub(crate) fn send_reactivate_slot(&mut self, handle: usize, frame: Frame) {
         if self.state != ProtocolState::Running {
             return;
@@ -2102,9 +2241,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Queues a `ReactivateSlotAck` for `handle` at `frame`. No-op unless `Running`.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     pub(crate) fn send_reactivate_slot_ack(&mut self, handle: usize, frame: Frame) {
         if self.state != ProtocolState::Running {
             return;
@@ -2113,6 +2250,26 @@ impl<T: Config> UdpProtocol<T> {
             handle,
             frame,
         }));
+    }
+
+    /// Queues a `JoinCommitted` for `handle` at activation frame `frame`. No-op
+    /// unless `Running`.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn send_join_committed(&mut self, handle: usize, frame: Frame) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::JoinCommitted(JoinCommitted { handle, frame }));
+    }
+
+    /// Queues a `JoinAborted` for `handle` at activation frame `frame`. No-op
+    /// unless `Running`.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn send_join_aborted(&mut self, handle: usize, frame: Frame) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(MessageBody::JoinAborted(JoinAborted { handle, frame }));
     }
 
     /// Drains the most recently received `JoinRequest`'s requested slot, if any.
@@ -2145,19 +2302,50 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Drains the most recently received `ReactivateSlot`, if any.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     pub(crate) fn take_received_reactivate_slot(&mut self) -> Option<ReactivateSlot> {
         self.received_reactivate_slot.take()
     }
 
     /// Drains the most recently received `ReactivateSlotAck`, if any.
-    // dead_code: consumed by N-peer reconnection orchestration (chunks N2/N3).
     #[cfg(feature = "hot-join")]
-    #[allow(dead_code)]
     pub(crate) fn take_received_reactivate_slot_ack(&mut self) -> Option<ReactivateSlotAck> {
         self.received_reactivate_slot_ack.take()
+    }
+
+    /// Drains the most recently received `JoinCommitted`, if any.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn take_received_join_committed(&mut self) -> Option<JoinCommitted> {
+        self.received_join_committed.take()
+    }
+
+    /// Drains the most recently received `JoinAborted`, if any.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn take_received_join_aborted(&mut self) -> Option<JoinAborted> {
+        self.received_join_aborted.take()
+    }
+
+    /// Test seam: stage a received `ReactivateSlot` exactly as if one had arrived
+    /// from the peer, without forging the magic-validated wire path. Used by
+    /// session-level survivor fail-closed-validation tests. Mirrors
+    /// [`set_pending_join_request_for_test`](Self::set_pending_join_request_for_test).
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn set_received_reactivate_slot_for_test(&mut self, body: ReactivateSlot) {
+        self.received_reactivate_slot = Some(body);
+    }
+
+    /// Test seam: stage a received `JoinCommitted` (see
+    /// [`set_received_reactivate_slot_for_test`](Self::set_received_reactivate_slot_for_test)).
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn set_received_join_committed_for_test(&mut self, body: JoinCommitted) {
+        self.received_join_committed = Some(body);
+    }
+
+    /// Test seam: stage a received `JoinAborted` (see
+    /// [`set_received_reactivate_slot_for_test`](Self::set_received_reactivate_slot_for_test)).
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn set_received_join_aborted_for_test(&mut self, body: JoinAborted) {
+        self.received_join_aborted = Some(body);
     }
 
     /// Sets whether this endpoint defers (ignores) incoming `Input` messages.
@@ -2166,6 +2354,129 @@ impl<T: Config> UdpProtocol<T> {
     #[allow(dead_code)]
     pub(crate) fn set_defer_input_processing(&mut self, defer: bool) {
         self.defer_input_processing = defer;
+    }
+
+    /// Re-seeds this endpoint's cached view of `handle`'s connection status to
+    /// `{connected, last_frame}` — the N-peer slot-reactivation un-stick. The
+    /// seed deliberately does **not** arm the slot's `reactivation_floor`;
+    /// only [`arm_reactivation_floor`](Self::arm_reactivation_floor) does,
+    /// and only at commit-evidence points (see both docs for why a
+    /// reopen-armed floor is a liveness bug).
+    ///
+    /// The gossip merge ([`merge_peer_connect_status`]) is deliberately
+    /// **sticky-disconnected**: once a peer claims a slot disconnected, later
+    /// `connected` gossip never resurrects the cached view (that stickiness is
+    /// what makes drop convergence loss/reorder-safe, and it is also what makes
+    /// an *aborted* reactivation attempt's transient `connected` gossip
+    /// invisible to non-participants). A **committed** reactivation therefore
+    /// needs this explicit out-of-band reset, invoked by the session at its own
+    /// reactivation points (coordinator commit; survivor reopen and
+    /// commit-receipt) — every mesh member un-sticks its own caches when *it*
+    /// learns the slot is live. `last_frame` is seeded to `F - 1` (the agreed
+    /// pre-activation bound every reopening peer also stamps locally), which is
+    /// faithful: every participant of a committed attempt reopens the slot at
+    /// exactly `F`. Subsequent genuine gossip max-merges forward from there.
+    /// A pre-commit (reopen-time) seed is equally safe without a floor: a
+    /// stale `disconnected` claim re-sticking the cache mid-attempt is
+    /// tolerated by design — the session's pending-reactivation shield keeps
+    /// the fold off the slot for the attempt's lifetime, and the
+    /// commit-receipt re-seed un-sticks the cache again — while after an
+    /// ABORT the re-stuck `{disconnected, f0}` view is exactly the state the
+    /// mesh re-converges on.
+    ///
+    /// [`merge_peer_connect_status`]: Self::merge_peer_connect_status
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn seed_peer_connect_status_for_reactivation(
+        &mut self,
+        handle: PlayerHandle,
+        last_frame: Frame,
+    ) {
+        if let Some(status) = self.peer_connect_status.get_mut(handle.as_usize()) {
+            *status = ConnectionStatus {
+                disconnected: false,
+                last_frame,
+            };
+        }
+    }
+
+    /// Seeds this (freshly rebuilt joiner) endpoint's cached view of `handle`
+    /// to `status` WITHOUT arming the reactivation floor — the N-peer
+    /// joiner-endpoint cache bootstrap.
+    ///
+    /// A rearmed joiner endpoint holds default `{connected, NULL}` caches for
+    /// EVERY slot; once it is un-reserved at the reactivation point, those
+    /// NULL terms enter the session's confirmed-frame fold and pin the
+    /// session's confirmed frame at `NULL` until the joiner's first own
+    /// gossip arrives — a mesh-wide stall window (and, for a capped survivor,
+    /// a gossip-silence wedge that can starve the coordinator's
+    /// wait-then-capture gate). The session therefore bootstraps the caches
+    /// at its reactivation point with claims the snapshot contract makes
+    /// faithful: the joiner participates only by acking the snapshot at
+    /// `S = F - 1`, which bakes in every slot's effects through `S`, so live
+    /// slots are claimed `{connected, min(local view, F - 1)}` and dropped
+    /// slots keep the agreed frozen view. Soundness: every fold consuming
+    /// these claims `min`s them with the folding session's own receipts, so a
+    /// bootstrap claim can never make a session confirm an input it does not
+    /// hold — it only stops the rebuilt endpoint from vetoing with `NULL`.
+    /// The floor is NOT armed here: the floor's `>= F - 1` re-drop theorem
+    /// holds only for the reactivated slot itself (other slots can genuinely
+    /// re-drop below `F - 1` when a lagging third party's receipt trails the
+    /// snapshot frame).
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn seed_peer_connect_status_for_joiner_bootstrap(
+        &mut self,
+        handle: PlayerHandle,
+        status: ConnectionStatus,
+    ) {
+        if let Some(slot) = self.peer_connect_status.get_mut(handle.as_usize()) {
+            *slot = status;
+        }
+    }
+
+    /// Arms the slot's `reactivation_floor` (see that field's documentation)
+    /// at `floor_frame` (`F - 1`), max-monotone across reactivations.
+    ///
+    /// MUST be called only at a **commit-evidence point** (coordinator commit,
+    /// survivor `JoinCommitted` receipt, or a commit-evidence implied/local
+    /// close): the floor's `>= F - 1` re-drop theorem is valid only in
+    /// committed worlds. Arming at the (pre-commit) survivor reopen is a
+    /// liveness bug (session-33 round-2 review Finding 1): after an ABORT the
+    /// mesh's live convergence target is the pre-attempt freeze `f0 < F - 1`
+    /// — exactly what an armed floor filters — so a post-reopen-aborted
+    /// survivor would pin its confirmed frame at `F - 1` forever and stall
+    /// the mesh. The pre-commit window needs no floor: the session's
+    /// pending-reactivation shield exempts the slot from the disconnect-
+    /// convergence fold for the attempt's whole lifetime, and the
+    /// commit-receipt re-seed un-sticks any cache a stale claim re-stuck
+    /// mid-attempt.
+    ///
+    /// Once armed the floor persists for the endpoint's lifetime (every
+    /// world in which it armed is committed, so the genuine convergence
+    /// target is always `>= F - 1`); only
+    /// [`rearm_for_rejoin`](Self::rearm_for_rejoin) resets it (constructor
+    /// rebuild) — and the rearmed endpoint is the JOINER's, which is
+    /// fold-excluded (reserved) until its own next reopen re-seeds it, so the
+    /// reset floor is never consulted while stale.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn arm_reactivation_floor(&mut self, handle: PlayerHandle, floor_frame: Frame) {
+        if let Some(floor) = self.reactivation_floor.get_mut(handle.as_usize()) {
+            *floor = if floor.is_null() {
+                floor_frame
+            } else {
+                std::cmp::max(*floor, floor_frame)
+            };
+        }
+    }
+
+    /// Test seam: the slot's current reactivation floor ([`Frame::NULL`] when
+    /// unarmed or out of range) — lets session tests pin the floor's
+    /// commit-evidence-only lifecycle.
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn reactivation_floor_for_test(&self, handle: PlayerHandle) -> Frame {
+        self.reactivation_floor
+            .get(handle.as_usize())
+            .copied()
+            .unwrap_or(Frame::NULL)
     }
 
     /// Drops all unacked entries from `pending_output` (the host's queue of
@@ -3041,6 +3352,139 @@ mod tests {
         let status = protocol.peer_connect_status(PlayerHandle::new(1));
         assert!(!status.disconnected);
         assert_eq!(status.last_frame, Frame::new(9));
+    }
+
+    /// Reactivation floor (session-33 review Finding 3, narrowed in-process
+    /// fix): after a COMMITTED reactivation seeds `{connected, F - 1}` and
+    /// arms the floor (the session's commit-evidence sites do both — the
+    /// round-2 Finding-1 fix moved the arming out of the seed), a stale
+    /// pre-attempt `disconnected` packet reordered past the seed (freeze
+    /// frame `f0 < F - 1`) must be IGNORED — without the floor the sticky
+    /// merge re-adopts it and permanently re-drops the live slot. A GENUINE
+    /// post-reactivation re-drop carries a freeze frame `>= F - 1` (every
+    /// commit participant's reopen stamps its receipt for the slot at
+    /// exactly `F - 1`, and the converged freeze frame is a min over those
+    /// receipts) and must still be adopted — including at exactly `F - 1`
+    /// (instant joiner death). The `f0 == F - 1` equality corner (serve
+    /// opened at the very freeze frame) remains ambiguous without per-slot
+    /// reactivation epochs in the gossip — the session-31 wire-format
+    /// future-work item.
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn merge_ignores_stale_disconnected_gossip_below_reactivation_floor() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Pre-attempt drop converges at f0 = 4.
+        gossip_slot_one(&mut protocol, true, 4);
+        assert!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .disconnected
+        );
+
+        // The slot reactivates at F = 10 and COMMITS: the session seeds
+        // {connected, 9} and arms the floor (the commit-evidence pairing).
+        protocol.seed_peer_connect_status_for_reactivation(PlayerHandle::new(1), Frame::new(9));
+        protocol.arm_reactivation_floor(PlayerHandle::new(1), Frame::new(9));
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(!status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(9));
+
+        // A stale pre-attempt carrier (in flight at the sender's status flip)
+        // re-delivers {disconnected, 4}: it must NOT re-stick the live slot.
+        gossip_slot_one(&mut protocol, true, 4);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(
+            !status.disconnected,
+            "stale disconnected gossip below the reactivation floor must be ignored"
+        );
+        assert_eq!(status.last_frame, Frame::new(9));
+
+        // A genuine post-reactivation re-drop at exactly the floor (freeze
+        // frame F - 1 = 9, the instant-death minimum) IS adopted.
+        gossip_slot_one(&mut protocol, true, 9);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(
+            status.disconnected,
+            "a genuine re-drop at/above the floor must still be adopted"
+        );
+        assert_eq!(status.last_frame, Frame::new(9));
+    }
+
+    /// The reactivation floor also protects the BOTH-disconnected convergence
+    /// arm: after a genuine post-reactivation re-drop, stale pre-attempt
+    /// convergence traffic (freeze frames below the floor) must not drag the
+    /// converged freeze frame below `F - 1`, while genuine convergence within
+    /// `>= F - 1` still wins.
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn merge_floor_blocks_stale_convergence_after_genuine_redrop() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        gossip_slot_one(&mut protocol, true, 4);
+        // Committed reactivation at F = 10: seed + arm (the commit-evidence
+        // pairing; the seed alone no longer arms — round-2 Finding 1).
+        protocol.seed_peer_connect_status_for_reactivation(PlayerHandle::new(1), Frame::new(9));
+        protocol.arm_reactivation_floor(PlayerHandle::new(1), Frame::new(9));
+
+        // Genuine re-drop at 11, then genuine convergence down to 9 (>= floor).
+        gossip_slot_one(&mut protocol, true, 11);
+        assert_eq!(
+            protocol
+                .peer_connect_status(PlayerHandle::new(1))
+                .last_frame,
+            Frame::new(11)
+        );
+        gossip_slot_one(&mut protocol, true, 4); // stale pre-attempt convergence
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(
+            status.last_frame,
+            Frame::new(11),
+            "stale below-floor convergence traffic must not drag the re-drop freeze frame down"
+        );
+        gossip_slot_one(&mut protocol, true, 9); // genuine convergence at the floor
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(9));
+    }
+
+    /// Floor lifecycle at the merge level (session-33 round-2 review
+    /// Finding 1): a reactivation SEED alone — the pre-commit reopen's cache
+    /// un-stick — must NOT arm the floor. In an aborted world the mesh's
+    /// live convergence target is the genuine pre-attempt freeze
+    /// `f0 < F - 1`, exactly what an armed floor filters; a survivor whose
+    /// reopen armed it would never re-adopt the mesh's drop gossip after the
+    /// abort and would pin its confirmed frame at `F - 1` forever. Only the
+    /// explicit commit-evidence arm ([`UdpProtocol::arm_reactivation_floor`])
+    /// activates the filter.
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn merge_seed_without_floor_arm_adopts_genuine_drop_gossip() {
+        let mut protocol = running_protocol_with_frame_zero();
+
+        // Pre-attempt drop converges at f0 = 4; the slot reopens at F = 10
+        // (seed {connected, 9}) but the attempt has NOT committed: no floor.
+        gossip_slot_one(&mut protocol, true, 4);
+        protocol.seed_peer_connect_status_for_reactivation(PlayerHandle::new(1), Frame::new(9));
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(!status.disconnected);
+        assert_eq!(status.last_frame, Frame::new(9));
+
+        // The attempt aborts; the mesh keeps gossiping the genuine
+        // pre-attempt state. With no commit evidence ever seen, the merge
+        // must re-adopt it (re-converging the slot's mesh-agreed exclusion).
+        gossip_slot_one(&mut protocol, true, 4);
+        let status = protocol.peer_connect_status(PlayerHandle::new(1));
+        assert!(
+            status.disconnected,
+            "with no commit evidence, the seed alone must not filter genuine pre-attempt drop gossip"
+        );
+        assert_eq!(
+            status.last_frame,
+            Frame::new(4),
+            "the genuine pre-attempt freeze frame is re-adopted verbatim"
+        );
     }
 
     // --- F14 arbitration: connect-status gossip vs. the two on_input skips -----
@@ -5266,6 +5710,64 @@ mod tests {
         assert_ne!(protocol.magic, 0, "Magic number should never be zero");
     }
 
+    /// Session-33 round-6 era-fence pin: a deterministic (seeded) endpoint
+    /// that re-arms for a hot-join rejoin must NOT reuse the previous era's
+    /// magic. A naive rebuild re-seeds identically and reuses it — a
+    /// still-live vacating peer (which holds the old magic as its learned
+    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks
+    /// onto the doomed peer, and the real rejoiner is filtered out forever
+    /// (the deterministic form of the unseeded 1-in-65535 organic magic
+    /// reuse). The fence must also stay deterministic: identical seed +
+    /// identical history must yield the identical rebuilt magic.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_fence_never_reuses_previous_magic_and_stays_deterministic() {
+        let seed = 12345u64;
+        let mut protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(seed),
+        );
+        let mut protocol2: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(seed),
+        );
+        let old_magic = protocol1.magic;
+        assert_eq!(
+            protocol1.magic, protocol2.magic,
+            "precondition: seeded twins start with the identical magic"
+        );
+
+        protocol1
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+        protocol2
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+
+        assert_ne!(
+            protocol1.magic, old_magic,
+            "era fence: the rebuilt endpoint must never reuse the previous era's magic"
+        );
+        assert_ne!(protocol1.magic, 0, "magic stays non-zero across the rearm");
+        assert_eq!(
+            protocol1.magic, protocol2.magic,
+            "the era fence preserves determinism: identical seed + history => identical rebuilt magic"
+        );
+        assert_eq!(
+            protocol1.state,
+            ProtocolState::Synchronizing,
+            "rearm re-enters Synchronizing"
+        );
+    }
+
     #[test]
     fn protocol_new_rejects_zero_byte_input_type() {
         let result = UdpProtocol::<UnitInputConfig>::new(
@@ -5900,7 +6402,7 @@ mod tests {
         // While Synchronizing, `message_allowed_in_current_state` admits only
         // Sync messages, so hot-join control messages must be dropped before
         // reaching a handler. This pins that the Running-only gate also covers
-        // all five hot-join variants (guarding against a future state-machine
+        // all seven hot-join variants (guarding against a future state-machine
         // change that forgets them). Mirrors
         // `handle_message_drops_gameplay_messages_while_synchronizing_without_side_effects`.
         let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -5941,12 +6443,28 @@ mod tests {
                 frame: Frame::new(7),
             }),
         );
+        deliver(
+            &mut protocol,
+            MessageBody::JoinCommitted(JoinCommitted {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        );
+        deliver(
+            &mut protocol,
+            MessageBody::JoinAborted(JoinAborted {
+                handle: 1,
+                frame: Frame::new(7),
+            }),
+        );
 
         assert_eq!(protocol.take_pending_join_request(), None);
         assert!(protocol.take_received_snapshot().is_none());
         assert_eq!(protocol.take_received_snapshot_ack(), None);
         assert!(protocol.take_received_reactivate_slot().is_none());
         assert!(protocol.take_received_reactivate_slot_ack().is_none());
+        assert!(protocol.take_received_join_committed().is_none());
+        assert!(protocol.take_received_join_aborted().is_none());
         assert_eq!(protocol.event_queue.len(), initial_event_len);
     }
 
@@ -6027,6 +6545,85 @@ mod tests {
         assert_eq!(protocol.take_received_reactivate_slot_ack(), Some(body));
         // Draining is one-shot.
         assert_eq!(protocol.take_received_reactivate_slot_ack(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_join_committed_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_join_committed(3, Frame::new(42));
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::JoinCommitted(body) => {
+                assert_eq!(body.handle, 3);
+                assert_eq!(body.frame, Frame::new(42));
+            },
+            other => panic!("expected JoinCommitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_join_aborted_queues_when_running() {
+        let mut protocol = running_protocol();
+
+        protocol.send_join_aborted(3, Frame::new(42));
+
+        assert_eq!(protocol.send_queue.len(), 1);
+        match &protocol.send_queue.front().unwrap().body {
+            MessageBody::JoinAborted(body) => {
+                assert_eq!(body.handle, 3);
+                assert_eq!(body.frame, Frame::new(42));
+            },
+            other => panic!("expected JoinAborted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn send_join_lifecycle_messages_are_noop_when_not_running() {
+        // Protocol stays in Initializing (never synchronized).
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        assert!(!protocol.is_running());
+
+        protocol.send_join_committed(1, Frame::new(1));
+        protocol.send_join_aborted(1, Frame::new(1));
+
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_join_committed() {
+        let mut protocol = running_protocol();
+        let body = JoinCommitted {
+            handle: 2,
+            frame: Frame::new(77),
+        };
+
+        deliver(&mut protocol, MessageBody::JoinCommitted(body.clone()));
+
+        assert_eq!(protocol.take_received_join_committed(), Some(body));
+        // Draining is one-shot.
+        assert_eq!(protocol.take_received_join_committed(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn handle_message_stores_join_aborted() {
+        let mut protocol = running_protocol();
+        let body = JoinAborted {
+            handle: 2,
+            frame: Frame::new(77),
+        };
+
+        deliver(&mut protocol, MessageBody::JoinAborted(body.clone()));
+
+        assert_eq!(protocol.take_received_join_aborted(), Some(body));
+        // Draining is one-shot.
+        assert_eq!(protocol.take_received_join_aborted(), None);
     }
 }
 

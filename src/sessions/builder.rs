@@ -1385,9 +1385,10 @@ impl<T: Config> SessionBuilder<T> {
         self.start_p2p_session_after_mesh_guard(socket)
     }
 
-    /// Shared construction body for [`start_p2p_session`], run after the
-    /// hot-join build-time guards. Builds one endpoint per distinct remote /
-    /// spectator address and hands the assembled registry to [`P2PSession::new`].
+    /// Shared construction body for [`start_p2p_session`](Self::start_p2p_session),
+    /// run after the hot-join build-time guards. Builds one endpoint per distinct
+    /// remote / spectator address and hands the assembled registry to
+    /// [`P2PSession::new`].
     fn start_p2p_session_after_mesh_guard(
         mut self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
