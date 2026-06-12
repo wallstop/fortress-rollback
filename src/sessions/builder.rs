@@ -1513,7 +1513,7 @@ impl<T: Config> SessionBuilder<T> {
     ///   the host endpoint cannot be created/synchronized.
     #[cfg(feature = "hot-join")]
     pub fn start_hot_join_session(
-        mut self,
+        self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
         host_addr: T::Address,
     ) -> Result<P2PSession<T>, FortressError> {
@@ -1576,6 +1576,100 @@ impl<T: Config> SessionBuilder<T> {
             .into());
         }
 
+        self.finish_hot_join_session(socket, host_addr, local_handle)
+    }
+
+    /// Test-only escape hatch that constructs a hot-joiner [`P2PSession`]
+    /// **skipping every joiner-side build-time guard in
+    /// [`start_hot_join_session`]** — the S20 N>=3 mesh guard *and* the
+    /// input-delay and lockstep guards — after only the shared
+    /// [`validate_rollback_config`] step plus the local-handle derivation,
+    /// mirroring
+    /// [`start_p2p_session_skip_hot_join_build_guards_for_test`].
+    ///
+    /// The public API rejects building an N>=3-mesh joiner (see the S20 guard
+    /// in [`start_hot_join_session`]) until chunk N5 proves the full N-peer
+    /// path end-to-end. The chunk-N4 in-crate mesh tests must still exercise
+    /// the joiner-side buffer-then-apply lifecycle in that
+    /// otherwise-unreachable shape; they use this to assemble the internal
+    /// state without re-implementing the endpoint-creation loop. It is
+    /// `#[cfg(test)]` only — never part of the public surface.
+    ///
+    /// NOT skipped: the N-peer save-mode gate (`SaveMode::EveryFrame`
+    /// required for the N-peer joiner role) lives in the shared tail
+    /// [`finish_hot_join_session`](Self::finish_hot_join_session) and applies
+    /// to this bypass too — it is a correctness invariant of the role, not a
+    /// build-shape guard the N4 tests need to circumvent.
+    ///
+    /// [`start_hot_join_session`]: Self::start_hot_join_session
+    /// [`start_p2p_session_skip_hot_join_build_guards_for_test`]: Self::start_p2p_session_skip_hot_join_build_guards_for_test
+    /// [`validate_rollback_config`]: Self::validate_rollback_config
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn start_hot_join_session_skip_build_guards_for_test(
+        self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+        host_addr: T::Address,
+    ) -> Result<P2PSession<T>, FortressError> {
+        self.validate_rollback_config()?;
+        let local_handle = self.player_reg.local_player_handle_required()?;
+        self.finish_hot_join_session(socket, host_addr, local_handle)
+    }
+
+    /// Shared construction tail for
+    /// [`start_hot_join_session`](Self::start_hot_join_session), run after the
+    /// joiner-side build-time guards: validates registration completeness,
+    /// derives the joiner role's N-peer discriminator, builds one
+    /// (input-deferred) endpoint per distinct remote address, and hands the
+    /// assembled registry to [`P2PSession::new`] in the joiner role.
+    #[cfg(feature = "hot-join")]
+    fn finish_hot_join_session(
+        mut self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+        host_addr: T::Address,
+        local_handle: PlayerHandle,
+    ) -> Result<P2PSession<T>, FortressError> {
+        // All slots must be registered, same as a normal P2P session.
+        let registered_count = self
+            .player_reg
+            .handles
+            .keys()
+            .filter(|handle| handle.is_valid_player_for(self.num_players))
+            .count();
+        if registered_count < self.num_players {
+            return Err(InvalidRequestKind::NotEnoughPlayers {
+                expected: self.num_players,
+                actual: registered_count,
+            }
+            .into());
+        }
+
+        // The joiner-role discriminator (chunk N4): more than one distinct
+        // remote machine = an N-peer mesh joiner, which buffers its snapshot
+        // and applies only on `JoinCommitted`. Always `false` through the
+        // public builder while the S20 N>=3 guard in `start_hot_join_session`
+        // stands (only the test-only bypass can currently reach `true`).
+        let npeer = self.distinct_remote_machine_count() > 1;
+
+        // S34 fix round 2 (MAJOR-A leg 2): the N-peer JOINER role requires
+        // `SaveMode::EveryFrame`, symmetric with the coordinator's serve-side
+        // gate (R2a in `try_open_npeer_serve`, which already refuses to SERVE
+        // under any other mode). A Sparse joiner's first misprediction reloads
+        // `last_saved = S` (its only saved state until the first post-apply
+        // sparse save) and re-simulates the bridge frame; the joiner-side
+        // reactivation floor keeps that replay presentation-correct, but
+        // Sparse remains an unvalidated configuration for the bridge-frame
+        // role — fail closed at the build boundary like the serve side. The
+        // 2-peer joiner stays Sparse-legal: it has no bridge frame and
+        // `last_saved = F` floors every reload at `F`. Lives in this shared
+        // tail (not in `start_hot_join_session`) so it still holds when the
+        // S20 N>=3 guard lifts in chunk N5, and for the test-only bypass.
+        if npeer && self.save_mode != SaveMode::EveryFrame {
+            return Err(InvalidRequestKind::NotSupported {
+                operation: "start_hot_join_session as an N>=3-mesh joiner without SaveMode::EveryFrame (the N-peer joiner's rollback baseline is the bridged snapshot frame; hot-join requires SaveMode::EveryFrame on both the serving and the joining side)",
+            }
+            .into());
+        }
+
         // Build remote endpoints exactly like start_p2p_session: one per unique
         // remote address (the host plus any other remote slots in scope).
         let mut addr_count = BTreeMap::<PlayerType<T::Address>, Vec<PlayerHandle>>::new();
@@ -1617,6 +1711,7 @@ impl<T: Config> SessionBuilder<T> {
             joiner: Some(crate::sessions::p2p_session::JoinerStateInit {
                 local_handle,
                 host_addr,
+                npeer,
             }),
             serve_timeout_polls: self.hot_join_serve_timeout_polls,
             max_snapshot_wire_bytes: self.hot_join_max_snapshot_wire_bytes,

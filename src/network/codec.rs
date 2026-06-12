@@ -440,12 +440,66 @@ fn decode_state_snapshot(bytes: &[u8], cursor: &mut usize) -> CodecResult<StateS
     })?;
     state_bytes.extend_from_slice(state_slice);
 
+    let bridge_len = read_usize(bytes, cursor, "state_snapshot.bridge_inputs.len")?;
+    // alloc-bound: `bridge_len` is a peer-controlled length prefix, validated
+    // against the bytes still remaining in this packet before reserving (same
+    // pattern as `state_bytes` above). The session layer additionally bounds
+    // the field semantically when consuming it: the blob must decode to exactly
+    // the receiver's already-validated `num_players` fixed-width inputs.
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        bridge_len,
+        1,
+        "state_snapshot.bridge_inputs",
+    )?;
+    let bridge_slice = take_bytes(bytes, cursor, bridge_len, "state_snapshot.bridge_inputs")?;
+    let mut bridge_inputs = Vec::new();
+    bridge_inputs
+        .try_reserve_exact(bridge_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {} bridge input bytes",
+                bridge_len
+            ))
+        })?;
+    bridge_inputs.extend_from_slice(bridge_slice);
+
+    let statuses_len = read_usize(bytes, cursor, "state_snapshot.bridge_statuses.len")?;
+    // alloc-bound: `statuses_len` is a peer-controlled length prefix, validated
+    // against the bytes still remaining in this packet before reserving (the
+    // exact `decode_input` peer_connect_status pattern, min element footprint
+    // CONNECTION_STATUS_WIRE_LEN). The session layer additionally bounds the
+    // field semantically when consuming it: it must hold exactly the
+    // receiver's already-validated `num_players` entries.
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        statuses_len,
+        CONNECTION_STATUS_WIRE_LEN,
+        "state_snapshot.bridge_statuses",
+    )?;
+    let mut bridge_statuses = Vec::new();
+    bridge_statuses
+        .try_reserve_exact(statuses_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {} bridge status entries",
+                statuses_len
+            ))
+        })?;
+    for _ in 0..statuses_len {
+        bridge_statuses.push(decode_connection_status(bytes, cursor)?);
+    }
+
     let checksum = read_option_u128(bytes, cursor, "state_snapshot.checksum")?;
 
     Ok(StateSnapshot {
         frame,
         num_players,
         state_bytes,
+        bridge_inputs,
+        bridge_statuses,
         checksum,
     })
 }
@@ -729,6 +783,17 @@ pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED
 /// use [`decode`] if you need the consumed length).
 #[cfg(feature = "hot-join")]
 pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
+    decode_bounded_with_consumed(bytes).map(|(value, _consumed)| value)
+}
+
+/// [`decode_bounded`] variant that also returns the number of bytes consumed,
+/// for callers that decode several bounded values back-to-back from one slice
+/// (e.g. the hot-join bridge-input blob: `num_players` fixed-width inputs
+/// concatenated) and must verify exact consumption.
+#[cfg(feature = "hot-join")]
+pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> CodecResult<(T, usize)> {
     // alloc-bound: this decode is bounded to MAX_BOUNDED_DECODE_LEN (64 MiB) two
     // ways. (1) `bytes` is pre-rejected when longer than the cap. (2) The bincode
     // `Limit<MAX_BOUNDED_DECODE_LEN>` config makes every container decoder claim
@@ -757,7 +822,6 @@ pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T
         .with_fixed_int_encoding()
         .with_limit::<MAX_BOUNDED_DECODE_LEN>();
     bincode::serde::decode_from_slice(bytes, config)
-        .map(|(value, _consumed)| value)
         .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
 }
 
@@ -1137,6 +1201,40 @@ mod hot_join_tests {
                 frame: Frame::new(42),
                 num_players: 4,
                 state_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02],
+                bridge_inputs: Vec::new(),
+                bridge_statuses: Vec::new(),
+                checksum: Some(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
+            }),
+        });
+    }
+
+    /// The N-peer serve shape: a snapshot carrying non-empty bridge inputs
+    /// (the confirmed inputs at `S` for all slots) AND per-slot connection
+    /// statuses must roundtrip through the manual bounded decoder
+    /// byte-for-byte.
+    #[test]
+    fn decode_message_roundtrips_state_snapshot_with_bridge_inputs() {
+        roundtrip(Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::StateSnapshot(StateSnapshot {
+                frame: Frame::new(42),
+                num_players: 3,
+                state_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                bridge_inputs: vec![0x11, 0x22, 0x33],
+                bridge_statuses: vec![
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(42),
+                    },
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(17),
+                    },
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::NULL,
+                    },
+                ],
                 checksum: Some(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
             }),
         });
@@ -1150,6 +1248,8 @@ mod hot_join_tests {
                 frame: Frame::new(7),
                 num_players: 2,
                 state_bytes: vec![1, 2, 3, 4, 5],
+                bridge_inputs: Vec::new(),
+                bridge_statuses: Vec::new(),
                 checksum: None,
             }),
         });
@@ -1163,6 +1263,8 @@ mod hot_join_tests {
                 frame: Frame::new(0),
                 num_players: 1,
                 state_bytes: Vec::new(),
+                bridge_inputs: Vec::new(),
+                bridge_statuses: Vec::new(),
                 checksum: None,
             }),
         });
@@ -1223,7 +1325,144 @@ mod hot_join_tests {
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_statuses len = 0
         bytes.push(2); // invalid option tag (only 0 or 1 valid)
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// Hand-crafts a `StateSnapshot` wire buffer whose `bridge_inputs` length
+    /// prefix claims `u64::MAX` while the buffer holds no payload. The bounded
+    /// decoder must reject this via `ensure_length_within_remaining` *before*
+    /// reserving, never panicking or attempting a giant allocation. Mirrors
+    /// `decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes`.
+    #[test]
+    fn decode_message_rejects_bridge_inputs_length_that_exceeds_packet_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // bridge_inputs len (absurd)
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `bridge_inputs` length that fits in `usize` but exceeds the remaining
+    /// bytes (claims 100 bytes when only a few remain) must also be rejected
+    /// before reserve.
+    #[test]
+    fn decode_message_rejects_bridge_inputs_length_larger_than_remaining() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&100_u64.to_le_bytes()); // bridge_inputs len
+        bytes.extend_from_slice(&[0xAA, 0xBB]); // only 2 bytes of payload present
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A snapshot buffer truncated mid-`bridge_inputs` payload (the length
+    /// prefix itself missing) must be rejected, never read out of bounds.
+    #[test]
+    fn decode_message_rejects_snapshot_truncated_before_bridge_inputs() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+                                                       // bridge_inputs length prefix omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// Hand-crafts a `StateSnapshot` wire buffer whose `bridge_statuses`
+    /// length prefix claims `u64::MAX` while the buffer holds no payload. The
+    /// bounded decoder must reject this via `ensure_length_within_remaining`
+    /// (min element footprint `CONNECTION_STATUS_WIRE_LEN`) *before*
+    /// reserving — mirrors the `bridge_inputs` battery.
+    #[test]
+    fn decode_message_rejects_bridge_statuses_length_that_exceeds_packet_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // bridge_statuses len (absurd)
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A `bridge_statuses` length that fits in `usize` but whose minimum wire
+    /// footprint (5 bytes per status) exceeds the remaining bytes must also
+    /// be rejected before reserve.
+    #[test]
+    fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
+        bytes.extend_from_slice(&100_u64.to_le_bytes()); // bridge_statuses len
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // only 3 payload bytes present
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A snapshot buffer truncated before the `bridge_statuses` length prefix
+    /// must be rejected, never read out of bounds.
+    #[test]
+    fn decode_message_rejects_snapshot_truncated_before_bridge_statuses() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
+                                                       // bridge_statuses length prefix omitted entirely.
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    /// A snapshot buffer truncated mid-`bridge_statuses` payload (the prefix
+    /// claims one status, only part of its 5-byte record present) must be
+    /// rejected, never read out of bounds.
+    #[test]
+    fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
+        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
+        bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
+        bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // bridge_statuses len = 1
+        bytes.extend_from_slice(&[0, 0xAA, 0xBB]); // 3 of the 5 status bytes
 
         let result = decode_message(&bytes);
 
@@ -1239,6 +1478,8 @@ mod hot_join_tests {
                 frame: Frame::new(5),
                 num_players: 2,
                 state_bytes: vec![7, 8, 9],
+                bridge_inputs: vec![4, 5],
+                bridge_statuses: Vec::new(),
                 checksum: Some(123),
             }),
         };

@@ -161,12 +161,46 @@ pub(crate) struct JoinRequest {
 #[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StateSnapshot {
-    /// The frame the serialized state corresponds to (the activation frame).
+    /// The frame the serialized state corresponds to. On the 2-peer host path
+    /// this is the activation frame `F` (the joiner is real from the frame it
+    /// loads); on the N-peer coordinator path this is the snapshot frame
+    /// `S = F - 1` (the joiner bridges one frame using
+    /// [`bridge_inputs`](Self::bridge_inputs)).
     pub frame: Frame,
     /// Total player count the snapshot was produced with (receiver validates equality).
     pub num_players: usize,
     /// bincode-serialized `Config::State` at `frame`.
     pub state_bytes: Vec<u8>,
+    /// N-peer bridge inputs (chunk N4): the **confirmed** inputs at `frame`
+    /// (= `S`) for all `num_players` slots, in handle order, each
+    /// `codec`-encoded with the crate's fixed-int configuration and
+    /// concatenated (`Config::Input` is fixed-width by the network-input-width
+    /// rule, so this is exactly `num_players × input_width` bytes). The
+    /// joining slot's entry is its agreed frozen value. **Empty on the 2-peer
+    /// host path** — emptiness is the explicit wire discriminator between the
+    /// two serve shapes, and both joiner roles reject the mismatched shape
+    /// fail-closed (an N-peer joiner must never invent bridge inputs).
+    /// A zero-width `Config::Input` cannot make a genuine N-peer blob empty:
+    /// network sessions reject zero-byte input encodings at endpoint
+    /// construction (`validate_default_input_wire_size` →
+    /// `SerializationErrorKind::InputSerializedSizeZero`), so the
+    /// discriminator is unambiguous for every constructible session.
+    pub bridge_inputs: Vec<u8>,
+    /// N-peer per-slot connection statuses at `frame` (= `S`), in handle
+    /// order (S34 fix round 1): the coordinator's `local_connect_status`
+    /// captured together with the snapshot. The joiner derives each slot's
+    /// bridge [`InputStatus`] from exactly the predicate every survivor's
+    /// simulation of `S` used (`disconnected && last_frame < S` ⇒
+    /// `Disconnected`, else `Confirmed` — so the `f0 == S` boundary presents
+    /// the slot's real frame-`S` input as `Confirmed` mesh-wide), keeps
+    /// carried-disconnected slots frozen at their carried value, and stamps
+    /// its own connection-status table from these instead of assuming every
+    /// slot live. **Empty on the 2-peer host path** — the same
+    /// shape-discriminator contract as [`bridge_inputs`](Self::bridge_inputs)
+    /// (both joiner roles reject the mismatched shape fail-closed).
+    ///
+    /// [`InputStatus`]: crate::InputStatus
+    pub bridge_statuses: Vec<ConnectionStatus>,
     /// Optional checksum of the saved state at `frame`.
     pub checksum: Option<u128>,
 }
