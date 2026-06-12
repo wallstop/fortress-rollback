@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780715246024,
+  "lastUpdate": 1781225109355,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "4db745da9691cf2eb66b0107068ad7c88556516d",
-          "message": "chore(deps): bump clap from 4.5.54 to 4.5.55 (#68)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.54 to 4.5.55.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.55</h2>\n<h2>[4.5.55] - 2026-01-27</h2>\n<h3>Fixes</h3>\n<ul>\n<li>Fix inconsistency in precedence between positionals with a\n<code>value_terminator(&quot;--&quot;)</code> and escapes\n(<code>--</code>) where <code>./foo -- bar</code> means the first arg is\nempty, rather than escaping future args</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.55] - 2026-01-27</h2>\n<h3>Fixes</h3>\n<ul>\n<li>Fix inconsistency in precedence between positionals with a\n<code>value_terminator(&quot;--&quot;)</code> and escapes\n(<code>--</code>) where <code>./foo -- bar</code> means the first arg is\nempty, rather than escaping future args</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/4c039309b614ee4523c67a243afc38af11860de9\"><code>4c03930</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/fb948a25ffde7f108acc682d2751976e80ab100b\"><code>fb948a2</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/0f602396a338455e2782963b8c8fb20240a6a87b\"><code>0f60239</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6057\">#6057</a>\nfrom GilShoshan94/master</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/83d4206ff16b489895e8a171a3bdb2e39d7d3e1f\"><code>83d4206</code></a>\ntest: Update fixture to cover all cases + styling</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/b13274d869ffa53910a6d16728546b1ca9161b2d\"><code>b13274d</code></a>\nfix: Rename <code>pvs</code> to <code>dvs</code> for default values</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/df92ea02bb4aa79b2738d7a8a86dcbfab417b7dd\"><code>df92ea0</code></a>\nfeat(help): Allow styling for inline context</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/0e535e518d56df3f0b808d2f1977aba290e193c3\"><code>0e535e5</code></a>\nchore(deps): Update compatible (dev) (<a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6054\">#6054</a>)</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/de57287f303db0e0b29f1bcca05fef50ef011225\"><code>de57287</code></a>\nchore(deps): Update Rust Stable to v1.88 (<a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6048\">#6048</a>)</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/5504a134684fc1148e08d8e6919ca16e13ed83a4\"><code>5504a13</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6047\">#6047</a>\nfrom clap-rs/revert-6045-cleanup-docsrs</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c1c243c924570052857d85206c7ee282e273a961\"><code>c1c243c</code></a>\nRevert &quot;Cleanup docs.rs related issues&quot;</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.54...clap_complete-v4.5.55\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.54&new-version=4.5.55)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-27T20:14:01-08:00",
-          "tree_id": "f6dc3733b12082cd1b7d2275c19e58b8ebd54e9c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/4db745da9691cf2eb66b0107068ad7c88556516d"
-        },
-        "date": 1769573951155,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 89,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 132,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 643,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 972,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1387,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 94758,
-            "range": "± 264",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24294,
-            "range": "± 185",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 681,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 872,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 105",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "09b8a0962041b2875fe695e5b9eb08efb487727e",
+          "message": "feat/bug-fix: Hot-Join + Desync Fixes (#172)\n\n## Description\n\nThis PR delivers three major areas of work:\n\n**1. N≥3-player desync audit and fixes.** A comprehensive adversarial\naudit of desync bugs in sessions with 3 or more players, covering 14\nfindings (F1–F14) and 5 completeness-critic scenarios. All confirmed\nbugs were fixed and regression-tested; contested findings were\narbitrated with red tests before being accepted as NOTABUG. Key fixes\ninclude:\n\n- **Input queue prediction-entry bug (pre-existing, from original GGRS\nport):** A rollback re-simulation whose first input request landed above\na remote queue's missing window would re-enter prediction at the wrong\nframe, silently skipping the misprediction check. This caused confirmed\nstate to permanently diverge with no rollback, no error, and no event —\nand raised false-positive `DesyncDetected` events when detection was on.\n- **Graceful peer drop staggered-detection desync (pre-existing):**\nUnder `DisconnectBehavior::ContinueWithout` with 3+ players, asymmetric\npacket loss could let a survivor run past the mesh-agreed freeze frame\nbefore gossip arrived, permanently embedding a dropped peer's\nunconfirmed high-frame inputs. Fixed by implementing the GGPO-faithful\n`PollNPlayers` gossip-minimum fold in `confirmed_frame()`, a\nconnect-status nudge for input-idle endpoints awaiting mesh agreement,\nand progress-sensitive retransmit suppression.\n- **Sparse save bug:** The checkpoint/save machinery could select a\nstale ring slot for the agreed freeze frame, causing the convergence\nre-roll to use a wrong value.\n- **Spectator host slot overwrite:** A redundant-host failover spectator\ncould overwrite a dropped slot's converged freeze frame with a higher\nvalue from a later host, breaking the global-min guarantee.\n\n**2. Hot-join improvements.** Continued correctness and hardening work\non the `hot-join` feature introduced earlier in this branch: protocol\nand session fixes for slot reactivation, handshake edge cases, and\nmulti-peer interaction.\n\n**3. TLA+ formal verification extended to N=3.** `NetworkProtocol.tla`\nand `NPeerReactivation.tla` were bumped to N=3 and pass TLC with\nnon-vacuous state-space growth (2,804→170,168 and 1,240→9,576 distinct\nstates respectively). `ChecksumExchange.tla` and `TimeSync.tla` were\nrigorously characterized as cannot-cleanly-bump and pinned at N=2 with\ndocumented rationale. The `verify-tla.sh` summary line was fixed to\nreport the true final distinct-state count.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/desync_harvest.rs` — desync-checksum harvest\narbitration tests (3-peer, deep-prediction, zero false positives proven\nwith neutralization probes)\n- `tests/sessions/hot_join.rs` — hot-join integration coverage, slot\nreactivation, handshake edge cases\n- `tests/sessions/peer_drop.rs` — graceful peer drop scenarios including\nstaggered detection, freeze-frame convergence under asymmetric loss, and\nN≥3 mesh agreement\n- `tests/network/multi_process.rs` — N=3/N=4 real-UDP multi-process\ndriver (previously 2-peer-only)\n- `tests/common/filter_socket.rs` — new `FilterSocket` test harness for\nN≥4 relay-clobber repro\n- `tests/common/reorder_socket.rs` — new `ReorderSocket` test harness\nfor packet-reordering scenarios\n- `tests/verification/z3.rs` — extended Z3 verification coverage\n\n**Manual testing performed:**\n\n- Not run as part of this PR description draft\n\n## Related Issues\n\n- (None linked in branch commits)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> Changes core rollback prediction, freeze-frame convergence, and\nmulti-peer disconnect semantics where silent desync was possible;\nhot-join wire additions and changelog-only spectator notes add\nintegration surface area.\n> \n> **Overview**\n> This PR tightens **changelog policy** for `[Unreleased]`: fixes to\nbehavior that already shipped may live under `### Fixed` only when\nprefixed with **`**Pre-existing:**`**, with the hook emitting reviewer\nnotes and tests covering mixed marked/unmarked entries.\n> \n> **Rollback / input-queue correctness** changes how prediction episodes\nstart: they always begin at the queue’s **first missing frame** (not the\nrequested frame), with a Kani proof and regression tests for the F17\n“swallowed window” shape; frame/prediction mismatches now **fail toward\nrollback** instead of skipping comparison. For graceful drop, queues\ngain **`freeze_at`**, **`set_frozen_value_at`** (converge frozen value\nto global-min `F`), and hot-join **`refreeze_with_value`** after abort.\n> \n> **Hot-join wire protocol** adds **`ReactivateSlot`**,\n**`ReactivateSlotAck`**, **`JoinCommitted`**, and **`JoinAborted`**\nmessage types with bounded codec roundtrip/truncation tests.\n**`CHANGELOG.md`** documents large **pre-existing N≥3 desync fixes**\n(prediction entry, `ContinueWithout` gossip-min / nudge), hot-join\nlimits, and expanded spectator failover semantics.\n> \n> **Formal verification**: `ChecksumExchange` is re-modeled for\n**per-(local,remote) pair** verdicts at **N=3** with symmetry and\nin-flight caps; new **`NPeerReactivation`** TLA+ (two-attempt retry /\nabort-restore); `NetworkProtocol` cfg bumped to three peers; CI lists\nupdated.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6ec2ee8a008d1be581ee5394e786d5de7df12b4b. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-11T17:40:28-07:00",
+          "tree_id": "eda0e3d4bdcc6dada8f6748b5c9ef921eddb41ee",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/09b8a0962041b2875fe695e5b9eb08efb487727e"
+        },
+        "date": 1781225108469,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 109,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 156,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 435,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 678,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1016,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 140301,
+            "range": "± 2530",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44742,
+            "range": "± 239",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 91",
             "unit": "ns/iter"
           },
           {
