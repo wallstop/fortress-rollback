@@ -295,7 +295,9 @@ impl InputBytes {
                     byte_len: self.bytes.len(),
                 });
             };
-            match codec::decode::<T::Input>(player_byte_slice) {
+            // Bounded decoding keeps malformed length-prefixed `Config::Input`
+            // implementations from allocating past the protocol receive cap.
+            match codec::decode_bounded_with_consumed::<T::Input>(player_byte_slice) {
                 Ok((input, consumed)) if consumed == player_byte_slice.len() => {
                     player_inputs.push(PlayerInput::new(self.frame, input));
                 },
@@ -412,7 +414,7 @@ pub(super) fn log_input_decode_error(err: InputBytesDecodeError) {
 )]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::net::SocketAddr;
 
     // Test configuration
@@ -451,6 +453,36 @@ mod tests {
 
     impl Config for BalancedVariableInputConfig {
         type Input = BalancedVariableInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    struct AllocatingDeserializeInput;
+
+    impl Serialize for AllocatingDeserializeInput {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_u8(0)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for AllocatingDeserializeInput {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let _payload = Vec::<u8>::deserialize(deserializer)?;
+            Ok(Self)
+        }
+    }
+
+    struct AllocatingDeserializeInputConfig;
+
+    impl Config for AllocatingDeserializeInputConfig {
+        type Input = AllocatingDeserializeInput;
         type State = TestState;
         type Address = SocketAddr;
     }
@@ -702,6 +734,25 @@ mod tests {
                 consumed: 4,
                 slice_len: 5,
             }
+        ));
+    }
+
+    #[test]
+    fn try_to_player_inputs_exact_rejects_allocating_input_length_bomb() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        let input_bytes = InputBytes {
+            frame: Frame::new(10),
+            bytes,
+        };
+
+        let err = input_bytes
+            .try_to_player_inputs_exact::<AllocatingDeserializeInputConfig>(1)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            InputBytesDecodeError::PlayerDecodeFailed { player: 0 }
         ));
     }
 

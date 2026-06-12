@@ -6,6 +6,12 @@
 //!   contributing real inputs for the reserved slot from an activation frame.
 //! - Both peers then advance in lockstep with no desync.
 //!
+//! N-peer (3+ machine) hot-join is also supported; its build-time
+//! requirement mirrors are pinned at the bottom of this file, and the full
+//! N-peer mesh end-to-end suite lives in-crate
+//! (`sessions::p2p_session::tests::npeer_mesh`, which drives 3- and 4-peer
+//! meshes over a deterministic in-memory bus).
+//!
 //! All tests use `ChannelSocket` + `TestClock` for fully deterministic behavior.
 #![cfg(feature = "hot-join")]
 // In tests: tests intentionally use unwrap/expect for clarity.
@@ -3864,15 +3870,23 @@ fn dropped_slot_can_be_rejoined_repeatedly() -> Result<(), FortressError> {
 }
 
 // ============================================================================
-// Build-time guard: N>=3 hot-join meshes are rejected (audit F1/F2 mitigation)
+// Build-time guards: N>=3 hot-join meshes build when the N-peer requirements
+// hold (S20 guard lift, chunk N5)
 // ============================================================================
 //
-// Hot-join is correct only in the 2-machine scope today. An N>=3 joiner would
-// leave every non-host survivor endpoint permanently deferred (F1), and an N>=3
-// host would have only the survivor that received the JoinRequest reopen the
-// slot (F2) -- both silent desyncs. The builder rejects N>=3 hot-join
-// construction; these tests pin that the 2-machine shipped cases still build and
-// the N>=3 cases return `InvalidRequestKind::NotSupported`.
+// N-peer (3+ machine) hot-join is supported end-to-end: the coordinator serves
+// a paused snapshot, the survivor mesh agrees on the reactivation frame, and
+// the joiner buffers-then-applies with bridge inputs. The builder no longer
+// rejects N>=3 hot-join shapes outright; instead it enforces BUILD-TIME MIRRORS
+// of the runtime serve gates (`try_open_npeer_serve` R2a/R2b) so an
+// unservable configuration fails at build instead of stalling every join at
+// runtime: a hot-join-serving host in an N>=3 mesh requires
+// `SaveMode::EveryFrame`, zero input delay, and at least one local player; an
+// N>=3 joiner requires `SaveMode::EveryFrame` (its rollback baseline is the
+// bridged snapshot frame). These tests pin that the satisfying N>=3 shapes
+// build, each violated mirror returns its own clear
+// `InvalidRequestKind::NotSupported`, and 2-machine shapes are completely
+// unaffected (the mirrors are scoped to `mesh_machines >= 3`).
 
 /// A 2-machine hot-join host (one local + one reserved slot) must still
 /// construct successfully (regression: the guard must not reject the shipped
@@ -3963,54 +3977,77 @@ fn two_machine_hot_join_joiner_constructs_ok() -> Result<(), FortressError> {
     Ok(())
 }
 
-/// A hot-join host in an N>=3 mesh (one local + two distinct remote/reserved
-/// machines) must be rejected at build time with
-/// `InvalidRequestKind::NotSupported`.
+/// Binds the `operation` string out of a `NotSupported` build rejection,
+/// panicking (with the actual result) on any other outcome.
+#[track_caller]
+fn expect_not_supported<S>(result: Result<S, FortressError>, what: &str) -> &'static str {
+    match result {
+        Err(FortressError::InvalidRequestStructured {
+            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
+        }) => operation,
+        Err(other) => panic!("{what} must be rejected with NotSupported; got {other:?}"),
+        Ok(_) => panic!("{what} must be rejected with NotSupported; got Ok(session)"),
+    }
+}
+
+/// A hot-join host in an N>=3 mesh (one local + one live remote + one reserved
+/// future-joiner machine) now constructs through the public
+/// `start_p2p_session` when the N-peer build requirements hold (the defaults:
+/// `SaveMode::EveryFrame`, zero input delay, one local player). Pre-lift this
+/// shape was rejected with the S20 `NotSupported` guard.
 #[test]
-fn three_machine_hot_join_host_is_rejected() -> Result<(), FortressError> {
+fn three_machine_hot_join_host_constructs_ok() -> Result<(), FortressError> {
     let clock = TestClock::new();
     let (host_socket, _s2, _s3, _host_addr, remote_addr, reserved_addr) =
         crate::common::create_channel_triple();
 
     // 1 local host + 1 live remote machine + 1 reserved (future-joiner) machine
-    // = 3 machines.
-    let result = SessionBuilder::<StubConfig>::new()
+    // = 3 machines. Propagate the real construction error on failure.
+    let _session = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config(&clock))
         .with_num_players(3)?
         .with_hot_join(true)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
         .add_reserved_player(reserved_addr, PlayerHandle::new(2))?
-        .start_p2p_session(host_socket);
+        .start_p2p_session(host_socket)?;
 
-    // Bind the `operation` text and assert it names the mesh guard, not some
-    // other `NotSupported` rejection that happened to fire first. Both
-    // distinctive substrings appear in the host-side guard message.
-    let operation = match result {
-        Err(FortressError::InvalidRequestStructured {
-            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
-        }) => operation,
-        other => panic!("an N>=3 hot-join host must be rejected with NotSupported; got {other:?}"),
-    };
-    assert!(
-        operation.contains("hot-join") && operation.contains("N>=3"),
-        "rejection must come from the N>=3 hot-join mesh guard; got operation {operation:?}"
-    );
+    Ok(())
+}
+
+/// A hot-join host with two distinct *live* remote machines (and zero reserved
+/// slots) is an N>=3 mesh counted from live remotes alone; with the build
+/// requirements satisfied it now constructs (pre-lift: rejected).
+#[test]
+fn hot_join_host_with_two_live_remote_machines_constructs_ok() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, remote_addr_a, remote_addr_b) =
+        crate::common::create_channel_triple();
+
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr_a), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(remote_addr_b), PlayerHandle::new(2))?
+        .start_p2p_session(host_socket)?;
+
     Ok(())
 }
 
 /// A hot-join joiner that registers two distinct remote machines (an N>=3 mesh
-/// joiner) must be rejected at build time with
-/// `InvalidRequestKind::NotSupported`.
+/// joiner) now constructs through the public `start_hot_join_session` in the
+/// N-peer joiner role (pre-lift: rejected with the S20 `NotSupported` guard).
 #[test]
-fn three_machine_hot_join_joiner_is_rejected() -> Result<(), FortressError> {
+fn three_machine_hot_join_joiner_constructs_ok() -> Result<(), FortressError> {
     let clock = TestClock::new();
     let (_s1, joiner_socket, _s3, host_addr, _joiner_addr, other_survivor_addr) =
         crate::common::create_channel_triple();
 
     // The joiner registers BOTH surviving peers as remotes (host + one other)
     // plus its own local slot -> two distinct remote machines.
-    let result = SessionBuilder::<StubConfig>::new()
+    let _session = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config(&clock))
         .with_num_players(3)?
         .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
@@ -4019,62 +4056,220 @@ fn three_machine_hot_join_joiner_is_rejected() -> Result<(), FortressError> {
             PlayerHandle::new(1),
         )?
         .add_player(PlayerType::Local, PlayerHandle::new(2))?
-        .start_hot_join_session(joiner_socket, host_addr);
+        .start_hot_join_session(joiner_socket, host_addr)?;
 
-    // Bind the `operation` text and assert it names the joiner mesh guard,
-    // distinguishing it from any other `NotSupported` (e.g. the lockstep guard).
-    // Both distinctive substrings appear in the joiner-side guard message.
-    let operation = match result {
-        Err(FortressError::InvalidRequestStructured {
-            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
-        }) => operation,
-        other => panic!(
-            "an N>=3 hot-join joiner (2+ remote machines) must be rejected with NotSupported; got {other:?}"
-        ),
-    };
+    Ok(())
+}
+
+/// Build-time mirror of runtime serve gate R2a: a hot-join-serving host in an
+/// N>=3 mesh without `SaveMode::EveryFrame` is rejected with a clear
+/// `NotSupported` (at runtime, `try_open_npeer_serve` would refuse every join
+/// request under any other save mode, so the join could never complete).
+#[test]
+fn npeer_host_without_every_frame_save_mode_is_rejected() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, remote_addr, reserved_addr) =
+        crate::common::create_channel_triple();
+
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_save_mode(fortress_rollback::SaveMode::Sparse)
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .add_reserved_player(reserved_addr, PlayerHandle::new(2))?
+        .start_p2p_session(host_socket);
+
+    let operation = expect_not_supported(result, "an N>=3 hot-join host under SaveMode::Sparse");
     assert!(
-        operation.contains("hot-join") && operation.contains("N>=3"),
-        "rejection must come from the N>=3 hot-join joiner guard; got operation {operation:?}"
+        operation.contains("hot-join")
+            && operation.contains("N>=3")
+            && operation.contains("SaveMode::EveryFrame"),
+        "rejection must come from the N>=3 save-mode mirror; got operation {operation:?}"
     );
     Ok(())
 }
 
-/// A hot-join host with two distinct *live* remote machines (and zero reserved
-/// slots) is still an N>=3 mesh and must be rejected. This complements
-/// `three_machine_hot_join_host_is_rejected` (which mixes a live remote with a
-/// reserved slot) by proving that live remotes alone are counted toward the
-/// mesh-size guard.
+/// Build-time mirror of runtime serve gate R2b (the `S = L` identity): a
+/// hot-join-serving host in an N>=3 mesh with non-zero input delay is rejected
+/// (with delay `d > 0` the host's gossiped last-input frames run `d` ahead of
+/// its simulation, so no snapshot frame could ever satisfy the runtime gate).
 #[test]
-fn hot_join_host_with_two_live_remote_machines_is_rejected() -> Result<(), FortressError> {
-    // Arrange: 1 local host + 2 distinct live remote machines, hot-join enabled,
-    // no reserved slots -> 3 machines.
+fn npeer_host_with_nonzero_input_delay_is_rejected() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _s2, _s3, _host_addr, remote_addr, reserved_addr) =
+        crate::common::create_channel_triple();
+
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_input_delay(1)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .add_reserved_player(reserved_addr, PlayerHandle::new(2))?
+        .start_p2p_session(host_socket);
+
+    let operation = expect_not_supported(result, "an N>=3 hot-join host with input delay 1");
+    assert!(
+        operation.contains("hot-join")
+            && operation.contains("N>=3")
+            && operation.contains("input delay"),
+        "rejection must come from the N>=3 input-delay mirror; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// Build-time mirror of runtime serve gate R2b (the survivor cap): a
+/// hot-join-serving host in an N>=3 mesh with no local player is rejected (a
+/// coordinator with no local players gossips no last-input cap at all, so
+/// nothing pins the survivors during the serve pause and the runtime gate
+/// would refuse every join request).
+#[test]
+fn npeer_host_with_no_local_player_is_rejected() -> Result<(), FortressError> {
+    // 1 local machine (this host, with zero local PLAYERS) + 2 distinct live
+    // remote machines = an N>=3 mesh.
     let clock = TestClock::new();
     let (host_socket, _s2, _s3, _host_addr, remote_addr_a, remote_addr_b) =
         crate::common::create_channel_triple();
 
-    // Act.
+    let result = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Remote(remote_addr_a), PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr_b), PlayerHandle::new(1))?
+        .start_p2p_session(host_socket);
+
+    let operation = expect_not_supported(result, "an N>=3 hot-join host with no local player");
+    assert!(
+        operation.contains("hot-join")
+            && operation.contains("N>=3")
+            && operation.contains("local player"),
+        "rejection must come from the N>=3 local-player mirror; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// The N-peer JOINER role's save-mode requirement holds through the public
+/// `start_hot_join_session`: an N>=3 joiner without `SaveMode::EveryFrame` is
+/// rejected (its rollback baseline is the bridged snapshot frame; Sparse
+/// reloads would replay the bridge frame from an unvalidated configuration).
+#[test]
+fn npeer_joiner_without_every_frame_save_mode_is_rejected() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (_s1, joiner_socket, _s3, host_addr, _joiner_addr, other_survivor_addr) =
+        crate::common::create_channel_triple();
+
     let result = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config(&clock))
         .with_num_players(3)?
+        .with_save_mode(fortress_rollback::SaveMode::Sparse)
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(
+            PlayerType::Remote(other_survivor_addr),
+            PlayerHandle::new(1),
+        )?
+        .add_player(PlayerType::Local, PlayerHandle::new(2))?
+        .start_hot_join_session(joiner_socket, host_addr);
+
+    let operation = expect_not_supported(result, "an N>=3 hot-join joiner under SaveMode::Sparse");
+    assert!(
+        operation.contains("hot-join") || operation.contains("hot_join"),
+        "rejection must come from the joiner save-mode gate; got operation {operation:?}"
+    );
+    assert!(
+        operation.contains("SaveMode::EveryFrame"),
+        "rejection must name the SaveMode::EveryFrame requirement; got operation {operation:?}"
+    );
+    Ok(())
+}
+
+/// Mirror scoping (2-machine shapes unaffected): a 2-machine hot-join host
+/// under `SaveMode::Sparse` still constructs — the save-mode mirror applies
+/// only to N>=3 meshes (the shipped 2-peer serve reads `last_saved_frame`
+/// directly and has no `S = L` identity to protect).
+#[test]
+fn two_machine_hot_join_host_sparse_save_mode_still_constructs() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _joiner_socket, _host_addr, joiner_addr) =
+        crate::common::create_channel_pair();
+
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_save_mode(fortress_rollback::SaveMode::Sparse)
         .with_hot_join(true)
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
-        .add_player(PlayerType::Remote(remote_addr_a), PlayerHandle::new(1))?
-        .add_player(PlayerType::Remote(remote_addr_b), PlayerHandle::new(2))?
-        .start_p2p_session(host_socket);
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
 
-    // Assert: rejected by the mesh guard (not some other NotSupported).
-    let operation = match result {
-        Err(FortressError::InvalidRequestStructured {
-            kind: fortress_rollback::InvalidRequestKind::NotSupported { operation },
-        }) => operation,
-        other => panic!(
-            "a hot-join host with two live remote machines must be rejected with NotSupported; got {other:?}"
-        ),
-    };
-    assert!(
-        operation.contains("hot-join") && operation.contains("N>=3"),
-        "rejection must come from the N>=3 hot-join mesh guard; got operation {operation:?}"
-    );
+    Ok(())
+}
+
+/// Mirror scoping (2-machine shapes unaffected): a 2-machine hot-join host
+/// with non-zero input delay still constructs — only the N>=3 serve requires
+/// the zero-delay `S = L` identity.
+#[test]
+fn two_machine_hot_join_host_with_input_delay_still_constructs() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _joiner_socket, _host_addr, joiner_addr) =
+        crate::common::create_channel_pair();
+
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_input_delay(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}
+
+/// Mirror scoping measures MACHINES, not handles: two remote handles sharing
+/// one machine address plus a local player is a 2-machine mesh, so even under
+/// `SaveMode::Sparse` (which an N>=3 mesh would reject) it still constructs.
+#[test]
+fn hot_join_host_couch_coop_sparse_still_constructs() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _remote_socket, _host_addr, remote_addr) =
+        crate::common::create_channel_pair();
+
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(3)?
+        .with_save_mode(fortress_rollback::SaveMode::Sparse)
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(2))?
+        .start_p2p_session(host_socket)?;
+
+    Ok(())
+}
+
+/// Mirror scoping (2-machine shapes unaffected): a hot-join-serving build with
+/// ZERO local players and ONE remote machine (this machine + both remote
+/// handles couch-co-op on one address = 2 machines) still constructs — the
+/// local-player mirror applies only to N>=3 meshes (`npeer_host_with_no_local_player_is_rejected`
+/// pins the same shape at 2 remote machines, where the mirror fires).
+#[test]
+fn two_machine_hot_join_host_with_no_local_player_still_constructs() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, _remote_socket, _host_addr, remote_addr) =
+        crate::common::create_channel_pair();
+
+    let _session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
     Ok(())
 }
 

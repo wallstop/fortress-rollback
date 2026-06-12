@@ -499,6 +499,27 @@ impl<T: Config> InputQueue<T> {
     /// Note: After calling `discard_confirmed_frames(5)`, frames 0-4 are discarded
     /// and frame 5 becomes the new tail (oldest frame in queue).
     pub fn discard_confirmed_frames(&mut self, mut frame: Frame) {
+        // An EMPTY queue holds nothing to discard — return quietly (chunk-N5
+        // noise downgrade, S34 residual 5). A hot-join reactivated queue
+        // (`reset_to_frame`: blanked ring, `length == 0`) is legitimately
+        // empty while the session's confirmed frame still trails the slot's
+        // first post-reactivation input, and every survivor advance in that
+        // window used to land in the offset arm below with an Error-severity
+        // "Discard offset N exceeds queue length 0" violation. Neither arm
+        // below is meaningful on an empty ring: the `frame >=
+        // last_added_frame` arm would fabricate `length = 1` out of a
+        // blanked slot, and the offset arm's `checked_sub(length == 0)`
+        // failure was the reported noise. Skipping is vacuously correct in
+        // every shape (there are no confirmed entries to drop).
+        if self.length == 0 {
+            #[cfg(not(kani))] // Kani: tracing macros explode CBMC state space.
+            tracing::trace!(
+                "discard_confirmed_frames({}): the queue is empty; nothing to discard",
+                frame
+            );
+            return;
+        }
+
         // we only drop frames until the last frame that was requested, otherwise we might delete data still needed
         if !self.last_requested_frame.is_null() {
             frame = cmp::min(frame, self.last_requested_frame);
@@ -1787,6 +1808,43 @@ mod input_queue_tests {
         // Discard all frames (should keep at least the most recent)
         queue.discard_confirmed_frames(Frame::new(100));
         assert_eq!(queue.length, 1);
+    }
+
+    /// Chunk-N5 noise downgrade (S34 residual 5): discarding on an EMPTY
+    /// queue is a quiet no-op — nothing exists to discard, so no arm runs
+    /// and no state changes. The reactivation shape (a hot-join reopened
+    /// queue is `reset_to_frame`-blanked to `length == 0` while the
+    /// session's confirmed frame still trails the slot's first
+    /// post-reactivation input) used to land in the offset arm with an
+    /// Error-severity "Discard offset N exceeds queue length 0" violation
+    /// on every survivor advance, and the `frame >= last_added_frame` arm
+    /// would have fabricated `length = 1` out of a blanked slot.
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn discard_confirmed_frames_on_empty_queue_is_quiet_noop() {
+        let mut queue = test_queue(0);
+        queue.reset_to_frame(Frame::new(11));
+        assert_eq!(queue.length, 0, "reset_to_frame blanks the ring");
+        let (head, tail, last_added) = (queue.head, queue.tail, queue.last_added_frame);
+
+        // The reactivation-window shape: discard below the activation frame
+        // (the offset arm's noise trigger pre-downgrade)...
+        queue.discard_confirmed_frames(Frame::new(9));
+        // ...and at/above last_added (the arm that would fabricate
+        // `length = 1` from a blanked slot).
+        queue.discard_confirmed_frames(Frame::new(11));
+
+        assert_eq!(queue.length, 0, "an empty queue stays empty");
+        assert_eq!(
+            (queue.head, queue.tail, queue.last_added_frame),
+            (head, tail, last_added),
+            "the no-op leaves the ring untouched"
+        );
+        // The queue still accepts its repositioned first input normally.
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(11), TestInput { inp: 7 })),
+            Frame::new(11)
+        );
     }
 
     /// Test that discard_confirmed_frames keeps the most recent input accessible

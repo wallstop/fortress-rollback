@@ -1240,8 +1240,12 @@ impl<T: Config> UdpProtocol<T> {
     ) {
         if self.state != ProtocolState::Running {
             // Pre-running protocols have no remote yet — there is nothing to
-            // back-fill toward. The input queue's replicated entries will be
-            // sent normally once the protocol enters Running.
+            // back-fill toward. For the input-delay gap-fill this helper was
+            // built for, the replicated entries WILL be sent normally once
+            // the protocol enters Running; the hot-join activation-window
+            // backfills (whose entries this early return would silently
+            // lose) therefore gate on `is_running()` before calling — see
+            // `P2PSession::backfill_joiner_pending_inputs`.
             return;
         }
         if self.pending_output.len() >= self.protocol_config.pending_output_limit {
@@ -1274,6 +1278,17 @@ impl<T: Config> UdpProtocol<T> {
             return;
         }
         self.pending_output.push_back(endpoint_data);
+    }
+
+    /// Returns the frame of the oldest un-acked pending input, or
+    /// [`Frame::NULL`] when nothing is pending. Consumed by the N-peer
+    /// survivor's reopen-time backfill to decide which activation-window
+    /// frames its organic send stream toward the joiner does not yet cover.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn oldest_pending_input_frame(&self) -> Frame {
+        self.pending_output
+            .front()
+            .map_or(Frame::NULL, |input| input.frame)
     }
 
     /// Returns how many additional entries can be appended to `pending_output`
@@ -2346,6 +2361,20 @@ impl<T: Config> UdpProtocol<T> {
     #[cfg(all(test, feature = "hot-join"))]
     pub(crate) fn set_received_join_aborted_for_test(&mut self, body: JoinAborted) {
         self.received_join_aborted = Some(body);
+    }
+
+    /// Test seam: stage a received `StateSnapshot` (see
+    /// [`set_received_reactivate_slot_for_test`](Self::set_received_reactivate_slot_for_test)).
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn set_received_snapshot_for_test(&mut self, body: StateSnapshot) {
+        self.received_snapshot = Some(body);
+    }
+
+    /// Test seam: reads whether this endpoint currently defers (ignores)
+    /// incoming `Input` messages — pins the joiner-side un-defer contract.
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn defers_input_processing(&self) -> bool {
+        self.defer_input_processing
     }
 
     /// Sets whether this endpoint defers (ignores) incoming `Input` messages.
@@ -6287,6 +6316,8 @@ mod tests {
             frame: Frame::new(42),
             num_players: 2,
             state_bytes: vec![1, 2, 3, 4],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
             checksum: Some(0xABCD),
         };
 
@@ -6351,6 +6382,8 @@ mod tests {
             frame: Frame::new(10),
             num_players: 2,
             state_bytes: vec![9, 9, 9],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
             checksum: None,
         };
 
@@ -6389,6 +6422,8 @@ mod tests {
             frame: Frame::new(1),
             num_players: 2,
             state_bytes: vec![1],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
             checksum: None,
         });
         protocol.send_state_snapshot_ack(Frame::new(1));
@@ -6420,6 +6455,8 @@ mod tests {
                 frame: Frame::new(7),
                 num_players: 2,
                 state_bytes: vec![1, 2, 3, 4],
+                bridge_inputs: Vec::new(),
+                bridge_statuses: Vec::new(),
                 checksum: Some(0xABCD),
             }),
         );

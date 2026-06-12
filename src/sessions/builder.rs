@@ -396,12 +396,24 @@ impl<T: Config> SessionBuilder<T> {
     /// [`add_reserved_player`](Self::add_reserved_player) and
     /// [`start_hot_join_session`](Self::start_hot_join_session).
     ///
-    /// While a join is in flight the solo host **pauses** (its
+    /// While a join is in flight the serving host **pauses** (its
     /// [`advance_frame`](P2PSession::advance_frame) returns an empty request set
     /// and the simulation does not advance) for the duration of the ~1–2 RTT
     /// handshake; it resumes automatically once the join completes or the serve
-    /// times out. This is safe in the 2-peer reserved-slot scope and bounds the
-    /// handshake. Keep polling/advancing during the pause.
+    /// times out. In the 2-peer shape the host runs solo, so the pause is
+    /// trivially safe; in an N-peer mesh (3+ machines) the pause is what caps
+    /// every survivor's confirmed frame at the snapshot frame while the mesh
+    /// agrees on the reactivation. Keep polling/advancing during the pause.
+    ///
+    /// # N-peer meshes (3+ machines)
+    ///
+    /// Serving hot-joins in a mesh of 3 or more machines is supported. The
+    /// session start methods enforce three build-time requirements on an
+    /// N-peer serving host (mirrors of the runtime serve gates, so an
+    /// unservable configuration fails at build instead of stalling every
+    /// join): [`SaveMode::EveryFrame`], zero
+    /// input delay, and at least one local player. See
+    /// [`start_p2p_session`](Self::start_p2p_session) for the exact errors.
     ///
     /// # Recovery from an abandoned join
     ///
@@ -496,18 +508,26 @@ impl<T: Config> SessionBuilder<T> {
         Ok(self)
     }
 
-    /// Overrides the host-side hot-join **serve timeout**, in
+    /// Overrides the hot-join **serve timeout**, in
     /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls.
     ///
-    /// This is the maximum number of polls a host keeps a single in-flight serve
-    /// open (re-sending the cached snapshot each poll) before aborting it and
-    /// resuming solo with the slot still reserved. Defaults to
+    /// On the **host side** (a session built with
+    /// [`add_reserved_player`](Self::add_reserved_player) /
+    /// [`with_hot_join`](Self::with_hot_join)), this is the maximum number of
+    /// polls a host keeps a single in-flight serve open (re-sending the
+    /// cached snapshot each poll) before aborting it and resuming solo with
+    /// the slot still reserved. Defaults to
     /// `DEFAULT_HOT_JOIN_SERVE_TIMEOUT_POLLS` (600 polls). Larger values tolerate
     /// slower or lossier joiners; smaller values free the paused host sooner.
     ///
-    /// Only meaningful on the host side (a session built with
-    /// [`add_reserved_player`](Self::add_reserved_player) /
-    /// [`with_hot_join`](Self::with_hot_join)); it is inert on a joiner session.
+    /// On an **N-peer joiner** session (a
+    /// [`start_hot_join_session`](Self::start_hot_join_session) build with 2+
+    /// distinct remote machines), the same knob bounds the **buffered-attempt
+    /// wait**: the maximum number of its own polls a joiner holds a buffered
+    /// snapshot while waiting for the mesh-wide join commit. Past the budget
+    /// the joiner discards the buffer and tears down terminally (the app
+    /// observes the coordinator `Disconnected` event and retries with a
+    /// fresh session). It is inert on a 2-peer joiner session.
     ///
     /// This is feature-gated behind the `hot-join` feature.
     ///
@@ -1056,11 +1076,23 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Sets a custom observer for specification violations.
     ///
-    /// When a violation occurs during session operation (e.g., frame sync issues,
-    /// input queue anomalies, checksum mismatches), it will be reported to this observer.
-    /// This enables programmatic monitoring, custom logging, or test assertions.
+    /// **Current routing (varies by session type):**
     ///
-    /// If no observer is set, violations are logged via the `tracing` crate by default.
+    /// - [`SpectatorSession`]: violations during
+    ///   session operation (e.g. frame sync issues, input anomalies) are
+    ///   reported to this observer, enabling programmatic monitoring, custom
+    ///   logging, or test assertions. With no observer set they are logged
+    ///   via the `tracing` crate ([`TracingObserver`]).
+    /// - [`P2PSession`] and [`SyncTestSession`]:
+    ///   violation reporting currently goes to the `tracing`-backed default
+    ///   observer ([`TracingObserver`] — `warn!`/`error!` events)
+    ///   regardless of this setting; the per-session observer is carried
+    ///   and exposed through the session's `violation_observer()` accessor,
+    ///   but the violation paths of these session types do not invoke it
+    ///   yet. Routing their violations to the per-session observer is
+    ///   tracked future work.
+    ///
+    /// [`TracingObserver`]: crate::telemetry::TracingObserver
     ///
     /// # Example
     ///
@@ -1304,11 +1336,29 @@ impl<T: Config> SessionBuilder<T> {
     /// - Returns [`InvalidRequestKind::NotSupported`] if this host serves
     ///   hot-joins (`with_hot_join(true)` or any reserved slot) in a mesh of 3
     ///   or more machines (this local host plus two or more distinct remote
-    ///   machine addresses): N-peer hot-join reactivation is not yet
-    ///   implemented and is rejected at build time rather than silently
-    ///   desyncing. Machines are counted per network address, so 2-machine
-    ///   couch co-op (multiple remote handles sharing one address) is
-    ///   unaffected. Requires the `hot-join` feature.
+    ///   machine addresses) and any **N-peer build requirement** is violated.
+    ///   N-peer hot-join is supported; serving it requires — mirroring the
+    ///   runtime serve gates, so a configuration that could never serve a
+    ///   join fails at build instead of at every join request:
+    ///   - `SaveMode::EveryFrame` (the snapshot frame must equal the
+    ///     last-sent frame, which only every-frame saving guarantees);
+    ///   - zero input delay (non-zero delay makes the gossiped last-input
+    ///     frames run ahead of the simulation, so no correct snapshot frame
+    ///     exists);
+    ///   - at least one local player (the serve pause caps the survivors via
+    ///     the local slots' gossiped last-input frames).
+    ///
+    ///   These are **build-time checks only**; the mirrored runtime serve
+    ///   gates re-check every join request, so a requirement broken later at
+    ///   runtime (e.g. raising the input delay via
+    ///   [`P2PSession::set_input_delay`]) pauses join serving — each join
+    ///   request is refused with a Warning-severity violation until the
+    ///   requirement holds again. Bounded and desync-free; see
+    ///   `set_input_delay`'s hot-join section for the delay case.
+    ///
+    ///   Machines are counted per network address, so 2-machine couch co-op
+    ///   (multiple remote handles sharing one address) is unaffected by these
+    ///   requirements. Requires the `hot-join` feature.
     pub fn start_p2p_session(
         self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
@@ -1330,28 +1380,53 @@ impl<T: Config> SessionBuilder<T> {
             .into());
         }
 
-        // Reject N>=3 hot-join meshes at build time. Hot-join is correct only in
-        // the 2-machine scope today: an N>=3 joiner registers more than one
-        // surviving peer but the joiner only un-defers the single host endpoint
-        // (every other survivor stays deferred forever, dropping their inputs),
-        // and on the host side only the survivor that received the JoinRequest
-        // reopens the dropped slot while the others never agree on an activation
-        // frame -- both are silent N>=3 desyncs. Converting them into a clear
-        // error here is far better than a silent divergence. The mesh machine
-        // count is `1` (this local host) plus the distinct remote machine count
-        // (which already includes reserved hot-join slots; see
-        // `distinct_remote_machine_count`). Full N-peer hot-join (per-remote
-        // un-defer + cross-survivor `ReactivateSlot` coordination) is tracked in
-        // PLAN.md Feature 8 (`specs/tla/NPeerReactivation.tla`).
+        // N-peer (3+ machine) build requirements — BUILD-TIME MIRRORS of the
+        // runtime serve gates in `try_open_npeer_serve` (S20 guard lift,
+        // chunk N5). The runtime gates stay as per-serve defense in depth;
+        // these mirrors exist for fail-at-build UX: each violated requirement
+        // would make the runtime gate refuse EVERY join request (a
+        // configuration failure that repeats its violation forever and can
+        // never complete a join), so reject it here with a clear error
+        // instead. Scoped exactly to the shapes that serve N-peer hot-joins:
+        // a host with serving enabled in a mesh of 3+ machines (`1` local
+        // machine plus the distinct remote machine count, which already
+        // includes reserved slots; see `distinct_remote_machine_count`).
+        // 2-machine shapes are completely unaffected.
         #[cfg(feature = "hot-join")]
         if self.accept_hot_join || !self.reserved_slots.is_empty() {
             let mesh_machines = 1 + self.distinct_remote_machine_count();
             if mesh_machines >= 3 {
-                return Err(InvalidRequestKind::NotSupported {
-                    operation:
-                        "hot-join in an N>=3 mesh (3+ machines); hot-join is currently supported only for 2 machines (one local host + one remote/reserved peer). Use a peer/num_players count compatible with 2-peer hot-join, or disable hot-join. N-peer hot-join is tracked in PLAN.md Feature 8.",
+                // Mirror of runtime gate R2a: `S = L = last_saved_frame`
+                // requires saved state at exactly the last-sent frame, which
+                // only `SaveMode::EveryFrame` guarantees.
+                if self.save_mode != SaveMode::EveryFrame {
+                    return Err(InvalidRequestKind::NotSupported {
+                        operation:
+                            "hot-join serving host in an N>=3 mesh without SaveMode::EveryFrame; the N-peer snapshot serve requires saved state at exactly the last-sent frame (mirrors the runtime serve gate, which would refuse every join request under any other save mode)",
+                    }
+                    .into());
                 }
-                .into());
+                // Mirror of runtime gate R2b (the `S = L` identity): with
+                // input delay `d > 0` the gossiped last-input frames run `d`
+                // ahead of the simulation, so the survivor cap would sit at a
+                // frame the coordinator has not simulated.
+                if self.input_delay != 0 {
+                    return Err(InvalidRequestKind::NotSupported {
+                        operation:
+                            "hot-join serving host in an N>=3 mesh with non-zero input delay; the N-peer snapshot serve requires every local slot's last-sent frame to equal the snapshot frame (mirrors the runtime serve gate, which non-zero input delay would fail on every join request)",
+                    }
+                    .into());
+                }
+                // Mirror of runtime gate R2b (the survivor cap): a
+                // coordinator with no local players gossips no last-input cap
+                // at all, so nothing pins the survivors during the pause.
+                if self.local_players == 0 {
+                    return Err(InvalidRequestKind::NotSupported {
+                        operation:
+                            "hot-join serving host in an N>=3 mesh with no local player; the N-peer serve pause caps survivors via the local slots' gossiped last-input frames (mirrors the runtime serve gate, which would refuse every join request with no local player)",
+                    }
+                    .into());
+                }
             }
         }
 
@@ -1359,20 +1434,22 @@ impl<T: Config> SessionBuilder<T> {
     }
 
     /// Test-only escape hatch that constructs a [`P2PSession`] **skipping every
-    /// hot-join build-time guard in [`start_p2p_session`]** — both the N>=3
-    /// hot-join mesh guard *and* the lockstep (`max_prediction == 0`) hot-join
-    /// guard. It jumps straight to [`start_p2p_session_after_mesh_guard`] after
-    /// only the shared [`validate_rollback_config`] step, so neither hot-join
-    /// rejection fires.
+    /// hot-join build-time guard in [`start_p2p_session`]** — the N-peer
+    /// (N>=3 mesh) build-requirement MIRRORS of the runtime serve gates
+    /// (`SaveMode::EveryFrame`, zero input delay, at least one local player)
+    /// *and* the lockstep (`max_prediction == 0`) hot-join guard. It jumps
+    /// straight to [`start_p2p_session_after_mesh_guard`] after only the
+    /// shared [`validate_rollback_config`] step, so no hot-join rejection
+    /// fires.
     ///
-    /// The public API rejects building a hot-join-serving host in a mesh of 3+
-    /// machines (see `start_p2p_session`), because the session-layer N-peer
-    /// reactivation is unimplemented. A few unit tests must still exercise the
-    /// lower-level host machinery (e.g. `poll_hot_join`'s cross-endpoint
-    /// join-request ownership gate) in the otherwise-unreachable N>=3 shape;
-    /// they use this to assemble that internal state without re-implementing the
-    /// endpoint-creation loop. It is `#[cfg(test)]` only — never part of the
-    /// public surface.
+    /// N-peer hot-join is publicly supported (the S20 guard lifted in chunk
+    /// N5); this bypass now exists for harness-staging flexibility: the
+    /// in-crate mesh tests stage shapes the mirrors would reject at build
+    /// (e.g. lockstep hosts for the serve-refusal unit tests) and shapes
+    /// whose gate behavior is exercised at RUNTIME instead (the mirrored
+    /// `try_open_npeer_serve` gates remain per-serve defense in depth, and
+    /// several tests pin exactly those runtime refusals). It is
+    /// `#[cfg(test)]` only — never part of the public surface.
     ///
     /// [`start_p2p_session_after_mesh_guard`]: Self::start_p2p_session_after_mesh_guard
     /// [`validate_rollback_config`]: Self::validate_rollback_config
@@ -1475,12 +1552,15 @@ impl<T: Config> SessionBuilder<T> {
     }
 
     /// Consumes the builder to construct a hot-joiner [`P2PSession`] that joins a
-    /// running host's reserved slot.
+    /// running session's reserved slot.
     ///
-    /// The joiner is built as a 2-peer-style session: the calling side is the
-    /// **local** player and the `host` is its single **remote** at `host_addr`.
-    /// Register exactly one local player (the slot being filled) and the host as
-    /// a remote player before calling this. The session starts in
+    /// Register exactly one **local** player (the slot being filled) and every
+    /// surviving peer as a **remote** player before calling this; the `host` at
+    /// `host_addr` is the (already-registered) remote that serves the snapshot.
+    /// With one distinct remote machine the joiner runs the 2-peer flow (the
+    /// host is its single remote); with two or more it runs the N-peer
+    /// buffer-then-apply flow (see "N-peer meshes" below). Either way the
+    /// session starts in
     /// [`SessionState::HotJoining`](crate::SessionState::HotJoining); it
     /// synchronizes with the host, requests a state snapshot, loads it (emitting a
     /// [`LoadGameState`](crate::FortressRequest::LoadGameState) on the first
@@ -1496,24 +1576,53 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Errors
     ///
+    /// In the order the checks run:
+    ///
+    /// - Returns the same configuration errors as
+    ///   [`start_p2p_session`](Self::start_p2p_session) (the shared
+    ///   rollback-configuration validation runs first).
     /// - Returns [`InvalidRequestKind::NotSupported`] if the configured input
     ///   delay is non-zero.
     /// - Returns [`InvalidRequestKind::NotSupported`] if `max_prediction == 0`
     ///   (lockstep): the host never saves state, so it could never serve a
     ///   snapshot and the joiner would hang in
     ///   [`HotJoining`](crate::SessionState::HotJoining) forever.
+    /// - Returns an error if exactly one local player is not registered.
+    /// - Returns the same player-count errors as
+    ///   [`start_p2p_session`](Self::start_p2p_session) (every slot must be
+    ///   registered).
     /// - Returns [`InvalidRequestKind::NotSupported`] if more than one distinct
-    ///   remote machine is registered (an N>=3-mesh joiner): a joiner is only
-    ///   supported for 2 machines today (register exactly one remote, the
-    ///   host). Spectators are not counted, and several remote handles sharing
-    ///   one address (couch co-op) count as a single machine.
-    /// - Returns the same player-count / configuration errors as
-    ///   [`start_p2p_session`](Self::start_p2p_session).
-    /// - Returns an error if exactly one local player is not registered, or if
-    ///   the host endpoint cannot be created/synchronized.
+    ///   remote machine is registered (an N>=3-mesh joiner, supported) without
+    ///   `SaveMode::EveryFrame`: the N-peer joiner's rollback baseline is the
+    ///   bridged snapshot frame, so every-frame saving is required on the
+    ///   joining side too. Spectators are not counted toward the machine
+    ///   count, and several remote handles sharing one address (couch co-op)
+    ///   count as a single machine.
+    /// - Returns an error if a remote endpoint cannot be created.
+    ///
+    /// # N-peer meshes (3+ machines)
+    ///
+    /// Joining a mesh of 3 or more machines is supported: register every
+    /// surviving peer as a remote (the host you pass as `host_addr` plus each
+    /// other survivor) and the one local slot being filled. The joiner then
+    /// runs the N-peer buffer-then-apply lifecycle: it buffers the host's
+    /// snapshot, applies it only on the mesh-wide join commit, bridges one
+    /// frame from the snapshot, and contributes real inputs from the
+    /// activation frame.
+    ///
+    /// # Spectators on a joiner
+    ///
+    /// A hot-joined session may register its own spectator endpoints; its
+    /// confirmed-input stream toward them starts at the **loaded snapshot
+    /// frame** (the earliest frame the joiner can serve — frames below it
+    /// exist nowhere on a mid-game joiner). Note that a stock
+    /// [`SpectatorSession`] anchors its simulation
+    /// at frame 0 and therefore cannot consume a mid-game stream; attach
+    /// spectators that must replay from the beginning to a peer that ran
+    /// from frame 0.
     #[cfg(feature = "hot-join")]
     pub fn start_hot_join_session(
-        mut self,
+        self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
         host_addr: T::Address,
     ) -> Result<P2PSession<T>, FortressError> {
@@ -1558,20 +1667,104 @@ impl<T: Config> SessionBuilder<T> {
             .into());
         }
 
-        // Reject an N>=3 joiner at build time. A 2-peer joiner has exactly one
-        // remote machine (the host). With 2+ distinct remote machines the
-        // joiner would register a deferred endpoint per survivor, but
-        // `poll_hot_join_joiner` un-defers only the single host endpoint after
-        // applying the snapshot -- every other survivor endpoint stays deferred
-        // forever and the joiner silently drops all of their inputs (a Critical
-        // N>=3 desync). Spectators do not count (they are observers, not mesh
-        // peers; `distinct_remote_machine_count` excludes them), and couch co-op
-        // (several remote handles sharing one address) is one machine and is
-        // allowed. Full N-peer hot-join is tracked in PLAN.md Feature 8.
-        if self.distinct_remote_machine_count() > 1 {
+        // N>=3-mesh joiners (2+ distinct remote machines) are supported (S20
+        // guard lift, chunk N5); the role is derived in the shared tail
+        // below. No further joiner-side mirrors are needed here: the
+        // zero-input-delay and lockstep requirements above already apply to
+        // ALL joiners, the joiner has exactly one local player by
+        // construction (`local_player_handle_required`), and the N-peer
+        // `SaveMode::EveryFrame` requirement lives in the shared tail
+        // (`finish_hot_join_session`) so it also covers the test bypass.
+        self.finish_hot_join_session(socket, host_addr, local_handle)
+    }
+
+    /// Test-only escape hatch that constructs a hot-joiner [`P2PSession`]
+    /// **skipping every joiner-side build-time guard in
+    /// [`start_hot_join_session`]** — the input-delay and lockstep guards —
+    /// after only the shared [`validate_rollback_config`] step plus the
+    /// local-handle derivation, mirroring
+    /// [`start_p2p_session_skip_hot_join_build_guards_for_test`].
+    ///
+    /// N-peer (N>=3 mesh) joiners are publicly supported (the S20 guard
+    /// lifted in chunk N5), so this bypass no longer changes which mesh
+    /// shapes are constructible; it exists for harness-staging flexibility —
+    /// the in-crate mesh tests stage joiner shapes the public guards would
+    /// reject at build (e.g. lockstep joiners for the request-refusal unit
+    /// tests) without re-implementing the endpoint-creation loop. It is
+    /// `#[cfg(test)]` only — never part of the public surface.
+    ///
+    /// NOT skipped: the N-peer save-mode gate (`SaveMode::EveryFrame`
+    /// required for the N-peer joiner role) lives in the shared tail
+    /// [`finish_hot_join_session`](Self::finish_hot_join_session) and applies
+    /// to this bypass too — it is a correctness invariant of the role, not a
+    /// build-shape guard the mesh tests need to circumvent.
+    ///
+    /// [`start_hot_join_session`]: Self::start_hot_join_session
+    /// [`start_p2p_session_skip_hot_join_build_guards_for_test`]: Self::start_p2p_session_skip_hot_join_build_guards_for_test
+    /// [`validate_rollback_config`]: Self::validate_rollback_config
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn start_hot_join_session_skip_build_guards_for_test(
+        self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+        host_addr: T::Address,
+    ) -> Result<P2PSession<T>, FortressError> {
+        self.validate_rollback_config()?;
+        let local_handle = self.player_reg.local_player_handle_required()?;
+        self.finish_hot_join_session(socket, host_addr, local_handle)
+    }
+
+    /// Shared construction tail for
+    /// [`start_hot_join_session`](Self::start_hot_join_session), run after the
+    /// joiner-side build-time guards: validates registration completeness,
+    /// derives the joiner role's N-peer discriminator, builds one
+    /// (input-deferred) endpoint per distinct remote address, and hands the
+    /// assembled registry to [`P2PSession::new`] in the joiner role.
+    #[cfg(feature = "hot-join")]
+    fn finish_hot_join_session(
+        mut self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+        host_addr: T::Address,
+        local_handle: PlayerHandle,
+    ) -> Result<P2PSession<T>, FortressError> {
+        // All slots must be registered, same as a normal P2P session.
+        let registered_count = self
+            .player_reg
+            .handles
+            .keys()
+            .filter(|handle| handle.is_valid_player_for(self.num_players))
+            .count();
+        if registered_count < self.num_players {
+            return Err(InvalidRequestKind::NotEnoughPlayers {
+                expected: self.num_players,
+                actual: registered_count,
+            }
+            .into());
+        }
+
+        // The joiner-role discriminator (chunk N4): more than one distinct
+        // remote machine = an N-peer mesh joiner, which buffers its snapshot
+        // and applies only on `JoinCommitted`. Reachable through the public
+        // builder since the S20 guard lift (chunk N5) — `start_hot_join_session`
+        // and the test bypass both derive the role here.
+        let npeer = self.distinct_remote_machine_count() > 1;
+
+        // S34 fix round 2 (MAJOR-A leg 2): the N-peer JOINER role requires
+        // `SaveMode::EveryFrame`, symmetric with the coordinator's serve-side
+        // gate (R2a in `try_open_npeer_serve`, which already refuses to SERVE
+        // under any other mode). A Sparse joiner's first misprediction reloads
+        // `last_saved = S` (its only saved state until the first post-apply
+        // sparse save) and re-simulates the bridge frame; the joiner-side
+        // reactivation floor keeps that replay presentation-correct, but
+        // Sparse remains an unvalidated configuration for the bridge-frame
+        // role — fail closed at the build boundary like the serve side. The
+        // 2-peer joiner stays Sparse-legal: it has no bridge frame and
+        // `last_saved = F` floors every reload at `F`. Lives in this shared
+        // tail (not in `start_hot_join_session`) so it holds for the public
+        // N-peer joiner path (the S20 guard lifted in chunk N5) AND for the
+        // test-only bypass.
+        if npeer && self.save_mode != SaveMode::EveryFrame {
             return Err(InvalidRequestKind::NotSupported {
-                operation:
-                    "start_hot_join_session into an N>=3 mesh (2+ remote machines); hot-join is currently supported only for 2 machines (register exactly one remote: the host). Use a peer/num_players count compatible with 2-peer hot-join. N-peer hot-join is tracked in PLAN.md Feature 8.",
+                operation: "start_hot_join_session as an N>=3-mesh joiner without SaveMode::EveryFrame (the N-peer joiner's rollback baseline is the bridged snapshot frame; hot-join requires SaveMode::EveryFrame on both the serving and the joining side)",
             }
             .into());
         }
@@ -1617,6 +1810,7 @@ impl<T: Config> SessionBuilder<T> {
             joiner: Some(crate::sessions::p2p_session::JoinerStateInit {
                 local_handle,
                 host_addr,
+                npeer,
             }),
             serve_timeout_polls: self.hot_join_serve_timeout_polls,
             max_snapshot_wire_bytes: self.hot_join_max_snapshot_wire_bytes,

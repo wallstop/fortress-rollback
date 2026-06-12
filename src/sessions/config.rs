@@ -1397,10 +1397,12 @@ impl std::fmt::Display for SaveMode {
 /// transitions to [`crate::SessionState::Synchronizing`] and stops producing
 /// confirmed frames). A halted peer is no longer a live participant, so this is
 /// not a desync among the peers that remain live — but it is almost never the
-/// intended configuration. (Note that under the `hot-join` feature, a
-/// reactivation-serving mesh is already restricted to two machines at build
-/// time, so the multi-survivor *rejoin* inconsistency this would otherwise
-/// imply cannot arise.)
+/// intended configuration. (Under the `hot-join` feature this matters twice:
+/// an N-peer mesh *rejoin* requires the surviving peers to agree on the
+/// dropped slot's freeze and to acknowledge the reopen, so survivors that
+/// disagree about who is live — exactly what mixed policies produce — are
+/// also the configuration most likely to leave the slot un-rejoinable.
+/// Configure every peer identically.)
 ///
 /// # Example
 ///

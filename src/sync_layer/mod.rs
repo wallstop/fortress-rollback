@@ -786,6 +786,23 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
+    /// Returns the armed [`ReactivationFloor`]'s activation frame `F` for
+    /// `handle`, or `None` when no floor is armed (the slot was never
+    /// hot-join reactivated on this session).
+    ///
+    /// Consumed by the session's chunk-N5 noise downgrade: an out-of-sequence
+    /// remote input STRICTLY BELOW an armed floor is a legitimate
+    /// pre-activation replay (stale retransmits of frames the freeze/bridge
+    /// already covers) and is dropped at trace level instead of reporting an
+    /// Error-severity violation.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn reactivation_floor_activation(&self, handle: PlayerHandle) -> Option<Frame> {
+        self.reactivation_floors
+            .get(handle.as_usize())
+            .and_then(Option::as_ref)
+            .map(|floor| floor.activation_frame)
+    }
+
     /// Reactivates a frozen/reserved slot at game frame `frame` (host side).
     ///
     /// Used by the host to reactivate a slot when a peer hot-joins, so the slot

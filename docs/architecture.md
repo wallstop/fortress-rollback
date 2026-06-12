@@ -885,6 +885,7 @@ The codec module provides centralized, deterministic serialization for all netwo
 - **Centralized Configuration**: Single bincode config with fixed-size integers for deterministic message sizes
 - **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
 - **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
+- **Bounded Peer Decode**: `decode_message` validates network `Message` lengths before allocation
 
 ```rust
 use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError};
@@ -893,7 +894,7 @@ use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError}
 let data: u32 = 42;
 let bytes = encode(&data)?;
 
-// Decode from bytes
+// Decode trusted/local bytes
 let (decoded, bytes_read): (u32, _) = decode(&bytes)?;
 debug_assert_eq!(data, decoded);
 
@@ -909,8 +910,9 @@ let len = encode_into(&data, &mut buffer)?;
 | `encode()`        | Encode to new `Vec<u8>`    | Simple/infrequent encoding        |
 | `encode_into()`   | Encode to existing slice   | Hot paths, buffer reuse           |
 | `encode_append()` | Append to existing `Vec`   | Incremental message building      |
-| `decode()`        | Decode with bytes consumed | When you need byte count          |
-| `decode_value()`  | Decode ignoring byte count | Convenience when count not needed |
+| `decode()`        | Decode trusted/local bytes with bytes consumed | Non-peer bytes where count matters |
+| `decode_value()`  | Decode trusted/local bytes ignoring byte count | Convenience when count not needed |
+| `decode_message()` | Decode bounded peer `Message` bytes | Custom socket receive paths |
 
 **Why Fixed-Size Integers:**
 
