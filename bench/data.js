@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781225109355,
+  "lastUpdate": 1781288065276,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "4796ff6618072d5f073f87dc874a1877351f2f52",
-          "message": "Various feedback based on first impl (#69)\n\n## Description\n\nAddressing various pain points based on initial integration\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->\n\n---------\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-01-28T19:35:32-08:00",
-          "tree_id": "d5b21932a313b6fab98ac779c8efd9ed948d8971",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/4796ff6618072d5f073f87dc874a1877351f2f52"
-        },
-        "date": 1769658003199,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 98,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 145,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 504,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 748,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1077,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 104466,
-            "range": "± 518",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27518,
-            "range": "± 828",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 83",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "90b0f1deee669e9751b295ed48d0536f99b5d3b4",
+          "message": "bugfix: Hot Join Correctness (#176)\n\n## Description\n\nThis PR tightens correctness for `hot-join` and N-player mesh behavior,\nwith a focus on preventing silent desyncs under real network conditions.\n\nMain user-facing outcomes:\n\n- Improves hot-join reliability for multi-peer sessions\n(reserved-slot/rejoin flows, mesh convergence, and handshake edge\ncases).\n- Fixes a pre-existing input-queue prediction-entry bug that could skip\nmisprediction checks and cause silent divergence.\n- Fixes pre-existing graceful-drop convergence issues in 3+ player\nsessions by using mesh-aware confirmed-frame gating and better status\npropagation/retransmit behavior.\n- Adds/updates regression coverage for hot-join and mesh-fix scenarios.\n\nIn short: this branch makes mid-session joins and peer-drop recovery\nsignificantly safer and more deterministic in N-player games.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/hot_join.rs` — expanded integration coverage for\nmulti-peer hot-join/rejoin and handshake edge cases\n\n**Manual testing performed:**\n\n- Not run as part of this PR description draft\n\n## Related Issues\n\n- (None linked in branch commits)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> Changes hot-join session semantics, snapshot wire format, and\nrollback/input presentation for multi-machine meshes; mistakes here\ncause silent desync rather than obvious API breaks.\n> \n> **Overview**\n> **N-peer hot-join (3+ machines)** is no longer rejected at build time.\nServing hosts and mesh joiners are documented and gated with mirrored\nrequirements (`SaveMode::EveryFrame`, zero input delay, local player on\ncoordinator; every-frame saving on N-peer joiners). `StateSnapshot`\ngains **`bridge_inputs`** and **`bridge_statuses`** so the coordinator\ncan ship confirmed inputs and per-slot connection state at snapshot\nframe `S`; empty vs non-empty blobs distinguish 2-peer vs N-peer shapes.\nNew paths **`capture_npeer_snapshot_with_max_wire_bytes`**,\n**`apply_npeer_snapshot`**, and bridge encode/decode simulate the\none-frame bridge to activation `F`, freeze carried-disconnected slots,\nderive bridge `InputStatus` like survivors, and arm a **reactivation\nfloor** on the joining slot so sparse rollbacks replay the original\nbridge presentation.\n> \n> **Wire safety and decoding:** `decode_message` bounds `bridge_inputs`\n/ `bridge_statuses` before reserve; per-player input reconstruction uses\n**`decode_bounded_with_consumed`** instead of unbounded `codec::decode`.\nDocs and CI now steer peer bytes away from generic decode helpers.\n> \n> **Noise / correctness:** `discard_confirmed_frames` on an **empty**\ninput queue (e.g. post hot-join reactivation) is a trace-level no-op\ninstead of an error violation.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n282bf9f388578c5a97256c8d8c1fd8fe63ddd744. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-12T11:09:08-07:00",
+          "tree_id": "71bda66d613259b3b97467c192979bc86139856c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/90b0f1deee669e9751b295ed48d0536f99b5d3b4"
+        },
+        "date": 1781288063661,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 107,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 154,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 437,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 704,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1010,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 136638,
+            "range": "± 2942",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45444,
+            "range": "± 191",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1562,
+            "range": "± 89",
             "unit": "ns/iter"
           },
           {
