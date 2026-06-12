@@ -55,9 +55,11 @@ SPECS=(
     "InputQueue"
     "Concurrency"
     "Rollback"
+    "ChecksumExchange"
     "TimeSync"
     "SpectatorSession"
     "PeerDrop"
+    "NPeerReactivation"
 )
 
 # Track results
@@ -215,7 +217,7 @@ verify_spec() {
 
         # Extract stats
         local states
-        states=$(grep -o '[0-9][0-9]* states generated' "$output_file" | head -1 || echo "")
+        states=$(grep -oE '[0-9]+ states generated, [0-9]+ distinct states found' "$output_file" | tail -1 || echo "")
         if [[ -n "$states" ]]; then
             echo "  $states"
         fi

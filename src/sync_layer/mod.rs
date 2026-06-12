@@ -175,6 +175,55 @@ where
     /// - **formal-spec.md**: INV-1 requires monotonic increase (except rollback)
     current_frame: Frame,
     input_queues: ProofVec<InputQueue<T>>,
+    /// Per-player pre-activation serving floors for reactivated slots
+    /// (N-peer hot-join). `None` until
+    /// [`Self::set_reactivation_floor`] arms a slot; see there for the full
+    /// contract. Never read for 2-peer hot-join or non-hot-join sessions
+    /// (nothing arms it), so their behavior is byte-identical.
+    #[cfg(feature = "hot-join")]
+    reactivation_floors: Vec<Option<ReactivationFloor<T::Input>>>,
+}
+
+/// Pre-activation serving floor for a reactivated slot (N-peer hot-join).
+///
+/// [`InputQueue::reset_to_frame`] blanks the ring below the activation frame
+/// `F`, but a SURVIVOR (unlike the wait-gated coordinator) can still be asked
+/// for frames `< F` after its reopen: a late-arriving misprediction below `F`
+/// rolls the simulation back across them, and a lagging spectator/replay
+/// flush requests their confirmed inputs. Those frames must present EXACTLY
+/// as the original pre-reopen simulation presented them — the agreed frozen
+/// value with `Disconnected` status for frames in `(frozen_bound, F)` — or
+/// fail closed where even that is impossible (frames at or below
+/// `frozen_bound` belonged to the slot's live era, whose real ring history
+/// the reset discarded). Without the floor, a sub-`F` request either leaks
+/// `InputStatus::Predicted` where every non-rolling-back peer simulated
+/// `Disconnected` (silent status divergence) or fails deep inside the queue
+/// (`SynchronizedInputsFailed` / `NoConfirmedInput`) once the joiner's real
+/// inputs occupy the ring.
+///
+/// **Reachability of the `f <= frozen_bound` fail-closed arm (session-33
+/// round-2 review): plain packet loss suffices — it is not adversarial-only.**
+/// A lost-and-mispredicted third-slot input at a frame `<= f0`, still
+/// outstanding when a prompt rejoin reopens the slot, rolls the simulation
+/// back across the discarded live-era window and lands here, producing a
+/// permanent `SynchronizedInputsFailed` halt on that survivor. That is the
+/// intended fail-closed trade (pre-floor this was a silent value
+/// divergence); the longer-term fix is gating the reopen on
+/// `confirmed >= f0` with no pending sub-`f0` misprediction, so the window
+/// can never be rolled across.
+#[cfg(feature = "hot-join")]
+#[derive(Copy, Clone)]
+struct ReactivationFloor<I> {
+    /// The activation frame `F`: frames `< F` take the pre-activation path.
+    activation_frame: Frame,
+    /// The pre-reactivation frozen bound (the slot's agreed freeze frame
+    /// `f0`): frames in `(f0, F)` are served with the frozen value +
+    /// `Disconnected`; frames `<= f0` are unservable (fail closed).
+    frozen_bound: Frame,
+    /// The frozen value, captured when the floor is armed — the reopened
+    /// queue's own tracked value is later overwritten by the joiner's real
+    /// confirms, so it cannot be read lazily.
+    frozen_input: Option<I>,
 }
 
 /// Builds an `InternalErrorStructured`/`IndexOutOfBounds` error tagged with
@@ -253,6 +302,8 @@ impl<T: Config> SyncLayer<T> {
                     current_frame: Frame::new(0),
                     saved_states: SavedStates::new(0),
                     input_queues: ProofVec::new(),
+                    #[cfg(feature = "hot-join")]
+                    reactivation_floors: Vec::new(),
                 }
             },
         }
@@ -284,6 +335,10 @@ impl<T: Config> SyncLayer<T> {
             current_frame: Frame::new(0),
             saved_states,
             input_queues,
+            // alloc-bound: one entry per player; `num_players` is validated
+            // at session construction (mirrors `input_queues` above).
+            #[cfg(feature = "hot-join")]
+            reactivation_floors: (0..num_players).map(|_| None).collect(),
         })
     }
 
@@ -484,7 +539,8 @@ impl<T: Config> SyncLayer<T> {
         queue.confirmed_input(frame)
     }
 
-    /// Freezes the input queue for a specific player.
+    /// Freezes the input queue for a specific player at an **agreed freeze
+    /// frame**.
     ///
     /// After this call, [`Self::add_remote_input`] for `player_handle` is
     /// silently dropped (the underlying [`InputQueue::add_input`] becomes a
@@ -495,6 +551,17 @@ impl<T: Config> SyncLayer<T> {
     /// confirmed input (reported as [`crate::InputStatus::Disconnected`] by
     /// [`Self::synchronized_inputs`]).
     ///
+    /// `freeze_frame` is the session-computed agreed freeze frame `F` (the
+    /// global minimum across all peers of the dropped slot's received frame).
+    /// The queue rolls its `last_confirmed_input` back to the value confirmed at
+    /// `F` (via `InputQueue::freeze_at`) so that **every** survivor — which may
+    /// have received the dropped peer's inputs through different frames under
+    /// packet loss — repeats the identical value, closing the under-loss desync
+    /// for the common case (a staggered-detection discard-before-convergence
+    /// residual remains; see `CHANGELOG.md` / the N0 design notes).
+    /// See `InputQueue::freeze_at` for the full rationale and fail-safe behavior
+    /// when no confirmed input exists at `F`.
+    ///
     /// # Errors
     /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
     /// out of range for this sync layer.
@@ -503,6 +570,7 @@ impl<T: Config> SyncLayer<T> {
     pub(crate) fn freeze_player(
         &mut self,
         player_handle: PlayerHandle,
+        freeze_frame: Frame,
     ) -> Result<(), FortressError> {
         if !player_handle.is_valid_player_for(self.num_players) {
             return Err(FortressError::InvalidPlayerHandle {
@@ -515,8 +583,57 @@ impl<T: Config> SyncLayer<T> {
             .input_queues
             .get_mut(player_handle.as_usize())
             .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
-        queue.freeze();
+        queue.freeze_at(freeze_frame);
         Ok(())
+    }
+
+    /// Re-rolls an **already-frozen** player's frozen value to the value
+    /// confirmed at `frame`, delegating to [`InputQueue::set_frozen_value_at`].
+    ///
+    /// This is the convergence counterpart to [`Self::freeze_player`]. The
+    /// session calls it from `P2PSession::disconnect_player_at_frames` every
+    /// time the disconnect machinery sets or lowers
+    /// `local_connect_status[handle].last_frame` to the global-min agreed freeze
+    /// frame `F`, so the dropped slot's repeated value tracks `F` **down** to
+    /// the value every survivor shares — closing the under-loss desync on the
+    /// direct-detection (own-endpoint timeout, `remove_player`) and re-adjust
+    /// paths that [`Self::freeze_player`] alone cannot reach (it is idempotent
+    /// once frozen). See [`InputQueue::set_frozen_value_at`] for the full
+    /// rationale and fail-safe behavior.
+    ///
+    /// # Infallible by design
+    ///
+    /// Unlike [`Self::freeze_player`], this does **not** return a `Result`. The
+    /// disconnect path must not fail-closed on a re-roll: an out-of-range handle
+    /// or a missing input queue here is logged as a [`ViolationSeverity::Error`]
+    /// violation and the call continues (the queue method itself is a no-op on a
+    /// non-frozen queue and fail-safe on a missing/evicted frame). Bubbling an
+    /// error would add noise to a path whose primary job — marking the slot
+    /// disconnected — has already succeeded by the time this runs.
+    pub(crate) fn set_frozen_value_at(&mut self, player_handle: PlayerHandle, frame: Frame) {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "set_frozen_value_at called with out-of-range handle {} (num_players={}); skipping re-roll",
+                player_handle,
+                self.num_players
+            );
+            return;
+        }
+        let len = self.input_queues.len();
+        let Some(queue) = self.input_queues.get_mut(player_handle.as_usize()) else {
+            let oob = input_queue_oob(player_handle.as_usize(), len);
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "set_frozen_value_at: no input queue for handle {} ({}); skipping re-roll",
+                player_handle,
+                oob
+            );
+            return;
+        };
+        queue.set_frozen_value_at(frame);
     }
 
     /// Unfreezes the input queue for a specific player, the counterpart to
@@ -555,6 +672,117 @@ impl<T: Config> SyncLayer<T> {
             .get_mut(player_handle.as_usize())
             .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
         queue.unfreeze();
+        Ok(())
+    }
+
+    /// Returns whether `player_handle`'s input queue is currently frozen
+    /// (repeating its last confirmed input), or `false` for an out-of-range
+    /// handle.
+    ///
+    /// Used by the N-peer hot-join survivor to fail-closed-validate a
+    /// `ReactivateSlot` directive: only a frozen (reserved/dropped) slot may be
+    /// reopened.
+    #[cfg(feature = "hot-join")]
+    #[must_use]
+    pub(crate) fn player_is_frozen(&self, player_handle: PlayerHandle) -> bool {
+        self.input_queues
+            .get(player_handle.as_usize())
+            .is_some_and(InputQueue::is_frozen)
+    }
+
+    /// Returns `player_handle`'s queue-tracked `last_confirmed_input` (the
+    /// value a frozen queue repeats), or `None` for an out-of-range handle or
+    /// a queue that never confirmed an input.
+    ///
+    /// Used by the N-peer hot-join survivor to capture the agreed frozen value
+    /// **before** reopening a slot, so a later `JoinAborted` can restore it via
+    /// [`Self::refreeze_player_with_value`] even if the reopened queue
+    /// confirmed (and tracked) some of the aborted attempt's real inputs in
+    /// between.
+    #[cfg(feature = "hot-join")]
+    #[must_use]
+    pub(crate) fn player_last_confirmed_input(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Option<T::Input> {
+        self.input_queues
+            .get(player_handle.as_usize())
+            .and_then(InputQueue::last_confirmed_input)
+    }
+
+    /// Re-freezes a reopened slot, restoring the caller-captured pre-reopen
+    /// frozen value — the N-peer hot-join survivor's `JoinAborted` restore.
+    /// Delegates to [`InputQueue::refreeze_with_value`]; see there for why
+    /// [`Self::freeze_player`] (frame-targeted, ring-reading) cannot perform
+    /// this restore and why the value must be captured before the reopen.
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is out
+    /// of range for this sync layer (same validation as [`Self::freeze_player`]).
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn refreeze_player_with_value(
+        &mut self,
+        player_handle: PlayerHandle,
+        value: Option<T::Input>,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let len = self.input_queues.len();
+        let queue = self
+            .input_queues
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        queue.refreeze_with_value(value);
+        Ok(())
+    }
+
+    /// Arms the pre-activation serving floor for a reactivated slot — see
+    /// [`ReactivationFloor`]. Must be called at the moment of reactivation
+    /// (immediately after [`Self::reactivate_player_at_frame`], before any
+    /// input processing): the frozen value is captured from the queue's
+    /// still-preserved `last_confirmed_input`, which the joiner's first real
+    /// confirm would overwrite.
+    ///
+    /// Re-arming (a later reactivation of the same slot) overwrites the
+    /// floor. A subsequent re-freeze deliberately leaves the floor armed:
+    /// frames above the restored frozen bound are then served by the ordinary
+    /// frozen branch before the floor is consulted, and frames at or below it
+    /// keep failing closed exactly as they would have.
+    ///
+    /// # Errors
+    /// Returns [`FortressError::InvalidPlayerHandle`] if `player_handle` is
+    /// out of range for this sync layer.
+    #[cfg(feature = "hot-join")]
+    pub(crate) fn set_reactivation_floor(
+        &mut self,
+        player_handle: PlayerHandle,
+        activation_frame: Frame,
+        frozen_bound: Frame,
+    ) -> Result<(), FortressError> {
+        if !player_handle.is_valid_player_for(self.num_players) {
+            return Err(FortressError::InvalidPlayerHandle {
+                handle: player_handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let frozen_input = self
+            .input_queues
+            .get(player_handle.as_usize())
+            .and_then(InputQueue::last_confirmed_input);
+        let len = self.reactivation_floors.len();
+        let slot = self
+            .reactivation_floors
+            .get_mut(player_handle.as_usize())
+            .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?;
+        *slot = Some(ReactivationFloor {
+            activation_frame,
+            frozen_bound,
+            frozen_input,
+        });
         Ok(())
     }
 
@@ -862,6 +1090,49 @@ impl<T: Config> SyncLayer<T> {
         }
     }
 
+    /// Finds the newest saved frame in the circular buffer that is loadable as a
+    /// rollback target within `[lower_bound, upper_bound]` AND strictly before
+    /// `current_frame`, returning [`Frame::NULL`] when no such state is present.
+    ///
+    /// Both bounds are inclusive. The result is additionally constrained to lie
+    /// strictly in the past (`< current_frame`), since a rollback can only load a
+    /// frame that has already been advanced past. The returned frame, when
+    /// non-NULL, is guaranteed to satisfy [`Self::load_frame`]'s preconditions
+    /// (its cell's stamped frame equals the returned frame), so a subsequent
+    /// `load_frame` call cannot fail with `WrongSavedFrame`.
+    ///
+    /// This is used by sparse-save rollback to locate an *earlier* checkpoint
+    /// when the sole tracked `last_saved_frame` sits ABOVE the rollback target a
+    /// gossip-lowered disconnect demands: the contaminated `last_saved_frame`
+    /// state embeds the dropped peer's pre-convergence inputs, so re-simulating
+    /// from it cannot reproduce the agreed history. The circular buffer often
+    /// still holds the previous sparse checkpoint (taken at or below the agreed
+    /// freeze frame, where the dropped slot's value is identical across
+    /// survivors), and loading that one lets re-simulation converge.
+    pub(crate) fn newest_saved_frame_in_range(
+        &self,
+        lower_bound: Frame,
+        upper_bound: Frame,
+    ) -> Frame {
+        let mut best = Frame::NULL;
+        for cell in self.saved_states.states.iter() {
+            let cell_frame = cell.frame();
+            if cell_frame.is_null() {
+                continue;
+            }
+            if cell_frame < lower_bound
+                || cell_frame > upper_bound
+                || cell_frame >= self.current_frame
+            {
+                continue;
+            }
+            if best.is_null() || cell_frame > best {
+                best = cell_frame;
+            }
+        }
+        best
+    }
+
     /// Loads the gamestate indicated by `frame_to_load`.
     ///
     /// # Errors
@@ -1015,11 +1286,18 @@ impl<T: Config> SyncLayer<T> {
         for (i, con_stat) in connect_status.iter().enumerate() {
             if con_stat.disconnected && con_stat.last_frame < self.current_frame {
                 // Disconnected past last_frame. If the player's queue was
-                // frozen via `freeze_player` (graceful peer drop), surface
-                // the queue's last confirmed input so remaining peers see
-                // the dropped peer's most recent good input rather than a
-                // default value. For non-frozen disconnects (legacy halt
-                // path) keep returning the default to preserve back-compat.
+                // frozen via `freeze_player` (graceful peer drop), surface the
+                // queue's frozen `last_confirmed_input` rather than a default
+                // value. After the under-loss convergence fix this value is the
+                // dropped peer's input at the **agreed freeze frame `F`** (the
+                // global minimum across survivors of the dropped slot's received
+                // frame), which `set_frozen_value_at` rolls every survivor to.
+                // Under packet loss `F` may be EARLIER than this peer's own
+                // most-recently-received input — surfacing the agreed-frame
+                // value (not the most-recent one) is exactly what keeps every
+                // survivor's confirmed history byte-identical. For non-frozen
+                // disconnects (legacy halt path) keep returning the default to
+                // preserve back-compat.
                 let queue = self.input_queues.get(i)?;
                 let value = if queue.is_frozen() {
                     queue.last_confirmed_input().unwrap_or_default()
@@ -1028,6 +1306,35 @@ impl<T: Config> SyncLayer<T> {
                 };
                 inputs.push((value, InputStatus::Disconnected));
             } else {
+                // Reactivation floor (N-peer hot-join): a reactivated slot's
+                // ring history below its activation frame was blanked by the
+                // reset, and the slot's status no longer routes those frames
+                // through the frozen branch above. A rollback crossing them
+                // must re-simulate them EXACTLY as the original pre-reopen
+                // simulation did — frozen value, `Disconnected` status — or
+                // fail closed where even that is impossible. See
+                // [`ReactivationFloor`].
+                #[cfg(feature = "hot-join")]
+                if let Some(floor) = self.reactivation_floors.get(i).and_then(Option::as_ref) {
+                    if self.current_frame < floor.activation_frame {
+                        if floor.frozen_bound < self.current_frame {
+                            inputs.push((
+                                floor.frozen_input.unwrap_or_default(),
+                                InputStatus::Disconnected,
+                            ));
+                            continue;
+                        }
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InputQueue,
+                            "synchronized_inputs requested frame {} of reactivated slot {} at or below its pre-reactivation bound {} — the slot's live-era ring history was discarded at reactivation",
+                            self.current_frame,
+                            i,
+                            floor.frozen_bound
+                        );
+                        return None;
+                    }
+                }
                 let queue = self.input_queues.get_mut(i)?;
                 inputs.push(queue.input(self.current_frame)?);
             }
@@ -1043,12 +1350,17 @@ impl<T: Config> SyncLayer<T> {
     /// (the `ContinueWithout` graceful-drop path), and the player is marked
     /// disconnected past their last frame, this method surfaces the queue's
     /// frozen `last_confirmed_input` (encoded into a `PlayerInput` with
-    /// [`Frame::NULL`]) instead of a blank/default input. This keeps the byte
-    /// stream sent to spectators consistent with the input stream remaining
-    /// peers actually simulate (see [`Self::synchronized_inputs`]). For
-    /// non-frozen disconnects (legacy halt path) and for queues that never
-    /// received any confirmed input before being frozen, blank input is still
-    /// returned to preserve back-compat.
+    /// [`Frame::NULL`]) instead of a blank/default input. After the under-loss
+    /// convergence fix this surfaced value is the dropped peer's input at the
+    /// **agreed freeze frame `F`** (the global minimum across survivors of the
+    /// dropped slot's received frame, converged by `set_frozen_value_at`), which
+    /// under packet loss may be EARLIER than this peer's most-recently-received
+    /// input. Surfacing the agreed-frame value — not the most-recent one — is
+    /// what keeps the byte stream sent to spectators consistent with the input
+    /// stream remaining peers actually simulate (see
+    /// [`Self::synchronized_inputs`]). For non-frozen disconnects (legacy halt
+    /// path) and for queues that never received any confirmed input before being
+    /// frozen, blank input is still returned to preserve back-compat.
     pub(crate) fn confirmed_inputs(
         &self,
         frame: Frame,
@@ -1082,6 +1394,28 @@ impl<T: Config> SyncLayer<T> {
                     None => inputs.push(PlayerInput::blank_input(Frame::NULL)),
                 }
             } else {
+                // Reactivation floor (N-peer hot-join): pre-activation frames
+                // of a reactivated slot are served with the captured frozen
+                // value exactly as the frozen branch above served them before
+                // the reopen (a lagging spectator/replay flush is otherwise
+                // unable to drain frames the blanked ring no longer holds).
+                // See [`ReactivationFloor`].
+                #[cfg(feature = "hot-join")]
+                if let Some(floor) = self.reactivation_floors.get(i).and_then(Option::as_ref) {
+                    if frame < floor.activation_frame {
+                        if floor.frozen_bound < frame {
+                            match floor.frozen_input {
+                                Some(input) => inputs.push(PlayerInput {
+                                    frame: Frame::NULL,
+                                    input,
+                                }),
+                                None => inputs.push(PlayerInput::blank_input(Frame::NULL)),
+                            }
+                            continue;
+                        }
+                        return Err(InvalidRequestKind::NoConfirmedInput { frame }.into());
+                    }
+                }
                 inputs.push(queue.confirmed_input(frame)?);
             }
         }
@@ -3227,7 +3561,7 @@ mod kani_sync_layer_proofs {
     fn proof_freeze_player_rejects_invalid_handle() {
         let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(1, 1, 2);
 
-        let result = sync_layer.freeze_player(PlayerHandle::new(2));
+        let result = sync_layer.freeze_player(PlayerHandle::new(2), Frame::NULL);
         kani::assert(result.is_err(), "invalid freeze handle should fail");
         kani::assert(
             sync_layer.current_frame() == Frame::new(0),
@@ -3256,7 +3590,7 @@ mod kani_sync_layer_proofs {
         let confirmed_before = sync_layer.last_confirmed_frame();
         let saved_before = sync_layer.last_saved_frame();
 
-        let result = sync_layer.freeze_player(PlayerHandle::new(0));
+        let result = sync_layer.freeze_player(PlayerHandle::new(0), Frame::NULL);
         kani::assert(result.is_ok(), "valid freeze should succeed");
         kani::assert(
             sync_layer.current_frame() == current_before,
@@ -3298,7 +3632,7 @@ mod kani_sync_layer_proofs {
         let confirmed = sync_layer.confirmed_input(PlayerHandle::new(0), Frame::new(0));
         kani::assert(confirmed.is_ok(), "input should be accepted");
 
-        let freeze = sync_layer.freeze_player(PlayerHandle::new(0));
+        let freeze = sync_layer.freeze_player(PlayerHandle::new(0), Frame::new(0));
         kani::assert(freeze.is_ok(), "freeze should succeed");
         sync_layer.advance_frame();
 
@@ -3396,7 +3730,7 @@ mod hot_join_sync_layer_tests {
 
         assert!(!queue_frozen(&sync_layer, 0));
         sync_layer
-            .freeze_player(PlayerHandle::new(0))
+            .freeze_player(PlayerHandle::new(0), Frame::NULL)
             .expect("freeze valid handle");
         assert!(queue_frozen(&sync_layer, 0));
 
@@ -3432,7 +3766,7 @@ mod hot_join_sync_layer_tests {
         // Freeze player 0 so we can observe reactivation unfreezing it, and
         // capture player 1's queue markers to prove they are untouched.
         sync_layer
-            .freeze_player(PlayerHandle::new(0))
+            .freeze_player(PlayerHandle::new(0), Frame::NULL)
             .expect("freeze valid handle");
         assert!(queue_frozen(&sync_layer, 0));
 

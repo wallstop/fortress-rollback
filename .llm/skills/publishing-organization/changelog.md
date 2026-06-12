@@ -45,10 +45,15 @@
 - **Breaking:** `SessionBuilder::with_input_delay()` now returns `Result<Self, FortressError>` instead of panicking on invalid values
 
 ### Fixed
-- Fixed crash when misprediction detected at frame 0
+- **Pre-existing:** Fixed crash when misprediction detected at frame 0
 ```
 
 Sections: Added, Changed, Deprecated, Removed, Fixed, Security.
+
+**Unreleased-code rule (hook-enforced):** while `[Unreleased]` has an `### Added` section, a
+`### Fixed` entry is only allowed when it fixes behavior that already shipped in a released
+version, self-declared with the `**Pre-existing:**` prefix (mirrors `**Breaking:**`). Fixes to
+the unreleased features themselves must be folded into their `### Added` entry instead.
 
 ## Release Header and Version Sync
 

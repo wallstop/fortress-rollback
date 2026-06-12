@@ -1118,12 +1118,20 @@ fn z3_proof_pending_output_capacity_accepts_gap_fill_delta() {
     });
 }
 
-/// Z3 Proof: Dropped players are excluded from confirmed-frame minimum
+/// Z3 Proof: Mesh-agreed dropped players are excluded from the confirmed-frame
+/// minimum
 ///
-/// Models `P2PSession::confirmed_frame()`: disconnected players do not
-/// participate in the minimum over `ConnectionStatus::last_frame`.
+/// Models `P2PSession::confirmed_frame()` after the N0 freeze barrier: a slot
+/// whose disconnect is **mesh-agreed** (locally disconnected and no running
+/// endpoint still reports it connected — `remote_slot_confirmed_bound`
+/// returns `None`) does not participate in the minimum over
+/// `ConnectionStatus::last_frame`; its frozen input value carries it instead.
+/// (A disconnected slot whose drop is NOT yet mesh-agreed keeps contributing
+/// its barrier bound — that case is covered by the same-instant
+/// bound-soundness proof below,
+/// `z3_proof_confirmed_bound_below_same_instant_subset_overrides`.)
 #[test]
-fn z3_proof_dropped_players_excluded_from_confirmed_min() {
+fn z3_proof_mesh_agreed_dropped_players_excluded_from_confirmed_min() {
     let cfg = Config::new();
     with_z3_config(&cfg, || {
         let solver = Solver::new();
@@ -1140,8 +1148,8 @@ fn z3_proof_dropped_players_excluded_from_confirmed_min() {
             .le(&connected_b_frame)
             .ite(&connected_a_frame, &connected_b_frame);
 
-        // Even if the dropped peer is behind both connected peers, the
-        // confirmed frame remains the min of connected peers only.
+        // Even if the mesh-agreed-dropped peer is behind both connected peers,
+        // the confirmed frame remains the min of the contributing slots only.
         solver.assert(dropped_frame.lt(&connected_a_frame));
         solver.assert(dropped_frame.lt(&connected_b_frame));
         solver.assert(connected_min.eq(&dropped_frame));
@@ -1150,8 +1158,136 @@ fn z3_proof_dropped_players_excluded_from_confirmed_min() {
         assert_eq!(
             check_result,
             SatResult::Unsat,
-            "Z3 should prove dropped players cannot lower confirmed_frame"
+            "Z3 should prove mesh-agreed dropped players cannot lower confirmed_frame"
         );
+    });
+}
+
+/// Z3 Proof: The per-slot confirmed bound never exceeds any SAME-INSTANT
+/// convergence override built from a subset of its own fold terms (N0
+/// freeze-barrier soundness, same-instant scope)
+///
+/// Models `P2PSession::remote_slot_confirmed_bound` in BOTH of its
+/// contributing arms (mirroring GGPO `PollNPlayers`), at a SINGLE instant on
+/// one session, where the per-slot fold terms are the running endpoints'
+/// cached gossiped views (`gossip_1`, `gossip_2` — the N=3 shape: two remote
+/// endpoints besides the slot owner) plus, in the connected arm, the local
+/// view:
+///
+/// ```text
+/// connected slot:                bound = min(local_view, gossip_1, gossip_2)
+/// locally disconnected (pre-     bound = min(gossip_1, gossip_2)
+/// mesh-agreement, the gossip-
+/// only amendment):
+/// ```
+///
+/// **The proven property (same instant):** any override
+/// `update_player_disconnects` can compute from the SAME cached snapshot is
+/// the `min` over a nonempty SUBSET of exactly these terms — a subset because
+/// endpoints can leave the fold (go non-running) between the two reads, and
+/// because the convergence folds the local term only while the slot is
+/// locally connected (the `if local_connected` guard; the disconnected arm
+/// omits it on both sides). For every such subset, `bound <= override`: the
+/// bound is the min over the FULL term set, and the min over any subset can
+/// only be `>=` it. The singleton subsets give the per-term corollary
+/// `bound <= every folded term`. `Frame::NULL` (= -1) needs no special
+/// casing: all terms live in `[-1, +inf)` and `min` preserves the ordering.
+///
+/// # Explicitly OUT of this model (do not over-read the proof)
+///
+/// - **Temporal evolution of the caches.** A cached term can later be mined
+///   DOWN (the both-disconnected `min` arm and the first-disconnect `adopt`
+///   arm of `merge_peer_connect_status`), so "every cached view is `<=` its
+///   owner's eventual converged contribution" is FALSE in general and is
+///   deliberately NOT a premise here. An override computed at a LATER instant
+///   from lowered terms can lie below an EARLIER bound.
+/// - **The N=3 temporal bridge.** At `N == 3` the gap between this
+///   same-instant property and the cross-time guarantee ("confirmation never
+///   outruns any freeze frame the mesh later agrees") is closed by an
+///   operational-ordering fact outside this algebraic model, documented in
+///   `remote_slot_confirmed_bound`: the only packet that can flip the third
+///   party's `queue_connected` for the slot comes from the very endpoint
+///   whose cached term the override would min, and the connect-status merge
+///   refreshes that term BEFORE any fold runs.
+/// - **The `N >= 4` residuals.** The stale-echo freeze (a third survivor
+///   converging on its stale cache of OUR old, lower claim) and the
+///   double-failure relay corner are out-of-model and remain open; they are
+///   documented as residuals in `remote_slot_confirmed_bound`'s rustdoc.
+#[test]
+fn z3_proof_confirmed_bound_below_same_instant_subset_overrides() {
+    /// Asserts, on a fresh solver, that `min(terms)` (the bound) cannot
+    /// exceed the min over any nonempty selected subset of `terms` (the
+    /// same-instant override). `selected[i]` are free Booleans, so one Unsat
+    /// covers every nonempty subset simultaneously. The override is
+    /// characterized (not constructed by nested `ite`) as: a lower bound of
+    /// every selected term that is attained by some selected term.
+    fn assert_bound_below_subset_min(terms: &[Int], label: &str) {
+        let solver = Solver::new();
+
+        for term in terms {
+            solver.assert(term.ge(NULL_FRAME));
+        }
+
+        // bound = min over ALL terms.
+        let mut bound = terms.first().expect("at least one term").clone();
+        for term in terms.iter().skip(1) {
+            bound = bound.le(term).ite(&bound, term);
+        }
+
+        // Free subset selectors; require the subset to be nonempty.
+        let selected: Vec<Bool> = (0..terms.len())
+            .map(|i| Bool::fresh_const(&format!("{label}_selected_{i}")))
+            .collect();
+        let mut nonempty = selected.first().expect("at least one selector").clone();
+        for sel in selected.iter().skip(1) {
+            nonempty = &nonempty | sel;
+        }
+        solver.assert(&nonempty);
+
+        // override = min over the selected terms: a lower bound of every
+        // selected term, attained by at least one selected term.
+        let override_f = Int::fresh_const(&format!("{label}_override"));
+        let mut attained: Option<Bool> = None;
+        for (sel, term) in selected.iter().zip(terms.iter()) {
+            solver.assert(sel.implies(override_f.le(term)));
+            let attains_here = sel & &override_f.eq(term);
+            attained = Some(match attained {
+                Some(so_far) => &so_far | &attains_here,
+                None => attains_here,
+            });
+        }
+        solver.assert(&attained.expect("at least one term"));
+
+        // Counterexample search: the bound exceeds a same-instant override.
+        solver.assert(bound.gt(&override_f));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Z3 should prove the {label} bound never exceeds a same-instant subset-min override"
+        );
+    }
+
+    let cfg = Config::new();
+    with_z3_config(&cfg, || {
+        // --- Connected arm: the fold (and the same-instant convergence,
+        // via `if local_connected`) includes the local view. ---
+        {
+            let local_view = Int::fresh_const("local_view");
+            let gossip_1 = Int::fresh_const("gossip_1");
+            let gossip_2 = Int::fresh_const("gossip_2");
+            assert_bound_below_subset_min(&[local_view, gossip_1, gossip_2], "connected");
+        }
+
+        // --- Locally-disconnected arm (the gossip-only amendment): the local
+        // term is absent from BOTH the bound and the same-instant override
+        // (the same `if local_connected` guard skips it in
+        // `update_player_disconnects`). ---
+        {
+            let gossip_1 = Int::fresh_const("disc_gossip_1");
+            let gossip_2 = Int::fresh_const("disc_gossip_2");
+            assert_bound_below_subset_min(&[gossip_1, gossip_2], "disconnected");
+        }
     });
 }
 

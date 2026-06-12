@@ -1386,6 +1386,22 @@ impl std::fmt::Display for SaveMode {
 /// peer drop on auto-timeout, where the session continues advancing for the
 /// remaining peers after a drop.
 ///
+/// # Configure the same behavior on every peer
+///
+/// All peers in a mesh should be built with the **same** `DisconnectBehavior`
+/// (and use the same disconnect entry point — [`P2PSession::remove_player`]
+/// for graceful drops, [`P2PSession::disconnect_player`] for legacy halt). The
+/// setting is local to each session; mixing policies across peers gives an
+/// asymmetric outcome where some survivors keep advancing
+/// ([`Self::ContinueWithout`]) while others halt ([`Self::Halt`], which
+/// transitions to [`crate::SessionState::Synchronizing`] and stops producing
+/// confirmed frames). A halted peer is no longer a live participant, so this is
+/// not a desync among the peers that remain live — but it is almost never the
+/// intended configuration. (Note that under the `hot-join` feature, a
+/// reactivation-serving mesh is already restricted to two machines at build
+/// time, so the multi-survivor *rejoin* inconsistency this would otherwise
+/// imply cannot arise.)
+///
 /// # Example
 ///
 /// ```

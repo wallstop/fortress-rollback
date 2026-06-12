@@ -226,7 +226,7 @@ For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll(
 
 ### Unreleased code rule (enforced; agent preflight wired)
 
-Never add separate `### Fixed` entries, or non-`**Breaking:**` `### Changed` entries, for code that has not yet been released. Fixes and tweaks to unreleased features must be folded into the existing `### Added` entry describing that feature. Only `**Breaking:**` entries (for already-released types -- e.g., new variants on a non-`#[non_exhaustive]` enum) belong in `### Changed` of `[Unreleased]`. The changelog describes the final shipped state, not intermediate development history.
+Never add separate `### Fixed` entries, or non-`**Breaking:**` `### Changed` entries, for code that has not yet been released. Fixes and tweaks to unreleased features must be folded into the existing `### Added` entry describing that feature. Only `**Breaking:**` entries (for already-released types -- e.g., new variants on a non-`#[non_exhaustive]` enum) belong in `### Changed` of `[Unreleased]`. A fix to behavior that already shipped in a released version DOES get its own `### Fixed` entry, prefixed `**Pre-existing:**` (the self-declaration the hook accepts, mirroring `**Breaking:**`). The changelog describes the final shipped state, not intermediate development history.
 
 Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also runs automatically in `scripts/ci/agent-preflight.py` whenever `CHANGELOG.md` is in the changed set, and as the `changelog-unreleased-rule` pre-commit hook.
 

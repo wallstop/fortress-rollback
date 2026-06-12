@@ -1268,11 +1268,49 @@ impl<T: Config> SessionBuilder<T> {
             .validate_frame_delay(self.input_delay)
     }
 
+    /// Counts the number of distinct *remote machines* (network addresses) the
+    /// registered players resolve to.
+    ///
+    /// This is the per-machine (peer) count, not the player-handle count:
+    /// multiple [`PlayerType::Remote`] handles sharing one address (couch
+    /// co-op on a single remote machine) count once. Spectators are excluded
+    /// (they are observers, not mesh peers). Reserved hot-join slots are
+    /// counted, because [`add_reserved_player`](Self::add_reserved_player)
+    /// registers each reserved slot as a [`PlayerType::Remote`] at the future
+    /// joiner's address — so this measure already subsumes `reserved_slots`
+    /// without double-counting an address that is both reserved and remote.
+    #[cfg(feature = "hot-join")]
+    fn distinct_remote_machine_count(&self) -> usize {
+        let mut addrs = std::collections::BTreeSet::<&T::Address>::new();
+        for player_type in self.player_reg.handles.values() {
+            match player_type {
+                PlayerType::Remote(addr) => {
+                    addrs.insert(addr);
+                },
+                PlayerType::Local | PlayerType::Spectator(_) => (),
+            }
+        }
+        addrs.len()
+    }
+
     /// Consumes the builder to construct a [`P2PSession`] and starts synchronization of endpoints.
     /// # Errors
     /// - Returns a [`FortressError`] if insufficient players have been registered.
+    /// - Returns [`InvalidRequestKind::NotSupported`] if this host serves
+    ///   hot-joins (`with_hot_join(true)` or any reserved slot) while
+    ///   `max_prediction == 0` (lockstep): the host never saves state, so it
+    ///   could never capture a snapshot to serve a joiner. Requires the
+    ///   `hot-join` feature.
+    /// - Returns [`InvalidRequestKind::NotSupported`] if this host serves
+    ///   hot-joins (`with_hot_join(true)` or any reserved slot) in a mesh of 3
+    ///   or more machines (this local host plus two or more distinct remote
+    ///   machine addresses): N-peer hot-join reactivation is not yet
+    ///   implemented and is rejected at build time rather than silently
+    ///   desyncing. Machines are counted per network address, so 2-machine
+    ///   couch co-op (multiple remote handles sharing one address) is
+    ///   unaffected. Requires the `hot-join` feature.
     pub fn start_p2p_session(
-        mut self,
+        self,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Result<P2PSession<T>, FortressError> {
         self.validate_rollback_config()?;
@@ -1292,6 +1330,69 @@ impl<T: Config> SessionBuilder<T> {
             .into());
         }
 
+        // Reject N>=3 hot-join meshes at build time. Hot-join is correct only in
+        // the 2-machine scope today: an N>=3 joiner registers more than one
+        // surviving peer but the joiner only un-defers the single host endpoint
+        // (every other survivor stays deferred forever, dropping their inputs),
+        // and on the host side only the survivor that received the JoinRequest
+        // reopens the dropped slot while the others never agree on an activation
+        // frame -- both are silent N>=3 desyncs. Converting them into a clear
+        // error here is far better than a silent divergence. The mesh machine
+        // count is `1` (this local host) plus the distinct remote machine count
+        // (which already includes reserved hot-join slots; see
+        // `distinct_remote_machine_count`). Full N-peer hot-join (per-remote
+        // un-defer + cross-survivor `ReactivateSlot` coordination) is tracked in
+        // PLAN.md Feature 8 (`specs/tla/NPeerReactivation.tla`).
+        #[cfg(feature = "hot-join")]
+        if self.accept_hot_join || !self.reserved_slots.is_empty() {
+            let mesh_machines = 1 + self.distinct_remote_machine_count();
+            if mesh_machines >= 3 {
+                return Err(InvalidRequestKind::NotSupported {
+                    operation:
+                        "hot-join in an N>=3 mesh (3+ machines); hot-join is currently supported only for 2 machines (one local host + one remote/reserved peer). Use a peer/num_players count compatible with 2-peer hot-join, or disable hot-join. N-peer hot-join is tracked in PLAN.md Feature 8.",
+                }
+                .into());
+            }
+        }
+
+        self.start_p2p_session_after_mesh_guard(socket)
+    }
+
+    /// Test-only escape hatch that constructs a [`P2PSession`] **skipping every
+    /// hot-join build-time guard in [`start_p2p_session`]** — both the N>=3
+    /// hot-join mesh guard *and* the lockstep (`max_prediction == 0`) hot-join
+    /// guard. It jumps straight to [`start_p2p_session_after_mesh_guard`] after
+    /// only the shared [`validate_rollback_config`] step, so neither hot-join
+    /// rejection fires.
+    ///
+    /// The public API rejects building a hot-join-serving host in a mesh of 3+
+    /// machines (see `start_p2p_session`), because the session-layer N-peer
+    /// reactivation is unimplemented. A few unit tests must still exercise the
+    /// lower-level host machinery (e.g. `poll_hot_join`'s cross-endpoint
+    /// join-request ownership gate) in the otherwise-unreachable N>=3 shape;
+    /// they use this to assemble that internal state without re-implementing the
+    /// endpoint-creation loop. It is `#[cfg(test)]` only — never part of the
+    /// public surface.
+    ///
+    /// [`start_p2p_session_after_mesh_guard`]: Self::start_p2p_session_after_mesh_guard
+    /// [`validate_rollback_config`]: Self::validate_rollback_config
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn start_p2p_session_skip_hot_join_build_guards_for_test(
+        self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+    ) -> Result<P2PSession<T>, FortressError> {
+        self.validate_rollback_config()?;
+        self.start_p2p_session_after_mesh_guard(socket)
+    }
+
+    /// Shared construction body for [`start_p2p_session`](Self::start_p2p_session),
+    /// run after the hot-join build-time guards. Builds one endpoint per distinct
+    /// remote / spectator address and hands the assembled registry to
+    /// [`P2PSession::new`].
+    fn start_p2p_session_after_mesh_guard(
+        mut self,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+    ) -> Result<P2PSession<T>, FortressError> {
         // check if all players are added without iterating over the configured
         // player count, which may be intentionally huge.
         let registered_count = self
@@ -1397,6 +1498,15 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// - Returns [`InvalidRequestKind::NotSupported`] if the configured input
     ///   delay is non-zero.
+    /// - Returns [`InvalidRequestKind::NotSupported`] if `max_prediction == 0`
+    ///   (lockstep): the host never saves state, so it could never serve a
+    ///   snapshot and the joiner would hang in
+    ///   [`HotJoining`](crate::SessionState::HotJoining) forever.
+    /// - Returns [`InvalidRequestKind::NotSupported`] if more than one distinct
+    ///   remote machine is registered (an N>=3-mesh joiner): a joiner is only
+    ///   supported for 2 machines today (register exactly one remote, the
+    ///   host). Spectators are not counted, and several remote handles sharing
+    ///   one address (couch co-op) count as a single machine.
     /// - Returns the same player-count / configuration errors as
     ///   [`start_p2p_session`](Self::start_p2p_session).
     /// - Returns an error if exactly one local player is not registered, or if
@@ -1444,6 +1554,24 @@ impl<T: Config> SessionBuilder<T> {
             return Err(InvalidRequestKind::NotEnoughPlayers {
                 expected: self.num_players,
                 actual: registered_count,
+            }
+            .into());
+        }
+
+        // Reject an N>=3 joiner at build time. A 2-peer joiner has exactly one
+        // remote machine (the host). With 2+ distinct remote machines the
+        // joiner would register a deferred endpoint per survivor, but
+        // `poll_hot_join_joiner` un-defers only the single host endpoint after
+        // applying the snapshot -- every other survivor endpoint stays deferred
+        // forever and the joiner silently drops all of their inputs (a Critical
+        // N>=3 desync). Spectators do not count (they are observers, not mesh
+        // peers; `distinct_remote_machine_count` excludes them), and couch co-op
+        // (several remote handles sharing one address) is one machine and is
+        // allowed. Full N-peer hot-join is tracked in PLAN.md Feature 8.
+        if self.distinct_remote_machine_count() > 1 {
+            return Err(InvalidRequestKind::NotSupported {
+                operation:
+                    "start_hot_join_session into an N>=3 mesh (2+ remote machines); hot-join is currently supported only for 2 machines (register exactly one remote: the host). Use a peer/num_players count compatible with 2-peer hot-join. N-peer hot-join is tracked in PLAN.md Feature 8.",
             }
             .into());
         }

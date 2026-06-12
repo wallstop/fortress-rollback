@@ -67,6 +67,16 @@ struct TestResult {
     final_value: i64,
     checksum: u64,
     rollbacks: u32,
+    /// Per-peer count of `FortressEvent::DesyncDetected` events, surfaced as a
+    /// top-level field by the binary. `verify_determinism_n` asserts this is
+    /// zero for every peer: the historical 0%-loss false positive that kept it
+    /// log-only was finding F17 (a prediction episode re-entered at the
+    /// requested frame instead of the queue's first missing frame, silently
+    /// swallowing misprediction comparisons), fixed in S30 in
+    /// `InputQueue::input`. See [`TestResult::desync_count`] and the module
+    /// note above the N-peer tests for the full history.
+    #[serde(default)]
+    desync_detected: u32,
     #[serde(default)]
     error_kind: Option<String>,
     error: Option<String>,
@@ -107,6 +117,21 @@ struct EventSummary {
 }
 
 impl TestResult {
+    /// Number of `DesyncDetected` events this peer observed.
+    ///
+    /// Prefers the top-level `desync_detected` field; falls back to the nested
+    /// `runtime.events.desync_detected` so the count is still available even if
+    /// the top-level field is ever absent (older binary / partial JSON).
+    fn desync_count(&self) -> u32 {
+        if self.desync_detected > 0 {
+            self.desync_detected
+        } else {
+            self.runtime
+                .as_ref()
+                .map_or(0, |r| r.events.desync_detected)
+        }
+    }
+
     /// Returns a diagnostic summary string for debugging test failures
     fn diagnostic_summary(&self) -> String {
         let base = format!(
@@ -165,6 +190,14 @@ struct PeerConfig {
     local_port: u16,
     player_index: usize,
     peer_addr: String,
+    /// Additional remote peer addresses beyond `peer_addr`, in
+    /// ascending-remote-handle order, for N >= 3 meshes; empty for 2-peer.
+    ///
+    /// These are emitted as extra `--peer` args after `peer_addr`, so the full
+    /// ordered remote list this peer sends to the binary is
+    /// `[peer_addr] ++ extra_peer_addrs`. The binary maps that list onto the
+    /// ascending remote handles `(0..num_players).filter(|h| h != player_index)`.
+    extra_peer_addrs: Vec<String>,
     frames: i32,
     packet_loss: f64,
     latency_ms: u64,
@@ -188,6 +221,7 @@ impl Default for PeerConfig {
             local_port: 0,
             player_index: 0,
             peer_addr: String::new(),
+            extra_peer_addrs: Vec::new(),
             frames: 100,
             packet_loss: 0.0,
             latency_ms: 0,
@@ -209,8 +243,8 @@ impl PeerConfig {
     /// Returns a diagnostic summary string for debugging test failures
     fn diagnostic_summary(&self) -> String {
         format!(
-            "port={}, player={}, peer={}, frames={}, loss={:.1}%, latency={}ms±{}ms, delay={}, seed={:?}, reorder={:.1}%, dup={:.1}%, burst={:.1}%x{}, sync={:?}",
-            self.local_port, self.player_index, self.peer_addr, self.frames,
+            "port={}, player={}, peer={}, extra_peers={:?}, frames={}, loss={:.1}%, latency={}ms±{}ms, delay={}, seed={:?}, reorder={:.1}%, dup={:.1}%, burst={:.1}%x{}, sync={:?}",
+            self.local_port, self.player_index, self.peer_addr, self.extra_peer_addrs, self.frames,
             self.packet_loss * 100.0, self.latency_ms, self.jitter_ms, self.input_delay, self.seed,
             self.reorder_rate * 100.0, self.duplicate_rate * 100.0,
             self.burst_loss_prob * 100.0, self.burst_loss_len,
@@ -754,6 +788,7 @@ impl NetworkScenario {
             local_port: port_base,
             player_index: 0,
             peer_addr: format!("127.0.0.1:{}", port_base + 1),
+            extra_peer_addrs: Vec::new(),
             frames: self.frames,
             packet_loss: self.peer1_profile.packet_loss,
             latency_ms: self.peer1_profile.latency_ms,
@@ -773,6 +808,7 @@ impl NetworkScenario {
             local_port: port_base + 1,
             player_index: 1,
             peer_addr: format!("127.0.0.1:{}", port_base),
+            extra_peer_addrs: Vec::new(),
             frames: self.frames,
             packet_loss: self.peer2_profile.packet_loss,
             latency_ms: self.peer2_profile.latency_ms,
@@ -966,6 +1002,14 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
         .arg("--input-delay")
         .arg(config.input_delay.to_string());
 
+    // Emit one additional `--peer` per extra remote address, in order. Combined
+    // with the `--peer` above, the binary receives the full ordered remote list
+    // `[peer_addr] ++ extra_peer_addrs` and maps it onto ascending remote
+    // handles. Empty for 2-peer tests, so their command line is unchanged.
+    for extra_peer in &config.extra_peer_addrs {
+        cmd.arg("--peer").arg(extra_peer);
+    }
+
     if config.packet_loss > 0.0 {
         cmd.arg("--packet-loss").arg(config.packet_loss.to_string());
     }
@@ -1054,6 +1098,7 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                             final_value: 0,
                             checksum: 0,
                             rollbacks: 0,
+                            desync_detected: 0,
                             error_kind: Some("parse".to_string()),
                             error: Some(format!("Failed to parse output: {}", e)),
                             runtime: None,
@@ -1079,6 +1124,7 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                         final_value: 0,
                         checksum: 0,
                         rollbacks: 0,
+                        desync_detected: 0,
                         error_kind: Some("timeout".to_string()),
                         error: Some(format!(
                             "Process timed out after {:.1}s (limit: {:.0}s)",
@@ -1099,6 +1145,7 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
                     final_value: 0,
                     checksum: 0,
                     rollbacks: 0,
+                    desync_detected: 0,
                     error_kind: Some("process".to_string()),
                     error: Some(format!("Error checking process: {}", e)),
                     runtime: None,
@@ -1113,15 +1160,20 @@ fn wait_for_peer(child: Child, name: &str) -> TestResult {
     wait_for_peer_with_timeout(child, name, PEER_PROCESS_TIMEOUT)
 }
 
-/// Runs a two-peer test with the given configurations.
+/// Runs an N-peer test (N >= 2) with the given per-peer configurations.
+///
+/// This is the generic spawn/wait engine shared by the 2-peer and N-peer paths.
+/// It spawns every peer (staggered so each listener binds before later peers
+/// start sending), waits for all of them concurrently via per-peer threads so
+/// the configured per-peer timeout is also the effective test timeout, and on
+/// any failure / cross-peer mismatch prints an N-way diagnostic block.
+///
+/// Returns one `TestResult` per input config, in the same order.
 ///
 /// # Panics
 /// Panics if the network_test_peer binary is not available.
 /// Use [`skip_if_no_peer_binary!`] at the start of tests to skip gracefully.
-fn run_two_peer_test(
-    peer1_config: PeerConfig,
-    peer2_config: PeerConfig,
-) -> (TestResult, TestResult) {
+fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
     // Check if the binary exists - fail fast with a clear message
     assert!(
         is_peer_binary_available(),
@@ -1132,48 +1184,70 @@ fn run_two_peer_test(
          This is not a test failure - the test requires the peer binary to be built first.",
         PEER_BINARY_NAME
     );
+    assert!(
+        configs.len() >= 2,
+        "run_n_peer_test requires at least 2 peers, got {}",
+        configs.len()
+    );
 
     let test_start = std::time::Instant::now();
 
-    // Calculate timeout: use the max of peer timeouts + 30s buffer for process overhead
-    let peer_timeout = std::cmp::max(peer1_config.timeout_secs, peer2_config.timeout_secs);
+    // Calculate timeout: use the max of peer timeouts + 30s buffer for process overhead.
+    let peer_timeout = configs.iter().map(|c| c.timeout_secs).max().unwrap_or(0);
     let process_timeout = Duration::from_secs(peer_timeout + 30);
 
-    // Spawn peer 1
-    let peer1 = spawn_peer(&peer1_config).expect("Failed to spawn peer 1");
+    // Spawn every peer, staggering so each peer's listener is bound before later
+    // peers start sending to it. This mirrors the 2-peer 100ms spawn stagger.
+    let mut wait_handles = Vec::with_capacity(configs.len());
+    for (index, config) in configs.iter().enumerate() {
+        if index > 0 {
+            thread::sleep(Duration::from_millis(100));
+        }
+        let child =
+            spawn_peer(config).unwrap_or_else(|e| panic!("Failed to spawn peer {index}: {e}"));
+        let name = format!("Peer {index}");
+        wait_handles.push(thread::spawn(move || {
+            wait_for_peer_with_timeout(child, &name, process_timeout)
+        }));
+    }
 
-    // Small delay to ensure peer 1 is listening
-    thread::sleep(Duration::from_millis(100));
-
-    // Spawn peer 2
-    let peer2 = spawn_peer(&peer2_config).expect("Failed to spawn peer 2");
-
-    // Wait for both peers concurrently so the configured per-peer timeout is
-    // also the effective test timeout. Sequential waits can double the runtime
-    // for a hung pair and let nextest kill the test before diagnostics are emitted.
-    let peer1_wait =
-        thread::spawn(move || wait_for_peer_with_timeout(peer1, "Peer 1", process_timeout));
-    let peer2_wait =
-        thread::spawn(move || wait_for_peer_with_timeout(peer2, "Peer 2", process_timeout));
-
-    let result1 = peer1_wait.join().expect("Peer 1 wait thread panicked");
-    let result2 = peer2_wait.join().expect("Peer 2 wait thread panicked");
+    // Wait for all peers concurrently.
+    let results: Vec<TestResult> = wait_handles
+        .into_iter()
+        .enumerate()
+        .map(|(index, handle)| {
+            handle
+                .join()
+                .unwrap_or_else(|_| panic!("Peer {index} wait thread panicked"))
+        })
+        .collect();
 
     let test_duration = test_start.elapsed();
 
-    // Log diagnostic information for debugging test failures
-    // This helps understand what happened when tests fail in CI
-    if !result1.success
-        || !result2.success
-        || result1.final_value != result2.final_value
-        || result1.checksum != result2.checksum
-    {
-        eprintln!("=== Test Configuration ===");
-        eprintln!("Peer 1: {}", peer1_config.diagnostic_summary());
-        eprintln!("Peer 2: {}", peer2_config.diagnostic_summary());
+    // Diagnostic gate (mirrors the 2-peer gate, generalized to N): this dumps the
+    // per-peer checksum/final_value divergence purely as a debugging aid. The
+    // divergence is FREQUENTLY BENIGN even at 0% loss: the peer that confirms the
+    // target LAST computes its checksum/value over an already-discarded
+    // `[target - 64, target)` window (empty hash `cbf29ce484222325`,
+    // `final_value = 0`) -- the window-discard race documented in the module note
+    // above the N-peer tests. So a divergence here is NOT asserted on and does not
+    // by itself indicate a desync; it is only worth dumping alongside other
+    // diagnostics when a test fails for some other reason.
+    let any_failure = results.iter().any(|r| !r.success);
+    let first_value = results.first().map(|r| r.final_value);
+    let first_checksum = results.first().map(|r| r.checksum);
+    let value_mismatch = results.iter().any(|r| Some(r.final_value) != first_value);
+    let checksum_mismatch = results.iter().any(|r| Some(r.checksum) != first_checksum);
+
+    if any_failure || value_mismatch || checksum_mismatch {
+        eprintln!("=== Test Configuration ({} peers) ===", configs.len());
+        for (index, config) in configs.iter().enumerate() {
+            eprintln!("Peer {}: {}", index, config.diagnostic_summary());
+        }
         eprintln!("=== Test Results ===");
-        eprintln!("Peer 1: {}", result1.diagnostic_summary());
-        eprintln!("Peer 2: {}", result2.diagnostic_summary());
+        for (index, result) in results.iter().enumerate() {
+            eprintln!("Peer {}: {}", index, result.diagnostic_summary());
+        }
         eprintln!("Duration: {:.2}s", test_duration.as_secs_f64());
         eprintln!("========================");
     }
@@ -1186,6 +1260,26 @@ fn run_two_peer_test(
         );
     }
 
+    results
+}
+
+/// Runs a two-peer test with the given configurations.
+///
+/// Thin wrapper over [`run_n_peer_test`] that preserves the historical
+/// `(TestResult, TestResult)` return shape so all existing 2-peer call sites
+/// keep working unchanged.
+///
+/// # Panics
+/// Panics if the network_test_peer binary is not available.
+/// Use [`skip_if_no_peer_binary!`] at the start of tests to skip gracefully.
+fn run_two_peer_test(
+    peer1_config: PeerConfig,
+    peer2_config: PeerConfig,
+) -> (TestResult, TestResult) {
+    let mut results = run_n_peer_test(vec![peer1_config, peer2_config]);
+    // run_n_peer_test returns exactly as many results as configs passed in.
+    let result2 = results.pop().expect("two-peer test must yield 2 results");
+    let result1 = results.pop().expect("two-peer test must yield 2 results");
     (result1, result2)
 }
 
@@ -1216,17 +1310,21 @@ fn validate_peer_config_sync_preset(label: &str, config: &PeerConfig) {
 
 /// Helper to verify determinism between two test results.
 ///
-/// NOTE: This currently only checks that both peers succeeded (via sync_health()).
-/// The `final_value` field is NOT compared because its calculation depends on
-/// when inputs become confirmed, which varies between peers due to network timing.
-/// The library's `sync_health()` API is the authoritative determinism check.
+/// NOTE: This only checks that both peers succeeded. A peer's `success` is set
+/// purely from `game.state.frame >= target && confirmed_frame >= target` in the
+/// binary; it does NOT read `sync_health()` (that is only logged in
+/// `runtime_diagnostics`). So `success == true` means each peer advanced to
+/// `target` AND confirmed all players' inputs through `target`. The `final_value`
+/// field is NOT compared because its calculation depends on when inputs become
+/// confirmed, which varies between peers due to network timing. This success
+/// oracle does not itself assert a desync-free state.
 ///
 /// See progress/session-73-flaky-network-test-analysis.md for details.
 #[track_caller]
 fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str) {
-    // The library's sync_health() API already verified determinism.
-    // final_value comparison is disabled because it depends on accumulation timing.
-    // Both peers reaching success=true means sync_health() returned InSync.
+    // success == true means each peer reached frame >= target with all inputs
+    // confirmed through target. final_value comparison is disabled because it
+    // depends on accumulation timing across peers.
 
     // Provide detailed diagnostics for sync failures
     if !result1.success || !result2.success {
@@ -1292,22 +1390,194 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
 
     assert!(
         result1.success,
-        "{}: Peer 1 failed (sync_health did not reach InSync): {:?}",
+        "{}: Peer 1 failed (did not reach frame >= target, or confirmed_frame < target): {:?}",
         context, result1.error
     );
     assert!(
         result2.success,
-        "{}: Peer 2 failed (sync_health did not reach InSync): {:?}",
+        "{}: Peer 2 failed (did not reach frame >= target, or confirmed_frame < target): {:?}",
         context, result2.error
     );
 
     // Log if values differ (for debugging) but don't assert
     if result1.final_value != result2.final_value {
         eprintln!(
-            "NOTE: {} final_value differs (peer1={}, peer2={}), but sync_health verified InSync",
+            "NOTE: {} final_value differs (peer1={}, peer2={}), but both peers reached success",
             context, result1.final_value, result2.final_value
         );
     }
+}
+
+/// N-peer generalization of [`verify_determinism`].
+///
+/// Asserts that every peer reached `success == true`. A peer's `success` is set
+/// purely from `game.state.frame >= target && confirmed_frame >= target` in the
+/// binary (`tests/network-peer/src/main.rs`); it is NOT derived from
+/// `sync_health()` (that is only logged in `runtime_diagnostics`). So
+/// `success == true` means: this peer advanced its simulation to `target` AND
+/// confirmed *all* N players' inputs through `target` (since `confirmed_frame`
+/// is the min over connected peers' `last_frame`). All peers succeeding is
+/// therefore the faithful N-peer generalization of the established 2-peer
+/// oracle.
+///
+/// In addition, asserts that every peer observed ZERO `DesyncDetected` events.
+/// The historical 0%-loss false positive that forced this count to be log-only
+/// was finding F17, root-caused in S30 to the library's `InputQueue::input`
+/// (a rollback re-simulation re-entered its prediction episode at the
+/// REQUESTED frame instead of the queue's first missing frame, silently
+/// swallowing misprediction comparisons for the skipped window) and fixed
+/// there, so on a clean network a nonzero count is a genuine library
+/// regression -- see the module note above the N-peer tests. Like
+/// [`verify_determinism`], `final_value` and `checksum` are only logged, not
+/// asserted, because at 0% loss the last-confirming peer computes them over an
+/// already-discarded `[target - 64, target)` window (empty hash) -- flaky by
+/// construction.
+#[track_caller]
+fn verify_determinism_n(results: &[TestResult], context: &str) {
+    let any_failure = results.iter().any(|r| !r.success);
+    if any_failure {
+        eprintln!("=== Determinism Verification Failed (N-peer): {context} ===");
+        eprintln!("Peer count: {}", results.len());
+        let advanced = results.iter().filter(|r| r.final_frame > 0).count();
+        for (index, result) in results.iter().enumerate() {
+            eprintln!(
+                "Peer {}: success={}, frame={}, value={}, checksum={:x}, error={:?}",
+                index,
+                result.success,
+                result.final_frame,
+                result.final_value,
+                result.checksum,
+                result.error
+            );
+        }
+        // Mirror verify_determinism's targeted diagnosis, generalized to N: the
+        // common failure mode is the sync handshake never completing for one or
+        // more peers (they never advance any frame).
+        if advanced == 0 {
+            eprintln!("DIAGNOSIS: No peer advanced any frames -- all peers failed to sync.");
+            eprintln!("  Check the mesh handle<->address mapping and sync preset configuration.");
+        } else if advanced < results.len() {
+            eprintln!(
+                "DIAGNOSIS: {} of {} peers never advanced frames -- partial sync failure.",
+                results.len() - advanced,
+                results.len()
+            );
+            eprintln!("  The sync handshake requires every pair of peers to exchange packets.");
+        } else {
+            eprintln!(
+                "DIAGNOSIS: All peers advanced frames but at least one failed -- \
+                 likely a timeout or desync during gameplay."
+            );
+        }
+        eprintln!("============================================");
+    }
+
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.success,
+            "{context}: Peer {index} failed (did not reach frame >= target, \
+             or confirmed_frame < target): {:?}",
+            result.error
+        );
+    }
+
+    // Assert each peer's DesyncDetected count is zero. These tests run on a
+    // clean network (0% loss, no disconnects), where the library must never
+    // raise a desync. The historical 0%-loss false positive that kept this
+    // log-only was finding F17, fixed in S30 at its InputQueue prediction-entry
+    // root cause (see the module note above the N-peer tests); post-fix, a
+    // 10-run real-UDP soak of the 3-peer test observed 0 events. Dump every
+    // peer's count and full diagnostics first so a cross-peer event pattern is
+    // visible before the per-peer assertion names the first offender.
+    let total_desync: u32 = results.iter().map(TestResult::desync_count).sum();
+    if total_desync > 0 {
+        eprintln!("=== DesyncDetected events observed ({context}, total={total_desync}) ===");
+        for (index, result) in results.iter().enumerate() {
+            eprintln!(
+                "Peer {index}: desync_detected={}, {}",
+                result.desync_count(),
+                result.diagnostic_summary()
+            );
+        }
+        eprintln!("============================================");
+    }
+    for (index, result) in results.iter().enumerate() {
+        let desync_count = result.desync_count();
+        assert_eq!(
+            desync_count,
+            0,
+            "{context}: Peer {index} observed {desync_count} DesyncDetected event(s) on a \
+             clean network (expected 0 since the F17 InputQueue prediction-entry fix, S30). \
+             Peer diagnostics: {}",
+            result.diagnostic_summary()
+        );
+    }
+
+    // Log (do not assert) any final_value divergence, matching verify_determinism.
+    if let Some(first) = results.first() {
+        for (index, result) in results.iter().enumerate().skip(1) {
+            if result.final_value != first.final_value {
+                eprintln!(
+                    "NOTE: {context} final_value differs (peer0={}, peer{index}={}), \
+                     but every peer reached success",
+                    first.final_value, result.final_value
+                );
+            }
+        }
+    }
+}
+
+/// Builds `num_players` peer configs for a fully-connected N-peer mesh on
+/// localhost.
+///
+/// Peer `i` listens on `127.0.0.1:(port_base + i)`. Its ordered remote list is
+/// `[127.0.0.1:(port_base + j) for j in 0..num_players if j != i]` -- i.e.
+/// ascending `j`, which is exactly the ascending-remote-handle order the binary
+/// expects (the binary assigns the K-th `--peer` address to the K-th handle in
+/// `(0..num_players).filter(|h| h != i)`). The first remote goes in `peer_addr`
+/// and the rest in `extra_peer_addrs`. Each peer gets a distinct deterministic
+/// seed (`42 + i`) and the same network `profile`.
+fn n_peer_mesh_configs(
+    num_players: usize,
+    port_base: u16,
+    profile: NetworkProfile,
+    frames: i32,
+    input_delay: usize,
+    timeout_secs: u64,
+    sync_preset: Option<String>,
+) -> Vec<PeerConfig> {
+    (0..num_players)
+        .map(|i| {
+            // Ascending-j remote address list, skipping our own index. This must
+            // stay ascending to match the binary's handle assignment.
+            let mut remotes: Vec<String> = (0..num_players)
+                .filter(|&j| j != i)
+                .map(|j| format!("127.0.0.1:{}", port_base + j as u16))
+                .collect();
+            // The first remote becomes `peer_addr`; the remainder become the
+            // extra `--peer` args (empty for the 2-peer case).
+            let peer_addr = remotes.remove(0);
+            PeerConfig {
+                local_port: port_base + i as u16,
+                player_index: i,
+                peer_addr,
+                extra_peer_addrs: remotes,
+                frames,
+                seed: Some(42 + i as u64),
+                timeout_secs,
+                input_delay,
+                sync_preset: sync_preset.clone(),
+                packet_loss: profile.packet_loss,
+                latency_ms: profile.latency_ms,
+                jitter_ms: profile.jitter_ms,
+                reorder_rate: profile.reorder_rate,
+                reorder_buffer_size: profile.reorder_buffer_size,
+                duplicate_rate: profile.duplicate_rate,
+                burst_loss_prob: profile.burst_loss_prob,
+                burst_loss_len: profile.burst_loss_len,
+            }
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -1343,7 +1613,8 @@ fn test_basic_connectivity() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "basic_connectivity");
 
     // Both should reach at least target frames
@@ -1390,7 +1661,8 @@ fn test_extended_session() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "extended_session");
 
     assert!(
@@ -1438,7 +1710,8 @@ fn test_packet_loss_5_percent() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "packet_loss_5_percent");
 }
 
@@ -1473,7 +1746,8 @@ fn test_packet_loss_15_percent() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "packet_loss_15_percent");
 }
 
@@ -1510,7 +1784,8 @@ fn test_latency_30ms() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "latency_30ms");
 }
 
@@ -1545,7 +1820,8 @@ fn test_latency_with_jitter() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "latency_with_jitter");
 }
 
@@ -1588,7 +1864,8 @@ fn test_poor_network_combined() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "poor_network_combined");
 }
 
@@ -1626,7 +1903,8 @@ fn test_asymmetric_network() {
 
     let (result1, result2) = scenario.run_test(10015);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "asymmetric_network");
 
     // Peer 1 should have more rollbacks due to bad network
@@ -1673,7 +1951,8 @@ fn test_stress_long_session_with_loss() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "stress_long_session_with_loss");
 
     assert!(
@@ -1728,7 +2007,8 @@ fn test_high_jitter_50ms() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "high_jitter_50ms");
 }
 
@@ -1767,7 +2047,8 @@ fn test_mobile_network_simulation() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "mobile_network_simulation");
 
     println!(
@@ -1814,7 +2095,8 @@ fn test_heavily_asymmetric_network() {
 
     let (result1, result2) = scenario.run_test(10023);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "heavily_asymmetric_network");
 
     println!(
@@ -1856,7 +2138,8 @@ fn test_higher_input_delay() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "higher_input_delay");
 }
 
@@ -1884,7 +2167,8 @@ fn test_zero_latency_high_loss() {
 
     let (result1, result2) = scenario.run_test(10027);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "zero_latency_high_loss");
 
     println!(
@@ -1928,7 +2212,8 @@ fn test_medium_session_300_frames() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "medium_session_300_frames");
 
     assert!(
@@ -1978,7 +2263,8 @@ fn test_stress_very_long_session() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "stress_very_long_session");
 
     println!(
@@ -2021,7 +2307,8 @@ fn test_determinism_different_seeds() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "determinism_different_seeds");
 }
 
@@ -2067,7 +2354,8 @@ fn test_staggered_peer_startup() {
     let result1 = wait_for_peer(peer1, "Peer 1");
     let result2 = wait_for_peer(peer2, "Peer 2");
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "staggered_peer_startup");
 }
 
@@ -2110,7 +2398,8 @@ fn test_heavily_staggered_startup() {
     let result1 = wait_for_peer(peer1, "Peer 1");
     let result2 = wait_for_peer(peer2, "Peer 2");
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "heavily_staggered_startup");
 }
 
@@ -2144,7 +2433,8 @@ fn test_asymmetric_input_delays() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "asymmetric_input_delays");
 }
 
@@ -2177,7 +2467,8 @@ fn test_zero_input_delay() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "zero_input_delay");
 
     // With zero input delay, expect more rollbacks
@@ -2216,7 +2507,8 @@ fn test_high_input_delay_8_frames() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "high_input_delay_8_frames");
 
     // With high input delay, should see fewer rollbacks
@@ -2261,7 +2553,8 @@ fn test_high_uniform_packet_loss_with_extreme_sync() {
 
     let (result1, result2) = scenario.run_test(10045);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(
         &result1,
         &result2,
@@ -2305,7 +2598,8 @@ fn test_burst_loss_recovery() {
 
     let (result1, result2) = scenario.run_test(10750);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "burst_loss_recovery");
 
     println!(
@@ -2339,7 +2633,8 @@ fn test_worst_case_realistic_network() {
 
     let (result1, result2) = scenario.run_test(10047);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "worst_case_realistic_network");
 
     println!(
@@ -2374,7 +2669,8 @@ fn test_rapid_short_session() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "rapid_short_session");
 
     assert!(
@@ -2418,7 +2714,8 @@ fn test_extreme_asymmetric_one_perfect_one_terrible() {
 
     let (result1, result2) = scenario.run_test(10051);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(
         &result1,
         &result2,
@@ -2468,7 +2765,8 @@ fn test_intercontinental_latency() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "intercontinental_latency");
 }
 
@@ -2509,7 +2807,8 @@ fn test_sustained_moderate_adversity() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "sustained_moderate_adversity");
 
     assert!(
@@ -2566,7 +2865,8 @@ fn test_reproducible_chaos_same_seed() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "reproducible_chaos_same_seed");
 }
 
@@ -2602,7 +2902,8 @@ fn test_baseline_no_chaos() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "baseline_no_chaos");
 
     assert!(
@@ -2657,7 +2958,8 @@ fn test_wifi_interference_simulation() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "wifi_interference_simulation");
 
     println!(
@@ -2703,7 +3005,8 @@ fn test_intercontinental_simulation() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "intercontinental_simulation");
 
     println!(
@@ -2748,7 +3051,8 @@ fn test_competitive_lan_simulation() {
 
     let (result1, result2) = run_two_peer_test(peer1_config, peer2_config);
 
-    // Verify both peers succeeded - this means sync_health() returned InSync
+    // Verify both peers reached success (frame >= target with all inputs confirmed);
+    // sync_health() is diagnostic-only and is NOT part of the success check.
     verify_determinism(&result1, &result2, "competitive_lan_simulation");
 
     // Rollback counts with input_delay=0 are inherently variable and depend on:
@@ -3379,6 +3683,7 @@ mod infrastructure_tests {
             final_value: 12345,
             checksum: 0xDEADBEEF,
             rollbacks: 5,
+            desync_detected: 0,
             error_kind: None,
             error: None,
             runtime: None,
@@ -3418,6 +3723,7 @@ mod infrastructure_tests {
             final_value: 0,
             checksum: 0,
             rollbacks: 0,
+            desync_detected: 0,
             error_kind: Some("timeout".to_string()),
             error: Some("Connection timeout".to_string()),
             runtime: None,
@@ -3433,6 +3739,82 @@ mod infrastructure_tests {
             summary.contains("Connection timeout"),
             "Summary should contain error"
         );
+    }
+
+    /// Successful result with the given top-level desync count (no runtime
+    /// diagnostics), for exercising the `verify_determinism_n` desync oracle.
+    fn successful_result_with_desyncs(desync_detected: u32) -> TestResult {
+        TestResult {
+            success: true,
+            final_frame: 100,
+            final_value: 1,
+            checksum: 1,
+            rollbacks: 0,
+            desync_detected,
+            error_kind: None,
+            error: None,
+            runtime: None,
+        }
+    }
+
+    /// The flipped desync oracle accepts an all-clean N-peer run.
+    #[test]
+    fn verify_determinism_n_accepts_zero_desync_counts() {
+        let results = vec![
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(0),
+        ];
+        verify_determinism_n(&results, "oracle_unit_test_clean");
+    }
+
+    /// Non-vacuity guard for the desync oracle flipped after the S30 F17 fix:
+    /// a successful run where one peer observed a `DesyncDetected` event must
+    /// fail `verify_determinism_n` (the count was previously logged-only).
+    #[test]
+    #[should_panic(expected = "DesyncDetected event(s) on a clean network")]
+    fn verify_determinism_n_panics_on_nonzero_desync_count() {
+        let results = vec![
+            successful_result_with_desyncs(0),
+            successful_result_with_desyncs(1),
+            successful_result_with_desyncs(0),
+        ];
+        verify_determinism_n(&results, "oracle_unit_test_desync");
+    }
+
+    /// The oracle also sees a count surfaced only through the nested
+    /// `runtime.events` fallback (older binary / partial JSON shape).
+    #[test]
+    #[should_panic(expected = "DesyncDetected event(s) on a clean network")]
+    fn verify_determinism_n_panics_on_nested_runtime_desync_count() {
+        let mut result = successful_result_with_desyncs(0);
+        result.runtime = Some(RuntimeDiagnostics {
+            session_state: "Running".to_string(),
+            current_frame: 100,
+            confirmed_frame: 100,
+            target_frame: 100,
+            elapsed_ms: 1_000,
+            sync_preset: None,
+            sync_config: "default".to_string(),
+            protocol_config: None,
+            time_sync_config: None,
+            sync_health: "InSync".to_string(),
+            events: EventSummary {
+                synchronizing: 1,
+                synchronized: 1,
+                network_interrupted: 0,
+                network_resumed: 0,
+                disconnected: 0,
+                sync_timeout: 0,
+                wait_recommendation: 0,
+                input_delay_recommendation: 0,
+                desync_detected: 2,
+                peer_dropped: 0,
+                replay_desync: 0,
+            },
+        });
+        let results = vec![successful_result_with_desyncs(0), result];
+        verify_determinism_n(&results, "oracle_unit_test_nested_desync");
     }
 
     /// Test NetworkProfile constants are valid.
@@ -5102,4 +5484,179 @@ fn test_burst_loss_extreme_unreliable() {
 
     // We don't assert success because this test is expected to be flaky.
     // The test exists to allow manual exploration, not CI validation.
+}
+
+// =============================================================================
+// N-Peer (N >= 3) Mesh Determinism Tests
+// =============================================================================
+//
+// These real-UDP tests close the multi-process N>=3 coverage gap: the rest of
+// this file only ever spawns 2 peers. They build a fully-connected localhost
+// mesh via `n_peer_mesh_configs` (each peer is `network_test_peer` launched with
+// N-1 `--peer` args) and verify cross-peer determinism.
+//
+// Oracle: every peer must reach `success`. A peer's `success` is set purely from
+// `game.state.frame >= target && confirmed_frame >= target` in the binary
+// (`tests/network-peer/src/main.rs`); it does NOT read `sync_health()` /
+// `all_sync_health()` (those are only logged in `runtime_diagnostics`). So
+// `success == true` means each peer advanced its simulation to `target` AND
+// confirmed *all* N players' inputs through `target` (since `confirmed_frame` is
+// the min over connected peers' `last_frame`). All peers succeeding is therefore
+// the faithful N-peer generalization of the established 2-peer oracle
+// (`verify_determinism` / `verify_determinism_n`). A desync-free state is
+// asserted separately via the per-peer `DesyncDetected == 0` check in
+// `verify_determinism_n` (see the DesyncDetected note below).
+//
+// NO CROSS-PEER CHECKSUM EQUALITY ORACLE: a strengthened cross-peer `checksum`
+// equality oracle was attempted (at success time the fixed
+// `[target - 64, target)` confirmed-input window should be identical across
+// peers at 0% loss), but it proved flaky even on clean localhost -- 3/20 green
+// over a 20x sweep of these three tests. Root cause matches the historical
+// flakiness note near `verify_determinism` and the binary's checksum comment:
+// the peer that confirms the target LAST computes its checksum after its current
+// frame has already advanced past `target`, so `set_last_confirmed_frame` has
+// already discarded the `[target - 64, target)` frames from its input queue;
+// `confirmed_inputs_for_frame` then returns `Err` for the whole window, giving
+// `frames_included = 0`, `final_value = 0`, and the empty-hash checksum
+// `cbf29ce484222325` -- which disagrees with the peers that captured a full
+// window. The same race already disables `final_value` comparison in the 2-peer
+// `verify_determinism`. We therefore assert `success` (which was 20/20 green)
+// plus the per-peer zero-`DesyncDetected` check below; `final_value` and
+// `checksum` are only logged in diagnostics.
+//
+// DesyncDetected == 0 (ASSERTED since the S30 F17 fix): the binary inherits
+// `DesyncDetection::On { interval: 60 }` (the library default), so the library's
+// per-peer checksum gossip runs, and `verify_determinism_n` asserts that every
+// peer observed ZERO `DesyncDetected` events. Historically this count was
+// logged-but-not-asserted because a large fraction of 0%-loss 3-peer runs
+// (~20-60% across S27-S29 measurements; 0/50 at 2-peer, whose prediction stays
+// shallow) raised `DesyncDetected`, always at the checksum-interval frame 60.
+// S27 attributed that to a test-harness checksum artifact (the speculative
+// `state.value` accumulator); S29 overturned the attribution (a faithful
+// full-state hash AND a faithful per-frame-input digest both still fired it,
+// with confirmed state byte-identical across peers) and recorded it as library
+// finding F17; S30 root-caused and FIXED F17 in `InputQueue::input`: a rollback
+// re-simulation whose first input request landed ABOVE a remote queue's missing
+// window re-entered its prediction episode at the REQUESTED frame, so the
+// missing window's arrivals were accepted with their misprediction comparison
+// silently skipped -- the victim's applied trajectory was never re-simulated
+// (silently divergent gameplay state) and the checksum harvest gossiped stale
+// saved-state stamps, raising false-positive `DesyncDetected` on byte-identical
+// confirmed input streams. Prediction episodes now always enter at the queue's
+// FIRST MISSING frame, making the swallowed window unconstructible. The
+// deterministic in-process reproduction lives in tests/sessions/desync_harvest.rs
+// ("F17 DETERMINISTIC REPRODUCTION (S30)", RED on pre-fix code), and a post-fix
+// 10-run real-UDP soak of the 3-peer test observed 0 events in 10/10 runs. On
+// this clean network (0% loss, no disconnects) a nonzero count is therefore a
+// genuine library regression and fails these tests.
+//
+// Each test uses a unique, non-colliding port range (>= 18001, clear of the
+// existing 10001-10900/20000/30000 clusters) as defense-in-depth -- the tests
+// are already serialized by `#[serial]` and the `network-multi-process` nextest
+// group (`max-threads = 1`), so the distinct ranges just remove any chance of
+// cross-test port collisions, not to enable concurrency.
+
+/// Three peers on a perfect local network must reach a deterministic, mutually
+/// consistent confirmed state.
+#[test]
+#[serial]
+#[ignore = "real-UDP mesh; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn three_peer_local_network_is_deterministic() {
+    skip_if_no_peer_binary!();
+    const NUM_PLAYERS: usize = 3;
+    const FRAMES: i32 = 100;
+    // Port base in a range not used elsewhere; uses 18001..=18003.
+    let configs = n_peer_mesh_configs(
+        NUM_PLAYERS,
+        18001,
+        NetworkProfile::local(),
+        FRAMES,
+        2,  // input_delay
+        60, // timeout_secs
+        None,
+    );
+
+    let results = run_n_peer_test(configs);
+
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
+    verify_determinism_n(&results, "three_peer_local_network");
+
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.final_frame >= FRAMES,
+            "Peer {index} didn't reach target frames: {} < {FRAMES}",
+            result.final_frame
+        );
+    }
+}
+
+/// Four peers on a perfect local network must reach a deterministic, mutually
+/// consistent confirmed state.
+#[test]
+#[serial]
+#[ignore = "real-UDP mesh; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn four_peer_local_network_is_deterministic() {
+    skip_if_no_peer_binary!();
+    const NUM_PLAYERS: usize = 4;
+    const FRAMES: i32 = 100;
+    // Distinct port range from the 3-peer test; uses 18011..=18014.
+    let configs = n_peer_mesh_configs(
+        NUM_PLAYERS,
+        18011,
+        NetworkProfile::local(),
+        FRAMES,
+        2,  // input_delay
+        90, // timeout_secs (more peers => more handshakes)
+        None,
+    );
+
+    let results = run_n_peer_test(configs);
+
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
+    verify_determinism_n(&results, "four_peer_local_network");
+
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.final_frame >= FRAMES,
+            "Peer {index} didn't reach target frames: {} < {FRAMES}",
+            result.final_frame
+        );
+    }
+}
+
+/// Three peers on a LAN profile (1ms latency/jitter, 0% loss) must reach a
+/// deterministic, mutually consistent confirmed state.
+#[test]
+#[serial]
+#[ignore = "real-UDP mesh; runs in the nightly network suite (ci-network-nightly.yml). Determinism is covered deterministically by tests/network/in_process_chaos.rs"]
+fn three_peer_lan_network_is_deterministic() {
+    skip_if_no_peer_binary!();
+    const NUM_PLAYERS: usize = 3;
+    const FRAMES: i32 = 100;
+    // Distinct port range; uses 18021..=18023.
+    let configs = n_peer_mesh_configs(
+        NUM_PLAYERS,
+        18021,
+        NetworkProfile::lan(),
+        FRAMES,
+        2,  // input_delay
+        60, // timeout_secs
+        None,
+    );
+
+    let results = run_n_peer_test(configs);
+
+    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
+    // log-only -- it proved flaky by construction; see module note above).
+    verify_determinism_n(&results, "three_peer_lan_network");
+
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.final_frame >= FRAMES,
+            "Peer {index} didn't reach target frames: {} < {FRAMES}",
+            result.final_frame
+        );
+    }
 }

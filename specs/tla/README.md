@@ -26,14 +26,15 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 | File | Config | Status | Description |
 |------|--------|--------|-------------|
-| `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | UDP protocol state machine |
+| `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | Sync-handshake + peer-drop state machine (N=3 peers) |
 | `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
-| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection |
+| `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection, per-(local,remote)-pair verdicts (N=3 peers) |
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
-| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination |
+| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
+| `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
 
 ## Properties Verified
 
@@ -76,6 +77,46 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - Dropped players are excluded from survivor progress
 - Rollback starts no later than every dropped player's `lastFrame + 1`
 
+### NPeerReactivation.tla
+
+Models "Agreement C" of N-peer mesh reconnection (1 coordinator, 3 survivors,
+1 joiner) from `progress/session-18-npeer-mesh-reconnection-design.md` (§4.C/§5/§8).
+
+**Safety:**
+
+- `Agreement` (S1): any two peers (coordinator, any survivor, joiner) that both
+  committed a frame committed the same committed **value** (the bytes in `val`, *not*
+  the `mode`/value-source label) at that frame
+- `NoConfirmedRewrite` (S2): committed history never reverts (every frame within `committedUpTo` stays definite)
+- `NoSplitBrainOnAbort` (L1): no aborted state has the joiner real-at-`F` while a survivor is frozen-at-`F`
+
+**Liveness (under weak fairness):**
+
+- `EventuallyResolved`: the protocol always reaches a terminal `joined`/`aborted` state
+
+**The cap and the abort lifecycle are modeled non-vacuously (have teeth):**
+
+- Survivors start with `committedUpTo` *below* `L` and **race toward `F`** by committing
+  frozen frames (`SurvivorAdvanceFrozen`). The keepalive-preserved cap (design §4.C —
+  "confirmed = min over connected incl. K") **holds each survivor at `F-1 = L`**: a
+  survivor cannot commit frame `F` frozen while `capHeld` is true. So the cap is an
+  exercised, live constraint, not an assertion by construction.
+- `CapCollapse` models the cap-collapse hazard (the coordinator dropping out of a
+  survivor's connected-min mid-pause). The protocol's keepalive serve (`keepaliveServing`)
+  is its guard: while the paused coordinator is serving, `CapCollapse` cannot fire.
+- The joiner follows the **late-apply lifecycle** (§5): `JoinerBuffer` buffers the
+  snapshot without applying it; `JoinerCommit` makes the joiner real-at-`F` *only* after
+  every survivor has reopened (the `JoinCommitted` gate); `JoinerAbortDiscard` discards
+  the buffer on abort, so the joiner is never real-at-`F` after an abort.
+- Removing either guard (a scratch *naive* variant: `CapCollapse` ungated **and** the
+  joiner committing real-at-`F` eagerly on buffer) makes TLC find a `NoSplitBrainOnAbort`
+  counterexample — confirming both the cap and the gated commit are load-bearing.
+
+**Precondition P-A is checkable, not assumed:** survivors hold *independent* frozen
+values. The default config pins P-A (`AssumePA = TRUE`) and passes. `NPeerReactivation_NoPA.cfg`
+(`AssumePA = FALSE`, not registered in CI) drops P-A and TLC reports an `Agreement`
+counterexample — demonstrating P-A is necessary.
+
 ### Rollback.tla
 
 **Safety (from formal-spec.md):**
@@ -113,16 +154,39 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 ### ChecksumExchange.tla
 
+All verdict state (`pendingChecksums`/`syncHealth`/`lastVerifiedFrame`) is keyed by ordered
+(local, remote) peer pairs, mirroring the implementation's per-`UdpProtocol` endpoint state
+(the F12 fix in `src/sessions/p2p_session.rs`). Checked at `PEERS = {p1, p2, p3}`,
+`MAX_FRAME = 3`, `CHECKSUM_INTERVAL = 1` — the smallest model with two comparable checksum
+frames per pair. Tractability at N=3 needs both `SYMMETRY Permutations(PEERS)` (sound: the
+module's only `CHOOSE` ranges over integer frames, never peers, and liveness is disabled)
+and an in-flight network cap of 2 (one broadcast outstanding; sound because
+`ReceiveChecksum` commutes with every other action — see the `StateConstraint` comment in
+the spec). Measured single-worker: N=3 completes in ~106s with 11,674,741 states generated
+/ 1,469,194 distinct (depth 62); N=2 in ~1s with 38,160 generated / 9,167 distinct (depth
+32). Without the cap-2 constraint and symmetry the same bounds do NOT terminate in CI
+budget (killed at 28.6 min, 233M+ generated / 31.7M+ distinct, queue still growing).
+
 **Safety:**
 
 - Checksums are computed deterministically for each frame
 - Checksum reports are only sent for confirmed frames
-- Desync detection compares matching frame checksums
+- No false positives, pair-precise: a `DesyncDetected` verdict for (p,q) requires p or q
+  to have actually diverged
+- Desync verdicts are terminal per pair (a match against one remote never clears another
+  pair's verdict — the Session 27 cross-pair clobbering regression guard)
+- `last_verified_frame` is monotonically increasing per pair
+- F12 leakage guards: `InSync` for (p,q) requires a matching checksum in pair (p,q) itself;
+  the `is_synchronized()` aggregate requires every pair individually verified; the
+  `last_verified_frame()` aggregate is the min over pairs. The two aggregate invariants
+  (`SynchronizedRequiresAllPairsVerified`, `AggregateVerifiedFrameSound`) are tautological
+  given the current aggregate definitions — they are kept as regression tripwires against
+  someone redefining the aggregates, not as added verification strength
 
 **Liveness:**
 
-- Checksum exchange eventually completes for confirmed frames
-- Desync is detected within bounded time after occurrence
+- Defined but disabled (premises are unsound under a late `IntroduceDesync`; same as the
+  earlier N=2 model)
 
 ## Running the Specifications
 
@@ -166,10 +230,11 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 
 | Config File | Key Constants | State Space |
 |-------------|---------------|-------------|
-| `NetworkProtocol.cfg` | MAX_FRAME=5, randomId=1..5 | ~12,000 states |
+| `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
 | `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
-| `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~52M states |
+| `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
+| `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -263,7 +328,7 @@ These specifications model the key algorithms from:
 | `InputQueue` | `src/input_queue/mod.rs` (InputQueue) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
-| `ChecksumExchange` | `src/checksum.rs`, `src/network/messages.rs` (ChecksumReport) |
+| `ChecksumExchange` | `src/sessions/p2p_session.rs` (sync_health, is_synchronized, last_verified_frame, compare_local_checksums_against_peers, check_checksum_send_interval), `src/network/protocol/mod.rs` (pending_checksums, last_verified_frame, on_checksum_report), `src/network/messages.rs` (ChecksumReport) |
 
 ## Extending the Specifications
 

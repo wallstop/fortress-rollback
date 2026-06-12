@@ -223,6 +223,25 @@ impl TimeSync {
         // This avoids floating-point non-determinism while producing equivalent results.
         (remote_sum - local_sum) / (2 * count)
     }
+
+    /// Test-only: deterministically seeds the rolling window so that
+    /// [`average_frame_advantage`](Self::average_frame_advantage) returns exactly
+    /// `target`.
+    ///
+    /// Fills every remote slot with `2 * target` and every local slot with `0`,
+    /// so the average reduces to `(remote_sum - local_sum) / (2 * count)`
+    /// `= (2 * target * count) / (2 * count) = target`. This lets session-level
+    /// tests pin a known frame advantage without running a full sync handshake.
+    #[cfg(test)]
+    pub(crate) fn seed_average_for_tests(&mut self, target: i32) {
+        let doubled = target.saturating_mul(2);
+        for slot in &mut self.remote {
+            *slot = doubled;
+        }
+        for slot in &mut self.local {
+            *slot = 0;
+        }
+    }
 }
 
 // #########
