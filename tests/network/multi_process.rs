@@ -1053,6 +1053,22 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
 /// This prevents tests from hanging forever if something goes wrong.
 const PEER_PROCESS_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes max
 
+/// Applies platform-specific timeout scaling for real-UDP multi-process tests.
+///
+/// macOS CI runners can exhibit higher timing variance under process-heavy
+/// network chaos tests, so allow additional time without relaxing assertions.
+fn apply_platform_timeout_scaling(base_timeout_secs: u64) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        // Keep this conservative so tests still fail quickly on genuine hangs.
+        base_timeout_secs.saturating_mul(3) / 2
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        base_timeout_secs
+    }
+}
+
 /// Waits for a peer with a timeout to prevent infinite hangs.
 /// Returns a TestResult indicating success or timeout failure.
 fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -> TestResult {
@@ -1157,7 +1173,8 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
 
 /// Waits for a peer and parses its result (with default timeout).
 fn wait_for_peer(child: Child, name: &str) -> TestResult {
-    wait_for_peer_with_timeout(child, name, PEER_PROCESS_TIMEOUT)
+    let timeout_secs = apply_platform_timeout_scaling(PEER_PROCESS_TIMEOUT.as_secs());
+    wait_for_peer_with_timeout(child, name, Duration::from_secs(timeout_secs))
 }
 
 /// Runs an N-peer test (N >= 2) with the given per-peer configurations.
@@ -1192,9 +1209,11 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
 
     let test_start = std::time::Instant::now();
 
-    // Calculate timeout: use the max of peer timeouts + 30s buffer for process overhead.
+    // Calculate timeout: use the max of peer timeouts + 30s buffer for process
+    // overhead, with platform scaling for CI variance.
     let peer_timeout = configs.iter().map(|c| c.timeout_secs).max().unwrap_or(0);
-    let process_timeout = Duration::from_secs(peer_timeout + 30);
+    let peer_timeout_scaled = apply_platform_timeout_scaling(peer_timeout);
+    let process_timeout = Duration::from_secs(peer_timeout_scaled + 30);
 
     // Spawn every peer, staggering so each peer's listener is bound before later
     // peers start sending to it. This mirrors the 2-peer 100ms spawn stagger.
@@ -3569,6 +3588,18 @@ mod infrastructure_tests {
 
         #[cfg(not(windows))]
         assert_eq!(PEER_BINARY_NAME, "network_test_peer");
+    }
+
+    #[test]
+    fn test_apply_platform_timeout_scaling() {
+        let base = 120;
+        let scaled = apply_platform_timeout_scaling(base);
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(scaled, 180);
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(scaled, base);
     }
 
     /// Verify that find_peer_binary returns Some when binary exists.
