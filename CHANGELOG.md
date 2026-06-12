@@ -37,12 +37,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The join handshake is ack-gated and loss/latency tolerant within a bounded envelope: the host
     re-serves the snapshot until acknowledged and only reactivates the slot on the ack, an abandoned join
     can never stall or fail-close the host (it resumes solo with the slot still reserved), and a joiner
-    that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. Scope: 2-peer /
-    host-mediated topology; requires `max_prediction >= 1` (lockstep hot-join is rejected at build time).
-    Hot-join in a mesh of 3 or more machines is **not yet supported** and is rejected at build time (by
-    both `start_p2p_session` on a hot-join-serving host and `start_hot_join_session` on a joiner) with
-    `InvalidRequestKind::NotSupported`, rather than silently desyncing; machine count is measured per
-    network address, so 2-machine couch co-op (multiple handles sharing one remote address) is unaffected.
+    that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. A reserved-slot
+    endpoint whose synchronized-but-never-joined peer dies is re-armed on its disconnect timeout, so a
+    fresh joiner session from the same address can always be served (a dead joiner cannot permanently
+    poison its slot's endpoint). Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
+    time).
+  - **N-peer meshes (3 or more machines) are supported end-to-end**, for both first-time joins of
+    build-time reserved slots and re-joins/reconnections of gracefully-dropped slots: the serving host
+    (coordinator) pauses and serves a snapshot captured at its last fully-confirmed frame with **bridge
+    inputs** (every slot's confirmed input at the snapshot frame), the surviving mesh agrees on the
+    reactivation frame (reopen directives and acks, freeze-convergence gated, with bounded
+    abort-and-retry on loss or timeout), and the joiner **buffers** the snapshot, applies it only on the
+    mesh-wide join commit, bridges one frame from the snapshot state, and contributes real inputs from
+    the activation frame. A buffered join attempt whose commit never arrives is bounded by the
+    joiner-side poll budget (`with_hot_join_serve_timeout_polls` on the joiner session): past it the
+    joiner tears down terminally — surfacing the conventional coordinator `Disconnected` event — and the
+    app retries with a fresh session, never a wedge. Build-time requirements for an N-peer **serving
+    host**, mirroring the runtime serve gates as `InvalidRequestKind::NotSupported`:
+    `SaveMode::EveryFrame`, zero input delay, and at least one local player; an N-peer **joiner**
+    likewise requires `SaveMode::EveryFrame`. Machine count is measured per network address, so
+    2-machine couch co-op (multiple handles sharing one remote address) is unaffected by these
+    requirements. Spec-violation noise from the legitimate pre-activation windows (the coordinator's
+    sub-activation pending stream replayed into a fresh joiner; a reactivated slot's empty input ring
+    while its first input is still in flight; lifecycle-close stragglers of the joiner's own concluded
+    attempt) is reported at trace level, with full severity kept everywhere else. A hot-joined session's
+    confirmed-input stream toward its own spectator endpoints starts at the loaded snapshot frame (the
+    earliest frame a mid-game joiner can serve).
   - A slot that is *cleanly gracefully dropped* (via `P2PSession::remove_player`, or automatically on the
     disconnect timeout under `DisconnectBehavior::ContinueWithout`) on a hot-join-serving host is returned
     to the reserved/frozen state and can be re-filled by a returning peer connecting from the same address,
