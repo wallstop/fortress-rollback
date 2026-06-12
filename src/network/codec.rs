@@ -601,6 +601,11 @@ pub(crate) fn encoded_len<T: Serialize>(value: &T) -> CodecResult<usize> {
 ///
 /// Returns the decoded value and the number of bytes consumed.
 ///
+/// This uses the crate's generic bincode configuration and is not
+/// allocation-bounded. Do not use it for peer-controlled bytes whose decoded
+/// type can contain length-prefixed containers such as `Vec`, `String`, or maps.
+/// For received network [`Message`] bytes, use [`decode_message`] instead.
+///
 /// # Examples
 ///
 /// ```
@@ -714,6 +719,8 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
 /// Decodes a value from a byte slice, ignoring the bytes consumed.
 ///
 /// This is a convenience function when you don't care about how many bytes were read.
+/// Like [`decode`], this is not allocation-bounded; use [`decode_message`] for
+/// received peer [`Message`] bytes instead of generic bincode decoding.
 ///
 /// # Examples
 ///
@@ -743,7 +750,6 @@ pub fn decode_value<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
 ///
 /// This mirrors [`crate::rle::DEFAULT_MAX_DECODED_LEN`] (64 MiB): a single
 /// rollback state snapshot far below it, far above any plausible decode buffer.
-#[cfg(feature = "hot-join")]
 pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED_LEN;
 
 /// Decodes a value from a byte slice with a fixed per-decode byte limit, so a
@@ -780,7 +786,7 @@ pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED
 /// Returns [`CodecError::DecodeError`] when `bytes` exceeds the cap, when a
 /// declared container length would exceed the cap, or when bincode otherwise
 /// fails to decode (truncated input, trailing bytes are *not* rejected here —
-/// use [`decode`] if you need the consumed length).
+/// use [`decode_bounded_with_consumed`] if you need the consumed length).
 #[cfg(feature = "hot-join")]
 pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
     decode_bounded_with_consumed(bytes).map(|(value, _consumed)| value)
@@ -790,7 +796,6 @@ pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T
 /// for callers that decode several bounded values back-to-back from one slice
 /// (e.g. the hot-join bridge-input blob: `num_players` fixed-width inputs
 /// concatenated) and must verify exact consumption.
-#[cfg(feature = "hot-join")]
 pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> CodecResult<(T, usize)> {
