@@ -31,8 +31,8 @@ pub mod test_utils;
 pub use bus_socket::{BusSocket, RoutingBus};
 #[allow(unused_imports)]
 pub use channel_socket::{
-    create_channel_pair, create_channel_quad, create_channel_triple, create_chaos_channel_pair,
-    create_unconnected_socket, ChannelSocket,
+    create_channel_mesh, create_channel_pair, create_channel_quad, create_channel_triple,
+    create_chaos_channel_mesh, create_chaos_channel_pair, create_unconnected_socket, ChannelSocket,
 };
 #[allow(unused_imports)]
 pub use filter_socket::{
