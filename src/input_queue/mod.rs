@@ -772,11 +772,17 @@ impl<T: Config> InputQueue<T> {
     /// # Behavior
     ///
     /// While the queue is **not yet frozen**:
+    /// - If `freeze_frame` is [`Frame::NULL`], there is no agreed freeze frame to
+    ///   roll back to — the expected case for a reserved hot-join slot frozen
+    ///   from frame 0 (no confirmed inputs yet) or a peer dropped before any
+    ///   confirmed input. Leave `last_confirmed_input` **unchanged** and freeze
+    ///   **silently**: this is a normal "no agreed frame" signal, *not* a
+    ///   violation (mirroring [`Self::set_frozen_value_at`]'s NULL no-op).
     /// - If `freeze_frame` is non-NULL and a confirmed input exists at that frame
     ///   in the ring buffer (via [`Self::confirmed_input`]), set
     ///   `last_confirmed_input` to that input's value, then freeze.
-    /// - If `freeze_frame` is [`Frame::NULL`] or no confirmed input exists at that
-    ///   frame (e.g. evicted from the ring buffer, or never received), leave
+    /// - If `freeze_frame` is non-NULL but no confirmed input exists at that frame
+    ///   (e.g. evicted from the ring buffer, or never received), leave
     ///   `last_confirmed_input` **unchanged** (fail-safe), report a
     ///   [`ViolationSeverity::Warning`] violation describing the miss, and still
     ///   freeze. This never panics.
@@ -788,23 +794,20 @@ impl<T: Config> InputQueue<T> {
             return;
         }
 
-        if freeze_frame.is_null() {
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::InputQueue,
-                "freeze_at called with NULL freeze frame; leaving last_confirmed_input unchanged"
-            );
-            self.frozen = true;
-            return;
-        }
-
         // Best-effort initial value-set, then freeze. The convergence guarantee
         // — rolling the frozen value DOWN to the global-min agreed frame `F` on
         // the direct-detection / re-adjust paths — is provided separately by
         // [`Self::set_frozen_value_at`], driven from
         // `P2PSession::disconnect_player_at_frames`. Here we seed an initial
         // value and flip the frozen flag.
-        if !self.roll_confirmed_input_to(freeze_frame) {
+        //
+        // `Frame::NULL` is the expected "no agreed freeze frame" case (a reserved
+        // hot-join slot frozen from frame 0; a drop before any confirmed input):
+        // `roll_confirmed_input_to` is already a no-op for it and there is no
+        // value to seed, so freeze silently — not a violation, mirroring
+        // `set_frozen_value_at`. Only a *non-NULL* frame missing from the ring
+        // (evicted or never received) is unexpected and warrants the `Warning`.
+        if !freeze_frame.is_null() && !self.roll_confirmed_input_to(freeze_frame) {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::InputQueue,
@@ -3182,6 +3185,152 @@ mod input_queue_tests {
         // NULL freeze frame: value left exactly as the most-recent confirmed.
         assert_eq!(queue.last_confirmed_input, before_value);
         assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 5 }));
+    }
+
+    /// Test-only capture of `report_violation!` output.
+    ///
+    /// `freeze_at` (and its siblings) report violations through the global
+    /// `report_violation!` macro, which routes to `TracingObserver` — a
+    /// `tracing::warn!` / `error!` event, not a per-session observer. To assert
+    /// *whether* a violation fired during a focused call, these helpers install a
+    /// thread-local capturing subscriber for the duration of `f`. Thread-local
+    /// (`tracing::subscriber::with_default`), so tests running in parallel never
+    /// observe each other's events.
+    mod violation_capture {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::field::{Field, Visit};
+        use tracing::{Event, Level, Subscriber};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+
+        /// A single captured tracing event: its severity level and message text.
+        #[derive(Clone, Debug)]
+        pub(super) struct Captured {
+            pub level: Level,
+            pub message: String,
+        }
+
+        /// Captures the special `message` field (the formatted violation text);
+        /// all other fields default through `record_debug` and are ignored.
+        #[derive(Default)]
+        struct MessageVisitor {
+            message: String,
+        }
+
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                }
+            }
+        }
+
+        struct CaptureLayer {
+            events: Arc<Mutex<Vec<Captured>>>,
+        }
+
+        impl<S: Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                if let Ok(mut events) = self.events.lock() {
+                    events.push(Captured {
+                        level: *event.metadata().level(),
+                        message: visitor.message,
+                    });
+                }
+            }
+        }
+
+        /// Runs `f` with a thread-local capturing subscriber and returns its
+        /// result alongside every tracing event emitted during the call.
+        pub(super) fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Captured>) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+                events: Arc::clone(&events),
+            });
+            let result = tracing::subscriber::with_default(subscriber, f);
+            let captured = events.lock().expect("capture mutex poisoned").clone();
+            (result, captured)
+        }
+
+        /// The captured events that `report_violation!` would emit — WARN
+        /// (`Warning`) or ERROR (`Error`/`Critical`). INFO/DEBUG/TRACE noise is
+        /// filtered out so the assertion is about violations specifically.
+        pub(super) fn violations(events: &[Captured]) -> Vec<&Captured> {
+            events
+                .iter()
+                .filter(|e| e.level == Level::WARN || e.level == Level::ERROR)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn freeze_at_with_null_frame_emits_no_violation() {
+        // `Frame::NULL` is the expected "no agreed freeze frame yet" signal
+        // (a reserved hot-join slot frozen from frame 0 with no confirmed inputs;
+        // a peer dropped before any confirmed input). It must NOT report a
+        // violation — mirroring the already-correct `set_frozen_value_at` NULL
+        // no-op. Regression test for the spurious-Warning defect: RED before the
+        // fix, which reported a `Warning` for *every* NULL freeze.
+        let ((), events) = violation_capture::capture(|| {
+            let mut queue = test_queue(0);
+            fill_sequential(&mut queue, 5);
+            queue.freeze_at(Frame::NULL);
+            assert!(queue.is_frozen());
+        });
+        let violations = violation_capture::violations(&events);
+        assert!(
+            violations.is_empty(),
+            "freeze_at(NULL) must not report a violation, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn freeze_at_with_missing_nonnull_frame_still_warns() {
+        // A *non-NULL* freeze frame with no confirmed input in the ring (evicted,
+        // or never received) is the genuinely-unexpected case and MUST still
+        // surface a `Warning`. Guards the fix against over-correction: it
+        // silences only the expected NULL case, never a real miss.
+        let ((), events) = violation_capture::capture(|| {
+            let mut queue = test_queue(0);
+            fill_sequential(&mut queue, 5);
+            // Frame 100 was never added: `roll_confirmed_input_to` fails.
+            queue.freeze_at(Frame::new(100));
+            assert!(queue.is_frozen());
+        });
+        let violations = violation_capture::violations(&events);
+        assert_eq!(
+            violations.len(),
+            1,
+            "freeze_at(non-NULL missing frame) must report exactly one violation, got: {violations:?}"
+        );
+        assert_eq!(violations[0].level, tracing::Level::WARN);
+        assert!(
+            violations[0]
+                .message
+                .contains("no confirmed input at agreed freeze frame"),
+            "unexpected violation message: {:?}",
+            violations[0].message
+        );
+    }
+
+    #[test]
+    fn freeze_at_with_present_frame_emits_no_violation() {
+        // The happy path (a non-NULL frame WITH a confirmed input) rolls the
+        // value and must not warn.
+        let ((), events) = violation_capture::capture(|| {
+            let mut queue = test_queue(0);
+            fill_sequential(&mut queue, 5);
+            queue.freeze_at(Frame::new(2));
+            assert_eq!(queue.last_confirmed_input, Some(TestInput { inp: 2 }));
+        });
+        let violations = violation_capture::violations(&events);
+        assert!(
+            violations.is_empty(),
+            "freeze_at(present frame) must not report a violation, got: {violations:?}"
+        );
     }
 
     #[test]

@@ -60,6 +60,7 @@ SPECS=(
     "SpectatorSession"
     "PeerDrop"
     "NPeerReactivation"
+    "FreezeConvergence"
 )
 
 # Track results

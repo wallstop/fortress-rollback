@@ -27,7 +27,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | File | Config | Status | Description |
 |------|--------|--------|-------------|
 | `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | Sync-handshake + peer-drop state machine (N=3 peers) |
-| `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
+| `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue + graceful-drop freeze (`freeze_at`/`set_frozen_value_at`) |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
 | `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection, per-(local,remote)-pair verdicts (N=3 peers) |
@@ -35,6 +35,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 | `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
+| `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 
 ## Properties Verified
 
@@ -62,10 +63,43 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - Runtime input delay stays within queue capacity
 - Mid-session delay increases preserve contiguous queued frames
 - Frozen queues reject later adds and preserve the final confirmed input
+- **Frozen-value determinism**: while frozen at a non-NULL agreed freeze frame
+  `F` present in the ring, `last_confirmed_input` equals exactly the confirmed
+  input at `F` — the frozen value is a deterministic function of `(F, ring)`,
+  independent of which survivor froze or the freeze/re-roll order (the
+  single-queue heart of the c25fc1f graceful-drop fix; models `freeze_at`,
+  `set_frozen_value_at`, `roll_confirmed_input_to`)
+- **Freeze-frame honesty**: `freezeFrame` is NULL exactly when no agreed-frame
+  value claim is in force, and a recorded non-NULL agreed frame is always
+  confirmable in the ring
 
 **Liveness:**
 
 - Predictions eventually confirmed (with rollback)
+
+### FreezeConvergence.tla
+
+Companion to `InputQueue.tla`'s freeze actions, lifting the single-queue
+determinism to the **cross-survivor** level the audit flagged as unmodeled.
+N survivors freeze a gracefully-dropped slot at possibly-different
+locally-received frames (asymmetric loss) and converge their frozen value
+**down** to the one global-min agreed frame `F` (via `set_frozen_value_at`).
+
+**Safety:**
+
+- `FrozenValueFaithful`: a survivor's repeated value is always the stream value
+  at its current freeze frame (the per-survivor lift of frozen-value determinism)
+- `FreezeFrameInRange`: no survivor freezes below the global min `F` or above
+  what it actually received
+- `ConvergedNoDesync`: once every survivor converges to `F`, the dropped slot's
+  reported confirmed stream is byte-identical across all survivors — the
+  desync-closing conclusion (the cross-survivor corollary at the fixpoint)
+
+**Liveness:**
+
+- `EventuallyConverged`: every survivor eventually converges to `F` (under weak
+  fairness), so the mesh reaches the no-desync fixpoint — also proving
+  `ConvergedNoDesync`'s `AllConverged` hypothesis is reachable (non-vacuous)
 
 ### PeerDrop.tla
 
@@ -231,10 +265,11 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | Config File | Key Constants | State Space |
 |-------------|---------------|-------------|
 | `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
-| `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
+| `InputQueue.cfg` | QUEUE_LENGTH=3, MAX_FRAME=4, NULL_FRAME=999 | ~56,500 distinct states (~1.07M generated) |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
 | `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
+| `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -325,10 +360,11 @@ These specifications model the key algorithms from:
 | TLA+ Module | Rust Implementation |
 |-------------|---------------------|
 | `NetworkProtocol` | `src/network/protocol/mod.rs` (UdpProtocol) |
-| `InputQueue` | `src/input_queue/mod.rs` (InputQueue) |
+| `InputQueue` | `src/input_queue/mod.rs` (InputQueue; `freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`, `confirmed_input`) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
 | `ChecksumExchange` | `src/sessions/p2p_session.rs` (sync_health, is_synchronized, last_verified_frame, compare_local_checksums_against_peers, check_checksum_send_interval), `src/network/protocol/mod.rs` (pending_checksums, last_verified_frame, on_checksum_report), `src/network/messages.rs` (ChecksumReport) |
+| `FreezeConvergence` | `src/input_queue/mod.rs` (`freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`), `src/sessions/p2p_session.rs` (`update_player_disconnects`, `disconnect_player_at_frames`, `remote_disconnect_snapshot`), `src/sync_layer/mod.rs` (frozen-slot bypass in `synchronized_inputs`) |
 
 ## Extending the Specifications
 
