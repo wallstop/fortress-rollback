@@ -1,4 +1,5 @@
 -------------------------- MODULE SpectatorFailover --------------------------
+
 (***************************************************************************)
 (* TLA+ Specification for MULTI-HOST SPECTATOR FAILOVER                     *)
 (* (the companion to SpectatorSession.tla that the N-player desync audit    *)
@@ -119,18 +120,17 @@
 (*     (it compares inputs, not connect-status); out of scope here, as        *)
 (*     checksum/desync detection is out of scope in SpectatorSession.tla.     *)
 (***************************************************************************)
-
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS
-    HOSTS,                  \* Ordered set of redundant hosts (e.g. {1,2,3});
-                            \* canonical = the lowest-numbered live host.
-    MAX_FRAME,              \* Maximum freeze frame value for model checking.
-    NULL_FRAME              \* Sentinel for "no witness" / initial (-1 in impl).
-
+CONSTANTS HOSTS,
+    \* Ordered set of redundant hosts (e.g. {1,2,3});
+    \* canonical = the lowest-numbered live host.
+         MAX_FRAME,    \* Maximum freeze frame value for model checking.
+         NULL_FRAME
+\* Sentinel for "no witness" / initial (-1 in impl).
 ASSUME HOSTS \subseteq Nat /\ HOSTS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
-ASSUME NULL_FRAME \notin 0..MAX_FRAME
+ASSUME NULL_FRAME \notin 0 .. MAX_FRAME
 
 (***************************************************************************)
 (* Frame values. Drop freeze frames are real frames 1..MAX_FRAME (a host    *)
@@ -138,47 +138,58 @@ ASSUME NULL_FRAME \notin 0..MAX_FRAME
 (* a connected/rejoined slot's last_frame is the baseline 0 (the value is     *)
 (* irrelevant to every property, which all guard on `disconnected`).         *)
 (***************************************************************************)
-Frame == {NULL_FRAME} \union (0..MAX_FRAME)
-FreezeFrame == 1..MAX_FRAME       \* a real drop freeze frame
-CONNECTED_FRAME == 0              \* baseline last_frame for a connected slot
+Frame == { NULL_FRAME } \union ( 0 .. MAX_FRAME )
+FreezeFrame == 1 .. MAX_FRAME
 
+\* a real drop freeze frame
+CONNECTED_FRAME == 0
+\* baseline last_frame for a connected slot
 (***************************************************************************)
 (* A host's (or the latch's) per-player connection status, mirroring the     *)
 (* production `ConnectionStatus { disconnected, last_frame }`.               *)
 (***************************************************************************)
-Status == [disconnected : BOOLEAN, lastFrame : Frame]
-Connected == [disconnected |-> FALSE, lastFrame |-> CONNECTED_FRAME]
+Status == [disconnected:BOOLEAN, lastFrame:Frame ]
+Connected == [ disconnected |-> FALSE, lastFrame |-> CONNECTED_FRAME ]
 
 (***************************************************************************)
 (* Lifecycle phases of the one droppable player. truePhase is the mesh       *)
 (* ground truth; hostPhase[h] is host h's own (possibly lagging) view.       *)
 (* Both advance only forward (in-order): Connected -> Dropped -> Rejoined.     *)
 (***************************************************************************)
-Phases == {"Connected", "Dropped", "Rejoined"}
+Phases == { "Connected", "Dropped", "Rejoined" }
 PhaseRank(ph) == CASE ph = "Connected" -> 0
-                   [] ph = "Dropped"   -> 1
-                   [] ph = "Rejoined"  -> 2
+                 [] ph = "Dropped" -> 1
+                 [] ph = "Rejoined" -> 2
 
 (***************************************************************************)
 (* Variables                                                               *)
 (***************************************************************************)
 VARIABLES
-    truePhase,      \* The mesh's actual lifecycle phase for the dropped player.
-    hostPhase,      \* [HOSTS -> Phases]: each host's own view (hostPhase[h] <= truePhase).
-    hostFreeze,     \* [HOSTS -> FreezeFrame]: host h's drop freeze frame (asymmetric,
-                    \* fixed at Init -- models per-host high-water received frame).
-    live,           \* SUBSET HOSTS: hosts not yet removed by failover (non-empty).
-
+  truePhase,    \* The mesh's actual lifecycle phase for the dropped player.
+  hostPhase,    \* [HOSTS -> Phases]: each host's own view (hostPhase[h] <= truePhase).
+  hostFreeze,
+    \* [HOSTS -> FreezeFrame]: host h's drop freeze frame (asymmetric,
+    \* fixed at Init -- models per-host high-water received frame).
+  live,
+    \* SUBSET HOSTS: hosts not yet removed by failover (non-empty).
     \* --- spectator state (mirrors the production fields) ---
-    latch,          \* Status: host_connect_status[player] -- the merged latched view.
-    witness,        \* [HOSTS -> Frame]: host_drop_witness[h][player] (NULL = None).
-    staged,         \* [HOSTS -> Status]: latest received (staged) status per host.
-
+  latch,    \* Status: host_connect_status[player] -- the merged latched view.
+  witness,    \* [HOSTS -> Frame]: host_drop_witness[h][player] (NULL = None).
+  staged,
+    \* [HOSTS -> Status]: latest received (staged) status per host.
     \* --- ghost (history) variables, for stating properties only ---
-    latchEverDisc   \* TRUE once the latch has ever been disconnected.
-
-vars == <<truePhase, hostPhase, hostFreeze, live,
-          latch, witness, staged, latchEverDisc>>
+  latchEverDisc
+\* TRUE once the latch has ever been disconnected.
+vars ==
+  << truePhase,
+     hostPhase,
+     hostFreeze,
+     live,
+     latch,
+     witness,
+     staged,
+     latchEverDisc
+  >>
 
 (***************************************************************************)
 (* The status host h currently gossips, derived from its phase view. A       *)
@@ -186,15 +197,16 @@ vars == <<truePhase, hostPhase, hostFreeze, live,
 (* rejoined host reports connected at the baseline frame.                    *)
 (***************************************************************************)
 HostReport(h) ==
-    CASE hostPhase[h] = "Dropped" -> [disconnected |-> TRUE,  lastFrame |-> hostFreeze[h]]
-      [] OTHER                    -> Connected
+  CASE hostPhase[h] = "Dropped" ->
+  [ disconnected |-> TRUE, lastFrame |-> hostFreeze[h] ]
+  [] OTHER-> Connected
 
 (***************************************************************************)
 (* Min over a NON-EMPTY set of frame numbers. CHOOSE ranges over frame        *)
 (* VALUES only (never over HOSTS), so it is symmetry-safe -- though this spec   *)
 (* uses no SYMMETRY anyway (host index is privileged: canonical = min live).  *)
 (***************************************************************************)
-Min(S) == CHOOSE x \in S : \A y \in S : x <= y
+Min(S) == CHOOSE x \in S: \A y \in S: x <= y
 
 \* Binary min/max on frame numbers (witness/freeze bookkeeping).
 Min2(x, y) == IF x <= y THEN x ELSE y
@@ -211,14 +223,14 @@ Canonical == Min(live)
 (* Type Invariant                                                          *)
 (***************************************************************************)
 TypeInvariant ==
-    /\ truePhase \in Phases
-    /\ hostPhase \in [HOSTS -> Phases]
-    /\ hostFreeze \in [HOSTS -> FreezeFrame]
-    /\ live \subseteq HOSTS /\ live # {}
-    /\ latch \in Status
-    /\ witness \in [HOSTS -> Frame]
-    /\ staged \in [HOSTS -> Status]
-    /\ latchEverDisc \in BOOLEAN
+  /\ truePhase \in Phases
+  /\ hostPhase \in [HOSTS -> Phases]
+  /\ hostFreeze \in [HOSTS -> FreezeFrame]
+  /\ live \subseteq HOSTS /\ live # {}
+  /\ latch \in Status
+  /\ witness \in [HOSTS -> Frame]
+  /\ staged \in [HOSTS -> Status]
+  /\ latchEverDisc \in BOOLEAN
 
 (***************************************************************************)
 (* Initial State: player connected everywhere, nothing staged/witnessed,     *)
@@ -226,25 +238,32 @@ TypeInvariant ==
 (* choice (each host's high-water received frame under packet loss).         *)
 (***************************************************************************)
 Init ==
-    /\ truePhase = "Connected"
-    /\ hostPhase = [h \in HOSTS |-> "Connected"]
-    /\ hostFreeze \in [HOSTS -> FreezeFrame]
-    /\ live = HOSTS
-    /\ latch = Connected
-    /\ witness = [h \in HOSTS |-> NULL_FRAME]
-    /\ staged = [h \in HOSTS |-> Connected]
-    /\ latchEverDisc = FALSE
+  /\ truePhase = "Connected"
+  /\ hostPhase = [h \in HOSTS |-> "Connected"]
+  /\ hostFreeze \in [HOSTS -> FreezeFrame]
+  /\ live = HOSTS
+  /\ latch = Connected
+  /\ witness = [h \in HOSTS |-> NULL_FRAME]
+  /\ staged = [h \in HOSTS |-> Connected]
+  /\ latchEverDisc = FALSE
+
 
 (***************************************************************************)
 (* ENVIRONMENT actions                                                      *)
 (***************************************************************************)
-
 (* The mesh ground truth advances one phase: the drop actually happens, then  *)
 (* (optionally) the player genuinely rejoins. Monotone forward.              *)
 AdvanceTruePhase ==
-    /\ truePhase # "Rejoined"
-    /\ truePhase' = IF truePhase = "Connected" THEN "Dropped" ELSE "Rejoined"
-    /\ UNCHANGED <<hostPhase, hostFreeze, live, latch, witness, staged, latchEverDisc>>
+  /\ truePhase # "Rejoined"
+  /\ truePhase' = IF truePhase = "Connected" THEN "Dropped" ELSE "Rejoined"
+  /\ UNCHANGED << hostPhase,
+        hostFreeze,
+        live,
+        latch,
+        witness,
+        staged,
+        latchEverDisc
+     >>
 
 (* A live host advances its OWN view by one phase, never past the ground       *)
 (* truth (a host cannot report a drop/rejoin that has not happened) and        *)
@@ -252,26 +271,43 @@ AdvanceTruePhase ==
 (* drop / the reactivation in its own stream; the spectator learns of it       *)
 (* only via a subsequent ReceiveReport.                                       *)
 AdvanceHostPhase(h) ==
-    /\ h \in live
-    /\ PhaseRank(hostPhase[h]) < PhaseRank(truePhase)
-    /\ hostPhase' = [hostPhase EXCEPT ![h] =
-                        IF hostPhase[h] = "Connected" THEN "Dropped" ELSE "Rejoined"]
-    /\ UNCHANGED <<truePhase, hostFreeze, live, latch, witness, staged, latchEverDisc>>
+  /\ h \in live
+  /\ PhaseRank(hostPhase[h]) < PhaseRank(truePhase)
+  /\ hostPhase' =
+       [hostPhase EXCEPT
+       ![h] =
+       IF hostPhase[h] = "Connected" THEN "Dropped" ELSE "Rejoined"]
+  /\ UNCHANGED << truePhase,
+        hostFreeze,
+        live,
+        latch,
+        witness,
+        staged,
+        latchEverDisc
+     >>
 
 (* Failover: a host times out and is removed. The spectator always keeps at    *)
 (* least one host. Production removes the entry from `hosts` /                 *)
 (* `host_snapshots` / `host_drop_witness` (index-parallel); here a removed     *)
 (* host simply leaves `live`, so it is never canonical and never folded.       *)
 Failover(h) ==
-    /\ h \in live
-    /\ live # {h}                 \* keep >= 1 host
-    /\ live' = live \ {h}
-    /\ UNCHANGED <<truePhase, hostPhase, hostFreeze, latch, witness, staged, latchEverDisc>>
+  /\ h \in live
+  /\ live # { h }
+  \* keep >= 1 host
+  /\ live' = live \ { h }
+  /\ UNCHANGED << truePhase,
+        hostPhase,
+        hostFreeze,
+        latch,
+        witness,
+        staged,
+        latchEverDisc
+     >>
+
 
 (***************************************************************************)
 (* SPECTATOR actions                                                        *)
 (***************************************************************************)
-
 (* ReceiveReport(h): the spectator receives host h's current gossip (staging,  *)
 (* `handle_host_input`, :1712). Faithful ordering:                            *)
 (*   1. witness_host_drop_reports (:1751) BEFORE staging -- if the report is    *)
@@ -280,20 +316,23 @@ Failover(h) ==
 (*   3. converge_latched_drop_status (:1827) -- if the report's freeze         *)
 (*      undercuts an already-disconnected latch, lower the latch (never raise).*)
 ReceiveReport(h) ==
-    /\ h \in live
-    /\ LET report == HostReport(h) IN
-        /\ witness' = [witness EXCEPT ![h] =
-                IF report.disconnected
-                THEN IF witness[h] = NULL_FRAME
-                     THEN report.lastFrame
-                     ELSE Max2(witness[h], report.lastFrame)
-                ELSE witness[h]]
+  /\ h \in live
+  /\ LET report == HostReport(h)
+     IN /\ witness' =
+             [witness EXCEPT
+             ![h] =
+             IF report.disconnected
+             THEN IF witness[h] = NULL_FRAME
+               THEN report.lastFrame
+               ELSE Max2(witness[h], report.lastFrame)
+             ELSE witness[h]]
         /\ staged' = [staged EXCEPT ![h] = report]
-        /\ latch' = IF report.disconnected /\ latch.disconnected
-                       /\ report.lastFrame < latch.lastFrame
-                    THEN [latch EXCEPT !.lastFrame = report.lastFrame]
-                    ELSE latch
-    /\ UNCHANGED <<truePhase, hostPhase, hostFreeze, live, latchEverDisc>>
+        /\ latch' =
+             IF report.disconnected /\ latch.disconnected /\
+                 report.lastFrame < latch.lastFrame
+             THEN [latch EXCEPT !.lastFrame = report.lastFrame]
+             ELSE latch
+  /\ UNCHANGED << truePhase, hostPhase, hostFreeze, live, latchEverDisc >>
 
 (* CommitCanonical: the spectator commits the canonical host's STAGED status    *)
 (* into the latch (`commit_canonical_snapshot`, :1591). For the player:        *)
@@ -312,10 +351,13 @@ ReceiveReport(h) ==
 (*     witness for the player (:1683); AdoptedDrop re-arms the committing       *)
 (*     host's witness at the adopted freeze (:1693).                          *)
 ConvergedFreeze(c) ==
-    LET others == {o \in live \ {c} : staged[o].disconnected}
-    IN IF others = {}
-       THEN staged[c].lastFrame
-       ELSE Min({staged[c].lastFrame} \union {staged[o].lastFrame : o \in others})
+  LET others == {o \in live \ { c }: staged[o].disconnected}
+  IN IF others = {}
+      THEN staged[c].lastFrame
+      ELSE Min({ staged[c].lastFrame } \union
+            {staged[o].lastFrame:
+              o \in others
+            })
 
 (***************************************************************************)
 (* The provenance gate (`reactivation_provenance`, :1435): host c may have   *)
@@ -326,52 +368,61 @@ ConvergedFreeze(c) ==
 (* re-open the slot (rustdoc :1413-1414) -- pinned by GateAcceptsBoundaryWitness.*)
 (***************************************************************************)
 Witnessed(c) ==
-    /\ latch.disconnected
-    /\ witness[c] # NULL_FRAME
-    /\ witness[c] >= latch.lastFrame
+  /\ latch.disconnected
+  /\ witness[c] # NULL_FRAME
+  /\ witness[c] >= latch.lastFrame
 
 CommitCanonical ==
-    /\ LET c        == Canonical
-           incoming == IF staged[c].disconnected
-                       THEN [disconnected |-> TRUE, lastFrame |-> ConvergedFreeze(c)]
-                       ELSE staged[c]
-           witnessed == Witnessed(c)
-       IN
-        \/  \* (T,T): both disconnected -> converge down (min). NoTransition.
-            /\ latch.disconnected /\ incoming.disconnected
-            /\ latch' = [latch EXCEPT !.lastFrame = Min2(latch.lastFrame, incoming.lastFrame)]
-            /\ UNCHANGED witness
-        \/  \* (T,F): latch disconnected, incoming connected.
-            /\ latch.disconnected /\ ~incoming.disconnected
-            /\  \/  \* Witnessed -> FOLLOW the genuine reactivation; consume witnesses.
-                    /\ witnessed
-                    /\ latch' = incoming
-                    /\ witness' = [h \in HOSTS |-> NULL_FRAME]
-                \/  \* Unwitnessed -> keep the frozen label (the critic-#1 gate).
-                    /\ ~witnessed
-                    /\ UNCHANGED <<latch, witness>>
-        \/  \* (F,T): adopt a fresh drop; re-arm the committing host's witness.
-            /\ ~latch.disconnected /\ incoming.disconnected
-            /\ latch' = incoming
-            /\ witness' = [witness EXCEPT ![c] =
-                    IF witness[c] = NULL_FRAME \/ incoming.lastFrame > witness[c]
-                    THEN incoming.lastFrame ELSE witness[c]]
-        \/  \* (F,F): both connected -> monotone-up bookkeeping (max). NoTransition.
-            /\ ~latch.disconnected /\ ~incoming.disconnected
-            /\ latch' = [latch EXCEPT !.lastFrame = Max2(latch.lastFrame, incoming.lastFrame)]
-            /\ UNCHANGED witness
-    /\ latchEverDisc' = (latchEverDisc \/ latch'.disconnected)
-    /\ UNCHANGED <<truePhase, hostPhase, hostFreeze, live, staged>>
+  /\ LET c == Canonical
+         incoming ==
+           IF staged[c].disconnected
+           THEN [ disconnected |-> TRUE, lastFrame |-> ConvergedFreeze(c) ]
+           ELSE staged[c]
+         witnessed == Witnessed(c)
+     IN \/ \* (T,T): both disconnected -> converge down (min). NoTransition.
+           /\ latch.disconnected /\ incoming.disconnected
+           /\ latch' =
+                [latch EXCEPT
+                !.lastFrame =
+                Min2(latch.lastFrame, incoming.lastFrame)]
+           /\ UNCHANGED witness
+        \/ \* (T,F): latch disconnected, incoming connected.
+           /\ latch.disconnected /\ ~incoming.disconnected
+           /\ \/ \* Witnessed -> FOLLOW the genuine reactivation; consume witnesses.
+                 /\ witnessed
+                 /\ latch' = incoming
+                 /\ witness' = [h \in HOSTS |-> NULL_FRAME]
+              \/ \* Unwitnessed -> keep the frozen label (the critic-#1 gate).
+                 /\ ~witnessed
+                 /\ UNCHANGED << latch, witness >>
+        \/ \* (F,T): adopt a fresh drop; re-arm the committing host's witness.
+           /\ ~latch.disconnected /\ incoming.disconnected
+           /\ latch' = incoming
+           /\ witness' =
+                [witness EXCEPT
+                ![c] =
+                IF witness[c] = NULL_FRAME \/ incoming.lastFrame > witness[c]
+                THEN incoming.lastFrame
+                ELSE witness[c]]
+        \/ \* (F,F): both connected -> monotone-up bookkeeping (max). NoTransition.
+           /\ ~latch.disconnected /\ ~incoming.disconnected
+           /\ latch' =
+                [latch EXCEPT
+                !.lastFrame =
+                Max2(latch.lastFrame, incoming.lastFrame)]
+           /\ UNCHANGED witness
+  /\ latchEverDisc' = ( latchEverDisc \/ latch'.disconnected )
+  /\ UNCHANGED << truePhase, hostPhase, hostFreeze, live, staged >>
 
 (***************************************************************************)
 (* Next-state relation                                                      *)
 (***************************************************************************)
 Next ==
-    \/ AdvanceTruePhase
-    \/ \E h \in HOSTS : AdvanceHostPhase(h)
-    \/ \E h \in HOSTS : Failover(h)
-    \/ \E h \in HOSTS : ReceiveReport(h)
-    \/ CommitCanonical
+  \/ AdvanceTruePhase
+  \/ \E h \in HOSTS: AdvanceHostPhase(h)
+  \/ \E h \in HOSTS: Failover(h)
+  \/ \E h \in HOSTS: ReceiveReport(h)
+  \/ CommitCanonical
 
 (***************************************************************************)
 (* Fairness: the spectator keeps receiving and committing, and hosts keep     *)
@@ -379,24 +430,24 @@ Next ==
 (* reflected). No fairness on Failover (it is an adversarial removal).        *)
 (***************************************************************************)
 Fairness ==
-    /\ \A h \in HOSTS : WF_vars(AdvanceHostPhase(h))
-    /\ \A h \in HOSTS : WF_vars(ReceiveReport(h))
-    /\ WF_vars(CommitCanonical)
+  /\ \A h \in HOSTS: WF_vars(AdvanceHostPhase(h))
+  /\ \A h \in HOSTS: WF_vars(ReceiveReport(h))
+  /\ WF_vars(CommitCanonical)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
 
 (***************************************************************************)
 (* SAFETY PROPERTIES                                                        *)
 (***************************************************************************)
-
 (* The set of LIVE hosts that have staged a disconnected report, and the       *)
 (* global-min freeze across them.                                            *)
-LiveDroppedStaged == {h \in live : staged[h].disconnected}
-\* Partial: defined only when LiveDroppedStaged # {} (else Min CHOOSEs over the
+LiveDroppedStaged == {h \in live: staged[h].disconnected}
+\* Partial: defined only when LiveDroppedStaged # {} (else Min CHOOSE's over the
 \* empty set). Its sole caller LatchAtOrBelowLiveMin guards on that antecedent,
 \* and the empty case (failover removed every host that staged the drop) IS
 \* reachable -- so the guard is load-bearing, not cosmetic.
-LiveMinFreeze == Min({staged[h].lastFrame : h \in LiveDroppedStaged})
+LiveMinFreeze == Min({staged[h].lastFrame: h \in LiveDroppedStaged})
 
 (***************************************************************************)
 (* LatchAtOrBelowLiveMin (audit F4 / completeness-critic #2) -- THE             *)
@@ -408,8 +459,8 @@ LiveMinFreeze == Min({staged[h].lastFrame : h \in LiveDroppedStaged})
 (* at commit and converge_latched_drop_status on late arrival; never raised.    *)
 (***************************************************************************)
 LatchAtOrBelowLiveMin ==
-    (latch.disconnected /\ LiveDroppedStaged # {}) =>
-        latch.lastFrame <= LiveMinFreeze
+  ( latch.disconnected /\ LiveDroppedStaged # {} ) =>
+    latch.lastFrame <= LiveMinFreeze
 
 (***************************************************************************)
 (* NoFalseResurrection (audit critic-#1 / Session 31) -- the provenance gate.   *)
@@ -422,7 +473,7 @@ LatchAtOrBelowLiveMin ==
 (* FALSE resurrection.)                                                        *)
 (***************************************************************************)
 NoFalseResurrection ==
-    (latchEverDisc /\ truePhase # "Rejoined") => latch.disconnected
+  ( latchEverDisc /\ truePhase # "Rejoined" ) => latch.disconnected
 
 (***************************************************************************)
 (* GateAcceptsBoundaryWitness -- the AVAILABILITY half of the provenance gate  *)
@@ -437,17 +488,16 @@ NoFalseResurrection ==
 (* exactly, then c rejoins and reports connected), so this is non-vacuous.       *)
 (***************************************************************************)
 GateAcceptsBoundaryWitness ==
-    LET c == Canonical IN
-        ( /\ latch.disconnected
-          /\ ~staged[c].disconnected
-          /\ witness[c] # NULL_FRAME
-          /\ witness[c] = latch.lastFrame ) => Witnessed(c)
+  LET c == Canonical IN ( /\ latch.disconnected
+                          /\ ~staged[c].disconnected
+                          /\ witness[c] # NULL_FRAME
+                          /\ witness[c] = latch.lastFrame ) => Witnessed(c)
 
 SafetyInvariant ==
-    /\ TypeInvariant
-    /\ LatchAtOrBelowLiveMin
-    /\ NoFalseResurrection
-    /\ GateAcceptsBoundaryWitness
+  /\ TypeInvariant
+  /\ LatchAtOrBelowLiveMin
+  /\ NoFalseResurrection
+  /\ GateAcceptsBoundaryWitness
 
 (***************************************************************************)
 (* FreezeNeverRaised: while the latch stays disconnected across a step, its     *)
@@ -459,13 +509,13 @@ SafetyInvariant ==
 (* afresh rather than raised.                                                    *)
 (***************************************************************************)
 FreezeNeverRaised ==
-    [][ (latch.disconnected /\ latch'.disconnected) =>
-            latch'.lastFrame <= latch.lastFrame ]_vars
+  [][( latch.disconnected /\ latch'.disconnected ) =>
+    latch'.lastFrame <= latch.lastFrame]_vars
+
 
 (***************************************************************************)
 (* LIVENESS                                                                 *)
 (***************************************************************************)
-
 (* DropEventuallyLatched: once the player has actually dropped, the spectator    *)
 (* eventually reflects it (latch disconnected) -- unless the player has by then    *)
 (* genuinely rejoined. The spectator does not silently ignore a drop the hosts    *)
@@ -473,7 +523,7 @@ FreezeNeverRaised ==
 (* receives + commits, and the (F,T) adopt arm latches it.                        *)
 (***************************************************************************)
 DropEventuallyLatched ==
-    (truePhase = "Dropped") ~> (latch.disconnected \/ truePhase = "Rejoined")
+  ( truePhase = "Dropped" ) ~> ( latch.disconnected \/ truePhase = "Rejoined" )
 
 (***************************************************************************)
 (* State constraint: nothing unbounded (all variables are already finite);   *)
@@ -484,8 +534,8 @@ StateConstraint == TRUE
 (***************************************************************************)
 (* Theorems                                                                *)
 (***************************************************************************)
-THEOREM SafetySpec  == Spec => []SafetyInvariant
-THEOREM FreezeSpec  == Spec => FreezeNeverRaised
-THEOREM LiveSpec    == Spec => DropEventuallyLatched
+THEOREM SafetySpec == Spec => []SafetyInvariant
+THEOREM FreezeSpec == Spec => FreezeNeverRaised
+THEOREM LiveSpec == Spec => DropEventuallyLatched
 
 =============================================================================
