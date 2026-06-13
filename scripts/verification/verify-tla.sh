@@ -58,6 +58,7 @@ SPECS=(
     "ChecksumExchange"
     "TimeSync"
     "SpectatorSession"
+    "SpectatorFailover"
     "PeerDrop"
     "NPeerReactivation"
     "FreezeConvergence"
