@@ -32,10 +32,11 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
 | `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection, per-(local,remote)-pair verdicts (N=3 peers) |
 | `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
-| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
+| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Per-endpoint rolling-window frame-advantage (pinned N=2; the cross-endpoint aggregation is modeled separately in `FrameAdvantageAggregation.tla`, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 | `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
+| `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 
 ## Properties Verified
 
@@ -100,6 +101,44 @@ locally-received frames (asymmetric loss) and converge their frozen value
 - `EventuallyConverged`: every survivor eventually converges to `F` (under weak
   fairness), so the mesh reaches the no-desync fixpoint — also proving
   `ConvergedNoDesync`'s `AllConverged` hypothesis is reachable (non-vacuous)
+
+### FrameAdvantageAggregation.tla
+
+Companion to `TimeSync.tla`. `TimeSync.tla` proves one endpoint's
+`average_frame_advantage()` is bounded and deterministic; this spec models the
+session-level fold that combines those per-endpoint averages across **all**
+remote endpoints into the single `frames_ahead` value driving
+`FortressEvent::WaitRecommendation` (`P2PSession::max_frame_advantage` →
+`check_wait_recommendation`). It is the cross-peer aggregation the original
+audit flagged as unmodeled at N≥3 — a constant bump of `TimeSync.tla` cannot
+reach it (Session 27: the window spec has no cross-peer interaction), so the
+per-endpoint average is abstracted (the same composition `FreezeConvergence.tla`
+uses with `InputQueue.tla`'s ring). Checked at 3 remote endpoints (an N≥4-player
+mesh from the local peer's view), one of them a 2-handle couch-co-op endpoint.
+
+**Safety:**
+
+- `FoldMatchesMaxSemantic`: the faithful per-handle / per-endpoint nested fold
+  equals the order-**independent** max over connected endpoints — simultaneously
+  the fold's correctness and its determinism (the result is invariant to
+  `remotes.values()` / `endpoint.handles()` iteration order)
+- `MultiHandleIdempotent`: folding a multi-handle endpoint once per handle yields
+  the same result as folding it once — `max(x, x) = x`, never the additive `2x`
+  (arbitrated finding F15 / completeness-critic #5, verbatim)
+- `AggregateIsAContributorOrZero`: the result is always **some connected
+  endpoint's** average, or 0 when none is connected — pinning both disconnect-gate
+  exclusion (a dropped endpoint's average never wins) and the fallback in one
+  statement
+- `FallbackZero`: a fully-disconnected mesh aggregates to 0 — the `i32::MIN`
+  sentinel never leaks
+- `AggregateBounded`: the result stays within the per-endpoint advantage bound
+- `RecommendationPositive`: any emitted `WaitRecommendation` carries a
+  `skip_frames ≥ MIN_RECOMMENDATION` (never a spurious 0/negative for an in-sync
+  or fully-disconnected mesh) — ties the fold to the public event
+
+Each of the six safety properties is mutation-pinned (RED under a targeted
+sabotage: additive fold, dropped disconnect gate, dropped `i32::MIN→0` fallback,
+threshold-less recommend).
 
 ### PeerDrop.tla
 
@@ -270,6 +309,7 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
 | `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
 | `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
+| `FrameAdvantageAggregation.cfg` | NUM_ENDPOINTS=3, MAX_ADVANTAGE=4, MULTI_HANDLE_COUNT=2, MIN_RECOMMENDATION=3 (no symmetry) | ~26,200 distinct states (~901,000 generated) |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -365,6 +405,8 @@ These specifications model the key algorithms from:
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
 | `ChecksumExchange` | `src/sessions/p2p_session.rs` (sync_health, is_synchronized, last_verified_frame, compare_local_checksums_against_peers, check_checksum_send_interval), `src/network/protocol/mod.rs` (pending_checksums, last_verified_frame, on_checksum_report), `src/network/messages.rs` (ChecksumReport) |
 | `FreezeConvergence` | `src/input_queue/mod.rs` (`freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`), `src/sessions/p2p_session.rs` (`update_player_disconnects`, `disconnect_player_at_frames`, `remote_disconnect_snapshot`), `src/sync_layer/mod.rs` (frozen-slot bypass in `synchronized_inputs`) |
+| `TimeSync` | `src/time_sync.rs` (TimeSync; `advance_frame`, `average_frame_advantage`) |
+| `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
 
 ## Extending the Specifications
 

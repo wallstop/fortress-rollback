@@ -61,6 +61,7 @@ SPECS=(
     "PeerDrop"
     "NPeerReactivation"
     "FreezeConvergence"
+    "FrameAdvantageAggregation"
 )
 
 # Track results
