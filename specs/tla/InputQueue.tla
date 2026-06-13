@@ -8,13 +8,23 @@
 (*   - Prediction vs confirmation lifecycle                                *)
 (*   - Frame delay handling                                                *)
 (*   - First incorrect frame tracking for rollback                         *)
+(*   - Graceful-peer-drop freeze: freeze_at / set_frozen_value_at /         *)
+(*     roll_confirmed_input_to (the heart of the c25fc1f fix), modeling the  *)
+(*     re-roll of the frozen value DOWN to a lowered agreed freeze frame.    *)
 (*                                                                         *)
 (* Properties verified:                                                    *)
 (*   - Safety: No buffer overflow (INV-4)                                  *)
 (*   - Safety: Valid indices (INV-5)                                       *)
 (*   - Safety: FIFO ordering preserved                                     *)
 (*   - Safety: No frame gaps                                               *)
+(*   - Safety: Frozen-value determinism (the frozen value is a              *)
+(*     deterministic function of the agreed freeze frame and the ring,       *)
+(*     independent of which survivor froze or in what order)               *)
 (*   - Liveness: Predictions eventually confirmed                          *)
+(*                                                                         *)
+(* The single-queue freeze actions here are lifted to the cross-survivor    *)
+(* agreement level (multiple survivors converging a dropped slot's frozen    *)
+(* value to one global-min frame) in the companion FreezeConvergence.tla.   *)
 (*                                                                         *)
 (* Production-Spec Alignment (as of Phase 9/10):                           *)
 (*   QUEUE_LENGTH maps to InputQueueConfig.queue_length (configurable):    *)
@@ -65,10 +75,14 @@ VARIABLES
     firstIncorrectFrame,    \* First frame where prediction was wrong
     lastConfirmedInput,     \* Last confirmed input (used for predictions)
     frameDelay,             \* Runtime input delay in frames
-    frozen                  \* TRUE after graceful peer drop freezes the queue
+    frozen,                 \* TRUE after graceful peer drop freezes the queue
+    freezeFrame             \* The agreed freeze frame this queue is frozen at
+                            \* (NULL_FRAME when not frozen, or when frozen via the
+                            \* bare `freeze()` with no agreed frame). See FreezeAt.
 
 vars == <<inputs, head, tail, length, lastAddedFrame, lastRequestedFrame,
-          firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
+          firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen,
+          freezeFrame>>
 
 (***************************************************************************)
 (* Type Definitions                                                        *)
@@ -93,6 +107,7 @@ TypeInvariant ==
     /\ lastConfirmedInput \in Input
     /\ frameDelay \in 0..(QUEUE_LENGTH - 1)
     /\ frozen \in BOOLEAN
+    /\ freezeFrame \in Frame
 
 (***************************************************************************)
 (* Initial State                                                           *)
@@ -110,6 +125,7 @@ Init ==
     /\ lastConfirmedInput = BlankInput
     /\ frameDelay = 0
     /\ frozen = FALSE
+    /\ freezeFrame = NULL_FRAME
 
 (***************************************************************************)
 (* Helper: Modular arithmetic for circular buffer                          *)
@@ -119,6 +135,21 @@ Mod(n) == n % QUEUE_LENGTH
 PrevIndex(i) == IF i = 0 THEN QUEUE_LENGTH - 1 ELSE i - 1
 
 NextIndex(i) == Mod(i + 1)
+
+(***************************************************************************)
+(* Helper: confirmed-input lookup (models InputQueue::confirmed_input)      *)
+(*                                                                         *)
+(* Production reads `inputs[frame % queue_length]` and returns it ONLY if   *)
+(* the stored entry's frame equals the requested frame (an exact-match ring *)
+(* probe; tail/length are not consulted). A non-NULL frame whose ring slot  *)
+(* holds a different frame (evicted by wraparound, or never written) has no *)
+(* confirmed input. NULL_FRAME never has a confirmed input.                 *)
+(***************************************************************************)
+HasConfirmedInputAt(f) ==
+    /\ f # NULL_FRAME
+    /\ inputs[Mod(f)].frame = f
+
+ConfirmedInputAt(f) == inputs[Mod(f)]
 
 (***************************************************************************)
 (* INV-4: Queue Length Bounds                                              *)
@@ -190,7 +221,8 @@ AddInput(input) ==
     /\ length' = IF length < QUEUE_LENGTH THEN length + 1 ELSE length
     /\ tail' = IF length >= QUEUE_LENGTH THEN NextIndex(tail) ELSE tail
     /\ lastAddedFrame' = input.frame + frameDelay
-    /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frameDelay, frozen>>
+    /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frameDelay, frozen,
+                   freezeFrame>>
 
 (***************************************************************************)
 (* Action: Get input for a frame (returns confirmed or predicted)          *)
@@ -203,7 +235,8 @@ GetInput(frame) ==
                              THEN frame
                              ELSE lastRequestedFrame
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
+                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen,
+                   freezeFrame>>
 
 (***************************************************************************)
 (* Action: Add remote input (may detect incorrect prediction)              *)
@@ -232,7 +265,7 @@ AddRemoteInput(input) ==
     /\ IF firstIncorrectFrame = NULL_FRAME /\ input.value # lastConfirmedInput.value
        THEN firstIncorrectFrame' = input.frame + frameDelay
        ELSE firstIncorrectFrame' = firstIncorrectFrame
-    /\ UNCHANGED <<lastRequestedFrame, frameDelay, frozen>>
+    /\ UNCHANGED <<lastRequestedFrame, frameDelay, frozen, freezeFrame>>
 
 (***************************************************************************)
 (* Action: Discard confirmed inputs up to a frame                          *)
@@ -246,7 +279,8 @@ DiscardConfirmed(upToFrame) ==
     /\ tail' = NextIndex(tail)
     /\ length' = length - 1
     /\ UNCHANGED <<inputs, head, lastAddedFrame, lastRequestedFrame,
-                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen>>
+                   firstIncorrectFrame, lastConfirmedInput, frameDelay, frozen,
+                   freezeFrame>>
 
 (***************************************************************************)
 (* Action: Reset prediction tracking (after rollback)                      *)
@@ -255,7 +289,8 @@ ResetPrediction ==
     /\ firstIncorrectFrame # NULL_FRAME
     /\ firstIncorrectFrame' = NULL_FRAME
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
-                   lastRequestedFrame, lastConfirmedInput, frameDelay, frozen>>
+                   lastRequestedFrame, lastConfirmedInput, frameDelay, frozen,
+                   freezeFrame>>
 
 (***************************************************************************)
 (* Action: Set frame delay                                                  *)
@@ -276,7 +311,7 @@ SetFrameDelay(newDelay) ==
           /\ frameDelay' = newDelay
           /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
                          lastRequestedFrame, firstIncorrectFrame,
-                         lastConfirmedInput, frozen>>
+                         lastConfirmedInput, frozen, freezeFrame>>
        \/ /\ ~frozen
           /\ lastAddedFrame # NULL_FRAME
           /\ newDelay = frameDelay + 1
@@ -291,7 +326,8 @@ SetFrameDelay(newDelay) ==
           /\ tail' = tail
           /\ lastAddedFrame' = lastAddedFrame + 1
           /\ frameDelay' = newDelay
-          /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frozen>>
+          /\ UNCHANGED <<lastRequestedFrame, firstIncorrectFrame, frozen,
+                         freezeFrame>>
        \/ /\ ~frozen
           /\ lastAddedFrame # NULL_FRAME
           /\ newDelay > frameDelay
@@ -302,17 +338,84 @@ SetFrameDelay(newDelay) ==
           /\ UNCHANGED vars
 
 (***************************************************************************)
-(* Action: Freeze queue after graceful peer drop                            *)
+(* Action: Freeze queue after graceful peer drop (bare `freeze()`)          *)
 (*                                                                         *)
-(* Freezing only flips the flag. AddInput/AddRemoteInput are disabled while *)
-(* frozen, preserving the final confirmed input for deterministic reads.    *)
+(* The bare `freeze()` only flips the flag, preserving the current          *)
+(* `lastConfirmedInput` as the frozen value. It makes NO agreed-frame claim *)
+(* (freezeFrame stays NULL_FRAME), so FrozenValueDeterminism below does not  *)
+(* constrain it. AddInput/AddRemoteInput are disabled while frozen.          *)
 (***************************************************************************)
 Freeze ==
     /\ ~frozen
     /\ frozen' = TRUE
+    /\ freezeFrame' = NULL_FRAME
     /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
                    lastRequestedFrame, firstIncorrectFrame,
                    lastConfirmedInput, frameDelay>>
+
+(***************************************************************************)
+(* Action: Freeze the queue AT a specific agreed freeze frame               *)
+(*                                                                         *)
+(* Maps to production: InputQueue::freeze_at(freeze_frame). This is the      *)
+(* graceful-peer-drop entry that ROLLS the frozen value back to the value    *)
+(* confirmed at the agreed freeze frame F before freezing, so every survivor *)
+(* repeats the SAME deterministic value for the dropped slot. The agreed F   *)
+(* is the global minimum across all peers of the dropped slot's received     *)
+(* frame (computed in p2p_session::update_player_disconnects), so every       *)
+(* survivor has a confirmed input AT F and that value is identical.          *)
+(*                                                                         *)
+(* Fail-safe (mirrors roll_confirmed_input_to):                             *)
+(*   - Idempotent: a no-op once already frozen (never re-seeds a value).     *)
+(*   - NULL_FRAME: the expected "no agreed frame yet" case (reserved hot-join *)
+(*     slot; drop before any confirmed input) -> freeze silently, value       *)
+(*     unchanged, freezeFrame stays NULL (no agreed-frame claim).            *)
+(*   - non-NULL present in ring -> roll lastConfirmedInput to that value,     *)
+(*     record freezeFrame = f.                                              *)
+(*   - non-NULL but missing from ring (evicted / never received) -> value     *)
+(*     unchanged (fail-safe; production also logs a Warning), freezeFrame      *)
+(*     stays NULL (no value claim is made for a frame we could not roll to).  *)
+(***************************************************************************)
+FreezeAt(f) ==
+    /\ ~frozen
+    /\ f \in Frame
+    /\ frozen' = TRUE
+    /\ IF HasConfirmedInputAt(f)
+       THEN /\ lastConfirmedInput' = ConfirmedInputAt(f)
+            /\ freezeFrame' = f
+       ELSE /\ lastConfirmedInput' = lastConfirmedInput
+            /\ freezeFrame' = NULL_FRAME
+    /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
+                   lastRequestedFrame, firstIncorrectFrame, frameDelay>>
+
+(***************************************************************************)
+(* Action: Re-roll an ALREADY-frozen queue's value to frame f               *)
+(*                                                                         *)
+(* Maps to production: InputQueue::set_frozen_value_at(frame). Where         *)
+(* freeze_at seeds the value on the gossip path, the direct-detection paths  *)
+(* (own-endpoint timeout, remove_player) freeze at the survivor's OWN, higher *)
+(* locally-received frame; the disconnect machinery later converges every     *)
+(* survivor's last_frame DOWN to the global-min F and calls this to re-roll   *)
+(* the frozen value to track F. The queue-level action rolls to whatever f    *)
+(* it is given (monotone-DOWN is a caller/session guarantee, modeled in        *)
+(* FreezeConvergence.tla); the value remains a deterministic function of f.   *)
+(*                                                                         *)
+(* Fail-safe (mirrors set_frozen_value_at):                                 *)
+(*   - Not frozen -> no-op (never seeds a value on a live queue).            *)
+(*   - NULL_FRAME -> no-op (no agreed frame yet).                            *)
+(*   - non-NULL present -> roll lastConfirmedInput, record freezeFrame = f.   *)
+(*   - non-NULL missing -> value unchanged (fail-safe; production logs a      *)
+(*     Warning), freezeFrame retained at its last successfully-rolled value.  *)
+(***************************************************************************)
+SetFrozenValueAt(f) ==
+    /\ frozen
+    /\ f \in Frame
+    /\ IF HasConfirmedInputAt(f)
+       THEN /\ lastConfirmedInput' = ConfirmedInputAt(f)
+            /\ freezeFrame' = f
+       ELSE /\ lastConfirmedInput' = lastConfirmedInput
+            /\ freezeFrame' = freezeFrame
+    /\ UNCHANGED <<inputs, head, tail, length, lastAddedFrame,
+                   lastRequestedFrame, firstIncorrectFrame, frameDelay, frozen>>
 
 (***************************************************************************)
 (* Next State Relation                                                     *)
@@ -329,6 +432,8 @@ Next ==
     \/ ResetPrediction
     \/ \E d \in 0..(QUEUE_LENGTH - 1): SetFrameDelay(d)
     \/ Freeze
+    \/ \E f \in Frame: FreezeAt(f)
+    \/ \E f \in Frame: SetFrozenValueAt(f)
 
 (***************************************************************************)
 (* Specification                                                           *)
@@ -343,6 +448,46 @@ Spec == Init /\ [][Next]_vars
 NoBufferOverflow ==
     length <= QUEUE_LENGTH
 
+(***************************************************************************)
+(* SAFE-FREEZE: Frozen-value determinism (the heart of the c25fc1f fix)     *)
+(*                                                                         *)
+(* Whenever the queue is frozen at a non-NULL agreed freeze frame F whose    *)
+(* confirmed input is present in the ring, `lastConfirmedInput` equals       *)
+(* exactly the confirmed input at F. The frozen value is therefore a         *)
+(* deterministic function of (F, ring contents at F) -- NOT of which          *)
+(* survivor froze, nor of the order in which freeze_at / set_frozen_value_at  *)
+(* fired. Combined with the session guarantee that every survivor holds the   *)
+(* identical confirmed input at the global-min F, this is precisely what      *)
+(* makes survivors repeat byte-identical values for a dropped slot (no        *)
+(* desync). FreezeConvergence.tla lifts this to the cross-survivor level.     *)
+(*                                                                         *)
+(* The guard "HasConfirmedInputAt(freezeFrame)" is load-bearing: a frame      *)
+(* later evicted from the ring (DiscardConfirmed then a wrapping write) is     *)
+(* the documented F-evicted residual and is deliberately excluded -- the      *)
+(* invariant constrains only frames still confirmable, matching production's   *)
+(* `confirmed_input` exact-match probe. (While frozen, no wrapping write can   *)
+(* occur -- AddInput is disabled -- so a value seeded at freeze stays valid.)  *)
+(*                                                                         *)
+(* The comparison is on the full Input record. Production's                    *)
+(* `last_confirmed_input: Option<T::Input>` stores only the VALUE; this spec    *)
+(* additionally carries the `.frame` as bookkeeping (a spec-only ghost, no      *)
+(* production field), so this invariant is strictly STRONGER than production's   *)
+(* value-only guarantee -- it never weakens it.                                *)
+(***************************************************************************)
+FrozenValueDeterminism ==
+    (frozen /\ freezeFrame # NULL_FRAME /\ HasConfirmedInputAt(freezeFrame))
+        => lastConfirmedInput = ConfirmedInputAt(freezeFrame)
+
+(***************************************************************************)
+(* SAFE-FREEZE-2: A recorded agreed freeze frame is never NULL while unfrozen *)
+(* and, when non-NULL, is a real frame the queue committed to (an agreed       *)
+(* frame is only ever recorded by a successful roll). This keeps freezeFrame   *)
+(* honest: it is NULL exactly when no agreed-frame value claim is in force.    *)
+(***************************************************************************)
+FreezeFrameHonest ==
+    /\ (~frozen) => (freezeFrame = NULL_FRAME)
+    /\ (freezeFrame # NULL_FRAME) => HasConfirmedInputAt(freezeFrame)
+
 \* Combined safety invariant
 SafetyInvariant ==
     /\ TypeInvariant
@@ -350,6 +495,8 @@ SafetyInvariant ==
     /\ QueueIndexValid
     /\ NoBufferOverflow
     /\ FIFOOrdering
+    /\ FrozenValueDeterminism
+    /\ FreezeFrameHonest
 
 (***************************************************************************)
 (* Liveness Properties                                                     *)

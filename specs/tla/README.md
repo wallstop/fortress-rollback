@@ -27,14 +27,17 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | File | Config | Status | Description |
 |------|--------|--------|-------------|
 | `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | Sync-handshake + peer-drop state machine (N=3 peers) |
-| `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue |
+| `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue + graceful-drop freeze (`freeze_at`/`set_frozen_value_at`) |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
 | `ChecksumExchange.tla` | `ChecksumExchange.cfg` | ✓ CI | Checksum exchange for desync detection, per-(local,remote)-pair verdicts (N=3 peers) |
-| `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Spectator session with frame delay and catchup |
-| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Time synchronization for peer frame rate coordination (pinned N=2, see cfg) |
+| `SpectatorSession.tla` | `SpectatorSession.cfg` | ✓ CI | Single-host spectator session with frame delay and catchup (multi-host failover is modeled separately in `SpectatorFailover.tla`) |
+| `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Per-endpoint rolling-window frame-advantage (pinned N=2; the cross-endpoint aggregation is modeled separately in `FrameAdvantageAggregation.tla`, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 | `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
+| `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
+| `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
+| `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
 
 ## Properties Verified
 
@@ -62,10 +65,136 @@ This directory contains TLA+ specifications for formally verifying the correctne
 - Runtime input delay stays within queue capacity
 - Mid-session delay increases preserve contiguous queued frames
 - Frozen queues reject later adds and preserve the final confirmed input
+- **Frozen-value determinism**: while frozen at a non-NULL agreed freeze frame
+  `F` present in the ring, `last_confirmed_input` equals exactly the confirmed
+  input at `F` — the frozen value is a deterministic function of `(F, ring)`,
+  independent of which survivor froze or the freeze/re-roll order (the
+  single-queue heart of the c25fc1f graceful-drop fix; models `freeze_at`,
+  `set_frozen_value_at`, `roll_confirmed_input_to`)
+- **Freeze-frame honesty**: `freezeFrame` is NULL exactly when no agreed-frame
+  value claim is in force, and a recorded non-NULL agreed frame is always
+  confirmable in the ring
 
 **Liveness:**
 
 - Predictions eventually confirmed (with rollback)
+
+### FreezeConvergence.tla
+
+Companion to `InputQueue.tla`'s freeze actions, lifting the single-queue
+determinism to the **cross-survivor** level the audit flagged as unmodeled.
+N survivors freeze a gracefully-dropped slot at possibly-different
+locally-received frames (asymmetric loss) and converge their frozen value
+**down** to the one global-min agreed frame `F` (via `set_frozen_value_at`).
+
+**Safety:**
+
+- `FrozenValueFaithful`: a survivor's repeated value is always the stream value
+  at its current freeze frame (the per-survivor lift of frozen-value determinism)
+- `FreezeFrameInRange`: no survivor freezes below the global min `F` or above
+  what it actually received
+- `ConvergedNoDesync`: once every survivor converges to `F`, the dropped slot's
+  reported confirmed stream is byte-identical across all survivors — the
+  desync-closing conclusion (the cross-survivor corollary at the fixpoint)
+
+**Liveness:**
+
+- `EventuallyConverged`: every survivor eventually converges to `F` (under weak
+  fairness), so the mesh reaches the no-desync fixpoint — also proving
+  `ConvergedNoDesync`'s `AllConverged` hypothesis is reachable (non-vacuous)
+
+### FrameAdvantageAggregation.tla
+
+Companion to `TimeSync.tla`. `TimeSync.tla` proves one endpoint's
+`average_frame_advantage()` is bounded and deterministic; this spec models the
+session-level fold that combines those per-endpoint averages across **all**
+remote endpoints into the single `frames_ahead` value driving
+`FortressEvent::WaitRecommendation` (`P2PSession::max_frame_advantage` →
+`check_wait_recommendation`). It is the cross-peer aggregation the original
+audit flagged as unmodeled at N≥3 — a constant bump of `TimeSync.tla` cannot
+reach it (Session 27: the window spec has no cross-peer interaction), so the
+per-endpoint average is abstracted (the same composition `FreezeConvergence.tla`
+uses with `InputQueue.tla`'s ring). Checked at 3 remote endpoints (an N≥4-player
+mesh from the local peer's view), one of them a 2-handle couch-co-op endpoint.
+
+**Safety:**
+
+- `FoldMatchesMaxSemantic`: the faithful per-handle / per-endpoint nested fold
+  equals the order-**independent** max over connected endpoints — simultaneously
+  the fold's correctness and its determinism (the result is invariant to
+  `remotes.values()` / `endpoint.handles()` iteration order)
+- `MultiHandleIdempotent`: folding a multi-handle endpoint once per handle yields
+  the same result as folding it once — `max(x, x) = x`, never the additive `2x`
+  (arbitrated finding F15 / completeness-critic #5, verbatim)
+- `AggregateIsAContributorOrZero`: the result is always **some connected
+  endpoint's** average, or 0 when none is connected — pinning both disconnect-gate
+  exclusion (a dropped endpoint's average never wins) and the fallback in one
+  statement
+- `FallbackZero`: a fully-disconnected mesh aggregates to 0 — the `i32::MIN`
+  sentinel never leaks
+- `AggregateBounded`: the result stays within the per-endpoint advantage bound
+- `RecommendationPositive`: any emitted `WaitRecommendation` carries a
+  `skip_frames ≥ MIN_RECOMMENDATION` (never a spurious 0/negative for an in-sync
+  or fully-disconnected mesh) — ties the fold to the public event
+
+Each of the six safety properties is mutation-pinned (RED under a targeted
+sabotage: additive fold, dropped disconnect gate, dropped `i32::MIN→0` fallback,
+threshold-less recommend).
+
+### SpectatorFailover.tla
+
+Companion to `SpectatorSession.tla` (which models a single host). The production
+spectator receives input broadcasts from a **vector of redundant hosts** and
+**fails over** when the canonical host disconnects; this spec models the
+connect-status merge (`merge_connection_status` + `converged_drop_status` +
+`converge_latched_drop_status` + `reactivation_provenance`,
+`src/sessions/p2p_spectator_session.rs`) that builds one convergent,
+reactivation-safe latched view from the hosts' disagreeing (asymmetric-loss)
+streams. One droppable player (the merge loops players independently), one drop
+cycle with an optional genuine rejoin (the regime in which the provenance gate
+is sound), in-order per-host delivery — see the `.tla` header for the scope and
+the cross-cycle residuals (which need the future-work host→spectator epoch wire
+signal) left out of model.
+
+**Safety:**
+
+- `LatchAtOrBelowLiveMin` (audit F4 / completeness-critic #2): a
+  latched-disconnected slot's freeze is never above the global-min freeze across
+  **live** hosts that staged a drop — the spectator replays
+  `inputs[last_frame]`, so bounding it by the live min guarantees every
+  surviving host confirmed that frame (no silent desync). Folds down at commit
+  (`converged_drop_status`) and on late arrival (`converge_latched_drop_status`);
+  never raised.
+- `NoFalseResurrection` (audit critic-#1 / Session 31): once disconnected, the
+  latch stays disconnected until the player **genuinely** rejoins — a stale
+  lagging host that becomes canonical via failover but never witnessed the drop
+  cannot re-open the slot (the `host_drop_witness` provenance gate). This is the
+  stale-lagging-canonical (failover) guarantee; the within-cycle reordered-staging
+  transient resurrection is a documented single-cycle production fail-open the
+  in-order-staging model deliberately excludes (see the `.tla` SCOPE header).
+- `GateAcceptsBoundaryWitness` (the availability dual): a genuine current-drop
+  witness at **exactly** the converged freeze is classified Witnessed (the
+  load-bearing `>=`, not `>`, in `reactivation_provenance`), so a real hot-join
+  re-open is not wrongly frozen out.
+- `FreezeNeverRaised`: while a slot stays latched-disconnected its freeze frame
+  is non-increasing (the min / converge arms only lower it).
+
+**Liveness:**
+
+- `DropEventuallyLatched`: a real drop is eventually reflected in the latch (or
+  the player genuinely rejoins) — the spectator does not ignore a drop the hosts
+  agree on.
+
+Each safety property is mutation-pinned (RED under a targeted sabotage):
+neutralizing **either** convergence fold (commit-time or late-arrival) breaks
+`LatchAtOrBelowLiveMin` — proving both are load-bearing; a `min→max` re-commit
+breaks `FreezeNeverRaised`; removing the provenance NULL-witness guard (the
+pre-Session-31 unconditional follow) breaks `NoFalseResurrection` via a
+host-failover stale-resurrection trace; tightening the gate `>=` to `>` breaks
+`GateAcceptsBoundaryWitness`. Disabling either WF assumption breaks the liveness.
+Reachability probes confirm the interesting states (converge-down, genuine
+follow, failover-while-disconnected, latch-disconnected, gate boundary) are
+non-vacuously reached.
 
 ### PeerDrop.tla
 
@@ -231,10 +360,13 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | Config File | Key Constants | State Space |
 |-------------|---------------|-------------|
 | `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
-| `InputQueue.cfg` | QUEUE_LENGTH=4, MAX_FRAME=6 | ~77,000 states |
+| `InputQueue.cfg` | QUEUE_LENGTH=3, MAX_FRAME=4, NULL_FRAME=999 | ~56,500 distinct states (~1.07M generated) |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
 | `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
+| `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
+| `FrameAdvantageAggregation.cfg` | NUM_ENDPOINTS=3, MAX_ADVANTAGE=4, MULTI_HANDLE_COUNT=2, MIN_RECOMMENDATION=3 (no symmetry) | ~26,200 distinct states (~901,000 generated) |
+| `SpectatorFailover.cfg` | HOSTS={1,2,3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — canonical=min(live), liveness) | ~96,800 distinct states (~446,000 generated), ~6s single worker |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -325,10 +457,14 @@ These specifications model the key algorithms from:
 | TLA+ Module | Rust Implementation |
 |-------------|---------------------|
 | `NetworkProtocol` | `src/network/protocol/mod.rs` (UdpProtocol) |
-| `InputQueue` | `src/input_queue/mod.rs` (InputQueue) |
+| `InputQueue` | `src/input_queue/mod.rs` (InputQueue; `freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`, `confirmed_input`) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |
 | `ChecksumExchange` | `src/sessions/p2p_session.rs` (sync_health, is_synchronized, last_verified_frame, compare_local_checksums_against_peers, check_checksum_send_interval), `src/network/protocol/mod.rs` (pending_checksums, last_verified_frame, on_checksum_report), `src/network/messages.rs` (ChecksumReport) |
+| `FreezeConvergence` | `src/input_queue/mod.rs` (`freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`), `src/sessions/p2p_session.rs` (`update_player_disconnects`, `disconnect_player_at_frames`, `remote_disconnect_snapshot`), `src/sync_layer/mod.rs` (frozen-slot bypass in `synchronized_inputs`) |
+| `TimeSync` | `src/time_sync.rs` (TimeSync; `advance_frame`, `average_frame_advantage`) |
+| `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
+| `SpectatorFailover` | `src/sessions/p2p_spectator_session.rs` (`merge_connection_status`, `converged_drop_status`, `converge_latched_drop_status`, `reactivation_provenance`, `witness_host_drop_reports`, `consume_drop_witnesses`, `witness_adopted_drop`, `commit_canonical_snapshot`, `host_drop_witness`, `host_connect_status`) |
 
 ## Extending the Specifications
 

@@ -60,7 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     requirements. Spec-violation noise from the legitimate pre-activation windows (the coordinator's
     sub-activation pending stream replayed into a fresh joiner; a reactivated slot's empty input ring
     while its first input is still in flight; lifecycle-close stragglers of the joiner's own concluded
-    attempt) is reported at trace level, with full severity kept everywhere else. A hot-joined session's
+    attempt) is reported at trace level, with full severity kept everywhere else. Likewise, freezing a
+    slot that has no agreed freeze frame yet — a build-time reserved slot frozen from frame 0, or any
+    drop before a first confirmed input (`Frame::NULL`) — is silent rather than emitting a spurious
+    `ViolationSeverity::Warning` on every such freeze, matching the frozen-value-convergence no-op; a
+    *non-NULL* freeze frame that is genuinely missing from the input ring (evicted, or never received)
+    still warns. A hot-joined session's
     confirmed-input stream toward its own spectator endpoints starts at the loaded snapshot frame (the
     earliest frame a mid-game joiner can serve).
   - A slot that is *cleanly gracefully dropped* (via `P2PSession::remove_player`, or automatically on the
