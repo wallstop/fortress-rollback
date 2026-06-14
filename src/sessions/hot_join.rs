@@ -8,7 +8,7 @@
 //!
 //! All items are `pub(crate)` and gated behind the `hot-join` feature.
 //!
-//! # Bounded deserialization (allocation only)
+//! # Bounded deserialization (allocation and recursion depth)
 //!
 //! A received `StateSnapshot::state_bytes` is peer-controlled. The wire-level
 //! [`decode_message`](crate::network::codec::decode_message) already bounds the
@@ -20,19 +20,20 @@
 //! caps every container claim at `MAX_BOUNDED_DECODE_LEN` so a hostile length
 //! prefix cannot drive an oversized *allocation*.
 //!
-//! This bounds allocation only — it does **not** bound *recursion depth*.
-//! bincode decodes a recursive type by recursing, and a pathologically
-//! deeply-nested `Config::State` (e.g. `enum Tree { Leaf(u8), Node(Box<Tree>) }`
-//! nested thousands deep) can be encoded in far fewer bytes than the
-//! `MAX_BOUNDED_DECODE_LEN` cap yet still exhaust the
-//! call stack while decoding — an uncatchable abort, not a recoverable `Err`.
-//! Reaching that requires a peer feeding such bytes through a custom socket
-//! large enough to carry them. Consistent with the project's "the user owns
-//! `Config::State`'s shape and determinism" stance, **save-state types should be
-//! non-recursive / shallow**; the bounded decoder cannot make a deeply recursive
-//! state safe to decode. See `decode_bounded` in the
-//! [`codec`](crate::network::codec) module for the analysis of bincode's
-//! *allocation* bounds.
+//! The byte cap alone bounds *allocation* but not *recursion depth*: bincode
+//! decodes a recursive type by recursing, and a pathologically deeply-nested
+//! `Config::State` (e.g. `enum Tree { Leaf(u8), Node(Box<Tree>) }` nested
+//! thousands deep) can be encoded in far fewer bytes than the
+//! `MAX_BOUNDED_DECODE_LEN` cap yet still exhaust the call stack while decoding.
+//! `codec::decode_bounded` therefore *also* bounds recursion depth: it decodes
+//! through a depth-limited serde wrapper that **rejects** nesting beyond
+//! `codec_depth::MAX_DECODE_DEPTH` with a recoverable `Err` instead of
+//! overflowing the stack (B-codec). So a deeply-recursive snapshot blob from a
+//! hostile peer is a clean decode error, not an uncatchable abort. (A
+//! `Config::State` nested *within* that generous limit decodes normally; the
+//! limit is far deeper than any realistic game state.) See `decode_bounded` /
+//! `codec_depth` in the [`codec`](crate::network::codec) module for the full
+//! allocation- and depth-bound analysis.
 
 use crate::network::codec;
 use crate::network::messages::{ConnectionStatus, Message, MessageBody, MessageHeader};
@@ -224,22 +225,23 @@ fn validate_snapshot_wire_size(
 /// incoming `bytes` slice is itself already bounded to the packet by chunk-2's
 /// [`decode_message`](crate::network::codec::decode_message).
 ///
-/// # Allocation is bounded; recursion depth is not
+/// # Allocation AND recursion depth are bounded
 ///
-/// The cap bounds memory, not stack depth. A `Config::State` that is recursive
-/// (e.g. a linked/tree type holding `Box<Self>`) can be encoded deeply nested in
-/// far fewer bytes than the cap, and bincode decodes it by recursing — so such
-/// input can still overflow the stack (an uncatchable abort, not an `Err`).
-/// `Config::State` save-state types should therefore be non-recursive / shallow;
-/// see the [module docs](self#bounded-deserialization-allocation-only).
+/// The byte cap bounds memory; `codec::decode_bounded` additionally bounds stack
+/// depth. A `Config::State` that is recursive (e.g. a linked/tree type holding
+/// `Box<Self>`) can be encoded deeply nested in far fewer bytes than the cap, and
+/// bincode decodes it by recursing — so it decodes through a depth-limited serde
+/// wrapper that **rejects** nesting beyond `codec_depth::MAX_DECODE_DEPTH` with a
+/// recoverable `Err` rather than overflowing the stack. A state nested within
+/// that (generous) limit decodes normally; see the
+/// [module docs](self#bounded-deserialization-allocation-and-recursion-depth).
 ///
 /// # Errors
 ///
 /// Returns [`FortressError::SerializationErrorStructured`] if `bytes` are
-/// truncated, malformed, exceed the bounded-decode cap, or declare a container
-/// length larger than the cap. Does not over-allocate on hostile input (a
-/// hostile *length prefix* yields `Err`, never an OOM); a deeply recursive
-/// `Config::State` is the documented exception — see above.
+/// truncated, malformed, exceed the bounded-decode cap, declare a container
+/// length larger than the cap, or are nested past the recursion-depth limit.
+/// Hostile input yields `Err`, never an OOM or a stack-overflow abort.
 // dead_code: consumed by chunk 5's joiner snapshot orchestration.
 #[cfg(feature = "hot-join")]
 #[allow(dead_code)]

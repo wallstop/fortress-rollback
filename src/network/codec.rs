@@ -768,39 +768,71 @@ pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED
 /// Use this (not [`decode_value`]) for any value reconstructed from
 /// peer-controlled bytes whose type can contain a length-prefixed container.
 ///
-/// # Bounds *allocation*, not *recursion depth*
+/// # Bounds both *allocation* and *recursion depth*
 ///
-/// The limit caps total bytes allocated; it does **not** cap the decode's call
-/// stack. bincode decodes a recursive type (one transitively containing
-/// `Box<Self>`, `Vec<Self>`, etc.) by recursing once per level of nesting, and a
-/// deeply-nested value can be encoded in far fewer bytes than
-/// [`MAX_BOUNDED_DECODE_LEN`] (each nesting level adds only a tag/length byte or
-/// two). Such input therefore stays under the byte cap yet can still overflow
-/// the stack mid-decode — an uncatchable abort, not a recoverable `Err`. This
-/// limit cannot prevent that; callers must keep peer-decoded types non-recursive
-/// / shallow. (Thread-based stack bounding is intentionally avoided: it would
-/// require `T: Send`, which `T` here is not guaranteed to be.)
+/// The byte limit above caps total bytes allocated; on its own it does **not**
+/// cap the decode's call stack. bincode decodes a recursive type (one
+/// transitively containing `Box<Self>`, `Vec<Self>`, etc.) by recursing once per
+/// level of nesting, and a deeply-nested value can be encoded in far fewer bytes
+/// than [`MAX_BOUNDED_DECODE_LEN`] (each level adds only a tag/length byte or
+/// two), so a malicious blob could stay under the byte cap yet overflow the
+/// stack mid-decode — an uncatchable abort, not a recoverable `Err`. Because
+/// `Config::State` is only `DeserializeOwned` (it may legitimately be
+/// recursive), this function decodes through
+/// [`deserialize_depth_limited`](super::codec_depth::deserialize_depth_limited),
+/// which **rejects** nesting deeper than
+/// [`MAX_DECODE_DEPTH`](super::codec_depth::MAX_DECODE_DEPTH) with a recoverable
+/// `Err` before the stack can overflow. A `Send` bound (which a thread-stack
+/// trick would require) is therefore not needed, and no value shallower than the
+/// limit is affected.
 ///
 /// # Errors
 ///
-/// Returns [`CodecError::DecodeError`] when `bytes` exceeds the cap, when a
-/// declared container length would exceed the cap, or when bincode otherwise
-/// fails to decode (truncated input, trailing bytes are *not* rejected here —
-/// use [`decode_bounded_with_consumed`] if you need the consumed length).
+/// Returns [`CodecError::DecodeError`] when `bytes` exceeds the byte cap, when a
+/// declared container length would exceed the cap, when container nesting exceeds
+/// [`MAX_DECODE_DEPTH`](super::codec_depth::MAX_DECODE_DEPTH), or when bincode
+/// otherwise fails to decode (truncated input; trailing bytes are *not* rejected
+/// here — use [`decode_bounded_with_consumed`] if you need the consumed length).
 #[cfg(feature = "hot-join")]
 pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
-    decode_bounded_with_consumed(bytes).map(|(value, _consumed)| value)
+    // alloc-bound: the same MAX_BOUNDED_DECODE_LEN byte cap as
+    // `decode_bounded_with_consumed` (pre-reject + bincode `Limit`); see
+    // `bounded_decode_config` / `reject_over_cap` for the full allocation
+    // analysis. This path additionally bounds recursion DEPTH via the
+    // depth-limited deserializer below.
+    reject_over_cap(bytes.len())?;
+    let config = bounded_decode_config();
+    // Wrap bincode's deserializer so a deeply-nested (recursive) `Config::State`
+    // blob is rejected with a recoverable error instead of overflowing the stack
+    // (B-codec). `BorrowedSerdeDecoder` exposes the serde deserializer; the
+    // borrowed reader is correct for a `DeserializeOwned` type (no field actually
+    // borrows from the slice).
+    let mut decoder = bincode::serde::BorrowedSerdeDecoder::from_slice(bytes, config, ());
+    super::codec_depth::deserialize_depth_limited::<T, _>(
+        decoder.as_deserializer(),
+        super::codec_depth::MAX_DECODE_DEPTH,
+    )
+    .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
 }
 
 /// [`decode_bounded`] variant that also returns the number of bytes consumed,
 /// for callers that decode several bounded values back-to-back from one slice
 /// (e.g. the hot-join bridge-input blob: `num_players` fixed-width inputs
 /// concatenated) and must verify exact consumption.
+///
+/// Unlike [`decode_bounded`], this path is **not** recursion-depth-limited, and
+/// it does not need to be: its only callers decode `Config::Input`, which is
+/// bound `Copy`, and a `Copy + Sized` type is provably non-recursive (recursion
+/// requires `Box`/`Vec`/heap indirection, none of which are `Copy`; a direct
+/// `enum E { N([E; 2]) }` is infinite-size and rejected by the compiler). So
+/// malicious bytes cannot drive this decode into unbounded recursion, and the
+/// hot input-decode path stays on the direct bincode call.
 pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> CodecResult<(T, usize)> {
     // alloc-bound: this decode is bounded to MAX_BOUNDED_DECODE_LEN (64 MiB) two
-    // ways. (1) `bytes` is pre-rejected when longer than the cap. (2) The bincode
+    // ways (see `reject_over_cap` + `bounded_decode_config`). (1) `bytes` is
+    // pre-rejected when longer than the cap. (2) The bincode
     // `Limit<MAX_BOUNDED_DECODE_LEN>` config makes every container decoder claim
     // its `len * size_of::<element>()` byte footprint against a running total
     // *before* allocating and error once it would exceed the cap, so a malicious
@@ -808,26 +840,34 @@ pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
     // never a giant `vec![0u8; len]`. No input this function accepts can drive an
     // allocation past the cap. Empirically verified for both the per-element
     // (`Vec<T>`) and native (`serde_bytes`) decode paths.
-    if bytes.len() > MAX_BOUNDED_DECODE_LEN {
+    reject_over_cap(bytes.len())?;
+    let config = bounded_decode_config();
+    bincode::serde::decode_from_slice(bytes, config)
+        .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
+}
+
+/// Rejects an input slice longer than [`MAX_BOUNDED_DECODE_LEN`] before any
+/// decode begins — the first of the two allocation bounds shared by
+/// [`decode_bounded`] and [`decode_bounded_with_consumed`].
+fn reject_over_cap(len: usize) -> CodecResult<()> {
+    if len > MAX_BOUNDED_DECODE_LEN {
         return Err(CodecError::decode(
-            format!(
-                "input length {} exceeds bounded-decode cap {}",
-                bytes.len(),
-                MAX_BOUNDED_DECODE_LEN
-            ),
+            format!("input length {len} exceeds bounded-decode cap {MAX_BOUNDED_DECODE_LEN}"),
             CodecOperation::Decode,
         ));
     }
-    // `with_limit` is an inherent method on the concrete `Configuration`, so the
-    // limited config is built from the same `standard().with_fixed_int_encoding()`
-    // base as `config()` (kept byte-for-byte identical to the shared codec config,
-    // only adding the limit) rather than from the `impl Config` return of
-    // `config()`.
-    let config = bincode::config::standard()
+    Ok(())
+}
+
+/// The bincode config for bounded peer-decodes: the shared codec config
+/// ([`config`]'s `standard().with_fixed_int_encoding()`, kept byte-for-byte
+/// identical) plus a [`MAX_BOUNDED_DECODE_LEN`] byte limit. `with_limit` is an
+/// inherent method on the concrete `Configuration`, so this is built from the
+/// concrete base rather than the `impl Config` return of [`config`].
+fn bounded_decode_config() -> impl bincode::config::Config {
+    bincode::config::standard()
         .with_fixed_int_encoding()
-        .with_limit::<MAX_BOUNDED_DECODE_LEN>();
-    bincode::serde::decode_from_slice(bytes, config)
-        .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
+        .with_limit::<MAX_BOUNDED_DECODE_LEN>()
 }
 
 #[cfg(test)]

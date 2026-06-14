@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`P2PSession::peer_checksum_mismatch_count(handle)` and an advisory per-peer checksum trust-downgrade
+  signal (Byzantine-peer hardening).** With desync detection enabled, the session now tracks, per remote
+  peer, how many confirmed-frame checksums failed to match the local history, exposes that count via the
+  new method, and logs **one** advisory `WARNING` once a peer's count crosses an internal threshold. This
+  is deliberately advisory: the library **never auto-ejects** a peer on checksum mismatch (with two
+  endpoints it cannot tell which side is wrong, so dropping a peer risks removing the honest one) — apps
+  apply their own policy from the raw count. The `SyncHealth::DesyncDetected` docs are clarified
+  accordingly: handle it gracefully (it is a recoverable event), do not hard-panic; a single mismatch is a
+  genuine divergence in the trusted-peer model but may be a one-off bad checksum from a malicious/buggy
+  peer in an untrusted deployment, where *persistence* is what distinguishes the two.
 - **Hot Join (reserved-slot model), behind the new opt-in `hot-join` feature flag.** A peer can join a
   running session by filling a *reserved* (or previously gracefully-dropped) player slot: it synchronizes
   with the host, receives a full game-state snapshot, loads it, and resumes normal rollback play — all
@@ -32,8 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FortressEvent::PeerJoined { handle, addr }`; `InvalidRequestKind::PlayerCountMismatch { expected, actual }`.
   - Under `hot-join`, `Config::State` additionally requires `Serialize + DeserializeOwned` (for snapshot
     transfer). This bound only applies when the feature is enabled, so it is **not** a breaking change for
-    existing builds. Snapshot deserialization is allocation-bounded (a hostile length prefix yields an
-    error, never an OOM); keep `Config::State` non-recursive.
+    existing builds. Snapshot deserialization is **both allocation-bounded and recursion-depth-bounded**:
+    a hostile length prefix yields an error (never an OOM), and a deeply-nested recursive snapshot yields a
+    recoverable decode error (never a stack-overflow abort), so a recursive `Config::State` is safe up to a
+    generous nesting limit. (`Config::Input` is bound `Copy`, hence provably non-recursive, so the input
+    decode path keeps its direct fast path.)
   - The join handshake is ack-gated and loss/latency tolerant within a bounded envelope: the host
     re-serves the snapshot until acknowledged and only reactivates the slot on the ack, an abandoned join
     can never stall or fail-close the host (it resumes solo with the slot still reserved), and a joiner

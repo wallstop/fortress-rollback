@@ -57,6 +57,33 @@ const MIN_RECOMMENDATION: u32 = 3;
 #[cfg(test)]
 const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
+/// Number of mismatching confirmed-frame checksums from a single peer at which
+/// the library emits a one-time advisory trust-downgrade WARNING (B3 Byzantine
+/// hardening).
+///
+/// Checksums are compared only on *confirmed* frames, whose inputs are
+/// byte-identical across honest peers, so in the default trusted-peer model a
+/// mismatch is a **genuine, permanent** state divergence (not a transient — the
+/// historic false-positive cases were bugs that were fixed). In an *untrusted*
+/// deployment a single mismatch may instead be a malicious or buggy peer
+/// emitting one bad checksum, which is the case this threshold disambiguates:
+/// once a peer's per-peer mismatch count (see
+/// [`UdpProtocol::checksum_mismatch_count`]) reaches it, the divergence is
+/// *persistent* and the library logs a richer diagnostic so an operator /
+/// application can downgrade trust. It is deliberately advisory: the library
+/// never auto-ejects — with only two endpoints it cannot tell which side is
+/// wrong, and ejecting may remove the honest peer. Applications wanting a
+/// different policy read the raw count via
+/// [`P2PSession::peer_checksum_mismatch_count`].
+///
+/// The count is per *confirmed frame*, so a single logical divergence at frame
+/// `F` increments once for every confirmed frame `>= F` it is compared against
+/// (a rollback / catch-up can confirm and compare many at once). The threshold
+/// can therefore be crossed by one divergence spanning many frames, not only by
+/// repeated independent episodes — which is the intent: a divergence that
+/// persists across this many confirmed frames has demonstrably not self-corrected.
+pub(crate) const CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD: u32 = 10;
+
 /// Default for the hot-join serve timeout: the maximum number of
 /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls a host will
 /// keep a single hot-join serve open (re-sending the cached snapshot each poll)
@@ -6633,6 +6660,53 @@ impl<T: Config> P2PSession<T> {
         Some(SyncHealth::Pending)
     }
 
+    /// Returns how many confirmed-frame checksums received from `player_handle`
+    /// have **failed** to match our local checksum history — the per-peer
+    /// persistence signal behind the library's B3 trust-downgrade hardening.
+    ///
+    /// Returns `None` for a local player, a spectator, an invalid handle, or a
+    /// remote whose endpoint is gone; `Some(0)` for a connected remote that has
+    /// never mismatched. The count is per-peer (verification or mismatch against
+    /// one remote never leaks into another's) and monotonic for the life of the
+    /// endpoint. It is counted per confirmed frame, so one logical divergence
+    /// spanning many frames increments it many times.
+    ///
+    /// # Why this exists (and what it is *not*)
+    ///
+    /// A [`SyncHealth::DesyncDetected`] should be handled gracefully, not by
+    /// crashing the process: it is a recoverable library event. On a *confirmed*
+    /// frame in the default trusted-peer model it is a genuine, permanent state
+    /// divergence — end the affected session cleanly and surface diagnostics, do
+    /// not `panic!`. In an *untrusted* deployment a *single* mismatch may instead
+    /// be a malicious or buggy peer emitting one bad checksum, and a count that
+    /// **climbs** is what marks a peer whose state *persistently* disagrees with
+    /// ours. The library logs one advisory WARNING when the count crosses an
+    /// internal threshold but **never auto-ejects**: with only two endpoints it
+    /// cannot tell which side is wrong, so dropping a peer risks removing the
+    /// honest one. Use this to apply your own trust policy (e.g. surface a richer
+    /// diagnostic, or — only in a deployment with independent
+    /// identity/corroboration — quarantine a peer that mismatches far past the
+    /// honest-desync range).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Persistent mismatches from one peer: downgrade trust, do not crash.
+    /// if let Some(n) = session.peer_checksum_mismatch_count(handle) {
+    ///     if n >= 10 {
+    ///         log::warn!("peer {handle:?} has {n} checksum mismatches");
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn peer_checksum_mismatch_count(&self, player_handle: PlayerHandle) -> Option<u32> {
+        let PlayerType::Remote(addr) = self.player_reg.handles.get(&player_handle)? else {
+            return None;
+        };
+        let remote = self.player_reg.remotes.get(addr)?;
+        Some(remote.checksum_mismatch_count)
+    }
+
     /// Returns `true` if every currently-**connected** remote peer shows
     /// [`SyncHealth::InSync`].
     ///
@@ -8946,6 +9020,46 @@ impl<T: Config> P2PSession<T> {
                                     remote_checksum,
                                     addr: remote.peer_addr(),
                                 });
+                                // B3 (Byzantine hardening): track per-peer
+                                // mismatch persistence. On a confirmed frame a
+                                // mismatch is a genuine divergence in the
+                                // trusted model; in an untrusted deployment a
+                                // lone one may be an adversarial checksum, so a
+                                // count that climbs is what marks a peer that
+                                // persistently disagrees with us. We surface it
+                                // (one advisory WARNING at the threshold) but
+                                // never auto-eject — with two endpoints we
+                                // cannot tell which side is wrong, and a
+                                // persistent honest desync should be ended
+                                // gracefully, not by silently dropping a peer.
+                                // `saturating_add` is deliberate: a count pegged
+                                // at u32::MAX still means "persistent" (the
+                                // threshold was crossed long before), and it
+                                // keeps the counter overflow-safe.
+                                remote.checksum_mismatch_count =
+                                    remote.checksum_mismatch_count.saturating_add(1);
+                                // The `== THRESHOLD` equality fires the WARNING
+                                // exactly once: the count passes through every
+                                // integer (this `+1` is in the same loop body as
+                                // the check, no early exit between), so even a
+                                // catch-up batch that drives it from below to
+                                // above the threshold still hits the `==` frame.
+                                if remote.checksum_mismatch_count
+                                    == CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD
+                                {
+                                    report_violation!(
+                                        ViolationSeverity::Warning,
+                                        ViolationKind::ChecksumMismatch,
+                                        "Peer {:?} produced {} mismatching checksums (>= \
+                                         trust-downgrade threshold {}): persistent state \
+                                         divergence. Downgrade trust / surface to the \
+                                         application; the library does not auto-eject (it \
+                                         cannot tell which endpoint is wrong).",
+                                        remote.peer_addr(),
+                                        remote.checksum_mismatch_count,
+                                        CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD
+                                    );
+                                }
                             } else {
                                 // Checksums match - update this peer's verified frame.
                                 // Per-peer (not session-global) so verification against one
@@ -10481,6 +10595,211 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, FortressEvent::DesyncDetected { .. })),
             "no false-positive DesyncDetected after stale checksum invalidation"
+        );
+    }
+
+    /// Thread-local tracing capture for tests asserting whether (and how often)
+    /// a `report_violation!` WARNING fired. `report_violation!` routes to the
+    /// global `TracingObserver` (a `warn!`/`error!` event), so capturing the
+    /// tracing events is the only way to observe it. Returns every WARN-level
+    /// message emitted while `body` ran. Thread-local, so it is parallel-safe
+    /// under both nextest and threaded `cargo test`.
+    fn capture_warn_messages(body: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        struct CapSub {
+            events: Arc<Mutex<Vec<(bool, String)>>>,
+        }
+        impl tracing::Subscriber for CapSub {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct V<'a>(&'a mut String);
+                impl tracing::field::Visit for V<'_> {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            use std::fmt::Write as _;
+                            let _ = write!(self.0, "{value:?}");
+                        }
+                    }
+                }
+                let mut message = String::new();
+                event.record(&mut V(&mut message));
+                self.events
+                    .lock()
+                    .expect("capture mutex")
+                    .push((*event.metadata().level() == tracing::Level::WARN, message));
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            CapSub {
+                events: Arc::clone(&events),
+            },
+            body,
+        );
+        let captured = std::mem::take(&mut *events.lock().expect("capture mutex"));
+        captured
+            .into_iter()
+            .filter_map(|(is_warn, message)| is_warn.then_some(message))
+            .collect()
+    }
+
+    /// B3 (Byzantine hardening): a peer that sends persistently mismatching
+    /// checksums must (1) accumulate a per-peer mismatch count queryable via
+    /// [`P2PSession::peer_checksum_mismatch_count`], (2) be surfaced by exactly
+    /// ONE advisory trust-downgrade WARNING once the count reaches the threshold
+    /// (NOT on the first mismatch), and (3) NEVER be auto-ejected by the library
+    /// — with two endpoints we cannot tell which side is wrong, so dropping a
+    /// peer risks removing the honest one. The count is per-peer, so a
+    /// misbehaving peer does not taint a well-behaved one.
+    #[test]
+    fn persistent_checksum_mismatch_counts_warns_once_and_never_ejects() {
+        let threshold = CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD;
+        let handle_b = PlayerHandle::new(1);
+        let handle_d = PlayerHandle::new(2);
+        let addr_b = test_addr(8080);
+
+        let warns = capture_warn_messages(|| {
+            let mut session = create_three_player_desync_session();
+
+            // Advance + confirm a wide window so every test frame compares
+            // (the comparison skips frames >= last_confirmed_frame).
+            for _ in 0..(threshold as i32 + 4) {
+                session.sync_layer.advance_frame();
+            }
+            session
+                .sync_layer
+                .set_last_confirmed_frame(Frame::new(threshold as i32 + 3), session.save_mode);
+
+            // Feed B `count` mismatching checksums starting at frame `base`,
+            // then run the production comparison (which consumes them).
+            let feed_mismatches = |session: &mut P2PSession<TestConfig>, base: i32, count: i32| {
+                for f in base..(base + count) {
+                    let frame = Frame::new(f);
+                    session.local_checksum_history.insert(frame, 0xAAAA_AAAA);
+                    session
+                        .player_reg
+                        .remotes
+                        .get_mut(&addr_b)
+                        .expect("B endpoint exists")
+                        .pending_checksums
+                        .insert(frame, 0xBBBB_BBBB); // differs from local => mismatch
+                }
+                session.compare_local_checksums_against_peers();
+            };
+
+            // A single mismatch must NOT trip the threshold.
+            feed_mismatches(&mut session, 0, 1);
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(1),
+                "one mismatch must yield a per-peer count of 1"
+            );
+
+            // Drive the count up to exactly the threshold.
+            feed_mismatches(&mut session, 1, threshold as i32 - 1);
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(threshold),
+                "the per-peer mismatch count must reach the trust-downgrade threshold"
+            );
+
+            // (3) The misbehaving peer is NEVER auto-ejected by the library.
+            assert!(
+                session.player_reg.remotes.contains_key(&addr_b),
+                "B's endpoint must still exist — the library must not auto-eject on mismatch"
+            );
+            assert!(
+                !session.local_connect_status[handle_b.as_usize()].disconnected,
+                "B must not be marked disconnected by the library on checksum mismatch"
+            );
+
+            // Per-peer isolation: D (sent nothing) stays at 0 — no cross-peer taint.
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_d),
+                Some(0),
+                "a well-behaved peer's mismatch count must stay 0 (per-peer)"
+            );
+        });
+
+        // (2) Exactly ONE advisory trust-downgrade WARNING fired — at the
+        // threshold, not on the first mismatch and not repeated afterwards.
+        let trust_warns = warns
+            .iter()
+            .filter(|m| m.contains("trust-downgrade threshold"))
+            .count();
+        assert_eq!(
+            trust_warns, 1,
+            "exactly one advisory trust-downgrade WARNING must fire at the threshold; got {trust_warns} in {warns:?}"
+        );
+    }
+
+    /// B3: the advisory WARNING fires exactly ONCE even when a single catch-up
+    /// batch drives the per-peer mismatch count from BELOW the threshold to
+    /// ABOVE it in one `compare_local_checksums_against_peers` call. This is the
+    /// adversarial case for the `== THRESHOLD` equality: because the count is
+    /// incremented by one and checked in the same loop body, it passes through
+    /// the exact threshold value even on an overshooting batch, so the equality
+    /// can never be skipped. (A future refactor to `+= n` would silently break
+    /// this; the test locks it in.)
+    #[test]
+    fn checksum_mismatch_warning_fires_once_on_batch_overshooting_threshold() {
+        let threshold = CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD;
+        let handle_b = PlayerHandle::new(1);
+        let addr_b = test_addr(8080);
+        let overshoot = threshold as i32 + 5; // jump well past the threshold in one batch
+
+        let warns = capture_warn_messages(|| {
+            let mut session = create_three_player_desync_session();
+            for _ in 0..(overshoot + 4) {
+                session.sync_layer.advance_frame();
+            }
+            session
+                .sync_layer
+                .set_last_confirmed_frame(Frame::new(overshoot + 3), session.save_mode);
+
+            // One batch of `threshold + 5` mismatching checksums to a fresh peer.
+            for f in 0..overshoot {
+                let frame = Frame::new(f);
+                session.local_checksum_history.insert(frame, 0xAAAA_AAAA);
+                session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_b)
+                    .expect("B endpoint exists")
+                    .pending_checksums
+                    .insert(frame, 0xBBBB_BBBB);
+            }
+            session.compare_local_checksums_against_peers();
+
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(u32::try_from(overshoot).expect("non-negative")),
+                "every mismatch in the overshooting batch must be counted"
+            );
+        });
+
+        let trust_warns = warns
+            .iter()
+            .filter(|m| m.contains("trust-downgrade threshold"))
+            .count();
+        assert_eq!(
+            trust_warns, 1,
+            "WARNING must fire exactly once even when one batch overshoots the threshold; got {trust_warns} in {warns:?}"
         );
     }
 
