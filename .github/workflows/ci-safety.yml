@@ -167,6 +167,7 @@ jobs:
 
       - name: Run tests with ${{ matrix.check }}
         run: |
+          set -o pipefail
           RUSTFLAGS="${{ matrix.rustflags }}" cargo test --release --lib 2>&1 | tee test-${{ matrix.check }}.txt
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
@@ -212,6 +213,8 @@ jobs:
       - name: Run strict clippy lints (nursery)
         shell: bash
         run: |
+          set -o pipefail
+
           {
             echo "## Strict Clippy Lints (Nursery)"
             echo ""
@@ -391,6 +394,8 @@ jobs:
 
       - name: Build documentation with warnings as errors
         run: |
+          set -o pipefail
+
           {
             echo "## Documentation Build"
             echo ""
@@ -406,6 +411,8 @@ jobs:
 
       - name: Run documentation tests
         run: |
+          set -o pipefail
+
           if cargo test --doc 2>&1 | tee doc-tests.txt; then
             echo "✅ All doc tests passed" >> "$GITHUB_STEP_SUMMARY"
           else
@@ -452,6 +459,8 @@ jobs:
 
       - name: Check for panic-prone patterns (library only)
         run: |
+          set -o pipefail
+
           {
             echo "## No-Panics Check"
             echo ""

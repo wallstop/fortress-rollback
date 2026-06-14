@@ -2909,7 +2909,7 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
 /// non-vacuity (some confirmed frames compared) and that the survivors' confirmed
 /// state did NOT diverge.
 #[test]
-fn p2p_n4_stale_echo_freeze_dropped_slot_diverges_across_survivors() -> Result<(), FortressError> {
+fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<(), FortressError> {
     // Long symmetric timeouts: every drop here is driven by explicit
     // `remove_player` + gossip propagation, never by an auto-timeout (so a
     // blocked LINK never collapses an endpoint to non-running on its own and

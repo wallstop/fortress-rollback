@@ -38,6 +38,7 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("changelog-unreleased-rule", "CHANGELOG.md"),
     ("vale-advisory", "docs/index.md"),
     ("link-check", "README.md"),
+    ("doc-claims", "tests/common/channel_socket.rs"),
     ("advance-frame-error-handling", "tests/sessions/spectator.rs"),
     ("kani-violation-cost", "src/lib.rs"),
 ]
@@ -223,6 +224,31 @@ def test_plan_checks_runs_link_check_for_rust_files() -> None:
     """A .rs change triggers the link check (rustdoc intra-doc links)."""
     checks = plan_checks({"src/lib.rs"})
     assert "link-check" in _ids(checks)
+
+
+def test_plan_checks_runs_doc_claims_for_rust_files() -> None:
+    """A .rs change triggers Rust semantic-claim checks."""
+    checks = plan_checks({"src/lib.rs"})
+    doc_claims_check = next(c for c in checks if c.check_id == "doc-claims")
+    assert doc_claims_check.command == ["bash", "scripts/ci/check-doc-claims.sh"]
+
+
+@pytest.mark.parametrize(
+    "changed_file",
+    [
+        "scripts/ci/check-doc-claims.sh",
+        "scripts/hooks/check-rust-semantic-claims.py",
+    ],
+)
+def test_plan_checks_runs_doc_claims_for_doc_claims_tooling(
+    changed_file: str,
+) -> None:
+    """Semantic-claim tooling changes trigger the check they affect."""
+    checks = plan_checks({changed_file})
+    check_ids = _ids(checks)
+    doc_claims_check = next(c for c in checks if c.check_id == "doc-claims")
+    assert doc_claims_check.command == ["bash", "scripts/ci/check-doc-claims.sh"]
+    assert "advance-frame-error-handling" not in check_ids
 
 
 def test_plan_checks_skips_link_check_for_unrelated_files() -> None:

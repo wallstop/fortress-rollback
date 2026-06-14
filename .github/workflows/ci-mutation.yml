@@ -127,6 +127,8 @@ jobs:
       - name: Run mutation testing
         id: mutants
         run: |
+          set -o pipefail
+
           {
             echo ""
             echo "## Mutation Testing Results (${{ matrix.os }})"

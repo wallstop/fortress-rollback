@@ -3291,7 +3291,7 @@ mod tests {
     // freeze frame) is never reconciled. If divergence is silently missed, this is
     // the spectator analog of the c25fc1f asymmetric-loss desync.
     #[test]
-    fn spectator_asymmetric_freeze_frame_nonoverlapping_region_divergence() {
+    fn spectator_asymmetric_freeze_frame_nonoverlapping_region_converges_to_global_min() {
         let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
             .with_num_players(2)
             .unwrap()
@@ -3431,7 +3431,7 @@ mod tests {
     }
 
     // Completeness-Critic #2 coverage (commit-time path). Same asymmetric-loss
-    // mesh as `spectator_asymmetric_freeze_frame_nonoverlapping_region_divergence`,
+    // mesh as `spectator_asymmetric_freeze_frame_nonoverlapping_region_converges_to_global_min`,
     // but the distinguishing ORDERING exercises `converged_drop_status` (the
     // commit-time fold), NOT `converge_latched_drop_status` (the late-arrival fold).
     // Here the non-canonical lower-`F` host (host 1, F_B = 1) has its snapshots for

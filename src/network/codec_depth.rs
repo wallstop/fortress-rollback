@@ -2,7 +2,7 @@
 //!
 //! # The surface this closes (B-codec)
 //!
-//! The bounded decode in [`super::codec`] caps the total *bytes* a peer-supplied
+//! The bounded decode in [`codec`](crate::network::codec) caps the total *bytes* a peer-supplied
 //! blob may allocate, but it does **not** cap the decode's *call-stack depth*.
 //! bincode decodes a recursive type — one transitively containing `Box<Self>`,
 //! `Vec<Self>`, `Option<Box<Self>>`, etc. — by recursing once per level of
@@ -11,12 +11,14 @@
 //! under the byte cap yet can overflow the thread stack mid-decode — an
 //! **uncatchable abort**, not a recoverable `Err`. A malicious peer can craft
 //! exactly this blob for a hot-join [`Config::State`](crate::Config::State)
-//! snapshot ([`Config::State`] is only `Serialize + DeserializeOwned`, so it may
+//! snapshot ([`Config::State`](crate::Config::State) is only
+//! `Serialize + DeserializeOwned`, so it may
 //! be recursive).
 //!
 //! # What this does
 //!
-//! [`deserialize_depth_limited`] wraps any [`serde::Deserializer`] so that every
+//! [`deserialize_depth_limited`](crate::network::codec_depth::deserialize_depth_limited)
+//! wraps any [`serde::Deserializer`] so that every
 //! level of container nesting (`seq`/`tuple`/`map`/`struct`/`enum`/`option`/
 //! newtype) increments a depth counter, and a value nested deeper than the
 //! configured `limit` is **rejected with a recoverable error** before the stack
@@ -33,7 +35,8 @@
 //! `Box`/`Vec`/`String` — none of which are `Copy`; a direct `enum E { N([E;2]) }`
 //! is infinite-size and rejected by the compiler). So the input decode path
 //! cannot be driven into unbounded recursion by malicious bytes and needs no
-//! depth guard; only the `State` path (`super::codec::decode_bounded`) is
+//! depth guard; only the `State` path
+//! ([`codec::decode_bounded`](crate::network::codec::decode_bounded)) is
 //! wrapped.
 
 use serde::de::{

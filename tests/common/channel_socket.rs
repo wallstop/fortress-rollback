@@ -307,7 +307,7 @@ pub fn create_channel_quad() -> (
 ///
 /// # Arguments
 ///
-/// * `n` - The number of peers in the mesh (must be `>= 2`).
+/// * `n` - The number of peers in the mesh (must be in `2..=1000`).
 ///
 /// # Returns
 ///
@@ -316,7 +316,7 @@ pub fn create_channel_quad() -> (
 ///
 /// # Panics
 ///
-/// Panics if `n < 2` (a mesh needs at least two peers).
+/// Panics if `n < 2` or `n > 1000`.
 #[allow(dead_code, clippy::expect_used)] // Test infrastructure.
 #[must_use]
 pub fn create_channel_mesh(n: usize) -> (Vec<ChannelSocket>, Vec<SocketAddr>) {
@@ -373,7 +373,8 @@ pub fn create_channel_mesh(n: usize) -> (Vec<ChannelSocket>, Vec<SocketAddr>) {
 ///
 /// # Arguments
 ///
-/// * `configs` - Per-peer chaos configuration; `configs.len()` is the mesh size.
+/// * `configs` - Per-peer chaos configuration; `configs.len()` is the mesh size
+///   and must be in `2..=1000`.
 ///   Callers **must** use a distinct seed per peer (identical seeds produce
 ///   correlated drop sequences that deadlock synchronization — see the
 ///   seed-correlation warning in the chaos test modules).
@@ -385,7 +386,7 @@ pub fn create_channel_mesh(n: usize) -> (Vec<ChannelSocket>, Vec<SocketAddr>) {
 ///
 /// # Panics
 ///
-/// Panics if `configs.len() < 2`.
+/// Panics if `configs.len() < 2` or `configs.len() > 1000`.
 #[allow(dead_code)]
 #[must_use]
 pub fn create_chaos_channel_mesh(
@@ -527,6 +528,12 @@ mod tests {
     #[should_panic(expected = "at least 2 peers")]
     fn create_channel_mesh_rejects_too_few_peers() {
         let _ = create_channel_mesh(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "at most 1000")]
+    fn create_channel_mesh_rejects_too_many_peers() {
+        let _ = create_channel_mesh(1001);
     }
 
     #[test]
