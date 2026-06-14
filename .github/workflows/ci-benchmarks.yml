@@ -85,7 +85,9 @@ jobs:
 
       # Run all criterion benchmarks
       - name: Run benchmarks
-        run: cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
+        run: |
+          set -o pipefail
+          cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}

@@ -1209,10 +1209,14 @@ fn z3_proof_mesh_agreed_dropped_players_excluded_from_confirmed_min() {
 ///   party's `queue_connected` for the slot comes from the very endpoint
 ///   whose cached term the override would min, and the connect-status merge
 ///   refreshes that term BEFORE any fold runs.
-/// - **The `N >= 4` residuals.** The stale-echo freeze (a third survivor
-///   converging on its stale cache of OUR old, lower claim) and the
-///   double-failure relay corner are out-of-model and remain open; they are
-///   documented as residuals in `remote_slot_confirmed_bound`'s rustdoc.
+/// - **The `N >= 4` residual.** This same-instant subset-min lemma is exactly
+///   the intra-snapshot invariant by which Session 41 arbitrated the
+///   stale-echo freeze **NOTABUG** (the low term's source endpoint stays in
+///   the fold, so bound == override at every instant). The one genuine
+///   residual — the double-failure relay — needs fold-membership asymmetry
+///   (the origin survivor leaves the fold before its relayed low value lands)
+///   and is out-of-model here; it is documented as a residual in
+///   `remote_slot_confirmed_bound`'s rustdoc.
 #[test]
 fn z3_proof_confirmed_bound_below_same_instant_subset_overrides() {
     /// Asserts, on a fresh solver, that `min(terms)` (the bound) cannot

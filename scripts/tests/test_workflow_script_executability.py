@@ -25,6 +25,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = PROJECT_ROOT / ".github" / "workflows"
@@ -133,6 +134,67 @@ def _discover_workflow_script_pairs() -> list[tuple[Path, str, int]]:
 DISCOVERED_PAIRS: list[tuple[Path, str, int]] = _discover_workflow_script_pairs()
 
 
+def _run_step_id(workflow: Path, job_name: str, step_index: int, step: dict) -> str:
+    """Return a stable test ID for a workflow step."""
+    step_name = step.get("name", f"step-{step_index}")
+    return f"{workflow.name}:{job_name}:{step_name}"
+
+
+def _iter_workflow_run_steps() -> list[tuple[Path, str, int, dict, str]]:
+    """Return every workflow step with a shell ``run:`` body."""
+    steps: list[tuple[Path, str, int, dict, str]] = []
+    if not WORKFLOWS_DIR.is_dir():
+        return steps
+
+    for workflow in sorted(WORKFLOWS_DIR.glob("*.yml")):
+        try:
+            data = yaml.safe_load(workflow.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as error:
+            raise AssertionError(f"Failed to parse {workflow}: {error}") from error
+
+        jobs = data.get("jobs", {})
+        if not isinstance(jobs, dict):
+            continue
+        for job_name, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            job_steps = job.get("steps", [])
+            if not isinstance(job_steps, list):
+                continue
+            for step_index, step in enumerate(job_steps, start=1):
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if isinstance(run, str):
+                    steps.append((workflow, str(job_name), step_index, step, run))
+    return steps
+
+
+def _uses_tee_pipeline(run: str) -> bool:
+    """Return true when a run block pipes command output through ``tee``."""
+    return re.search(r"(?<!\|)\|\s*tee\b", run) is not None
+
+
+def _has_pipefail(run: str) -> bool:
+    """Return true when the run block enables Bash pipefail."""
+    return (
+        re.search(r"(?m)^\s*set\s+-[A-Za-z]*o\s+pipefail\b", run) is not None
+    )
+
+
+def _explicitly_handles_pipeline_status(run: str) -> bool:
+    """Return true when the run block intentionally handles command status."""
+    return (
+        "PIPESTATUS[0]" in run
+        or re.search(r"(?<!\|)\|\s*tee\b[^\n]*\|\|\s*true\b", run) is not None
+    )
+
+
+TEE_RUN_STEPS: list[tuple[Path, str, int, dict, str]] = [
+    step for step in _iter_workflow_run_steps() if _uses_tee_pipeline(step[4])
+]
+
+
 def _pair_id(triple: tuple[Path, str, int]) -> str:
     workflow, script, line = triple
     return f"{workflow.name}:{line}->{script}"
@@ -180,4 +242,29 @@ def test_workflow_script_is_executable_in_git_index(
         f"{workflow_path.relative_to(PROJECT_ROOT)}:{line_number} as "
         f"./{script_path}) has git-index mode {mode}, expected 100755. "
         f"Fix with: git update-index --chmod=+x {script_path}"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_path,job_name,step_index,step,run",
+    TEE_RUN_STEPS,
+    ids=[
+        _run_step_id(workflow, job, index, step)
+        for workflow, job, index, step, _ in TEE_RUN_STEPS
+    ],
+)
+def test_workflow_tee_pipelines_preserve_command_failure(
+    workflow_path: Path,
+    job_name: str,
+    step_index: int,
+    step: dict,
+    run: str,
+) -> None:
+    """Workflow ``tee`` pipelines must not mask the piped command's exit code."""
+    assert _has_pipefail(run) or _explicitly_handles_pipeline_status(run), (
+        f"{workflow_path.relative_to(PROJECT_ROOT)} job {job_name!r} "
+        f"step {step.get('name', step_index)!r} pipes through tee without "
+        "preserving the command exit status. Add `set -o pipefail`, read "
+        "`PIPESTATUS[0]`, or make intentional advisory behavior explicit with "
+        "`|| true`."
     )

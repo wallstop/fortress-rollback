@@ -233,6 +233,8 @@ jobs:
       - name: Check for outdated dependencies
         id: outdated
         run: |
+          set -o pipefail
+
           {
             echo "## Dependency Freshness Check"
             echo ""

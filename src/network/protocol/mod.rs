@@ -214,6 +214,19 @@ where
     /// not leak into another remote's sync verdict (an N>=3 logical error if it
     /// were session-global). `None` until the first matching checksum.
     pub(crate) last_verified_frame: Option<Frame>,
+    /// Number of confirmed frames at which this peer's checksum did NOT match
+    /// our local history (the per-peer persistence signal behind B3 trust
+    /// downgrade). Monotonic (saturating), per-peer (never leaks across
+    /// remotes). On a confirmed frame a mismatch is a genuine state divergence
+    /// in the trusted-peer model; in an untrusted deployment a single one may be
+    /// a malicious/buggy peer's one-off bad checksum, so a count that climbs is
+    /// what marks a peer whose state *persistently* disagrees. Counted per
+    /// confirmed frame, so one divergence spanning many frames increments many
+    /// times. The library does NOT auto-eject on this — with two endpoints it
+    /// cannot tell which side is wrong — it only surfaces it (one advisory
+    /// WARNING at `CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD`, plus
+    /// `P2PSession::peer_checksum_mismatch_count` for the raw value).
+    pub(crate) checksum_mismatch_count: u32,
     desync_detection: DesyncDetection,
 
     /// Optional deterministic RNG for protocol randomness.
@@ -384,7 +397,10 @@ pub fn fuzz_protocol_input_packet(
     if packet_bytes.try_reserve_exact(byte_limit).is_err() {
         return;
     }
-    packet_bytes.extend_from_slice(&bytes[..byte_limit]);
+    // byte_limit <= bytes.len() by construction, so `get(..byte_limit)` is always
+    // Some; `unwrap_or_default()` keeps this panic-free (zero-panic policy /
+    // `clippy::indexing_slicing`) rather than indexing with `[..byte_limit]`.
+    packet_bytes.extend_from_slice(bytes.get(..byte_limit).unwrap_or_default());
 
     let body = Input {
         peer_connect_status: status,
@@ -658,6 +674,7 @@ impl<T: Config> UdpProtocol<T> {
             // debug desync
             pending_checksums: BTreeMap::new(),
             last_verified_frame: None,
+            checksum_mismatch_count: 0,
             desync_detection,
 
             // deterministic protocol RNG (if configured)

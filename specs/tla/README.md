@@ -38,6 +38,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 | `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 | `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
+| `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration: reproduces the residual under the current fold (Baseline → safety violated), proves the dead-survivor tombstone regresses liveness (Tombstone → liveness violated), proves the cache-only no-wire shortcut unsound via the corroborate-then-drop race (InheritedFloor → safety violated), and proves candidate fix #3 (mesh-acked-floor) sound (MeshAgree → safety+liveness PASS). The audit's last open potential-desync item (S41 REAL/deferred) |
 
 ## Properties Verified
 
@@ -195,6 +196,73 @@ host-failover stale-resurrection trace; tightening the gate `>=` to `>` breaks
 Reachability probes confirm the interesting states (converge-down, genuine
 follow, failover-while-disconnected, latch-disconnected, gate boundary) are
 non-vacuously reached.
+
+### DoubleFailureRelay.tla
+
+Arbitrates the N≥4 **"double-failure relay"** freeze-barrier residual — the audit's
+last open potential-desync item, arbitrated REAL with the fix deferred-with-spec in
+Session 41. The S32 freeze barrier bounds each survivor's confirmed frame for a
+dropping slot by the mesh-gossip minimum, and both that **bound**
+(`remote_slot_confirmed_bound`) and the freeze **override**
+(`update_player_disconnects`) iterate the identical `is_running()` endpoint set — so
+confirmation can outrun a later-agreed freeze **only** when the low value's source
+endpoint LEAVES the fold (fold-membership asymmetry). The model captures the fold,
+the per-endpoint gossip caches (which can go stale under partition), endpoint death
+(pruning), the prediction window (irreversible discard of confirmed frames below the
+window floor), and the freeze re-roll.
+
+The confirmation rule is a `FIX_MODE` constant exercised by four configs:
+
+- **Baseline** (`DoubleFailureRelay_Baseline.cfg`, expected to FAIL): the current
+  production fold. TLC reproduces the residual as a **safety** counterexample
+  (`NoConfirmedDivergence` / `LockedRecordMatchesFreeze` violated) — the model-level
+  RED mirroring the in-process repro. The global-min source dies and is pruned, the
+  victim confirms+discards real inputs on a stale-high cache, and a late relay lowers
+  the freeze below the already-discarded window.
+- **Tombstone** (`DoubleFailureRelay_Tombstone.cfg`, expected to FAIL on the
+  PROPERTY): candidate fix #2 (keep folding a dead survivor's last term). Safety
+  holds, but the **liveness** property `ConfirmationProgresses` is violated — a dead
+  laggard's retained low term pins a still-live slot's confirmation below the living
+  floor forever (a survivor cannot tell a real freeze from ordinary lag at the moment
+  of death). The formal proof of the project rule "no partial fix — a partial fix
+  regresses liveness."
+- **MeshAgree** (`DoubleFailureRelay.cfg`, the default, ✓ CI): candidate fix #3.
+  Confirmation of a not-yet-mesh-agreed slot advances only to the **mesh-acked
+  floor** (the min over every alive peer reachable on a live link of that peer's
+  *current* freeze floor, read via a fresh ack — not the stale cache), holds while
+  partitioned, and excludes the slot to MAX only once its freeze has fully converged.
+  **Both** the safety invariants and the liveness property hold.
+- **InheritedFloor** (`DoubleFailureRelay_InheritedFloor.cfg`, expected to FAIL on
+  safety): candidate fix #4 — the **cache-only / no-wire shortcut**, the cheapest and
+  most tempting design. A survivor snapshots a departed connected source's last cached
+  low term (bounding both the confirm target and the freeze convergence) and releases
+  it only on *fresh* gossip from every remaining alive peer reporting the slot
+  connected above it — no wire change, no peer-receipt oracle. TLC reports
+  `NoConfirmedDivergence` **violated** via the **corroborate-then-drop race**: a peer
+  gossips `{connected, high}` (corroborating "healthy", releasing the observer's
+  floor), then detects the drop and freezes the slot *low* while its disconnect gossip
+  is still in flight — so the observer has already confirmed+locked the slot's real
+  inputs above the eventual freeze. The obstruction is **intrinsic** — a cache lags the
+  corroborator's own in-flight drop — and the adversarial review additionally disproved
+  the strongest cache-only variants (re-validate-against-current-cache, never-release =
+  Tombstone liveness, speculative-bound, link-reachability-hold, local generation
+  counter). This is the evidence that the production fix needs a fresh-ack *round* +
+  drop-epoch commitment, not passive gossip. The third documented dead-end.
+
+**Safety:** `NoConfirmedDivergence` (no two alive survivors permanently — both
+window-locked — disagree on the dropped slot's recorded confirmed value);
+`LockedRecordMatchesFreeze` (a mesh-agreed survivor's locked record equals the agreed
+freeze value); plus `FreezeNeverBelowGlobalMin` and `RecordedSourceInRange` sanity
+invariants. **Liveness:** `ConfirmationProgresses` (every alive survivor eventually
+confirms to the living mesh floor; partitions heal monotonically). The four configs
+together are the machine-checked arbitration: the residual is real (Baseline), the
+dead-survivor tombstone regresses liveness (Tombstone), the cache-only no-wire
+shortcut is unsound via the corroborate-then-drop race (InheritedFloor), and the
+mesh-acked-floor design is sound (MeshAgree). The MeshAgree config is the design a
+future production red-green cycle should implement — and the InheritedFloor result is
+why it cannot be done without the wire piece: it needs a per-slot ack/epoch
+(fresh-ack round + drop-epoch commitment) on connect-status gossip, not passive
+gossip corroboration.
 
 ### PeerDrop.tla
 
@@ -367,6 +435,8 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
 | `FrameAdvantageAggregation.cfg` | NUM_ENDPOINTS=3, MAX_ADVANTAGE=4, MULTI_HANDLE_COUNT=2, MIN_RECOMMENDATION=3 (no symmetry) | ~26,200 distinct states (~901,000 generated) |
 | `SpectatorFailover.cfg` | HOSTS={1,2,3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — canonical=min(live), liveness) | ~96,800 distinct states (~446,000 generated), ~6s single worker |
+| `DoubleFailureRelay.cfg` | SURVIVORS={a,b,c}, MAX_FRAME=3, WINDOW=1, RECEIPTS={0,3}, FIX_MODE="MeshAgree" (no symmetry — liveness; links monotone-heal, weak fairness) | ~865,600 distinct states (~3.88M generated), ~2min single worker |
+| `DoubleFailureRelay_InheritedFloor.cfg` (demo, expected FAIL — safety) | same constants, FIX_MODE="InheritedFloor" (cache-only no-wire shortcut) | `NoConfirmedDivergence` violated in ~2min (corroborate-then-drop race) |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -465,6 +535,7 @@ These specifications model the key algorithms from:
 | `TimeSync` | `src/time_sync.rs` (TimeSync; `advance_frame`, `average_frame_advantage`) |
 | `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
 | `SpectatorFailover` | `src/sessions/p2p_spectator_session.rs` (`merge_connection_status`, `converged_drop_status`, `converge_latched_drop_status`, `reactivation_provenance`, `witness_host_drop_reports`, `consume_drop_witnesses`, `witness_adopted_drop`, `commit_canonical_snapshot`, `host_drop_witness`, `host_connect_status`) |
+| `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`); models the N≥4 residual the in-process test `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors` characterizes. The MeshAgree fix is a *design* (mesh-acked-floor / per-slot ack-epoch) for a future production red-green cycle — not yet implemented in `src/`; the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary |
 
 ## Extending the Specifications
 

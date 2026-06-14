@@ -50,10 +50,22 @@ pub enum SyncHealth {
     /// - When the peer hasn't sent checksum data yet
     Pending,
 
-    /// Checksums differ - game state has diverged.
+    /// Checksums differ at the compared frame — the peers' game state for that
+    /// frame does not match.
     ///
-    /// This is a critical error indicating non-determinism or a bug.
-    /// The session should typically be terminated when this occurs.
+    /// Treat this as a **signal to handle gracefully, not a reason to
+    /// hard-panic.** `DesyncDetected` is a normal, recoverable library event;
+    /// crashing the process on a single one is fragile. In the default
+    /// trusted-peer model a mismatch indicates genuine non-determinism — end
+    /// the affected session and surface diagnostics. In an untrusted deployment
+    /// a *single* mismatch may instead be a malicious or buggy peer emitting one
+    /// bad checksum, so weight a *persistent* mismatch with the same peer (see
+    /// [`P2PSession::peer_checksum_mismatch_count`]) more heavily than a one-off,
+    /// and prefer downgrading trust over auto-ejecting — with only two endpoints
+    /// you cannot tell which side is wrong, so ejecting may remove the honest
+    /// peer.
+    ///
+    /// [`P2PSession::peer_checksum_mismatch_count`]: crate::P2PSession::peer_checksum_mismatch_count
     DesyncDetected {
         /// The frame at which the desync was detected.
         frame: Frame,

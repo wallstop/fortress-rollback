@@ -5,6 +5,7 @@
 # - "downcast" docs must be backed by actual downcasting infrastructure
 # - bounded decode docs must not point callers at unbounded decode helpers
 # - `codec::decode_*` references in docs/allocation comments must name real helpers
+# - Rustdoc range contracts and test names must match implementation clues
 #
 # Usage: ./scripts/ci/check-doc-claims.sh [options]
 #   ./scripts/ci/check-doc-claims.sh            # Check all Rust files
@@ -38,7 +39,7 @@ print_usage() {
     echo "  --verbose  Show all files checked"
     echo "  --help     Show this help message"
     echo ""
-    echo "Checks doc comments for misleading downcast and bounded-decode claims."
+    echo "Checks doc comments and test names for misleading semantic claims."
 }
 
 main() {
@@ -223,6 +224,20 @@ main() {
     done < <(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/tests" "$PROJECT_ROOT/examples" "$PROJECT_ROOT/benches" \
         -name '*.rs' -print 2>/dev/null \
         | sort)
+
+    echo ""
+
+    local semantic_claim_checker="$PROJECT_ROOT/scripts/hooks/check-rust-semantic-claims.py"
+    if [[ -f "$semantic_claim_checker" ]]; then
+        if ! python3 "$semantic_claim_checker"; then
+            issues=$((issues + 1))
+        fi
+    else
+        issues=$((issues + 1))
+        echo ""
+        echo -e "${RED}ERROR${NC}: missing semantic claim checker: $semantic_claim_checker"
+        echo -e "  ${BLUE}Fix:${NC} Restore scripts/hooks/check-rust-semantic-claims.py."
+    fi
 
     echo ""
 

@@ -1347,11 +1347,26 @@ macro_rules! debug_check_invariants {
 }
 
 /// No-op version for release builds without `paranoid` feature.
+///
+/// The arguments are referenced inside a statically-dead `if false` block so a
+/// caller binding used *only* by this macro is not flagged `unused_variables`
+/// under the crate's `#![deny(warnings)]` (see `src/lib.rs`). The dead block is
+/// removed by codegen, so the release no-op stays truly zero-cost: `$expr` is
+/// referenced for the lint but never evaluated, preserving the macro's contract
+/// of doing no work in release.
 #[macro_export]
 #[cfg(not(any(debug_assertions, feature = "paranoid")))]
 macro_rules! debug_check_invariants {
-    ($expr:expr) => {{}};
-    ($expr:expr, $context:expr) => {{}};
+    ($expr:expr) => {{
+        if false {
+            let _ = &$expr;
+        }
+    }};
+    ($expr:expr, $context:expr) => {{
+        if false {
+            let _ = (&$expr, &$context);
+        }
+    }};
 }
 
 /// Macro for checking invariants and panicking if violated (debug only).
@@ -1398,8 +1413,20 @@ macro_rules! assert_invariants {
 #[macro_export]
 #[cfg(not(any(debug_assertions, feature = "paranoid")))]
 macro_rules! assert_invariants {
-    ($expr:expr) => {{}};
-    ($expr:expr, $context:expr) => {{}};
+    // See the release `debug_check_invariants!` no-op above: the `if false`
+    // block references the arguments for the `unused_variables` lint without
+    // evaluating them, keeping the release no-op zero-cost under
+    // `#![deny(warnings)]`.
+    ($expr:expr) => {{
+        if false {
+            let _ = &$expr;
+        }
+    }};
+    ($expr:expr, $context:expr) => {{
+        if false {
+            let _ = (&$expr, &$context);
+        }
+    }};
 }
 
 /// Macro for checking invariants and returning a Result.

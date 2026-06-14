@@ -203,20 +203,27 @@ fn try_encode_with_offset(buf: &[u8], offset: usize) -> RleResult<Vec<u8>> {
     };
 
     let mut cursor = 0;
-    while cursor < slice.len() {
-        let byte = slice[cursor];
+    // `slice.get(..)` is used instead of `slice[..]` so the scanner is panic-free
+    // by construction (zero-panic policy / `clippy::indexing_slicing`); the bounds
+    // checks are identical to the previous `cursor < slice.len()` guards.
+    while let Some(&byte) = slice.get(cursor) {
         let start = cursor;
         cursor += 1;
         if byte == 0 || byte == 255 {
-            while cursor < slice.len() && slice[cursor] == byte {
+            while slice.get(cursor) == Some(&byte) {
                 cursor += 1;
             }
             write_contiguous(&mut enc, (cursor - start) as u64, byte);
         } else {
-            while cursor < slice.len() && slice[cursor] != 0 && slice[cursor] != 255 {
+            while let Some(&b) = slice.get(cursor) {
+                if b == 0 || b == 255 {
+                    break;
+                }
                 cursor += 1;
             }
-            write_noncontiguous_slice(&mut enc, &slice[start..cursor]);
+            // start <= cursor <= slice.len() by construction, so this range is
+            // always valid; `unwrap_or_default()` is an unreachable safety net.
+            write_noncontiguous_slice(&mut enc, slice.get(start..cursor).unwrap_or_default());
         }
     }
 
@@ -236,7 +243,10 @@ fn write_contiguous(enc: &mut Vec<u8>, len: u64, prev_bits: u8) {
     // Use stack-allocated buffer to avoid heap allocation in hot path
     let mut temp_buf = [0u8; 10]; // Max varint size for u64
     let written = varint::encode(value, &mut temp_buf);
-    enc.extend_from_slice(&temp_buf[..written]);
+    // `written` is always <= temp_buf.len() (max 10 varint bytes for a u64), so
+    // `get(..written)` is always Some; `unwrap_or_default()` keeps it panic-free
+    // (zero-panic policy / `clippy::indexing_slicing`) without a real fallback.
+    enc.extend_from_slice(temp_buf.get(..written).unwrap_or_default());
 }
 
 /// Write a non-contiguous (uncompressed) sequence to the output.
@@ -250,7 +260,10 @@ fn write_noncontiguous_slice(enc: &mut Vec<u8>, noncontiguous_bits: &[u8]) {
     // Use stack-allocated buffer to avoid heap allocation in hot path
     let mut temp_buf = [0u8; 10]; // Max varint size for u64
     let written = varint::encode(value, &mut temp_buf);
-    enc.extend_from_slice(&temp_buf[..written]);
+    // `written` is always <= temp_buf.len() (max 10 varint bytes for a u64), so
+    // `get(..written)` is always Some; `unwrap_or_default()` keeps it panic-free
+    // (zero-panic policy / `clippy::indexing_slicing`) without a real fallback.
+    enc.extend_from_slice(temp_buf.get(..written).unwrap_or_default());
     enc.extend_from_slice(noncontiguous_bits);
 }
 

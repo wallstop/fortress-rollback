@@ -13,6 +13,7 @@ on:
       - "scripts/docs/**"
       - "scripts/tests/**"
       - "scripts/ci/check-doc-claims.sh"
+      - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
@@ -33,6 +34,7 @@ on:
       - "scripts/docs/**"
       - "scripts/tests/**"
       - "scripts/ci/check-doc-claims.sh"
+      - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/ci/check-derive-bounds.sh"
       - ".markdownlint.json"
       - ".markdown-link-check.json"
@@ -84,6 +86,8 @@ jobs:
       - name: Run Vale prose linter
         id: vale
         run: |
+          set -o pipefail
+
           {
             echo "## Vale Prose Lint Results"
             echo ""
@@ -270,6 +274,8 @@ jobs:
 
       - name: Check for rustdoc-style code fence attributes
         run: |
+          set -o pipefail
+
           {
             echo "## Code Fence Syntax Check"
             echo ""
@@ -580,6 +586,8 @@ jobs:
 
       - name: Run documentation tests
         run: |
+          set -o pipefail
+
           {
             echo "## Documentation Example Tests"
             echo ""
@@ -626,6 +634,8 @@ jobs:
 
       - name: Measure documentation coverage
         run: |
+          set -o pipefail
+
           {
             echo "## Documentation Coverage Report"
             echo ""
@@ -693,6 +703,8 @@ jobs:
 
       - name: Verify markdown code samples
         run: |
+          set -o pipefail
+
           {
             echo "## Markdown Code Sample Verification"
             echo ""

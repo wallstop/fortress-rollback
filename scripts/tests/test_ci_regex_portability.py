@@ -10,6 +10,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOC_CLAIMS_SOURCE = REPO_ROOT / "scripts" / "ci" / "check-doc-claims.sh"
 DERIVE_BOUNDS_SOURCE = REPO_ROOT / "scripts" / "ci" / "check-derive-bounds.sh"
+RUST_SEMANTIC_CLAIMS_SOURCE = (
+    REPO_ROOT / "scripts" / "hooks" / "check-rust-semantic-claims.py"
+)
 
 
 def _setup_repo_with_script(tmp_path: Path, script_source: Path) -> tuple[Path, Path]:
@@ -18,6 +21,10 @@ def _setup_repo_with_script(tmp_path: Path, script_source: Path) -> tuple[Path, 
     script_path = repo / "scripts" / "ci" / script_source.name
     script_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(script_source, script_path)
+    if script_source == DOC_CLAIMS_SOURCE:
+        hook_path = repo / "scripts" / "hooks" / RUST_SEMANTIC_CLAIMS_SOURCE.name
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(RUST_SEMANTIC_CLAIMS_SOURCE, hook_path)
     return repo, script_path
 
 

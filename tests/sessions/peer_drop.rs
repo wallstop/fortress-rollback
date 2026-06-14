@@ -2860,6 +2860,691 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
 }
 
 // ============================================================================
+// ARBITRATION (N=4 residual): "stale-echo freeze" — VERDICT: NOTABUG
+// (arbitrated S41). Documented at `p2p_session.rs`
+// `remote_slot_confirmed_bound`'s rustdoc ("# Documented residuals").
+// ============================================================================
+//
+// Claim once feared: a third survivor X freezes the dropped slot D using its
+// STALE-LOW cache of survivor U's old gossip about D. The moment ANOTHER peer's
+// (B's) disconnect report flips X's `queue_connected` for D, X's
+// endpoint-terms override (`update_player_disconnects`' min over running
+// endpoints) mins that stale-low cached term and converges a freeze frame BELOW
+// X's current confirmed bound — which (the fear was) X's confirmation may
+// already have passed, re-exposing the window-floor mechanism: X silently
+// overwrites confirmed history for D in `(stale_low, X_confirmed]` while U
+// (whose own bound stayed high) keeps D's real inputs there.
+//
+// VERDICT (S41): NOTABUG. The stale-low term is held by a STILL-RUNNING endpoint,
+// so the SAME term is folded into X's confirmed BOUND (`remote_slot_confirmed_bound`)
+// that the override later mins — bound == applied freeze within a snapshot, so X is
+// pinned AT the stale-low value and never confirms past it (no window-floor
+// re-exposure). The only cross-call escape is UNREACHABLE in a full mesh
+// (see the assertion-site comment below and the rustdoc); the genuine escape needs
+// fold-membership asymmetry, which is the sibling `p2p_n4_double_failure_relay_*`
+// (REAL) corner.
+//
+// This test is the IN-MESH REACHABILITY evidence for that NOTABUG: it drives the
+// full choreography and the F4 byte oracle (over the shared confirmed-frame range,
+// A's and C's recorded confirmed StateStub must be byte-equal) shows the victim C
+// pinned low with byte-IDENTICAL confirmed state — confirmation never outran the
+// freeze in process. The byte-compare is the oracle; a NON-EMPTY divergence list
+// (or a survivor stalling / `advance_frame` erroring) would be a RED reproduction.
+//
+// Assignment (natural mapping onto the F4 harness): U = A (high-receipt peer
+// whose own bound stays high), X = C (stale-holding survivor), flip-trigger =
+// B. A->C is severed (as in F4) so C never hears A's NEWER, higher gossip about
+// D — C's `endpoint_A.peer_connect_status(D)` is frozen at A's early, low view.
+//
+// The non-vacuity assertion guards that some confirmed frames were compared; the
+// `divergences.is_empty()` assertion pins the NOTABUG outcome so the file stays a
+// regression guard (it flips RED if the corner ever reproduces).
+
+/// Stale-echo arbitration (VERDICT: NOTABUG, S41). Engineers C to hold a
+/// stale-low cache of A's early gossip about D (A->C severed after A's low gossip
+/// lands), then has B drop D and gossip the disconnect to C, flipping C's
+/// `queue_connected(D)` while C still holds A's stale-low term. Records confirmed
+/// states per survivor and runs the F4 byte oracle, which shows C pinned low with
+/// byte-identical confirmed state — confirmation never outran the freeze. Asserts
+/// non-vacuity (some confirmed frames compared) and that the survivors' confirmed
+/// state did NOT diverge.
+#[test]
+fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<(), FortressError> {
+    // Long symmetric timeouts: every drop here is driven by explicit
+    // `remove_player` + gossip propagation, never by an auto-timeout (so a
+    // blocked LINK never collapses an endpoint to non-running on its own and
+    // changes the fold membership out from under the choreography).
+    let (
+        mut sess_a,
+        mut sess_b,
+        mut sess_c,
+        mut sess_d,
+        blocked,
+        a_addr,
+        b_addr,
+        c_addr,
+        d_addr,
+        clock,
+    ) = build_filtered_four_player_sessions(Duration::from_secs(5))?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+    let mut stub_c = GameStub::new();
+    let mut stub_d = GameStub::new();
+
+    let mut states_a: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_b: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_c: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    let h_a = PlayerHandle::new(0);
+    let h_b = PlayerHandle::new(1);
+    let h_c = PlayerHandle::new(2);
+    let h_d = PlayerHandle::new(3);
+
+    // --- Phase 1: tiny warmup (all links open) so A's gossip about D reaches C
+    // at a LOW frame and all four mutually confirm a couple of frames. D's
+    // stream (i + 3000) is non-constant so a frozen D value is frame-sensitive
+    // and divergence is byte-detectable. ---
+    let warmup_frames = 3_u32;
+    for i in 0..warmup_frames {
+        poll_four(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &clock,
+            3,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, i + 1000, &mut states_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, i + 2000, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, i + 3000, &mut sink)?;
+    }
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        4,
+    );
+
+    // --- Phase 2: SEVER A->C now (early), freezing C's cache of A's view of D
+    // at A's CURRENT (low) gossip. From here C never hears A's newer, higher
+    // gossip about D — C's `endpoint_A.peer_connect_status(D)` is stuck low. We
+    // keep D->A, D->B, D->C open and advance several frames so A's and B's REAL
+    // receipt of D climbs well ABOVE the frozen value C holds for A. ---
+    blocked.block(a_addr, c_addr);
+    blocked.block(c_addr, a_addr); // sever both directions, as in F4
+
+    // Advance a wider window so A's (and B's) D receipt climbs above the stale
+    // value frozen in C's A-cache. C still receives D directly, so C's OWN
+    // local receipt of D also climbs — but C's confirmed_frame is BOUNDED by
+    // the gossip fold, which includes A's frozen-low cache.
+    let climb_window = 6_u32;
+    for i in 0..climb_window {
+        poll_four(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &clock,
+            2,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, 100 + i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1100 + i, &mut states_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2100 + i, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, 3100 + i, &mut sink)?;
+    }
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        4,
+    );
+
+    // --- Phase 3: D goes silent to EVERYONE. B drops D first (direct
+    // `remove_player`) at B's HIGH receipt, then gossips D-disconnected to C
+    // (B->C open), flipping C's `queue_connected(D)`. C still holds A's
+    // stale-low cache (A->C severed), so C's override mins down to A's stale-low
+    // term. A, meanwhile, dropped D at its OWN high receipt and (A<->C severed)
+    // never hears C's lowering directly. ---
+    blocked.block(d_addr, a_addr);
+    blocked.block(d_addr, b_addr);
+    blocked.block(d_addr, c_addr);
+
+    // B drops D at its high receipt and re-gossips the disconnect to C.
+    sess_b.remove_player(h_d).unwrap();
+    // A drops D at its high receipt; A's own bound for D stays HIGH (A folds its
+    // own receipt, not C's lowering — A<->C severed).
+    sess_a.remove_player(h_d).unwrap();
+    // C does NOT explicitly remove D: we want C to learn D is disconnected via
+    // B's GOSSIP (the queue_connected flip), so the stale-low A-cache term is
+    // what mines C's freeze frame down — not C's own (higher) receipt.
+
+    let mut c_stall_error: Option<FortressError> = None;
+    for _ in 0..200 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, 500, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1500, &mut states_b)?;
+        // C may stall or error if the mine-down targets confirmed/discarded
+        // history (the window-floor re-exposure the claim predicts). Capture
+        // (not `?`-propagate) any non-throttle error so the test can report it.
+        match try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2500, &mut states_c) {
+            Ok(_) => {},
+            Err(e) => {
+                if c_stall_error.is_none() {
+                    c_stall_error = Some(e);
+                }
+            },
+        }
+    }
+
+    // --- Byte oracle (F4 pattern): over the shared confirmed range, A vs C is
+    // the stale-echo pair (A's bound stayed high; C's was mined down by A's
+    // stale-low cached term). A vs B catches residual divergence. ---
+    let confirmed_bound = sess_a
+        .confirmed_frame()
+        .as_i32()
+        .min(sess_b.confirmed_frame().as_i32())
+        .min(sess_c.confirmed_frame().as_i32());
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, &'static str, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state_a) in &states_a {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state_c) = states_c.get(&frame) {
+            compared += 1;
+            if state_a != state_c {
+                divergences.push((frame, "A!=C", state_a, state_c));
+            }
+        }
+        if let Some(&state_b) = states_b.get(&frame) {
+            if state_a != state_b {
+                divergences.push((frame, "A!=B", state_a, state_b));
+            }
+        }
+    }
+
+    // Non-vacuity: the choreography must actually have exercised confirmed
+    // frames across survivors, or the arbitration proves nothing.
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across survivors (bound={confirmed_bound}); \
+         the stale-echo choreography did not produce overlapping confirmed history"
+    );
+
+    // NOTABUG (arbitrated S41), two-part rationale (matches the
+    // `remote_slot_confirmed_bound` rustdoc "# Documented residuals"):
+    //
+    // (1) INTRA-SNAPSHOT (bound == applied freeze). C's stale-low term is held by
+    //     a STILL-RUNNING endpoint (A's cache), so it is folded into C's confirmed
+    //     BOUND (`remote_slot_confirmed_bound`) AND into the override
+    //     (`update_player_disconnects`) IDENTICALLY — both folds iterate the same
+    //     `is_running()` endpoint set. C is therefore pinned AT the stale-low value
+    //     the whole window: it never confirms PAST it, and the mine-down rewrites
+    //     only PREDICTED frames (no window-floor re-exposure, no divergence, no stall).
+    //
+    // (2) REACHABILITY (no cross-call escape). The one cross-call escape — a
+    //     still-running endpoint adopting a LOWER freeze on its disconnect-flip
+    //     (`merge_peer_connect_status`'s first-disconnect `last_frame = remote.last_frame`)
+    //     below an already-confirmed frame — is UNREACHABLE in a full mesh: for any
+    //     endpoint to gossip a low `{disconnected, F}` that we adopt, some running
+    //     endpoint must have gossiped that low `F`, and broadcast gossip (every input
+    //     packet carries the full connect-status vector) delivers the same low `F` to
+    //     US, pinning our bound at `F` BEFORE we can confirm past it. The genuine
+    //     escape requires that source endpoint to be ABSENT from our fold
+    //     (fold-membership asymmetry) — i.e. the sibling `p2p_n4_double_failure_relay_*`
+    //     (REAL) corner, where the low term's origin dies and is pruned.
+    //
+    // If this assertion ever fails (divergences non-empty, or C errored), the
+    // stale-echo corner has gone RED and this guard must be revisited.
+    assert!(
+        divergences.is_empty() && c_stall_error.is_none(),
+        "stale-echo went RED: the corner reproduced in-process \
+         (bound={confirmed_bound}, compared={compared}, divergences={divergences:?}, \
+         c_stall_error={c_stall_error:?})"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// ARBITRATION (N=4 residual): "double-failure relay" — VERDICT: REAL
+// (arbitrated S41; the genuine residual). Documented at `p2p_session.rs`
+// `remote_slot_confirmed_bound`'s rustdoc ("# Documented residuals").
+// ============================================================================
+//
+// Documented quote (p2p_session.rs, remote_slot_confirmed_bound rustdoc):
+// "an origin survivor that dies AFTER relaying its low freeze value to a third
+// peer but BEFORE delivering it to us leaves a window where our bound (no longer
+// folding the dead origin's endpoint) exceeds the override later relayed through
+// the third peer."
+//
+// VERDICT (this test): REAL — arbitrated AND adversarially verified faithful /
+// non-vacuous in S41. The corner REPRODUCES in-process as a REAL, deterministic,
+// cross-survivor CONFIRMED-STATE divergence with FIRST divergence at `F + 1`; it
+// VANISHES if the origin stays in the fold or the relay is prompt (so the
+// choreography is load-bearing, not an artifact). The test asserts the divergence
+// IS present as a CI-safe characterization guard that FLIPS when a future fix
+// closes the residual.
+//
+// Mechanism, as actually driven below (A = "us", B = dying origin, C = relay,
+// D = the dropped peer; num_players=4, ContinueWithout, max_prediction=4):
+//   - Phase 2 builds a D-receipt gradient by blocking D->B: B's view of D freezes
+//     at the global-min `F` while A and C keep receiving D up to a higher `M`.
+//     While B still runs and gossips {connected, F}, every survivor folds B's low
+//     term, so the freeze barrier PINS confirmed_frame at `F` even though A's and
+//     C's receipt of D has climbed to M. C keeps gossiping {connected, M} to A, so
+//     A's cached C-view of D (`endpoint_C.peer_connect_status(D)`) reaches M.
+//   - Phase 3 arms the DOUBLE FAILURE via explicit removals (no timeout, so fold
+//     membership is fully controlled): block D->C (C frozen at M); sever C->A while
+//     A's cached C-view of D is still {connected, M} (A's long timeout keeps C's
+//     endpoint RUNNING, so A keeps folding C at M); `B.remove_player(D)` (B freezes
+//     D at F and gossips {disconnected, F} to C, which ADOPTS F via
+//     `merge_peer_connect_status:1847` even though C's own receipt is M); and
+//     `A.remove_player(B)` so B's endpoint on A goes non-running and is PRUNED from
+//     A's D fold (`remote_slot_confirmed_bound`/`update_player_disconnects` skip
+//     `!endpoint.is_running()`) — the "origin dies after relaying to C but before
+//     delivering to us" leg. A's D fold is now min(A receipt, C-cache) = M.
+//   - Phase 4: A records frames ABOVE `F` with D's REAL inputs (A does not yet know
+//     D dropped) and its small window DISCARDS the frames below `current - 4`.
+//   - Phase 5 re-opens C->A: C's relayed {disconnected, F} finally lands, A lowers
+//     its D term to F and arms a disconnect rollback to F+1 — BELOW A's window
+//     floor. The S20 out-of-window clamp (adjust_gamestate:7478,
+//     `frame_to_load.max(window_floor)`) keeps A LIVE (Ok, no stall) and
+//     re-simulates only the in-window frames with D frozen at F. The already
+//     -discarded frames in `(F, floor]` keep A's real-input state, which no longer
+//     matches C's frozen-at-F state -> a permanent divergence the relay cannot fix.
+//
+// This is the N>=4 instance of the discard-before-convergence residual the S32
+// barrier closed at N=3 but only NARROWED at N>=4. The "double failure" is: the
+// origin B is pruned from A's fold (its low view never reaches A directly) AND
+// C->A is delayed past A's record+discard of the high frames.
+//
+// Oracle (F4 byte pattern): over the shared confirmed-frame range, A's and C's
+// recorded confirmed StateStub must be byte-equal; a NON-EMPTY divergence list is
+// the RED signal. The decisive SIGNATURE of this corner (vs a plain input split)
+// is that D's confirmed *inputs* CONVERGE across A and C (both frozen at F, so the
+// library's own input-checksum desync detector stays silent) while the recorded
+// *state* silently diverges. The assertions pin the empirically-observed
+// reproduction (first divergence at `F + 1`) as a CI-safe characterization guard.
+
+/// Double-failure-relay arbitration (VERDICT: REAL, S41). Builds a D-receipt
+/// gradient (B low = `F`, A/C high = `M`), then prunes the origin B from A's fold
+/// via `A.remove_player(B)` while A's direct link to C is severed and B has already
+/// relayed its low freeze to C — so A records D's slot above `F` with real inputs
+/// and discards those frames before C's relayed `{disconnected, F}` reaches A. The
+/// late relay lowers A's D term below A's discarded window; the S20 clamp keeps A
+/// live but cannot repair the discarded frames, leaving A and C with divergent
+/// confirmed state. Records confirmed states per survivor, runs the F4 byte oracle,
+/// and probes (on genuinely-queryable in-window frames) that D's confirmed inputs
+/// nonetheless converged — so an input-checksum desync detector stays blind.
+#[test]
+fn p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors() -> Result<(), FortressError>
+{
+    // LONG symmetric timeouts so NO auto-timeout fires: every endpoint pruning
+    // here is driven by an explicit `remove_player`, so the choreography fully
+    // controls fold membership (a blocked LINK never collapses an endpoint to
+    // non-running out from under us). SMALL prediction window (4) so A can burn
+    // its whole window and DISCARD frames below `F` before C's relayed low lands.
+    let long = Duration::from_secs(20);
+    let (
+        mut sess_a,
+        mut sess_b,
+        mut sess_c,
+        mut sess_d,
+        blocked,
+        a_addr,
+        b_addr,
+        c_addr,
+        d_addr,
+        clock,
+    ) = build_filtered_four_player_sessions_with_timeouts_and_prediction([long; 4], 4)?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+    let mut stub_c = GameStub::new();
+    let mut stub_d = GameStub::new();
+
+    let mut states_a: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_b: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_c: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    let h_a = PlayerHandle::new(0);
+    let h_b = PlayerHandle::new(1);
+    let h_c = PlayerHandle::new(2);
+    let h_d = PlayerHandle::new(3);
+
+    // --- Phase 1: warmup, all links open so all four confirm together. D's stream
+    // (i + 3000) is non-constant so a frozen D value is frame-sensitive and a
+    // divergence is byte-detectable. ---
+    let warmup_frames = 6_u32;
+    for i in 0..warmup_frames {
+        poll_four(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &clock,
+            3,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, i + 1000, &mut states_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, i + 2000, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, i + 3000, &mut sink)?;
+    }
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        8,
+    );
+
+    // --- Phase 2: build the D-receipt gradient B(low=F) < C,A(high=M). Block
+    // D -> B so B's receipt of D freezes at the global-min `F`. Keep D -> A and
+    // D -> C (and C -> A) OPEN and advance a WIDE window so A's and C's receipt of
+    // D climb to `M`. While B still runs and gossips {connected, F}, every
+    // survivor folds B's low term, so confirmed_frame is PINNED at `F` (the
+    // barrier working) even as A's and C's *receipt* of D climbs to M. Crucially
+    // C keeps gossiping {connected, M} to A, so A's cached view of C's D term
+    // (`endpoint_C.peer_connect_status(D)`) reaches M. ---
+    blocked.block(d_addr, b_addr);
+    let climb = 14_u32;
+    for i in 0..climb {
+        poll_four(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &clock,
+            2,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, 100 + i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1100 + i, &mut states_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2100 + i, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, 3100 + i, &mut sink)?;
+    }
+    poll_four(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &clock,
+        4,
+    );
+
+    // --- Phase 3: arm the DOUBLE FAILURE (all via explicit removals; no timeout).
+    //   (a) Block D -> C so C's receipt of D freezes at M (D keeps reaching A).
+    //   (b) Sever C -> A and A -> C while A's cached view of C's D term is still
+    //       the HIGH {connected, M}. A's LONG timeout keeps C's endpoint RUNNING
+    //       on A (a blocked link alone never prunes it), so A keeps folding C at M
+    //       — A never hears C lower its D view until we re-open the link.
+    //   (c) B `remove_player(D)`: B freezes D at F and gossips {disconnected, F}.
+    //       B -> C is OPEN, so C receives it and on first learning D disconnected
+    //       ADOPTS F (merge_peer_connect_status:1847) even though C's own receipt
+    //       is M -> C is now frozen at the global-min F, BELOW its own receipt.
+    //       B -> A is CUT first so A does NOT adopt F here (A's cached B view of D
+    //       freezes at its last {connected, F}).
+    //   (d) A `remove_player(B)`: B's endpoint on A goes terminal (non-running),
+    //       so it is PRUNED from A's D fold (`remote_slot_confirmed_bound` and
+    //       `update_player_disconnects` skip `!endpoint.is_running()`). B's low
+    //       view is now gone from A's fold; A's D bound = min(A receipt, C-cache)
+    //       = M. This is the "origin dies AFTER relaying to the third peer but
+    //       BEFORE delivering to us" leg.
+    // D stays reachable to A (D -> A open) so A keeps confirming D with REAL
+    // inputs. A NEVER removes D — it must learn the drop only via C's late relay. ---
+    blocked.block(d_addr, c_addr);
+    blocked.block(c_addr, a_addr);
+    blocked.block(a_addr, c_addr);
+    blocked.block(b_addr, a_addr);
+    blocked.block(a_addr, b_addr);
+
+    sess_b.remove_player(h_d).unwrap();
+    sess_a.remove_player(h_b).unwrap();
+
+    // --- Phase 4: A confirms/records D HIGH and DISCARDS past F. With B pruned and
+    // C frozen-high in A's fold, A advances and records frames above F using D's
+    // REAL (connected, then predicted-high) inputs — A does NOT yet know D dropped
+    // (`a_dropped_d_p4` stays false) — while its small window discards every frame
+    // below `current - max_prediction`. C, meanwhile, receives B's relayed
+    // {disconnected, F}, freezes D at F, and (with D mesh-excluded) advances PAST
+    // F recording frozen-at-F D values. C -> A is severed so C's lowered view
+    // cannot reach A yet. ---
+    let mut a_dropped_b = false;
+    let mut a_dropped_d_p4 = false;
+    let mut a_stall_error: Option<FortressError> = None;
+    for _ in 0..120 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        match try_advance_recording(&mut sess_a, &mut stub_a, h_a, 500, &mut states_a) {
+            Ok(_) => {},
+            Err(e) => {
+                if a_stall_error.is_none() {
+                    a_stall_error = Some(e);
+                }
+            },
+        }
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1500, &mut states_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2500, &mut states_c)?;
+
+        for e in sess_a.events() {
+            if let FortressEvent::PeerDropped { handle, .. } = e {
+                if handle == h_b {
+                    a_dropped_b = true;
+                }
+                if handle == h_d {
+                    a_dropped_d_p4 = true;
+                }
+            }
+        }
+    }
+
+    // --- Phase 5: the LATE RELAY. Re-open C -> A so C's {disconnected, F} finally
+    // reaches A AFTER A recorded + discarded past F. A's `update_player_disconnects`
+    // now folds C (running, reporting D disconnected at F) and lowers A's D term to
+    // F, arming a disconnect rollback to F+1. F+1 is BELOW A's window floor; the
+    // S20 out-of-window clamp (adjust_gamestate:7478, `frame_to_load.max(window_floor)`)
+    // keeps A LIVE (returns Ok, no stall) and re-simulates only the in-window
+    // frames with D frozen at F. The frames in `(F, floor]` were already discarded
+    // and KEEP A's real-input state, which no longer matches C's frozen-at-F state
+    // -> a permanent cross-survivor confirmed-state DIVERGENCE the relay cannot
+    // repair. ---
+    blocked.unblock(c_addr, a_addr);
+    blocked.unblock(a_addr, c_addr);
+
+    let mut a_dropped_d_p5 = false;
+    for _ in 0..160 {
+        sess_a.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        match try_advance_recording(&mut sess_a, &mut stub_a, h_a, 700, &mut states_a) {
+            Ok(_) => {},
+            Err(e) => {
+                if a_stall_error.is_none() {
+                    a_stall_error = Some(e);
+                }
+            },
+        }
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2700, &mut states_c)?;
+
+        if sess_a
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { handle, .. } if handle == h_d))
+        {
+            a_dropped_d_p5 = true;
+        }
+    }
+
+    // A "learned D disconnected" if it emitted PeerDropped for D in either phase.
+    // The interesting (and documented) ordering is p4=false, p5=true: A confirmed
+    // past F BEFORE it knew D had dropped, then learned the low freeze via the relay.
+    let a_dropped_d = a_dropped_d_p4 || a_dropped_d_p5;
+
+    // --- Byte oracle (F4 pattern): over the shared confirmed range A vs C is the
+    // double-failure pair (A's D bound stayed high while B was pruned + C severed;
+    // C froze D at the relayed low F). ---
+    let confirmed_bound = sess_a
+        .confirmed_frame()
+        .as_i32()
+        .min(sess_c.confirmed_frame().as_i32());
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, &'static str, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state_a) in &states_a {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state_c) = states_c.get(&frame) {
+            compared += 1;
+            if state_a != state_c {
+                divergences.push((frame, "A!=C", state_a, state_c));
+            }
+        }
+    }
+
+    // PROBE (the decisive signature of THIS corner vs a plain input split): read
+    // D's confirmed INPUT (handle 3) on A vs C at sample in-window frames. The
+    // public contract (`confirmed_inputs_for_frame`) says these are identical
+    // across peers for any confirmed frame. They DO match here — both peers
+    // converged D's frozen input to the global-min `F` — yet the recorded game
+    // STATE for those same frames diverges, because A computed/recorded that state
+    // with D's REAL inputs BEFORE the freeze converged and the frames were already
+    // discarded (below the window floor) when the relay lowered the term. So the
+    // library's own input-based desync detector would see NO divergence while the
+    // actual confirmed STATE silently disagrees: the documented residual exactly.
+    //
+    // We sample frames in the QUERYABLE range at end of test (`confirmed_bound`
+    // climbs to ~167, and the input ring retains roughly the last
+    // `INPUT_QUEUE_LENGTH` == 128 confirmed frames). The EARLY diverging-onset
+    // frames (`F + 1` .. the early window) are by now FULLY DISCARDED from the
+    // input ring — `confirmed_inputs_for_frame` returns `Err`/`None` for them —
+    // which STRENGTHENS the detector-blind claim: the divergence lives in discarded
+    // history the input-checksum detector cannot inspect. So we filter to the frames
+    // that ARE queryable (both peers return `Ok`) and assert NON-VACUOUSLY that D's
+    // converged input matches across A and C on at least one genuine frame (a plain
+    // `None == None` on a discarded frame must not count as a match).
+    let mut input_probe: Vec<(i32, Option<u32>, Option<u32>)> = Vec::new();
+    let mut queryable_matches = 0_u32;
+    let mut queryable_mismatch = false;
+    for &pf in &[50_i32, 100, 150] {
+        if pf > confirmed_bound {
+            continue;
+        }
+        let da = sess_a
+            .confirmed_inputs_for_frame(Frame::new(pf))
+            .ok()
+            .and_then(|v| v.get(3).map(|i| i.inp));
+        let dc = sess_c
+            .confirmed_inputs_for_frame(Frame::new(pf))
+            .ok()
+            .and_then(|v| v.get(3).map(|i| i.inp));
+        // Only frames queryable on BOTH peers count toward the non-vacuous match
+        // (a discarded frame yields `None` on both and proves nothing).
+        if da.is_some() && dc.is_some() {
+            if da == dc {
+                queryable_matches += 1;
+            } else {
+                queryable_mismatch = true;
+            }
+        }
+        input_probe.push((pf, da, dc));
+    }
+
+    // Non-vacuity: the choreography must actually have exercised confirmed frames
+    // across survivors, or the arbitration proves nothing.
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across survivors (bound={confirmed_bound}); \
+         the double-failure-relay choreography did not produce overlapping confirmed history"
+    );
+
+    // A must have actually LEARNED D's disconnect (emitted PeerDropped for D),
+    // and via the LATE relay (p5), not before it confirmed past F (p4). Otherwise
+    // a divergence would be the trivial "A never converged the drop" rather than
+    // the documented "A converged the disconnect FLAG but the freeze frame relayed
+    // below A's already-discarded confirmed window, so the S20 clamp could not
+    // re-simulate the diverged frames".
+    assert!(
+        a_dropped_d_p5 && !a_dropped_d_p4,
+        "expected A to learn D's disconnect ONLY via the late relay (p4={a_dropped_d_p4}, \
+         p5={a_dropped_d_p5}); the documented double-failure ordering did not hold \
+         (bound={confirmed_bound}, a_dropped_b={a_dropped_b})"
+    );
+
+    // A must have stayed LIVE through the late relay: the documented mechanism is
+    // the S20 out-of-window CLAMP (Ok, no stall), not a hard error. A stall/error
+    // would be a different (more benign) failure mode.
+    assert!(
+        a_stall_error.is_none(),
+        "expected A to stay live via the S20 clamp, but advance_frame errored: \
+         {a_stall_error:?} (bound={confirmed_bound})"
+    );
+
+    // ARBITRATION VERDICT — pinned to the empirically-observed CURRENT-code
+    // behavior: the "double-failure relay" residual (documented as REAL, the
+    // genuine N>=4 residual, in `remote_slot_confirmed_bound`'s rustdoc) REPRODUCES
+    // in-process as a REAL, deterministic, cross-survivor CONFIRMED-STATE
+    // divergence. A confirmed and recorded frames above the global-min freeze `F`
+    // with D's real inputs while its only low-view sources were out of fold (origin
+    // B pruned, relay C severed); the late relay then lowered A's D term below A's
+    // already-discarded window, and the S20 clamp kept A live but could not repair
+    // the discarded frames. This is the N>=4 instance of the discard-before
+    // -convergence residual the S32 barrier narrowed but did not close. The queryable
+    // input probe above shows the insidious part: D's confirmed *inputs* converged
+    // across peers (so an input-checksum desync detector stays silent) while the
+    // recorded *state* diverged.
+    //
+    // This assertion CHARACTERIZES that reproduction: it PASSES while the corner
+    // remains open. If a future fix closes the residual (a stale-aware override
+    // fold, or full mesh-agreement-before-freeze convergence), `divergences` goes
+    // empty and this assertion flips — at which point convert this test into a
+    // positive convergence guard (assert `divergences.is_empty()`), mirroring the
+    // F4 `..._converges_across_survivors` test.
+    assert!(
+        !divergences.is_empty(),
+        "double-failure-relay did NOT reproduce: confirmed state converged across \
+         survivors (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
+         a_stall_error={a_stall_error:?}). If a fix landed, convert this to a positive \
+         convergence guard (assert divergences.is_empty())."
+    );
+
+    // And the decisive signature: D's confirmed INPUTS converged across A and C
+    // even though their recorded STATE diverged (input-based desync detection is
+    // blind to this residual). This must rest on GENUINELY-QUERYABLE frames — at
+    // least one frame queryable on both peers (else the "match" is a vacuous
+    // `None == None` on discarded history), and no queryable mismatch.
+    assert!(
+        queryable_matches > 0,
+        "input probe was vacuous: no sampled frame was queryable on BOTH A and C \
+         (all discarded from the input ring) — pick frames in the queryable window; \
+         got {input_probe:?} (bound={confirmed_bound})"
+    );
+    assert!(
+        !queryable_mismatch,
+        "expected D's confirmed inputs to MATCH across A and C on every queryable \
+         frame (the freeze frame converged) despite the state divergence; \
+         got {input_probe:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
 // Regression (direct-detection path): `remove_player` under asymmetric loss
 // ============================================================================
 //
@@ -4383,9 +5068,12 @@ fn staggered_two_drops_opposite_order_survivors_converge_no_desync() -> Result<(
 // and the packet that delivers a third party's flip refreshes that party's
 // term before any fold runs), so the confirmed frame can never race past `F`:
 // nothing at/above `F` is lost and the throttle keeps the `F+1` rollback
-// target inside the window. At N>=4 the bound strictly NARROWS the race but
-// two corners remain open (the stale-echo freeze and the double-failure
-// relay) — documented as residuals in `remote_slot_confirmed_bound`.
+// target inside the window. At N>=4 the bound strictly NARROWS the race;
+// S41 arbitrated the two named corners (stale-echo freeze; double-failure
+// relay) red-test-first to ONE genuine residual — the double-failure relay
+// (stale-echo is NOTABUG: its low term's source endpoint stays in the fold,
+// so bound == override). See `remote_slot_confirmed_bound`'s
+// "# Documented residuals".
 //
 // Three orderings ("flavors") are pinned below. All FAIL before the barrier
 // (byte divergence at frames > F) and PASS after:

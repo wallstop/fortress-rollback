@@ -94,6 +94,10 @@ impl TestClock {
     /// The returned closure captures a reference to this clock's shared state,
     /// so advancing the clock affects all protocols using this clock function.
     ///
+    /// # Panics
+    ///
+    /// The returned closure panics if the internal mutex is poisoned.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -115,6 +119,10 @@ impl TestClock {
     /// On non-WASM targets, `web_time::Instant` is the same type as
     /// `std::time::Instant`, so this returns the same underlying clock
     /// as [`as_protocol_clock()`](TestClock::as_protocol_clock).
+    ///
+    /// # Panics
+    ///
+    /// The returned closure panics if the internal mutex is poisoned.
     ///
     /// # Example
     ///

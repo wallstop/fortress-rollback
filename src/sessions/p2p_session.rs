@@ -57,6 +57,33 @@ const MIN_RECOMMENDATION: u32 = 3;
 #[cfg(test)]
 const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 
+/// Number of mismatching confirmed-frame checksums from a single peer at which
+/// the library emits a one-time advisory trust-downgrade WARNING (B3 Byzantine
+/// hardening).
+///
+/// Checksums are compared only on *confirmed* frames, whose inputs are
+/// byte-identical across honest peers, so in the default trusted-peer model a
+/// mismatch is a **genuine, permanent** state divergence (not a transient — the
+/// historic false-positive cases were bugs that were fixed). In an *untrusted*
+/// deployment a single mismatch may instead be a malicious or buggy peer
+/// emitting one bad checksum, which is the case this threshold disambiguates:
+/// once a peer's per-peer mismatch count (see
+/// [`UdpProtocol::checksum_mismatch_count`]) reaches it, the divergence is
+/// *persistent* and the library logs a richer diagnostic so an operator /
+/// application can downgrade trust. It is deliberately advisory: the library
+/// never auto-ejects — with only two endpoints it cannot tell which side is
+/// wrong, and ejecting may remove the honest peer. Applications wanting a
+/// different policy read the raw count via
+/// [`P2PSession::peer_checksum_mismatch_count`].
+///
+/// The count is per *confirmed frame*, so a single logical divergence at frame
+/// `F` increments once for every confirmed frame `>= F` it is compared against
+/// (a rollback / catch-up can confirm and compare many at once). The threshold
+/// can therefore be crossed by one divergence spanning many frames, not only by
+/// repeated independent episodes — which is the intent: a divergence that
+/// persists across this many confirmed frames has demonstrably not self-corrected.
+pub(crate) const CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD: u32 = 10;
+
 /// Default for the hot-join serve timeout: the maximum number of
 /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls a host will
 /// keep a single hot-join serve open (re-sending the cached snapshot each poll)
@@ -5592,8 +5619,11 @@ impl<T: Config> P2PSession<T> {
     /// peer — so the dropped slot's input at the agreed frame is never lost
     /// and the post-agreement rollback target always stays inside the
     /// prediction window. At `N >= 4` the same bound strictly NARROWS the
-    /// race but does not fully close it: two corners (the stale-echo freeze
-    /// and the double-failure relay) are documented as residuals in
+    /// race but does not fully close it: one residual remains (the
+    /// **double-failure relay** — confirmation outruns a freeze only when the
+    /// low value's origin survivor dies and is pruned from the fold before its
+    /// relayed value lands; the sibling "stale-echo" framing was arbitrated
+    /// NOTABUG in Session 41). See the "Documented residuals" section of
     /// `remote_slot_confirmed_bound`.
     ///
     /// A slot whose disconnect is **mesh-agreed** (locally disconnected and no
@@ -6628,6 +6658,53 @@ impl<T: Config> P2PSession<T> {
 
         // No successful comparison yet - still pending
         Some(SyncHealth::Pending)
+    }
+
+    /// Returns how many confirmed-frame checksums received from `player_handle`
+    /// have **failed** to match our local checksum history — the per-peer
+    /// persistence signal behind the library's B3 trust-downgrade hardening.
+    ///
+    /// Returns `None` for a local player, a spectator, an invalid handle, or a
+    /// remote whose endpoint is gone; `Some(0)` for a connected remote that has
+    /// never mismatched. The count is per-peer (verification or mismatch against
+    /// one remote never leaks into another's) and monotonic for the life of the
+    /// endpoint. It is counted per confirmed frame, so one logical divergence
+    /// spanning many frames increments it many times.
+    ///
+    /// # Why this exists (and what it is *not*)
+    ///
+    /// A [`SyncHealth::DesyncDetected`] should be handled gracefully, not by
+    /// crashing the process: it is a recoverable library event. On a *confirmed*
+    /// frame in the default trusted-peer model it is a genuine, permanent state
+    /// divergence — end the affected session cleanly and surface diagnostics, do
+    /// not `panic!`. In an *untrusted* deployment a *single* mismatch may instead
+    /// be a malicious or buggy peer emitting one bad checksum, and a count that
+    /// **climbs** is what marks a peer whose state *persistently* disagrees with
+    /// ours. The library logs one advisory WARNING when the count crosses an
+    /// internal threshold but **never auto-ejects**: with only two endpoints it
+    /// cannot tell which side is wrong, so dropping a peer risks removing the
+    /// honest one. Use this to apply your own trust policy (e.g. surface a richer
+    /// diagnostic, or — only in a deployment with independent
+    /// identity/corroboration — quarantine a peer that mismatches far past the
+    /// honest-desync range).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Persistent mismatches from one peer: downgrade trust, do not crash.
+    /// if let Some(n) = session.peer_checksum_mismatch_count(handle) {
+    ///     if n >= 10 {
+    ///         log::warn!("peer {handle:?} has {n} checksum mismatches");
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn peer_checksum_mismatch_count(&self, player_handle: PlayerHandle) -> Option<u32> {
+        let PlayerType::Remote(addr) = self.player_reg.handles.get(&player_handle)? else {
+            return None;
+        };
+        let remote = self.player_reg.remotes.get(addr)?;
+        Some(remote.checksum_mismatch_count)
     }
 
     /// Returns `true` if every currently-**connected** remote peer shows
@@ -7783,31 +7860,83 @@ impl<T: Config> P2PSession<T> {
     /// # Documented residuals (`N >= 4`; not closed by the barrier or nudge)
     ///
     /// The barrier closes the desync at `N == 3` and strictly narrows it at
-    /// `N >= 4`. Two `N >= 4` corners remain open (both require at least
-    /// three survivors; neither is a regression — the pre-barrier code had no
-    /// bound at all):
+    /// `N >= 4`. Two `N >= 4` corners were originally documented here as open;
+    /// **Session 41 arbitrated both red-test-first** and found they collapse to
+    /// ONE genuine residual. The unifying invariant: confirmation can outrun a
+    /// freeze frame ONLY when the low value's source endpoint LEAVES this
+    /// session's fold (fold-membership asymmetry). Both folds —
+    /// [`Self::remote_slot_confirmed_bound`] (the confirmed bound) and
+    /// [`Self::update_player_disconnects`] (the freeze override) — iterate the
+    /// identical `is_running()` / non-reserved endpoint set, so a term in one
+    /// fold is in the other (the membership is identical unconditionally).
+    /// Within any snapshot the bound equals the applied freeze in the
+    /// general-drop case both corners live in; an active reopened hot-join
+    /// reactivation instead clamps the bound conservatively ABOVE the raw terms
+    /// (`attempt_clamp`) while the override skips that handle — `bound >=
+    /// override`, never an overrun. Neither corner is a regression (the
+    /// pre-barrier code had no bound at all). Both require at least three
+    /// survivors.
     ///
-    /// - **Stale-echo freeze:** a third survivor `X` can freeze the dropped
-    ///   slot using its stale cache of OUR old (lower) claim — the moment
-    ///   ANOTHER peer's disconnect report flips `X`'s `queue_connected`,
-    ///   `X`'s endpoint-terms override mins that stale-low cached term and
-    ///   converges a freeze frame BELOW our current bound, which our
-    ///   confirmation may already have passed (re-exposing the window-floor
-    ///   mechanism). Impossible at `N == 3`: there the only packet that can
-    ///   flip `X`'s `queue_connected` comes from the endpoint whose term it
-    ///   would min, and the connect-status merge refreshes that same term
-    ///   BEFORE the fold runs. Not a mute problem, so the nudge does not
-    ///   close it (it is a stale-cache race).
-    /// - **Double-failure relay:** an origin survivor that dies AFTER
-    ///   relaying its low freeze value to a third peer but BEFORE delivering
-    ///   it to us leaves a window where our bound (no longer folding the dead
-    ///   origin's endpoint) exceeds the override later relayed through the
-    ///   third peer.
+    /// - **Stale-echo freeze — NOTABUG (arbitrated S41).** A stale-low term
+    ///   held by a STILL-RUNNING endpoint is folded into the confirmed bound
+    ///   AND the override identically, so confirmation is pinned AT the freeze
+    ///   value and never overruns it (proven by the `stale_echo_*` unit probes
+    ///   and `p2p_n4_stale_echo_freeze_*` in `tests/sessions/peer_drop.rs`,
+    ///   where the victim is pinned low with byte-identical confirmed state).
+    ///   The only cross-call escape — a still-running endpoint adopting a lower
+    ///   freeze on its disconnect-flip (`merge_peer_connect_status`'s
+    ///   first-disconnect `last_frame = remote.last_frame`) below an
+    ///   already-confirmed frame — is UNREACHABLE in a full mesh: for any
+    ///   endpoint to gossip a low `{disconnected, F}` we would adopt, some
+    ///   running endpoint must have gossiped that low `F`, and broadcast gossip
+    ///   (every input packet carries the full connect-status vector; the merge
+    ///   runs even for undecodable packets) delivers the same low `F` to US,
+    ///   pinning our own bound at `F` before we can confirm past it. The escape
+    ///   requires that source endpoint to be absent from our fold — i.e. the
+    ///   double-failure relay below. (`N == 3` is doubly safe: a survivor has
+    ///   one other survivor endpoint, so the flipping packet IS the term it
+    ///   would min.)
+    /// - **Double-failure relay — REAL (arbitrated S41).** The genuine
+    ///   residual. When the global-min origin survivor DIES (its endpoint goes
+    ///   non-running and is pruned from BOTH folds) AFTER relaying its low
+    ///   freeze `F` to a third survivor but BEFORE delivering it to us, and the
+    ///   relay is loss-delayed, our bound (no longer folding the dead origin)
+    ///   lets us confirm and DISCARD the dropped slot's real inputs in
+    ///   `(F, window_floor]`; the relayed `{disconnected, F}` then lands, the
+    ///   rollback target `F + 1` is below the prediction-window floor, the S20
+    ///   clamp keeps us live, and the discarded frames keep our real-input
+    ///   state while the relaying survivor froze at `F` — a permanent
+    ///   cross-survivor confirmed-STATE divergence. Insidiously the dropped
+    ///   slot's CONVERGED confirmed inputs match (frozen at `F` on both), so the
+    ///   input-checksum desync detector stays silent. This is the `N >= 4`
+    ///   instance of the discard-before-convergence residual the barrier closed
+    ///   at `N == 3`; it needs TWO simultaneous failures (origin death + relay
+    ///   delay). Deterministically reproduced (first divergence at `F + 1`,
+    ///   non-vacuous) by `p2p_n4_double_failure_relay_*` in
+    ///   `tests/sessions/peer_drop.rs`.
     ///
-    /// Future work for both: a stale-aware override fold (ignore cached terms
-    /// older than the slot's disconnect epoch) or full
-    /// mesh-agreement-before-freeze convergence. Byzantine peers are out of
-    /// scope entirely.
+    /// **Deferred fix (S41 — needs its own red-green + adversarial cycle; a
+    /// partial fix would regress liveness, so none is shipped).** The fix
+    /// direction is now machine-arbitrated in `specs/tla/DoubleFailureRelay.tla`
+    /// (S42/S44): close the fold-membership asymmetry by **(a)** a per-slot
+    /// DROP-EPOCH carried on connect-status gossip PLUS a `FRESH-ACK ROUND` that
+    /// holds confirmation of a not-yet-mesh-agreed dropped slot until a *fresh*
+    /// ack (one that postdates our intent to advance) from every reachable-alive
+    /// peer corroborates the floor — the epoch makes that ack a commitment under
+    /// latency (the wire-epoch direction, shared with the host->spectator
+    /// reactivation/epoch signal); this is the verified-SOUND `MeshAgree` policy.
+    /// **The cheaper alternatives are MACHINE-DISPROVEN:** (b) a dead-survivor
+    /// TOMBSTONE fold regresses liveness (a dead laggard's retained low term pins
+    /// a still-live slot forever — `Tombstone` cfg, conflicting with the S25
+    /// `is_running()`-filter arbitration); and the tempting NO-WIRE / cache-only
+    /// "inherited floor" (snapshot a departed source's low term, release on fresh
+    /// gossip corroboration) is UNSOUND via the *corroborate-then-drop race* — a
+    /// peer corroborates connected-above-floor and then drops the slot low with
+    /// its disconnect gossip still in flight, so we confirm+lock real inputs
+    /// above the freeze (`InheritedFloor` cfg). The obstruction is intrinsic: a
+    /// cache lags the corroborator's own in-flight drop, so PASSIVE gossip alone
+    /// cannot be the commitment — the fresh-ack *round* (not just a wire field)
+    /// is necessary. Byzantine peers are out of scope entirely.
     ///
     /// # `N == 2` identity (normal operation)
     ///
@@ -8899,6 +9028,46 @@ impl<T: Config> P2PSession<T> {
                                     remote_checksum,
                                     addr: remote.peer_addr(),
                                 });
+                                // B3 (Byzantine hardening): track per-peer
+                                // mismatch persistence. On a confirmed frame a
+                                // mismatch is a genuine divergence in the
+                                // trusted model; in an untrusted deployment a
+                                // lone one may be an adversarial checksum, so a
+                                // count that climbs is what marks a peer that
+                                // persistently disagrees with us. We surface it
+                                // (one advisory WARNING at the threshold) but
+                                // never auto-eject — with two endpoints we
+                                // cannot tell which side is wrong, and a
+                                // persistent honest desync should be ended
+                                // gracefully, not by silently dropping a peer.
+                                // `saturating_add` is deliberate: a count pegged
+                                // at u32::MAX still means "persistent" (the
+                                // threshold was crossed long before), and it
+                                // keeps the counter overflow-safe.
+                                remote.checksum_mismatch_count =
+                                    remote.checksum_mismatch_count.saturating_add(1);
+                                // The `== THRESHOLD` equality fires the WARNING
+                                // exactly once: the count passes through every
+                                // integer (this `+1` is in the same loop body as
+                                // the check, no early exit between), so even a
+                                // catch-up batch that drives it from below to
+                                // above the threshold still hits the `==` frame.
+                                if remote.checksum_mismatch_count
+                                    == CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD
+                                {
+                                    report_violation!(
+                                        ViolationSeverity::Warning,
+                                        ViolationKind::ChecksumMismatch,
+                                        "Peer {:?} produced {} mismatching checksums (>= \
+                                         trust-downgrade threshold {}): persistent state \
+                                         divergence. Downgrade trust / surface to the \
+                                         application; the library does not auto-eject (it \
+                                         cannot tell which endpoint is wrong).",
+                                        remote.peer_addr(),
+                                        remote.checksum_mismatch_count,
+                                        CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD
+                                    );
+                                }
                             } else {
                                 // Checksums match - update this peer's verified frame.
                                 // Per-peer (not session-global) so verification against one
@@ -10434,6 +10603,211 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, FortressEvent::DesyncDetected { .. })),
             "no false-positive DesyncDetected after stale checksum invalidation"
+        );
+    }
+
+    /// Thread-local tracing capture for tests asserting whether (and how often)
+    /// a `report_violation!` WARNING fired. `report_violation!` routes to the
+    /// global `TracingObserver` (a `warn!`/`error!` event), so capturing the
+    /// tracing events is the only way to observe it. Returns every WARN-level
+    /// message emitted while `body` ran. Thread-local, so it is parallel-safe
+    /// under both nextest and threaded `cargo test`.
+    fn capture_warn_messages(body: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        struct CapSub {
+            events: Arc<Mutex<Vec<(bool, String)>>>,
+        }
+        impl tracing::Subscriber for CapSub {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct V<'a>(&'a mut String);
+                impl tracing::field::Visit for V<'_> {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            use std::fmt::Write as _;
+                            let _ = write!(self.0, "{value:?}");
+                        }
+                    }
+                }
+                let mut message = String::new();
+                event.record(&mut V(&mut message));
+                self.events
+                    .lock()
+                    .expect("capture mutex")
+                    .push((*event.metadata().level() == tracing::Level::WARN, message));
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            CapSub {
+                events: Arc::clone(&events),
+            },
+            body,
+        );
+        let captured = std::mem::take(&mut *events.lock().expect("capture mutex"));
+        captured
+            .into_iter()
+            .filter_map(|(is_warn, message)| is_warn.then_some(message))
+            .collect()
+    }
+
+    /// B3 (Byzantine hardening): a peer that sends persistently mismatching
+    /// checksums must (1) accumulate a per-peer mismatch count queryable via
+    /// [`P2PSession::peer_checksum_mismatch_count`], (2) be surfaced by exactly
+    /// ONE advisory trust-downgrade WARNING once the count reaches the threshold
+    /// (NOT on the first mismatch), and (3) NEVER be auto-ejected by the library
+    /// — with two endpoints we cannot tell which side is wrong, so dropping a
+    /// peer risks removing the honest one. The count is per-peer, so a
+    /// misbehaving peer does not taint a well-behaved one.
+    #[test]
+    fn persistent_checksum_mismatch_counts_warns_once_and_never_ejects() {
+        let threshold = CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD;
+        let handle_b = PlayerHandle::new(1);
+        let handle_d = PlayerHandle::new(2);
+        let addr_b = test_addr(8080);
+
+        let warns = capture_warn_messages(|| {
+            let mut session = create_three_player_desync_session();
+
+            // Advance + confirm a wide window so every test frame compares
+            // (the comparison skips frames >= last_confirmed_frame).
+            for _ in 0..(threshold as i32 + 4) {
+                session.sync_layer.advance_frame();
+            }
+            session
+                .sync_layer
+                .set_last_confirmed_frame(Frame::new(threshold as i32 + 3), session.save_mode);
+
+            // Feed B `count` mismatching checksums starting at frame `base`,
+            // then run the production comparison (which consumes them).
+            let feed_mismatches = |session: &mut P2PSession<TestConfig>, base: i32, count: i32| {
+                for f in base..(base + count) {
+                    let frame = Frame::new(f);
+                    session.local_checksum_history.insert(frame, 0xAAAA_AAAA);
+                    session
+                        .player_reg
+                        .remotes
+                        .get_mut(&addr_b)
+                        .expect("B endpoint exists")
+                        .pending_checksums
+                        .insert(frame, 0xBBBB_BBBB); // differs from local => mismatch
+                }
+                session.compare_local_checksums_against_peers();
+            };
+
+            // A single mismatch must NOT trip the threshold.
+            feed_mismatches(&mut session, 0, 1);
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(1),
+                "one mismatch must yield a per-peer count of 1"
+            );
+
+            // Drive the count up to exactly the threshold.
+            feed_mismatches(&mut session, 1, threshold as i32 - 1);
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(threshold),
+                "the per-peer mismatch count must reach the trust-downgrade threshold"
+            );
+
+            // (3) The misbehaving peer is NEVER auto-ejected by the library.
+            assert!(
+                session.player_reg.remotes.contains_key(&addr_b),
+                "B's endpoint must still exist — the library must not auto-eject on mismatch"
+            );
+            assert!(
+                !session.local_connect_status[handle_b.as_usize()].disconnected,
+                "B must not be marked disconnected by the library on checksum mismatch"
+            );
+
+            // Per-peer isolation: D (sent nothing) stays at 0 — no cross-peer taint.
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_d),
+                Some(0),
+                "a well-behaved peer's mismatch count must stay 0 (per-peer)"
+            );
+        });
+
+        // (2) Exactly ONE advisory trust-downgrade WARNING fired — at the
+        // threshold, not on the first mismatch and not repeated afterwards.
+        let trust_warns = warns
+            .iter()
+            .filter(|m| m.contains("trust-downgrade threshold"))
+            .count();
+        assert_eq!(
+            trust_warns, 1,
+            "exactly one advisory trust-downgrade WARNING must fire at the threshold; got {trust_warns} in {warns:?}"
+        );
+    }
+
+    /// B3: the advisory WARNING fires exactly ONCE even when a single catch-up
+    /// batch drives the per-peer mismatch count from BELOW the threshold to
+    /// ABOVE it in one `compare_local_checksums_against_peers` call. This is the
+    /// adversarial case for the `== THRESHOLD` equality: because the count is
+    /// incremented by one and checked in the same loop body, it passes through
+    /// the exact threshold value even on an overshooting batch, so the equality
+    /// can never be skipped. (A future refactor to `+= n` would silently break
+    /// this; the test locks it in.)
+    #[test]
+    fn checksum_mismatch_warning_fires_once_on_batch_overshooting_threshold() {
+        let threshold = CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD;
+        let handle_b = PlayerHandle::new(1);
+        let addr_b = test_addr(8080);
+        let overshoot = threshold as i32 + 5; // jump well past the threshold in one batch
+
+        let warns = capture_warn_messages(|| {
+            let mut session = create_three_player_desync_session();
+            for _ in 0..(overshoot + 4) {
+                session.sync_layer.advance_frame();
+            }
+            session
+                .sync_layer
+                .set_last_confirmed_frame(Frame::new(overshoot + 3), session.save_mode);
+
+            // One batch of `threshold + 5` mismatching checksums to a fresh peer.
+            for f in 0..overshoot {
+                let frame = Frame::new(f);
+                session.local_checksum_history.insert(frame, 0xAAAA_AAAA);
+                session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_b)
+                    .expect("B endpoint exists")
+                    .pending_checksums
+                    .insert(frame, 0xBBBB_BBBB);
+            }
+            session.compare_local_checksums_against_peers();
+
+            assert_eq!(
+                session.peer_checksum_mismatch_count(handle_b),
+                Some(u32::try_from(overshoot).expect("non-negative")),
+                "every mismatch in the overshooting batch must be counted"
+            );
+        });
+
+        let trust_warns = warns
+            .iter()
+            .filter(|m| m.contains("trust-downgrade threshold"))
+            .count();
+        assert_eq!(
+            trust_warns, 1,
+            "WARNING must fire exactly once even when one batch overshoots the threshold; got {trust_warns} in {warns:?}"
         );
     }
 
@@ -12065,6 +12439,405 @@ mod tests {
             Frame::new(4),
             "the mined-down local view (4) must persist after B goes non-running — \
              nothing a non-running survivor knew is lost"
+        );
+    }
+
+    // ======================================================================
+    // ARBITRATION (N>=4 residual): the "stale-echo freeze" corner (VERDICT:
+    // NOTABUG) documented in `remote_slot_confirmed_bound`'s rustdoc. These
+    // tests directly manufacture the stale-echo cache state — a survivor X
+    // holding a STALE-LOW running-endpoint cache of survivor U's old gossip
+    // about dropped peer D, plus a disconnect-flip from a THIRD endpoint — and
+    // pin the INTRA-SNAPSHOT invariant: with that stale-low term already folded,
+    // is X's confirmed BOUND <= the freeze `update_player_disconnects` mines (so
+    // the freeze never lands BELOW the simultaneously-computed bound, never
+    // re-exposing the window-floor)?
+    //
+    // Verdict (these tests establish the intra-snapshot half): YES, bound ==
+    // applied freeze. The barrier (`remote_slot_confirmed_bound`) folds the SAME
+    // stale-low running-endpoint term into X's confirmed bound that the override
+    // (`update_player_disconnects`) later mins — a running endpoint cannot be in
+    // one fold but absent from the other (both gate on `is_running()` and, under
+    // hot-join, the reserved-endpoint guard). So a folded stale-low term pins the
+    // bound AT (or below) itself: the freeze never lands below it, and the mine
+    // -down rewrites only PREDICTED frames. (These probes capture `cf_before`
+    // AFTER the term is in the fold, so they pin THIS intra-snapshot invariant —
+    // NOT the temporal/reachability claim. The cross-call/reachability argument —
+    // broadcast gossip pins our bound, so the genuine escape needs fold-membership
+    // asymmetry, the PRUNED-endpoint double-failure relay — lives in the rustdoc
+    // and the `p2p_n4_stale_echo_freeze_*` integration test.)
+    // ======================================================================
+
+    /// Pins the INTRA-SNAPSHOT `bound == override` invariant. Manufactures the
+    /// canonical stale-echo shape on a live A(local)+B,C,D session with B's
+    /// stale-low term ALREADY folded, captures the confirmed bound (`cf_before`),
+    /// then drives the flip (`update_player_disconnects`) and proves the mined
+    /// freeze frame never lands strictly below that bound. Because `cf_before` is
+    /// read AFTER the stale-low term is in the fold, this pins the intra-snapshot
+    /// invariant — a folded stale-low term constrains the confirmed bound and the
+    /// freeze EQUALLY — NOT the temporal claim that X never confirms past it. The
+    /// cross-call/reachability argument (broadcast gossip pins our bound; the
+    /// genuine escape needs fold-membership asymmetry) lives in the rustdoc and the
+    /// `p2p_n4_stale_echo_freeze_*` integration test.
+    ///
+    /// Slot map: D = handle 3 is the dropped peer. U = endpoint B (handle 1)
+    /// holds the STALE-LOW connected cache of D (its `B->A` gossip about D went
+    /// stale low). The flip is delivered by endpoint C (handle 2) reporting D
+    /// disconnected. A's own (local) receipt of D is HIGH.
+    #[test]
+    fn stale_echo_barrier_pins_bound_to_stale_low_term_no_confirmation_overrun() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // A received D through a HIGH frame (20) and still believes D connected.
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(20),
+        };
+        // A's own slots (handle 0) and the non-dropped survivors' slots must not
+        // pin the confirmed frame BELOW D's terms — give them all a high
+        // last_frame so D is the binding slot.
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(20),
+        };
+        session.local_connect_status[1] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(20),
+        };
+        session.local_connect_status[2] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(20),
+        };
+
+        // Endpoint B (U): STALE-LOW connected cache of D at frame 3 (B's `B->A`
+        // gossip about D went stale low — the `B->A` link lost B's later, higher
+        // D gossip). For B/C's OWN slots and A's slot, high frames so only D's
+        // term is low.
+        {
+            let b = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint");
+            b.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(3),
+                },
+            );
+            for h in [0, 1, 2] {
+                b.set_peer_connect_status_for_tests(
+                    PlayerHandle::new(h),
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(20),
+                    },
+                );
+            }
+        }
+        // Endpoint C (flip-trigger, not yet flipped): still reports D connected
+        // at a HIGH frame (18). Its OWN/other slots high too.
+        {
+            let c_ep = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            for h in [0, 1, 2, 3] {
+                c_ep.set_peer_connect_status_for_tests(
+                    PlayerHandle::new(h),
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(if h == 3 { 18 } else { 20 }),
+                    },
+                );
+            }
+        }
+        // D's own endpoint is the dropped peer: take it down (non-running) so it
+        // leaves both folds, exactly like a dropped peer.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .disconnect();
+
+        // STEP 1 — confirmation BEFORE the flip. The barrier folds B's stale-low
+        // connected cache of D (3) into the bound, so the confirmed frame is
+        // PINNED at 3 even though A received D through 20. This is the whole
+        // reason the corner cannot manifest: X never confirms past the stale-low
+        // term, because that term bounds X's confirmed frame directly.
+        let cf_before = session.confirmed_frame();
+        assert_eq!(
+            cf_before,
+            Frame::new(3),
+            "the barrier must pin the confirmed frame at the stale-low cached term (3); \
+             a confirmation that PASSED 3 here would be the prerequisite for the desync"
+        );
+
+        // STEP 2 — the flip. Endpoint C now reports D disconnected (a third
+        // peer's disconnect report), and A locally drops D at its own HIGH
+        // detection (20) — the pair the disconnect path sets together.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(18),
+                },
+            );
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(20),
+        };
+
+        // STEP 3 — the override fires. `update_player_disconnects` folds the SAME
+        // running endpoints (B still running, stale-low 3; C running,
+        // disconnected 18). `queue_connected(D)` flips false (C disconnected), and
+        // `queue_min_confirmed` mins B's stale-low term -> D is mined to 3.
+        session.update_player_disconnects();
+        let mined = session.local_connect_status[d.as_usize()].last_frame;
+        assert_eq!(
+            mined,
+            Frame::new(3),
+            "the override DOES mine D's freeze frame to the stale-low term (3) — but the \
+             barrier already held the confirmed bound there"
+        );
+
+        // THE DECISIVE INVARIANT: the override never freezes D BELOW the frame
+        // the session previously reported as confirmed. Equal is sound (the
+        // frozen value at the confirmed frame equals D's real input there); only
+        // STRICTLY BELOW would re-expose the window-floor (rewrite confirmed
+        // history). On current code it is exactly equal.
+        assert!(
+            mined >= cf_before,
+            "STALE-ECHO RED: the override mined D's freeze frame ({mined:?}) STRICTLY BELOW \
+             the previously-confirmed frame ({cf_before:?}) — confirmation overran the freeze, \
+             re-exposing the window-floor"
+        );
+    }
+
+    /// Non-vacuity / mechanism pin for the INTRA-SNAPSHOT invariant: proves the
+    /// stale-low term is what binds, by toggling ONLY whether endpoint B's cache
+    /// of D is stale-low vs fresh-high. With B stale-low (3) the bound is 3 and the
+    /// override mines to 3; with B fresh-high (20) the bound is min over the OTHER
+    /// terms and the override mines to that — the stale-low term is the sole cause
+    /// of the low freeze, AND in BOTH cases `mined >= cf_before` (a folded term
+    /// constrains the simultaneously-computed bound and freeze EQUALLY). Like its
+    /// sibling, `cf_before` is captured AFTER the term is folded, so this pins the
+    /// intra-snapshot `bound == override` equality, not the temporal/reachability
+    /// claim (which lives in the rustdoc and the `p2p_n4_stale_echo_freeze_*` test).
+    #[test]
+    fn stale_echo_stale_low_term_drives_freeze_but_never_below_confirmed() {
+        fn run(b_stale_low: bool) -> (Frame, Frame) {
+            let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+            let d = PlayerHandle::new(3);
+            for h in [0, 1, 2] {
+                session.local_connect_status[h] = ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(20),
+                };
+            }
+            session.local_connect_status[d.as_usize()] = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(20),
+            };
+            let b_d_frame = if b_stale_low { 3 } else { 20 };
+            {
+                let b = session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_b)
+                    .expect("B endpoint");
+                for h in [0, 1, 2, 3] {
+                    b.set_peer_connect_status_for_tests(
+                        PlayerHandle::new(h),
+                        ConnectionStatus {
+                            disconnected: false,
+                            last_frame: Frame::new(if h == 3 { b_d_frame } else { 20 }),
+                        },
+                    );
+                }
+            }
+            {
+                let c_ep = session
+                    .player_reg
+                    .remotes
+                    .get_mut(&addr_c)
+                    .expect("C endpoint");
+                for h in [0, 1, 2, 3] {
+                    c_ep.set_peer_connect_status_for_tests(
+                        PlayerHandle::new(h),
+                        ConnectionStatus {
+                            disconnected: false,
+                            last_frame: Frame::new(if h == 3 { 18 } else { 20 }),
+                        },
+                    );
+                }
+            }
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint")
+                .disconnect();
+
+            let cf_before = session.confirmed_frame();
+
+            // Flip via endpoint C + local detection at 20.
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(18),
+                    },
+                );
+            session.local_connect_status[d.as_usize()] = ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(20),
+            };
+            session.update_player_disconnects();
+            let mined = session.local_connect_status[d.as_usize()].last_frame;
+            (cf_before, mined)
+        }
+
+        let (cf_stale, mined_stale) = run(true);
+        let (cf_fresh, mined_fresh) = run(false);
+
+        // Stale-low B drives both the bound and the freeze down to 3.
+        assert_eq!(cf_stale, Frame::new(3), "stale-low B pins the bound at 3");
+        assert_eq!(
+            mined_stale,
+            Frame::new(3),
+            "stale-low B's term mines the freeze frame to 3"
+        );
+        // Fresh-high B leaves C's 18 as the binding low term (D connected at C's
+        // 18 before the flip), so the bound is 18 and the freeze converges to 18.
+        assert_eq!(
+            cf_fresh,
+            Frame::new(18),
+            "without the stale-low term the bound rises to the next-lowest term (C's 18)"
+        );
+        assert_eq!(
+            mined_fresh,
+            Frame::new(18),
+            "the freeze frame follows the same term up to 18"
+        );
+        // The stale-low term is the SOLE cause of the lower freeze (non-vacuity).
+        assert_ne!(
+            mined_stale, mined_fresh,
+            "the stale-low term must be the sole cause of the differing freeze frame"
+        );
+        // In BOTH runs the barrier tracked the term: confirmation never overran.
+        assert!(
+            mined_stale >= cf_stale && mined_fresh >= cf_fresh,
+            "the freeze frame must never land below the previously-confirmed frame in either run"
+        );
+    }
+
+    /// Closes the most plausible INTRA-SNAPSHOT escape: a stale-low term that is
+    /// already DISCONNECTED (not connected). One might hope a disconnected
+    /// stale-low cache excludes the slot from the BOUND (via `any_reports_connected`)
+    /// while still mining the OVERRIDE down — the bound-vs-freeze asymmetry that
+    /// would let the freeze land below the bound. It does not: for a non-hot-join
+    /// fold `folded_frame = status.last_frame` UNCONDITIONALLY, so a disconnected
+    /// stale-low term still contributes to `gossip_min` and pins the bound. The
+    /// slot is only excluded once EVERY running endpoint reports it disconnected
+    /// (mesh agreement) — at which point the override has nothing left to mine
+    /// below what is already converged. This pins the intra-snapshot bound (it
+    /// asserts `remote_slot_confirmed_bound` / `confirmed_frame` directly); the
+    /// temporal/reachability argument lives in the rustdoc and the
+    /// `p2p_n4_stale_echo_freeze_*` integration test.
+    #[test]
+    fn stale_echo_disconnected_stale_low_term_still_pins_bound() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+        for h in [0, 1, 2] {
+            session.local_connect_status[h] = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(20),
+            };
+        }
+        // A received D through 20 and still believes D connected (A has NOT
+        // detected its own drop yet — the pre-detection window).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(20),
+        };
+        // Endpoint B: DISCONNECTED stale-low cache of D at frame 3.
+        {
+            let b = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint");
+            for h in [0, 1, 2] {
+                b.set_peer_connect_status_for_tests(
+                    PlayerHandle::new(h),
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(20),
+                    },
+                );
+            }
+            b.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(3),
+                },
+            );
+        }
+        // Endpoint C: still reports D CONNECTED at a high frame (so the slot is
+        // NOT yet mesh-agreed — at least one running endpoint says connected).
+        {
+            let c_ep = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            for h in [0, 1, 2, 3] {
+                c_ep.set_peer_connect_status_for_tests(
+                    PlayerHandle::new(h),
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(20),
+                    },
+                );
+            }
+        }
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .disconnect();
+
+        // The disconnected stale-low term (3) still pins the bound at 3, NOT the
+        // slot being excluded. A connected slot bounded by a disconnected
+        // endpoint's stale-low gossip — the barrier folds it regardless.
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(3)),
+            "a DISCONNECTED stale-low cache (3) must still pin the connected slot's bound at 3 \
+             — it is not excluded until EVERY running endpoint agrees on the disconnect"
+        );
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(3),
+            "confirmed_frame must be pinned at the disconnected stale-low term, not race past it"
         );
     }
 

@@ -114,6 +114,14 @@ def is_link_check_surface_file(path: str) -> bool:
     return is_markdown_file(path) or is_rust_file(path)
 
 
+def is_doc_claims_surface_file(path: str) -> bool:
+    """Return True for files that can affect check-doc-claims output."""
+    return is_rust_file(path) or path in {
+        "scripts/ci/check-doc-claims.sh",
+        "scripts/hooks/check-rust-semantic-claims.py",
+    }
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -163,6 +171,9 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     )
     link_check_changed = any(
         is_link_check_surface_file(path) for path in changed_files
+    )
+    doc_claims_changed = any(
+        is_doc_claims_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
@@ -291,6 +302,22 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 # Detection + reporting only -- the correct fix depends on item
                 # visibility, so there is no safe blind auto-fix.
                 fix_command=None,
+            )
+        )
+
+    if run_all or doc_claims_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="doc-claims",
+                description=(
+                    "validate Rust doc comments and test names against "
+                    "implementation clues"
+                ),
+                command=["bash", "scripts/ci/check-doc-claims.sh"],
+                fix_hint=(
+                    "Update stale rustdoc/test names, or adjust the implementation "
+                    "if the documented contract is the intended behavior."
+                ),
             )
         )
 

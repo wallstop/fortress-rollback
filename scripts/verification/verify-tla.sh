@@ -63,6 +63,7 @@ SPECS=(
     "NPeerReactivation"
     "FreezeConvergence"
     "FrameAdvantageAggregation"
+    "DoubleFailureRelay"
 )
 
 # Track results

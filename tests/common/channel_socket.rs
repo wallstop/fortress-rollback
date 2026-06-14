@@ -296,6 +296,117 @@ pub fn create_channel_quad() -> (
     )
 }
 
+/// Creates a fully-meshed set of `n` connected in-memory sockets for N-player
+/// P2P testing.
+///
+/// This is the general-N companion to [`create_channel_pair`] /
+/// [`create_channel_triple`] / [`create_channel_quad`]: every socket can send
+/// to every other socket, and messages are delivered instantly through channels
+/// — no real network I/O occurs. The fixed-N helpers above are retained for
+/// readability; this one is used by the N≥3 deterministic chaos harness.
+///
+/// # Arguments
+///
+/// * `n` - The number of peers in the mesh (must be in `2..=1000`).
+///
+/// # Returns
+///
+/// `(sockets, addrs)` where `sockets[i]` is at `addrs[i]` and can send to every
+/// `addrs[j]` for `j != i`. Address `i` is `127.0.0.1:(10001 + i)`.
+///
+/// # Panics
+///
+/// Panics if `n < 2` or `n > 1000`.
+#[allow(dead_code, clippy::expect_used)] // Test infrastructure.
+#[must_use]
+pub fn create_channel_mesh(n: usize) -> (Vec<ChannelSocket>, Vec<SocketAddr>) {
+    assert!(
+        (2..=1000).contains(&n),
+        "a channel mesh needs at least 2 peers and at most 1000 (got {n})"
+    );
+
+    let addrs: Vec<SocketAddr> = (0..n)
+        .map(|i| {
+            // `n <= 1000` (asserted above) keeps the port within `u16`.
+            let port = 10001 + u16::try_from(i).expect("peer index fits in u16");
+            ([127, 0, 0, 1], port).into()
+        })
+        .collect();
+
+    // One receiver per peer; senders are cloned so every other peer can write
+    // into it.
+    let mut senders: Vec<Sender<(SocketAddr, Message)>> = Vec::with_capacity(n);
+    let mut receivers: Vec<mpsc::Receiver<(SocketAddr, Message)>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (tx, rx) = mpsc::channel();
+        senders.push(tx);
+        receivers.push(rx);
+    }
+
+    let sockets: Vec<ChannelSocket> = receivers
+        .into_iter()
+        .enumerate()
+        .map(|(i, rx)| {
+            // Peer `i` gets a cloned sender to every other peer `j`.
+            let peer_senders: HashMap<SocketAddr, Sender<(SocketAddr, Message)>> = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| (addrs[j], senders[j].clone()))
+                .collect();
+            ChannelSocket {
+                local_addr: addrs[i],
+                senders: peer_senders,
+                receiver: Mutex::new(rx),
+            }
+        })
+        .collect();
+
+    (sockets, addrs)
+}
+
+/// Creates a fully-meshed set of `n`
+/// [`ChaosSocket`](fortress_rollback::ChaosSocket)-wrapped `ChannelSocket`s for
+/// deterministic N-player network chaos testing.
+///
+/// This is the general-N companion to [`create_chaos_channel_pair`]. Each peer
+/// `i` wraps its mesh socket in a `ChaosSocket` configured by `configs[i]`,
+/// sharing the same virtual `clock` so the whole simulation is deterministic.
+///
+/// # Arguments
+///
+/// * `configs` - Per-peer chaos configuration; `configs.len()` is the mesh size
+///   and must be in `2..=1000`.
+///   Callers **must** use a distinct seed per peer (identical seeds produce
+///   correlated drop sequences that deadlock synchronization — see the
+///   seed-correlation warning in the chaos test modules).
+/// * `clock` - Shared test clock for deterministic time control.
+///
+/// # Returns
+///
+/// `(chaos_sockets, addrs)` where `chaos_sockets[i]` is at `addrs[i]`.
+///
+/// # Panics
+///
+/// Panics if `configs.len() < 2` or `configs.len() > 1000`.
+#[allow(dead_code)]
+#[must_use]
+pub fn create_chaos_channel_mesh(
+    configs: Vec<fortress_rollback::ChaosConfig>,
+    clock: &super::test_clock::TestClock,
+) -> (
+    Vec<fortress_rollback::ChaosSocket<SocketAddr, ChannelSocket>>,
+    Vec<SocketAddr>,
+) {
+    use fortress_rollback::ChaosSocket;
+
+    let (sockets, addrs) = create_channel_mesh(configs.len());
+    let chaos_sockets = sockets
+        .into_iter()
+        .zip(configs)
+        .map(|(socket, config)| ChaosSocket::new(socket, config).with_clock(clock.as_chaos_clock()))
+        .collect();
+    (chaos_sockets, addrs)
+}
+
 /// Creates a connected pair of [`ChaosSocket`](fortress_rollback::ChaosSocket)-wrapped
 /// `ChannelSocket`s for deterministic network chaos testing.
 ///
@@ -374,6 +485,55 @@ mod tests {
         let (s1, s2, addr1, addr2) = create_channel_pair();
         assert_eq!(s1.local_addr(), addr1);
         assert_eq!(s2.local_addr(), addr2);
+    }
+
+    #[test]
+    fn create_channel_mesh_returns_distinct_addresses_and_matching_locals() {
+        for n in [2usize, 3, 5, 8] {
+            let (sockets, addrs) = create_channel_mesh(n);
+            assert_eq!(sockets.len(), n, "mesh must have n sockets");
+            assert_eq!(addrs.len(), n, "mesh must have n addresses");
+
+            // Every address is distinct.
+            let unique: std::collections::HashSet<_> = addrs.iter().collect();
+            assert_eq!(unique.len(), n, "mesh addresses must be distinct (n={n})");
+
+            // Each socket's local address matches its slot, and it has a sender
+            // to every OTHER peer (and none to itself).
+            for (i, socket) in sockets.iter().enumerate() {
+                assert_eq!(socket.local_addr(), addrs[i], "local_addr matches slot");
+                assert_eq!(
+                    socket.senders.len(),
+                    n - 1,
+                    "peer {i} must reach the other {} peers",
+                    n - 1
+                );
+                assert!(
+                    !socket.senders.contains_key(&addrs[i]),
+                    "peer {i} must not have a sender to itself"
+                );
+                for (j, addr) in addrs.iter().enumerate() {
+                    if j != i {
+                        assert!(
+                            socket.senders.contains_key(addr),
+                            "peer {i} must have a sender to peer {j}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "at least 2 peers")]
+    fn create_channel_mesh_rejects_too_few_peers() {
+        let _ = create_channel_mesh(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "at most 1000")]
+    fn create_channel_mesh_rejects_too_many_peers() {
+        let _ = create_channel_mesh(1001);
     }
 
     #[test]
