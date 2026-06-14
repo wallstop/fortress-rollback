@@ -7916,19 +7916,27 @@ impl<T: Config> P2PSession<T> {
     ///   `tests/sessions/peer_drop.rs`.
     ///
     /// **Deferred fix (S41 — needs its own red-green + adversarial cycle; a
-    /// partial fix would regress liveness, so none is shipped):** close the
-    /// fold-membership asymmetry by one of (a) a per-slot DROP-EPOCH carried on
-    /// connect-status gossip so a relayed low `F` is recognized as authoritative
-    /// even after its origin dies and confirmation is held back (the wire-epoch
-    /// direction, shared with the host->spectator reactivation/epoch signal);
-    /// (b) a dead-survivor TOMBSTONE fold that retains a pruned survivor's last
-    /// gossiped term for a not-yet-mesh-agreed dropped slot until agreement
-    /// (non-wire, but must be reconciled with the S25 completeness-critic-#3
-    /// arbitration that the `is_running()` filter is correct — the tombstone is
-    /// a snapshot captured at death, distinct from folding a rearm-reset live
-    /// cache, and must `NULL`-guard the min); or (c) full
-    /// mesh-agreement-before-freeze (an ack round before discarding below a
-    /// freeze). Byzantine peers are out of scope entirely.
+    /// partial fix would regress liveness, so none is shipped).** The fix
+    /// direction is now machine-arbitrated in `specs/tla/DoubleFailureRelay.tla`
+    /// (S42/S44): close the fold-membership asymmetry by **(a)** a per-slot
+    /// DROP-EPOCH carried on connect-status gossip PLUS a `FRESH-ACK ROUND` that
+    /// holds confirmation of a not-yet-mesh-agreed dropped slot until a *fresh*
+    /// ack (one that postdates our intent to advance) from every reachable-alive
+    /// peer corroborates the floor — the epoch makes that ack a commitment under
+    /// latency (the wire-epoch direction, shared with the host->spectator
+    /// reactivation/epoch signal); this is the verified-SOUND `MeshAgree` policy.
+    /// **The cheaper alternatives are MACHINE-DISPROVEN:** (b) a dead-survivor
+    /// TOMBSTONE fold regresses liveness (a dead laggard's retained low term pins
+    /// a still-live slot forever — `Tombstone` cfg, conflicting with the S25
+    /// `is_running()`-filter arbitration); and the tempting NO-WIRE / cache-only
+    /// "inherited floor" (snapshot a departed source's low term, release on fresh
+    /// gossip corroboration) is UNSOUND via the *corroborate-then-drop race* — a
+    /// peer corroborates connected-above-floor and then drops the slot low with
+    /// its disconnect gossip still in flight, so we confirm+lock real inputs
+    /// above the freeze (`InheritedFloor` cfg). The obstruction is intrinsic: a
+    /// cache lags the corroborator's own in-flight drop, so PASSIVE gossip alone
+    /// cannot be the commitment — the fresh-ack *round* (not just a wire field)
+    /// is necessary. Byzantine peers are out of scope entirely.
     ///
     /// # `N == 2` identity (normal operation)
     ///

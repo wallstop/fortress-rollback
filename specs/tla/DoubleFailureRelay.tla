@@ -38,7 +38,7 @@
 (* The S41 write-up records three candidate fixes and the project rule "no    *)
 (* partial fix shipped — a partial fix regresses liveness." This module turns  *)
 (* the prose arbitration into a machine-checked one. The confirmation rule is  *)
-(* a CONSTANT `FIX_MODE` with three values, each exercised by its own .cfg:    *)
+(* a CONSTANT `FIX_MODE` with four values, each exercised by its own .cfg:     *)
 (*                                                                          *)
 (*   - "Baseline"  — current production (prune the dead origin from the fold,  *)
 (*                   confirm/discard on the surviving stale-high cache). The   *)
@@ -75,6 +75,24 @@
 (*                   registered in verify-tla.sh) and the design a future        *)
 (*                   production red-green cycle should implement (a per-slot     *)
 (*                   ack/epoch on connect-status gossip).                       *)
+(*                                                                          *)
+(*   - "InheritedFloor" — candidate fix #4 (the CACHE-ONLY / NO-WIRE shortcut): *)
+(*                   the cheapest, most TEMPTING design — snapshot a departed     *)
+(*                   connected source's last cached low term (bounding the        *)
+(*                   confirm target AND the freeze), release it only on FRESH     *)
+(*                   gossip from every remaining alive peer reporting the slot     *)
+(*                   connected above it. No wire change, no peer-receipt oracle.   *)
+(*                   MACHINE-DISPROVEN UNSOUND: NoConfirmedDivergence is VIOLATED  *)
+(*                   via the CORROBORATE-THEN-DROP race (a peer corroborates       *)
+(*                   "healthy", the observer releases, then that peer drops the    *)
+(*                   slot low while its disconnect gossip is still in flight, so   *)
+(*                   the observer confirms+locks real inputs above the freeze).    *)
+(*                   Passive gossip corroboration is point-in-time and reversible  *)
+(*                   by the corroborator's own later drop, so NO cache-only        *)
+(*                   release is sound — the formal proof that the fix needs a      *)
+(*                   FRESH-ACK ROUND + DROP-EPOCH, not passive gossip. (Run via    *)
+(*                   DoubleFailureRelay_InheritedFloor.cfg — expected to FAIL on   *)
+(*                   safety; the third documented dead-end, the no-wire shortcut.) *)
 (*                                                                          *)
 (* Properties:                                                              *)
 (*   - Safety: NoConfirmedDivergence — no two alive survivors ever hold        *)
@@ -119,14 +137,18 @@
 (*     rather than as a concrete ack-round wire format; the wire format is the  *)
 (*     production design choice this proof informs, not constrains.            *)
 (*                                                                          *)
-(* SCOPE OF THE THREE RESULTS (honest bounds — what each claim does and does NOT *)
+(* SCOPE OF THE FOUR RESULTS (honest bounds — what each claim does and does NOT  *)
 (* prove; established in an adversarial faithfulness review):                    *)
 (*                                                                          *)
 (*   - The NEGATIVE results are UNCONDITIONAL within the modeled world. Baseline  *)
-(*     -unsafe and Tombstone-illiveness are demonstrated by REACHABLE             *)
-(*     counterexamples, and every abstraction here is conservative (it makes the  *)
-(*     model safer/more-restrictive than production), so a reachable violation is *)
-(*     a real one. These two are the load-bearing arbitration outcomes.          *)
+(*     -unsafe, Tombstone-illiveness, and InheritedFloor-unsafe are demonstrated  *)
+(*     by REACHABLE counterexamples, and every abstraction here is conservative   *)
+(*     (it makes the model safer/more-restrictive than production), so a reachable *)
+(*     violation is a real one. These three are the load-bearing arbitration       *)
+(*     outcomes: they rule out, respectively, doing nothing, the dead-survivor     *)
+(*     tombstone (liveness), and the cache-only no-wire shortcut (safety, via the  *)
+(*     corroborate-then-drop race) — establishing that the sound fix needs a       *)
+(*     fresh-ack ROUND + drop-epoch, not passive gossip.                          *)
 (*                                                                          *)
 (*   - The POSITIVE result (MeshAgree sound) is proven for the AGGREGATION RULE   *)
 (*     under two idealizing assumptions that the production fix must additionally *)
@@ -165,14 +187,14 @@ CONSTANTS
     NULL_FRAME,    \* sentinel "no frame" (-1 in impl)
     WINDOW,        \* prediction window: frames > bound - WINDOW are still re-rollable
     RECEIPTS,      \* allowed per-survivor receipts of the dropped slot (adversarial at Init)
-    FIX_MODE       \* "Baseline" | "Tombstone" | "MeshAgree"
+    FIX_MODE       \* "Baseline" | "Tombstone" | "MeshAgree" | "InheritedFloor"
 
 ASSUME SURVIVORS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
 ASSUME NULL_FRAME \notin 0..MAX_FRAME
 ASSUME WINDOW \in Nat /\ WINDOW >= 1
 ASSUME RECEIPTS \subseteq (0..MAX_FRAME) /\ RECEIPTS # {}
-ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree"}
+ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree", "InheritedFloor"}
 
 Frame == {NULL_FRAME} \union (0..MAX_FRAME)
 
@@ -192,10 +214,19 @@ VARIABLES
     cacheLast,     \* [SURVIVORS -> [SURVIVORS -> Frame]]: cacheLast[obs][src] = obs's cache of src's D last_frame
     link,          \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]]: link[src][obs] = src->obs gossip flows
     bound,         \* [SURVIVORS -> Frame]: confirmed high-water for D (NULL = nothing confirmed)
-    recSrc         \* [SURVIVORS -> [0..MAX_FRAME -> Frame]]: recorded source frame per committed frame
+    recSrc,        \* [SURVIVORS -> [0..MAX_FRAME -> Frame]]: recorded source frame per committed frame
+    floor,         \* [SURVIVORS -> Frame] (InheritedFloor mode): inherited freeze-floor commitment
+                   \*   (NULL = none). While non-NULL, s must not confirm D past floor[s]. Snapshotted
+                   \*   SYNCHRONOUSLY when a CONNECTED folded source leaves s's fold (Die), from that
+                   \*   source's last cached term — the production "do not forget a departed low term."
+    corrob         \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]] (InheritedFloor mode): corrob[s][o] = since
+                   \*   floor[s] was armed, o sent s FRESH gossip (a Gossip event, NOT a stale cache read)
+                   \*   reporting D CONNECTED above floor[s]. Releasing floor[s] requires every alive
+                   \*   folded source to corroborate — the event-driven "fresh ack" that closes the
+                   \*   S42 instantaneous-ack idealization without reading any peer's true receipt.
 
 vars == <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
-          link, bound, recSrc>>
+          link, bound, recSrc, floor, corrob>>
 
 (***************************************************************************)
 (* Min over a non-empty set of integers. CHOOSE ranges over integer frame    *)
@@ -331,8 +362,46 @@ MeshAgreeTarget(s) ==
     \* could still converge below).
     ELSE Min2(BaselineTarget(s), MeshAckedFloor(s))
 
+(***************************************************************************)
+(* Candidate fix #4 ("InheritedFloor"): the CACHE-ONLY / NO-WIRE / PASSIVE-          *)
+(* CORROBORATION variant — the cheapest, most TEMPTING design, MACHINE-DISPROVEN      *)
+(* UNSOUND here (run DoubleFailureRelay_InheritedFloor.cfg: `NoConfirmedDivergence`    *)
+(* VIOLATED). It is retained as the THIRD documented dead-end (alongside _Baseline,    *)
+(* a safety dead-end, and _Tombstone, a liveness dead-end) precisely because it looks   *)
+(* so plausible: it needs no wire-format change and no peer-receipt oracle.             *)
+(*                                                                                      *)
+(* The design reads ONLY the possibly-stale per-endpoint CACHE (`BaselineTarget`) plus  *)
+(* two pieces of LOCAL receiver state:                                                  *)
+(*   1. ARM (synchronous): the instant a CONNECTED folded source leaves a survivor's     *)
+(*      fold (Die), snapshot that source's last cached term into `floor[s]` (folded into  *)
+(*      BOTH the confirm target here AND the freeze via `QueueMin`) — "do not forget a     *)
+(*      departed low term." This part is fine and race-free.                              *)
+(*   2. RELEASE (event-driven): `floor[s]` lifts when EVERY alive folded source has        *)
+(*      delivered FRESH `Gossip` (tracked in `corrob`) reporting D CONNECTED above it.      *)
+(*                                                                                          *)
+(* WHY IT FAILS — the CORROBORATE-THEN-DROP race: a peer can gossip {connected, high}        *)
+(* (corroborating "healthy", releasing the observer's floor) and then DETECT THE DROP        *)
+(* itself and freeze the slot LOW, with its disconnect gossip still in flight — so the        *)
+(* observer, having already released, confirms+LOCKS the slot's real inputs above the         *)
+(* eventual freeze before the drop reaches it (the residual, un-fixed). The obstruction is     *)
+(* INTRINSIC: a cache LAGS the corroborator's own in-flight drop, so a passive release acts on  *)
+(* info already stale at the source. Disproven here for the natural rule and (in the adversarial *)
+(* review) for the strongest variants — re-validate-against-current-cache, never-release         *)
+(* (= Tombstone liveness), speculative-bound, link-reachability-hold, local generation counter   *)
+(* — each falling to the same race or to liveness. This is the evidence that the                  *)
+(* production fix needs a FRESH-ACK ROUND (request/response held until the ack postdates the      *)
+(* observer's intent to advance) + a per-slot DROP-EPOCH commitment — the MeshAgree direction      *)
+(* (the default), whose aggregation this module proves sound under exactly the instantaneous        *)
+(* -fresh-ack idealization that ack round must discharge.                                            *)
+(***************************************************************************)
+InheritedFloorTarget(s) ==
+    IF floor[s] = NULL_FRAME THEN BaselineTarget(s)
+    ELSE Min2(BaselineTarget(s), floor[s])
+
 BoundTarget(s) ==
-    IF FIX_MODE = "MeshAgree" THEN MeshAgreeTarget(s) ELSE BaselineTarget(s)
+    CASE FIX_MODE = "MeshAgree"      -> MeshAgreeTarget(s)
+      [] FIX_MODE = "InheritedFloor" -> InheritedFloorTarget(s)
+      [] OTHER                       -> BaselineTarget(s)
 
 (***************************************************************************)
 (* The value (recorded SOURCE frame) survivor s writes for the dropped slot at  *)
@@ -355,6 +424,8 @@ TypeInvariant ==
     /\ link \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
     /\ bound \in [SURVIVORS -> Frame]
     /\ recSrc \in [SURVIVORS -> [0..MAX_FRAME -> Frame]]
+    /\ floor \in [SURVIVORS -> Frame]
+    /\ corrob \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
 
 (***************************************************************************)
 (* Initial state. The warmup phase (repro Phase 1: all links open, all survivors *)
@@ -382,6 +453,8 @@ Init ==
     /\ \A s \in SURVIVORS : link[s][s]
     /\ bound = [s \in SURVIVORS |-> NULL_FRAME]
     /\ recSrc = [s \in SURVIVORS |-> [g \in 0..MAX_FRAME |-> NULL_FRAME]]
+    /\ floor = [s \in SURVIVORS |-> NULL_FRAME]
+    /\ corrob = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
 
 (***************************************************************************)
 (* Action: src gossips its CURRENT local view of the dropped slot to obs        *)
@@ -408,7 +481,17 @@ Gossip(src, obs) ==
                       ELSE cf                               \* connected report, cache disc: no resurrect
        IN /\ cacheDisc' = [cacheDisc EXCEPT ![obs][src] = newDisc]
           /\ cacheLast' = [cacheLast EXCEPT ![obs][src] = newLast]
-    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, link, bound, recSrc>>
+          \* InheritedFloor: a FRESH connected-above-floor delivery corroborates that
+          \* `src`'s slot is healthy above obs's armed floor (event-driven, post-merge:
+          \* a reordered stale connected packet that the merge rejects sets newDisc/newLast
+          \* unchanged, so it cannot falsely corroborate a converged-disconnect cache).
+          /\ corrob' = IF /\ FIX_MODE = "InheritedFloor"
+                          /\ floor[obs] # NULL_FRAME
+                          /\ ~newDisc
+                          /\ newLast > floor[obs]
+                       THEN [corrob EXCEPT ![obs][src] = TRUE]
+                       ELSE corrob
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, link, bound, recSrc, floor>>
 
 (***************************************************************************)
 (* Action: src directly concludes the dropped slot disconnected (an explicit    *)
@@ -417,17 +500,31 @@ Gossip(src, obs) ==
 (* remove_player(D) on a survivor.                                              *)
 (***************************************************************************)
 QueueMin(s) ==
-    LET folded == FoldedSources(s)
-        base   == recvThrough[s]
-    IN IF folded = {}
-       THEN base
-       ELSE Min2(base, MinI({cacheLast[s][o] : o \in folded}))
+    LET folded   == FoldedSources(s)
+        base     == recvThrough[s]
+        cacheMin == IF folded = {}
+                    THEN base
+                    ELSE Min2(base, MinI({cacheLast[s][o] : o \in folded}))
+    IN \* InheritedFloor: the inherited floor is a departed CONNECTED source's low term
+       \* that the live fold no longer carries; it must mine the FREEZE down too (not just
+       \* cap the confirm bound), else a survivor that detects the drop itself freezes
+       \* ABOVE the departed origin's term and its discarded frames diverge. With the
+       \* floor folded here, the resulting freeze is always <= floor, so the post-freeze
+       \* subsume is safe.
+       IF FIX_MODE = "InheritedFloor" /\ floor[s] # NULL_FRAME
+       THEN Min2(cacheMin, floor[s])
+       ELSE cacheMin
 
 DetectDrop(s) ==
     /\ alive[s]
     /\ ~localDisc[s]
     /\ localDisc' = [localDisc EXCEPT ![s] = TRUE]
     /\ localFrame' = [localFrame EXCEPT ![s] = QueueMin(s)]
+    \* InheritedFloor: once s has its own disconnect view of D, the real freeze + frozen
+    \* value govern, so the pre-disconnect connected-term floor is obsolete (subsumed).
+    /\ floor' = IF FIX_MODE = "InheritedFloor" THEN [floor EXCEPT ![s] = NULL_FRAME] ELSE floor
+    /\ corrob' = IF FIX_MODE = "InheritedFloor"
+                 THEN [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]] ELSE corrob
     /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound, recSrc>>
 
 (***************************************************************************)
@@ -438,6 +535,32 @@ Die(s) ==
     /\ alive[s]
     /\ Cardinality({o \in SURVIVORS : alive[o]}) > 1   \* never empty the mesh
     /\ alive' = [alive EXCEPT ![s] = FALSE]
+    \* InheritedFloor ARM (synchronous with the death — the race-free core): every
+    \* surviving observer o that still folded s as a CONNECTED source snapshots s's
+    \* last cached term into floor[o], so the bound cannot jump up when s leaves the
+    \* fold. `~cacheDisc[o][s]` (s connected in o's cache) implies o is not yet
+    \* mesh-agreed, so this only arms while the slot is still contested.
+    \* Arm only for observers that have NOT yet detected the drop themselves
+    \* (`~localDisc[o]`): one that already has its own disconnect view froze its slot
+    \* while s was still folded, so it missed no term and an armed floor would only
+    \* (wrongly) pin its confirmation below the living floor forever.
+    /\ floor' = IF FIX_MODE = "InheritedFloor"
+                THEN [o \in SURVIVORS |->
+                       IF o # s /\ alive[o] /\ ~localDisc[o] /\ ~cacheDisc[o][s]
+                       THEN IF floor[o] = NULL_FRAME
+                            THEN cacheLast[o][s]
+                            ELSE Min2(floor[o], cacheLast[o][s])
+                       ELSE floor[o]]
+                ELSE floor
+    \* A (re)arm to a fresh-or-strictly-lower floor resets corroboration: the
+    \* remaining alive peers must freshly re-corroborate against the new floor.
+    /\ corrob' = IF FIX_MODE = "InheritedFloor"
+                 THEN [o \in SURVIVORS |->
+                        IF /\ o # s /\ alive[o] /\ ~localDisc[o] /\ ~cacheDisc[o][s]
+                           /\ (floor[o] = NULL_FRAME \/ cacheLast[o][s] < floor[o])
+                        THEN [x \in SURVIVORS |-> FALSE]
+                        ELSE corrob[o]]
+                 ELSE corrob
     /\ UNCHANGED <<recvThrough, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc>>
 
@@ -461,7 +584,7 @@ Unblock(src, dst) ==
     /\ ~link[src][dst]
     /\ link' = [link EXCEPT ![src][dst] = TRUE]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc,
-                   cacheLast, bound, recSrc>>
+                   cacheLast, bound, recSrc, floor, corrob>>
 
 (***************************************************************************)
 (* Action: update_player_disconnects — fold the caches, and if the dropped      *)
@@ -489,6 +612,14 @@ UpdateDisconnects(s) ==
                         /\ ~Locked(s, g)                  \* still re-rollable (not discarded)
                      THEN newFrame                        \* re-roll to frozen value
                      ELSE recSrc[s][g]]]
+          \* InheritedFloor SUBSUME: once s has folded a disconnect and converged its
+          \* own freeze, the real freeze (<= floor, carried by the relay that triggers
+          \* this) governs the slot; the connected-term floor is obsolete and lifts so
+          \* the slot can later mesh-agree-exclude (avoids capping below the exclusion).
+          /\ floor' = IF FIX_MODE = "InheritedFloor"
+                      THEN [floor EXCEPT ![s] = NULL_FRAME] ELSE floor
+          /\ corrob' = IF FIX_MODE = "InheritedFloor"
+                       THEN [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]] ELSE corrob
     /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound>>
 
 (***************************************************************************)
@@ -510,7 +641,26 @@ AdvanceConfirm(s) ==
                      THEN RecordValue(s, g)
                      ELSE recSrc[s][g]]]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc,
-                   cacheLast, link>>
+                   cacheLast, link, floor, corrob>>
+
+(***************************************************************************)
+(* Action (InheritedFloor mode): RELEASE the inherited floor once EVERY alive       *)
+(* folded source has freshly corroborated D connected above it — positive,           *)
+(* event-driven proof the departed peer was a benign laggard, so confirmation may     *)
+(* resume past the floor. A survivor partitioned from a peer it needs never collects   *)
+(* that peer's corroboration, so it cannot release and HOLDS (the production           *)
+(* partition-hold); WF on Gossip+Unblock guarantees the corroborations eventually      *)
+(* arrive (or the peer dies and leaves the fold), so the hold is bounded.              *)
+(***************************************************************************)
+ReleaseFloor(s) ==
+    /\ FIX_MODE = "InheritedFloor"
+    /\ alive[s]
+    /\ floor[s] # NULL_FRAME
+    /\ \A o \in FoldedSources(s) : corrob[s][o]   \* all alive folded peers corroborated
+    /\ floor' = [floor EXCEPT ![s] = NULL_FRAME]
+    /\ corrob' = [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]]
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
+                   link, bound, recSrc>>
 
 Next ==
     \/ \E src, obs \in SURVIVORS : Gossip(src, obs)
@@ -519,6 +669,7 @@ Next ==
     \/ \E src, dst \in SURVIVORS : Unblock(src, dst)
     \/ \E s \in SURVIVORS : UpdateDisconnects(s)
     \/ \E s \in SURVIVORS : AdvanceConfirm(s)
+    \/ \E s \in SURVIVORS : ReleaseFloor(s)
 
 (***************************************************************************)
 (* Fairness for the liveness property. WEAK fairness suffices because partitions    *)
@@ -538,6 +689,7 @@ Fairness ==
     /\ \A src, obs \in SURVIVORS : WF_vars(Gossip(src, obs))
     /\ \A s \in SURVIVORS : WF_vars(UpdateDisconnects(s))
     /\ \A s \in SURVIVORS : WF_vars(AdvanceConfirm(s))
+    /\ \A s \in SURVIVORS : WF_vars(ReleaseFloor(s))
     /\ WF_vars(\E src, dst \in SURVIVORS : Unblock(src, dst))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
