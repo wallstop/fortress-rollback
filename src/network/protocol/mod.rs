@@ -397,7 +397,10 @@ pub fn fuzz_protocol_input_packet(
     if packet_bytes.try_reserve_exact(byte_limit).is_err() {
         return;
     }
-    packet_bytes.extend_from_slice(&bytes[..byte_limit]);
+    // byte_limit <= bytes.len() by construction, so `get(..byte_limit)` is always
+    // Some; `unwrap_or_default()` keeps this panic-free (zero-panic policy /
+    // `clippy::indexing_slicing`) rather than indexing with `[..byte_limit]`.
+    packet_bytes.extend_from_slice(bytes.get(..byte_limit).unwrap_or_default());
 
     let body = Input {
         peer_connect_status: status,

@@ -1399,9 +1399,30 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
                 eprintln!("  Check network conditions and sync preset configuration.");
             },
             (false, false) => {
-                // Both advanced frames but still failed - different issue
-                eprintln!("DIAGNOSIS: Both peers advanced frames but test still failed.");
-                eprintln!("  This may indicate a timeout or desync during gameplay.");
+                let both_timed_out = result1.error_kind.as_deref() == Some("timeout")
+                    && result2.error_kind.as_deref() == Some("timeout");
+                if both_timed_out {
+                    // Both peers exhausted their real-time budget before reaching
+                    // the target. These multi-process tests are governed by real
+                    // wall-clock time (real UDP latency/jitter/loss + timer-based
+                    // retransmission), so a timeout here is almost always CI host
+                    // starvation on a slow/loaded runner, NOT a protocol livelock:
+                    // the prediction-window throttle + retransmission guarantee
+                    // progress under mere delay/loss, the same scenario completes
+                    // in seconds on an unloaded machine, and progress-under-loss
+                    // is proven deterministically in tests/network/in_process_chaos.rs.
+                    eprintln!("DIAGNOSIS: Both peers timed out before reaching the target frame.");
+                    eprintln!("  Real-UDP multi-process tests are real-time, so a timeout is");
+                    eprintln!("  usually CI host starvation, not a logic deadlock. Determinism");
+                    eprintln!("  and progress-under-loss are covered deterministically in");
+                    eprintln!("  tests/network/in_process_chaos.rs. If a scenario is consistently");
+                    eprintln!("  too heavy for per-PR CI, move it to the nightly suite with");
+                    eprintln!("  #[ignore] (see .github/workflows/ci-network-nightly.yml).");
+                } else {
+                    // Both advanced frames but still failed - different issue
+                    eprintln!("DIAGNOSIS: Both peers advanced frames but test still failed.");
+                    eprintln!("  This may indicate a timeout or desync during gameplay.");
+                }
             },
         }
         eprintln!("============================================");
@@ -2199,6 +2220,7 @@ fn test_zero_latency_high_loss() {
 /// Test medium-length session (300 frames) with moderate conditions.
 #[test]
 #[serial]
+#[ignore = "long-running endurance or high-latency real-UDP session; runs in the nightly network suite (ci-network-nightly.yml), not per-PR CI"]
 fn test_medium_session_300_frames() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {

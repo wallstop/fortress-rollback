@@ -17,6 +17,31 @@
 #![warn(rustdoc::invalid_html_tags)]
 #![warn(rustdoc::bare_urls)]
 //#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
+// Zero-panic policy: enforce the panic-prone-pattern lints on non-test library
+// code in the *normal* `cargo clippy` gate (the same set as the dedicated
+// `No Panics Check` job in ci-safety.yml). Putting them here means the standard
+// `cargo clippy --all-targets` that developers and CI already run catches an
+// unchecked `[index]`, `.unwrap()`, `panic!()`, etc. in `src/` — closing the
+// gap where such patterns previously only surfaced in the separate library-only
+// job. `not(any(test, loom, kani))` exempts the crate's own `#[cfg(test)]`
+// modules plus the `#[cfg(loom)]` concurrency-model and `#[cfg(kani)]` proof
+// code (all test-only configurations that legitimately index/unwrap, e.g.
+// loom's `Mutex::lock().unwrap()`); under normal `cargo clippy` none of those
+// cfgs are set, so the deny stays active on production `src/`. Integration tests
+// and examples are separate crates and are unaffected. Use a scoped
+// `#[allow(...)]` with justification for a deliberate exception.
+#![cfg_attr(
+    not(any(test, loom, kani)),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable
+    )
+)]
 use std::{fmt::Debug, hash::Hash};
 
 pub use error::{
