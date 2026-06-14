@@ -1188,9 +1188,17 @@ fn wait_for_peer(child: Child, name: &str) -> TestResult {
 /// Returns one `TestResult` per input config, in the same order.
 ///
 /// # Panics
-/// Panics if the network_test_peer binary is not available.
+/// Panics if fewer than two peer configs are provided, if the
+/// network_test_peer binary is not available, if a peer cannot be spawned, or
+/// if a peer wait thread panics.
 /// Use [`skip_if_no_peer_binary!`] at the start of tests to skip gracefully.
 fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
+    assert!(
+        configs.len() >= 2,
+        "run_n_peer_test requires at least 2 peers, got {}",
+        configs.len()
+    );
+
     // Check if the binary exists - fail fast with a clear message
     assert!(
         is_peer_binary_available(),
@@ -1201,12 +1209,6 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
          This is not a test failure - the test requires the peer binary to be built first.",
         PEER_BINARY_NAME
     );
-    assert!(
-        configs.len() >= 2,
-        "run_n_peer_test requires at least 2 peers, got {}",
-        configs.len()
-    );
-
     let test_start = std::time::Instant::now();
 
     // Calculate timeout: use the max of peer timeouts + 30s buffer for process
@@ -1289,7 +1291,9 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
 /// keep working unchanged.
 ///
 /// # Panics
-/// Panics if the network_test_peer binary is not available.
+/// Panics if the network_test_peer binary is not available, if a peer cannot
+/// be spawned, if a peer wait thread panics, or if the shared N-peer helper
+/// returns fewer than two results.
 /// Use [`skip_if_no_peer_binary!`] at the start of tests to skip gracefully.
 fn run_two_peer_test(
     peer1_config: PeerConfig,
@@ -3658,6 +3662,18 @@ mod infrastructure_tests {
             found.is_some(),
             "is_peer_binary_available should match find_peer_binary().is_some()"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires at least 2 peers")]
+    fn run_n_peer_test_rejects_empty_configs_before_binary_check() {
+        let _ = run_n_peer_test(Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "requires at least 2 peers")]
+    fn run_n_peer_test_rejects_single_config_before_binary_check() {
+        let _ = run_n_peer_test(vec![PeerConfig::default()]);
     }
 
     /// Test PeerConfig default values.

@@ -51,6 +51,7 @@ Rules: always `bat --paging=never` (bare `bat` blocks); never redirect to `/dev/
 - **ZERO-PANIC POLICY** -- Production code must NEVER panic; all errors as `Result`
 - **All clippy lints pass** -- `clippy::all`, `clippy::pedantic`, `clippy::nursery`
 - **No broken doc links** -- All intra-doc links must resolve
+- **Accurate panic docs** -- Rustdoc `# Panics` lists all reachable panic conditions; boundary panic docs should have matching tests when practical
 - **Public items documented** -- Rustdoc with examples
 - **Overflow checks in release** -- Integer overflow caught at runtime
 - **Deterministic behavior** -- Same inputs must always produce same outputs

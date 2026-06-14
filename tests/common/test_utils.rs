@@ -192,8 +192,8 @@ impl PortAllocator {
     ///
     /// # Panics
     ///
-    /// Panics if the port counter would overflow (after many allocations
-    /// from the starting point). This should never happen in practice.
+    /// Panics if the allocator is exhausted and the next port would be
+    /// `>= 60000`. This should never happen in practice.
     #[allow(dead_code)]
     #[must_use]
     pub fn next_port() -> u16 {
@@ -211,6 +211,10 @@ impl PortAllocator {
     /// Allocates N consecutive ports.
     ///
     /// This is useful for multi-peer tests that need a known set of ports.
+    ///
+    /// # Panics
+    ///
+    /// Panics if allocating any requested port would exhaust the allocator.
     ///
     /// # Example
     ///
@@ -256,6 +260,10 @@ impl PortAllocator {
     /// let (mock_port1, mock_port2) = PortAllocator::next_pair();
     /// let mock_remote = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), mock_port1);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if allocating either port would exhaust the allocator.
     ///
     /// [`bind_socket_ephemeral`]: crate::common::test_utils::bind_socket_ephemeral
     #[allow(dead_code)]
@@ -1403,9 +1411,24 @@ mod tests {
 
     mod port_allocator_tests {
         use super::*;
+        use serial_test::serial;
+
+        fn set_port_allocator_state(next_port: u16) {
+            PORT_COUNTER.store(next_port, Ordering::SeqCst);
+            PORT_COUNTER_INITIALIZED.store(true, Ordering::SeqCst);
+        }
+
+        fn assert_allocator_exhaustion_panics<T>(
+            operation: impl FnOnce() -> T + std::panic::UnwindSafe,
+        ) {
+            let result = std::panic::catch_unwind(operation);
+            PortAllocator::reset();
+            assert!(result.is_err(), "allocator exhaustion should panic");
+        }
 
         /// Tests that PortAllocator provides unique ports.
         #[test]
+        #[serial]
         fn port_allocator_provides_unique_ports() {
             // Reset to ensure clean state
             PortAllocator::reset();
@@ -1421,6 +1444,7 @@ mod tests {
 
         /// Tests that next_ports returns the correct number of ports.
         #[test]
+        #[serial]
         fn port_allocator_next_ports_returns_correct_count() {
             PortAllocator::reset();
 
@@ -1442,6 +1466,7 @@ mod tests {
         /// Tests that next_pair returns two unique ports.
         /// Note: This tests the deprecated function to ensure it still works correctly.
         #[test]
+        #[serial]
         #[allow(deprecated)]
         fn port_allocator_next_pair_returns_unique_ports() {
             PortAllocator::reset();
@@ -1452,6 +1477,7 @@ mod tests {
 
         /// Tests that ports are within the expected range.
         #[test]
+        #[serial]
         fn port_allocator_ports_in_valid_range() {
             PortAllocator::reset();
 
@@ -1465,6 +1491,31 @@ mod tests {
                 );
                 assert!(port < 60000, "Port {} should be < 60000", port);
             }
+        }
+
+        #[test]
+        #[serial]
+        fn port_allocator_next_port_panics_when_exhausted() {
+            set_port_allocator_state(60000);
+
+            assert_allocator_exhaustion_panics(PortAllocator::next_port);
+        }
+
+        #[test]
+        #[serial]
+        fn port_allocator_next_ports_panics_when_exhausted_mid_batch() {
+            set_port_allocator_state(59999);
+
+            assert_allocator_exhaustion_panics(PortAllocator::next_ports::<2>);
+        }
+
+        #[test]
+        #[serial]
+        #[allow(deprecated)]
+        fn port_allocator_next_pair_panics_when_exhausted_mid_pair() {
+            set_port_allocator_state(59999);
+
+            assert_allocator_exhaustion_panics(PortAllocator::next_pair);
         }
     }
 
