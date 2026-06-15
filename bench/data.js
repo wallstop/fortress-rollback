@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781380516240,
+  "lastUpdate": 1781481782738,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "a80ed6134f42114ced171a7e44f8814af3f21a58",
-          "message": "More ergonomics (#71)\n\n## Description\n\n&check; More ergonomic helpers to assist in real game usage\n&check; Address banner not working in github pages\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-01-30T12:47:31-08:00",
-          "tree_id": "5da849bd266a0bcebc645e679e4e8d4653becb43",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/a80ed6134f42114ced171a7e44f8814af3f21a58"
-        },
-        "date": 1769806322744,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 145,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 496,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 747,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1038,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102993,
-            "range": "± 721",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27336,
-            "range": "± 1049",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 82",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1603,
             "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e740b7a433e0ee7bae11f99f2e9aba4816067de7",
+          "message": "feat: Peer-Mesh Hardening (#178)\n\n## Description\n\nThis branch hardens peer-controlled decode paths and improves multi-peer\nrollback diagnostics.\nIt adds a per-peer checksum mismatch counter for `P2PSession`, emits a\none-time advisory warning when a peer shows persistent checksum\ndivergence, and keeps that signal advisory rather than auto-ejecting a\npeer.\n\nIt also makes hot-join snapshot decoding reject deeply nested recursive\nstate payloads with a recoverable error instead of risking a stack\noverflow, while keeping the existing bounded-allocation protections.\n\nBeyond the runtime changes, this branch expands N>=3/N>=4 chaos and\npeer-drop coverage and adds a new `DoubleFailureRelay` TLA+ spec plus\ndocumentation that formalize the remaining multi-peer freeze-barrier\nresidual. That spec work proves the mesh-acked-floor fix design and\ndocuments why cheaper cache-only alternatives are unsound; it does not\nship that protocol change yet.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Added bounded-recursion decode coverage for hot-join snapshot\ndecoding.\n- Expanded in-process chaos coverage for N>=3 multi-peer topologies.\n- Added/expanded peer-drop regressions for checksum-mismatch persistence\nand the N=4 double-failure relay scenario.\n- Added `DoubleFailureRelay` to the TLA+ verification suite and\nrefreshed the verification docs.\n\n**Manual testing performed:**\n\n- None documented in this PR draft.\n\n## Related Issues\n\n- None referenced.\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Touches P2P desync/checksum behavior, peer-controlled hot-join\ndeserialization, and formalizes a deferred multi-peer freeze-barrier\nfix—runtime changes affect session safety paths and hostile-input\nhandling.\n> \n> **Overview**\n> **P2P diagnostics:** Tracks per-remote **checksum mismatch counts** on\nconfirmed frames, exposes them via\n**`P2PSession::peer_checksum_mismatch_count`**, and logs a **one-time\nadvisory WARNING** when a peer crosses an internal threshold—**no\nauto-eject**; apps choose policy from the raw count. Changelog/docs\nclarify **`SyncHealth::DesyncDetected`** handling.\n> \n> **Hot-join decode hardening:** **`codec::decode_bounded`** for\n**`Config::State`** now uses a new **`codec_depth`** serde wrapper so\npeer snapshots nested past **`MAX_DECODE_DEPTH`** fail with **`Err`**\ninstead of risking stack overflow, while keeping the existing byte cap;\ninput decode stays on the fast path.\n> \n> **Zero-panic / lint:** **`#![cfg_attr(not(test))]`** denies\npanic-prone clippy lints on library **`src/`**; **`rle`** and protocol\npaths replace slicing with **`get`**-based access.\n> \n> **Formal methods:** Adds **`DoubleFailureRelay.tla`** (Baseline /\nTombstone / MeshAgree / InheritedFloor configs), registers the passing\n**MeshAgree** model in **`verify-tla.sh`**, and documents why cheaper\ncache-only fixes are unsound—the **mesh-acked-floor** protocol change is\n**spec-only**, not implemented in production.\n> \n> **CI & docs quality:** Workflow **`run`** steps that pipe to **`tee`**\nuse **`set -o pipefail`**; **`check-rust-semantic-claims.py`** is wired\nthrough **`check-doc-claims.sh`**, **agent preflight**, and **ci-docs**\npath filters, with pytest coverage for semantic claims and tee\npipelines.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n8cccba67525283bb192581f249aa81244e680afc. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-14T16:58:19-07:00",
+          "tree_id": "9c21e6d3cbae852d6b89d6e1db8377a7cbbfb0f1",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e740b7a433e0ee7bae11f99f2e9aba4816067de7"
+        },
+        "date": 1781481782107,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 108,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 155,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 431,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 696,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1015,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 128604,
+            "range": "± 475",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45721,
+            "range": "± 216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 87",
             "unit": "ns/iter"
           },
           {
