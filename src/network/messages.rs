@@ -14,6 +14,27 @@ pub struct ConnectionStatus {
     pub disconnected: bool,
     /// The last frame received from this peer.
     pub last_frame: Frame,
+    /// Per-slot connection-status **generation**, incremented by the owning peer
+    /// on every `connected <-> disconnected` transition (a drop or a
+    /// reactivation/hot-join re-open) of this slot in its own
+    /// `local_connect_status`. It rides on the connect-status gossip carried by
+    /// every [`Input`] packet so a receiver can order a slot's reports by drop
+    /// cycle: a report with a strictly-lower `epoch` is from an earlier cycle
+    /// (a reordered or relay-lagged packet) and must not be mistaken for a fresh
+    /// one.
+    ///
+    /// The spectator session is the only consumer today — it uses the epoch to
+    /// close the two host->spectator reactivation fail-open corners (a stale
+    /// earlier-cycle drop report re-arming consumed provenance; a reordered
+    /// pre-drop connected snapshot transiently resurrecting a dropped slot). The
+    /// player-mesh confirmed/freeze folds deliberately ignore it (they read only
+    /// `disconnected`/`last_frame`), so carrying the epoch is behavior-neutral
+    /// there.
+    ///
+    /// Wraps at [`u16::MAX`]; a single slot toggling 65535 times within one
+    /// session is unreachable in practice (the same astronomically-rare,
+    /// documented framing as the protocol packet-filter `magic` era counter).
+    pub epoch: u16,
 }
 
 impl Default for ConnectionStatus {
@@ -21,6 +42,7 @@ impl Default for ConnectionStatus {
         Self {
             disconnected: false,
             last_frame: Frame::NULL,
+            epoch: 0,
         }
     }
 }
@@ -31,12 +53,21 @@ impl std::fmt::Display for ConnectionStatus {
         let Self {
             disconnected,
             last_frame,
+            epoch,
         } = self;
 
         if *disconnected {
-            write!(f, "Disconnected(last_frame={})", last_frame.as_i32())
+            write!(
+                f,
+                "Disconnected(last_frame={}, epoch={epoch})",
+                last_frame.as_i32()
+            )
         } else {
-            write!(f, "Connected(last_frame={})", last_frame.as_i32())
+            write!(
+                f,
+                "Connected(last_frame={}, epoch={epoch})",
+                last_frame.as_i32()
+            )
         }
     }
 }
@@ -320,6 +351,7 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
         let cloned = status;
         assert!(cloned.disconnected);
@@ -333,9 +365,10 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(42),
+            epoch: 5,
         };
         let display = format!("{}", status);
-        assert_eq!(display, "Connected(last_frame=42)");
+        assert_eq!(display, "Connected(last_frame=42, epoch=5)");
     }
 
     #[test]
@@ -343,16 +376,17 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 3,
         };
         let display = format!("{}", status);
-        assert_eq!(display, "Disconnected(last_frame=100)");
+        assert_eq!(display, "Disconnected(last_frame=100, epoch=3)");
     }
 
     #[test]
     fn test_connection_status_display_null_frame() {
         let status = ConnectionStatus::default();
         let display = format!("{}", status);
-        assert_eq!(display, "Connected(last_frame=-1)");
+        assert_eq!(display, "Connected(last_frame=-1, epoch=0)");
     }
 
     #[test]
@@ -492,10 +526,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(10),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(20),
+                    epoch: 0,
                 },
             ],
             disconnect_requested: false,

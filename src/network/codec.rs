@@ -310,16 +310,20 @@ fn read_usize(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecRes
 }
 
 fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<ConnectionStatus> {
+    // Field order MUST match the `ConnectionStatus` declaration (serde/bincode
+    // serializes struct fields in declaration order): `disconnected`,
+    // `last_frame`, then `epoch`.
     Ok(ConnectionStatus {
         disconnected: read_bool(bytes, cursor, "connection_status.disconnected")?,
         last_frame: Frame::new(read_i32(bytes, cursor, "connection_status.last_frame")?),
+        epoch: read_u16(bytes, cursor, "connection_status.epoch")?,
     })
 }
 
 /// The fixed wire footprint, in bytes, of one encoded [`ConnectionStatus`].
 //
-// 1-byte bool + 4-byte fixed-int i32.
-const CONNECTION_STATUS_WIRE_LEN: usize = 5;
+// 1-byte bool + 4-byte fixed-int i32 + 2-byte fixed-int u16.
+const CONNECTION_STATUS_WIRE_LEN: usize = 7;
 
 /// Rejects a length prefix that cannot possibly fit in the unread input bytes,
 /// *before* any memory is reserved for it.
@@ -926,10 +930,14 @@ mod tests {
                         ConnectionStatus {
                             disconnected: false,
                             last_frame: Frame::new(10),
+                            // Non-zero epoch spanning both u16 bytes (> 255) pins
+                            // the connect-status `epoch` wire round-trip.
+                            epoch: 513,
                         },
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(20),
+                            epoch: 7,
                         },
                     ],
                     disconnect_requested: false,
@@ -988,10 +996,12 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(10),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(20),
+                        epoch: 0,
                     },
                 ],
                 disconnect_requested: false,
@@ -1270,14 +1280,17 @@ mod hot_join_tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(42),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(17),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::NULL,
+                        epoch: 0,
                     },
                 ],
                 checksum: Some(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
@@ -1457,8 +1470,8 @@ mod hot_join_tests {
     }
 
     /// A `bridge_statuses` length that fits in `usize` but whose minimum wire
-    /// footprint (5 bytes per status) exceeds the remaining bytes must also
-    /// be rejected before reserve.
+    /// footprint (`CONNECTION_STATUS_WIRE_LEN` = 7 bytes per status) exceeds the
+    /// remaining bytes must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
         let mut bytes = Vec::new();
@@ -1495,8 +1508,10 @@ mod hot_join_tests {
     }
 
     /// A snapshot buffer truncated mid-`bridge_statuses` payload (the prefix
-    /// claims one status, only part of its 5-byte record present) must be
-    /// rejected, never read out of bounds.
+    /// claims one status but fewer than its `CONNECTION_STATUS_WIRE_LEN` = 7
+    /// record bytes are present) must be rejected, never read out of bounds.
+    /// Because the record is fixed-width, this is caught by the pre-reserve
+    /// length bound (`1 * 7 > remaining`), before any element is decoded.
     #[test]
     fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
         let mut bytes = Vec::new();
@@ -1507,7 +1522,7 @@ mod hot_join_tests {
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // bridge_statuses len = 1
-        bytes.extend_from_slice(&[0, 0xAA, 0xBB]); // 3 of the 5 status bytes
+        bytes.extend_from_slice(&[0, 0xAA, 0xBB]); // 3 of the 7 status bytes
 
         let result = decode_message(&bytes);
 

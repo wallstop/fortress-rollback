@@ -389,6 +389,7 @@ pub fn fuzz_protocol_input_packet(
         status.push(ConnectionStatus {
             disconnected,
             last_frame: Frame::new(last_frame),
+            epoch: 0,
         });
     }
 
@@ -2449,6 +2450,14 @@ impl<T: Config> UdpProtocol<T> {
             *status = ConnectionStatus {
                 disconnected: false,
                 last_frame,
+                // Preserve the cached generation. This is the receiver-side
+                // player-mesh cache, whose `epoch` is inert: the confirmed/freeze
+                // folds read only `disconnected`/`last_frame`, and a spectator
+                // consumes each host's own armed `local_connect_status`, never
+                // this relayed cache (`merge_peer_connect_status` likewise never
+                // copies a sender's epoch in). Preserved only to avoid a spurious
+                // field reset.
+                ..*status
             };
         }
     }
@@ -2972,6 +2981,7 @@ mod tests {
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(99),
+                            epoch: 0,
                         };
                         2
                     ],
@@ -3296,6 +3306,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected,
                     last_frame: Frame::new(last_frame),
+                    epoch: 0,
                 },
             ],
         });
@@ -3586,6 +3597,7 @@ mod tests {
             ConnectionStatus {
                 disconnected,
                 last_frame: Frame::new(last_frame),
+                epoch: 0,
             },
         ]
     }
@@ -4154,10 +4166,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4201,10 +4215,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4371,10 +4387,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4413,10 +4431,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         assert!(sender.send_connect_status_nudge(&nudge_status));
@@ -4621,6 +4641,7 @@ mod tests {
         protocol.peer_connect_status[1] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
 
         let status = protocol.peer_connect_status(PlayerHandle::new(1));
@@ -8729,6 +8750,7 @@ mod kani_proofs {
         let status = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(frame_val),
+            epoch: 0,
         };
 
         // Frame should be preserved
@@ -8760,6 +8782,7 @@ mod kani_proofs {
         let status = ConnectionStatus {
             disconnected: is_disconnected,
             last_frame: Frame::NULL,
+            epoch: 0,
         };
 
         kani::assert(

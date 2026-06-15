@@ -1331,10 +1331,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(frame.as_i32() - 2),
+                epoch: 0,
             },
         ]
     }
@@ -1602,16 +1604,19 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             // The second dead slot, frozen strictly below S.
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
             // The joining slot itself.
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(3),
+                epoch: 0,
             },
         ];
         let snapshot = capture_npeer_snapshot_with_max_wire_bytes(
@@ -1661,14 +1666,17 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
         ];
         let at_f = joiner
@@ -1697,11 +1705,13 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             // The joining slot, frozen exactly AT the snapshot frame.
             ConnectionStatus {
                 disconnected: true,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
         ];
         let snapshot = capture_npeer_snapshot_with_max_wire_bytes(
@@ -1870,10 +1880,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
         ];
 
@@ -1912,11 +1924,13 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             // The joining slot, frozen exactly AT the snapshot frame.
             ConnectionStatus {
                 disconnected: true,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
         ];
         let snapshot = capture_npeer_snapshot_with_max_wire_bytes(
@@ -1958,10 +1972,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: snapshot_frame,
+                epoch: 0,
             },
         ];
         joiner

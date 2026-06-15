@@ -112,21 +112,20 @@ where
     hosts: Vec<UdpProtocol<T>>,
     host_snapshots: Vec<Vec<Option<HostFrameSnapshot<T::Input>>>>,
     /// Per-host disconnect-witness provenance: `host_drop_witness[host][player]`
-    /// is the highest freeze `last_frame` at which that host's own forwarded
-    /// connect-status stream has reported the slot disconnected (`None` if it
-    /// has not). Max-merged on every observation (independent of packet-arrival
-    /// order and of which host is the canonical committer), RE-ARMED at commit
-    /// time for the committing host whenever its snapshot's drop is adopted
-    /// into a connected slot ([`Self::witness_adopted_drop`] — a follow can
-    /// consume the arrival-time witness between staging and commit, and a
-    /// spectator-authored freeze must stay re-openable by its author), and
-    /// CONSUMED —
-    /// cleared for the player across all hosts — whenever a reactivation is
-    /// followed ([`Self::consume_drop_witnesses`]), so only drop reports
-    /// observed at-or-after the last followed re-open can authorize the next
-    /// one. Without consumption, a host's retained pre-convergence-high view of
-    /// an EARLIER drop cycle could numerically cover a LATER drop's converged
-    /// (global-min) freeze and wrongly authorize resurrecting it.
+    /// records that host's own most-recent forwarded **drop** of the slot — its
+    /// freeze `last_frame` and the [`ConnectionStatus::epoch`] generation it
+    /// dropped at (`None` if it has not dropped the slot in the current,
+    /// not-yet-consumed cycle). A drop report at a strictly NEWER epoch resets
+    /// the witness to the new cycle; one at the SAME epoch max-merges the freeze
+    /// (retransmits / pre-convergence-high views); one at a STRICTLY OLDER epoch
+    /// than [`Self::host_status_epoch`] is a reordered earlier-cycle packet and
+    /// is ignored. RE-ARMED at commit time for the committing host whenever its
+    /// snapshot's drop is adopted into a connected slot
+    /// ([`Self::witness_adopted_drop`] — a follow can consume the arrival-time
+    /// witness between staging and commit, and a spectator-authored freeze must
+    /// stay re-openable by its author), and CONSUMED — cleared for the player
+    /// across all hosts — whenever a reactivation is followed
+    /// ([`Self::consume_drop_witnesses`]).
     ///
     /// This gates the `disconnected -> connected` reactivation FOLLOW in
     /// [`merge_connection_status`]: a genuine hot-join re-open is gossiped by a
@@ -135,10 +134,26 @@ where
     /// the rearm re-opens it, and gossip rides every packet, so a live witness
     /// re-establishes itself after consumption), whereas a stale lagging host
     /// that never observed the drop gossips connected without ever having
-    /// reported the drop. See [`Self::reactivation_provenance`]. Kept
-    /// index-parallel with [`Self::hosts`]/[`Self::host_snapshots`] (entries
-    /// are removed together in [`Self::remove_disconnected_hosts`]).
-    host_drop_witness: Vec<Vec<Option<Frame>>>,
+    /// reported the drop. The follow additionally requires the connected
+    /// report's epoch to be `>=` the witnessed drop's epoch (a genuine
+    /// reactivation strictly postdates the drop that bumped the generation; a
+    /// reordered PRE-drop connected snapshot carries the older pre-drop epoch and
+    /// is rejected) — see [`Self::reactivation_provenance`]. Kept index-parallel
+    /// with [`Self::hosts`]/[`Self::host_snapshots`] (entries are removed
+    /// together in [`Self::remove_disconnected_hosts`]).
+    host_drop_witness: Vec<Vec<Option<DropWitness>>>,
+    /// Per-host high-water [`ConnectionStatus::epoch`] generation:
+    /// `host_status_epoch[host][player]` is the maximum epoch this spectator has
+    /// observed in that host's forwarded connect-status stream for the slot
+    /// (monotone non-decreasing, advanced by EVERY report — connected or
+    /// disconnected). It is the cross-cycle discriminator the consumed witness
+    /// table cannot provide: a reordered earlier-cycle drop report arriving after
+    /// a follow consumed the witness re-arms it on a pre-epoch gate, but its
+    /// epoch is strictly below this high-water (which the reactivation the host
+    /// forwarded already advanced), so the re-arm is rejected. Unlike the witness
+    /// it is NOT consumed (it is a monotone watermark, not per-cycle provenance).
+    /// Index-parallel with [`Self::host_drop_witness`].
+    host_status_epoch: Vec<Vec<u16>>,
     canonical_hosts: Vec<Option<CanonicalFrameHost<T::Address>>>,
     event_queue: VecDeque<FortressEvent<T>>,
     current_frame: Frame,
@@ -260,6 +275,22 @@ impl<T: Config> SpectatorSession<T> {
             host_drop_witness.push(witness);
         }
 
+        let mut host_status_epoch = Vec::new();
+        host_status_epoch
+            .try_reserve_exact(hosts.len())
+            .map_err(|_err| allocation_failed("spectator.host_status_epoch", hosts.len()))?;
+        for _ in 0..hosts.len() {
+            let mut row = Vec::new();
+            // reserve-in-loop: one fresh per-player epoch-watermark row per host, reserved once to its exact bounded size (`num_players`).
+            row.try_reserve_exact(num_players).map_err(|_err| {
+                allocation_failed("spectator.host_status_epoch_row", num_players)
+            })?;
+            // Fills the just-reserved exact capacity in place (no reallocation).
+            // alloc-bound: `num_players` is the session-validated player count, bounded at construction (parallels the `host_drop_witness` row).
+            row.resize(num_players, 0_u16);
+            host_status_epoch.push(row);
+        }
+
         let mut canonical_hosts = Vec::new();
         canonical_hosts
             .try_reserve_exact(actual_buffer_size)
@@ -278,6 +309,7 @@ impl<T: Config> SpectatorSession<T> {
             hosts,
             host_snapshots,
             host_drop_witness,
+            host_status_epoch,
             canonical_hosts,
             event_queue: VecDeque::new(),
             current_frame: Frame::NULL,
@@ -1008,6 +1040,9 @@ impl<T: Config> SpectatorSession<T> {
         // promoted host would inherit the removed host's drop provenance and a
         // stale-connected gossip could wrongly pass the reactivation gate.
         retain_surviving_hosts(&mut self.host_drop_witness, &disconnected_hosts);
+        // The epoch watermark is likewise per-host and must follow its host to
+        // the new index alongside the witness it discriminates.
+        retain_surviving_hosts(&mut self.host_status_epoch, &disconnected_hosts);
     }
 
     /// Returns the current frame of a session.
@@ -1375,28 +1410,64 @@ impl<T: Config> SpectatorSession<T> {
         converged
     }
 
-    /// Folds `host_index`'s raw forwarded connect-status report into the
-    /// per-host disconnect-witness table: for every slot the host reports
-    /// disconnected, raise that host's witnessed freeze frame to the reported
-    /// `last_frame` (monotonic max; `None` until the host first reports a
-    /// drop). See [`Self::host_drop_witness`].
-    fn witness_host_drop_reports(
+    /// Folds `host_index`'s raw forwarded connect-status report into the per-host
+    /// epoch watermark ([`Self::host_status_epoch`]) and disconnect-witness table
+    /// ([`Self::host_drop_witness`]).
+    ///
+    /// For every slot: advance the host's epoch high-water by the report's
+    /// [`ConnectionStatus::epoch`] (monotone max, ALL reports — connected or
+    /// disconnected). Then, for a slot the host reports **disconnected** whose
+    /// epoch is NOT strictly below that high-water (i.e. it is the current cycle,
+    /// not a reordered earlier one), record/refresh the witness: a strictly newer
+    /// epoch resets it to the new drop cycle; the same epoch max-merges the freeze
+    /// (retransmits / pre-convergence-high views). A drop report at a strictly
+    /// older epoch is a reordered earlier-cycle packet and is ignored — closing
+    /// the cross-cycle stale-re-arm fail-open that a freeze-only witness could not
+    /// discriminate.
+    fn witness_host_status_reports(
         &mut self,
         host_index: usize,
         status_snapshot: &[ConnectionStatus],
     ) {
-        let Some(witness) = self.host_drop_witness.get_mut(host_index) else {
+        let (Some(witness_row), Some(epoch_row)) = (
+            self.host_drop_witness.get_mut(host_index),
+            self.host_status_epoch.get_mut(host_index),
+        ) else {
             return;
         };
         for (player_index, status) in status_snapshot.iter().enumerate() {
-            if !status.disconnected {
+            let Some(seen) = epoch_row.get_mut(player_index) else {
+                continue;
+            };
+            // A report whose epoch is strictly below the high-water is a
+            // reordered earlier-cycle packet.
+            let is_stale = status.epoch < *seen;
+            *seen = (*seen).max(status.epoch);
+            if !status.disconnected || is_stale {
                 continue;
             }
-            if let Some(slot) = witness.get_mut(player_index) {
-                *slot = Some(slot.map_or(status.last_frame, |witnessed| {
-                    witnessed.max(status.last_frame)
-                }));
-            }
+            let Some(slot) = witness_row.get_mut(player_index) else {
+                continue;
+            };
+            *slot = Some(match *slot {
+                // Strictly newer cycle: reset to this drop.
+                Some(witness) if status.epoch > witness.epoch => DropWitness {
+                    freeze: status.last_frame,
+                    epoch: status.epoch,
+                },
+                // Same cycle: max-merge the freeze.
+                Some(witness) if status.epoch == witness.epoch => DropWitness {
+                    freeze: witness.freeze.max(status.last_frame),
+                    epoch: witness.epoch,
+                },
+                // Older than the witness — unreachable given `!is_stale`
+                // (high-water >= witness epoch), but never regress the witness.
+                Some(witness) => witness,
+                None => DropWitness {
+                    freeze: status.last_frame,
+                    epoch: status.epoch,
+                },
+            });
         }
     }
 
@@ -1404,50 +1475,59 @@ impl<T: Config> SpectatorSession<T> {
     /// `host_index` for `player_index` may be followed as a genuine
     /// reactivation.
     ///
-    /// `Witnessed` iff the spectator's slot is currently latched disconnected
+    /// `Witnessed` iff the spectator's slot is currently latched disconnected,
     /// AND `host_index`'s own gossip has reported that slot disconnected at a
-    /// freeze frame `>=` the latched freeze since the last followed
-    /// reactivation consumed the witness table for this player
-    /// ([`Self::consume_drop_witnesses`]). A host that witnessed the current
-    /// drop reported it at its own (possibly higher) view of the freeze, and
-    /// the latched freeze only ever converges DOWN, so the `>=` comparison
-    /// accepts every genuine current-drop witness once the latch has
-    /// converged at or below that host's view. One transient micro-window
-    /// fails closed: a genuine witness whose own view sits BELOW a
-    /// still-unconverged latch — possible only when all of its drop-era
-    /// arrivals are retransmits masked by first-writer staging, so
-    /// [`Self::converge_latched_drop_status`] never sees its lower freeze —
-    /// is blocked until its next drop-bearing packet for a fresh frame
-    /// stages and converges the latch down to its view. Fail-closed is the
-    /// safe direction and it self-corrects. The freeze-frame comparison
-    /// alone CANNOT discriminate drop cycles: an earlier cycle's
-    /// pre-convergence-high view can numerically cover a later drop's converged
-    /// (global-min) freeze, because a rejoin re-bases the slot's `last_frame`
-    /// to `activation_frame - 1` (`p2p_session.rs`) and the next drop can
-    /// therefore freeze at or below the old high view. Cross-cycle
-    /// discrimination is purely by consumption — witnesses retained from
-    /// before the last follow are cleared, so only reports observed after it
-    /// count — and consumption is arrival-time-based; see the residual notes
-    /// on [`merge_connection_status`] for the stale post-consume re-arm it
-    /// cannot close. When the slot is not latched disconnected the returned
-    /// value is inert (only the `(disconnected, connected)` merge arm consults
-    /// it).
+    /// freeze frame `>=` the latched freeze (since the last followed reactivation
+    /// consumed the witness for this player — [`Self::consume_drop_witnesses`]),
+    /// AND the `incoming_epoch` of the connected report being merged is `>=` that
+    /// witnessed drop's [`ConnectionStatus::epoch`].
+    ///
+    /// The freeze comparison accepts every genuine current-drop witness once the
+    /// latch has converged at or below that host's view (the host reported the
+    /// drop at its own possibly-higher view; the latch converges DOWN). The
+    /// EPOCH comparison is what discriminates drop CYCLES, which the freeze
+    /// cannot: an earlier cycle's pre-convergence-high freeze can numerically
+    /// cover a later drop's converged (global-min) freeze (a rejoin re-bases
+    /// `last_frame` to `activation_frame - 1`). A genuine reactivation bumps the
+    /// generation strictly past the drop it re-opens, so its connected report
+    /// carries `epoch > witnessed.epoch`; a reordered PRE-drop connected snapshot
+    /// carries the older pre-drop epoch (`< witnessed.epoch`) and is rejected
+    /// (the within-cycle fail-open). Paired with the witness's own stale-drop
+    /// rejection in [`Self::witness_host_status_reports`], a reordered earlier
+    /// drop can no longer re-arm consumed provenance either (the cross-cycle
+    /// fail-open). `>=` (not `>`) is deliberate: in the legacy uniform-epoch
+    /// world every report shares epoch `0`, so the comparison is inert and the
+    /// gate reduces to the freeze-only behavior — no regression for peers that
+    /// do not arm the epoch.
+    ///
+    /// One transient micro-window still fails closed (the safe direction,
+    /// self-correcting): a genuine witness whose own freeze sits BELOW a
+    /// still-unconverged latch — possible only when all its drop-era arrivals
+    /// are retransmits masked by first-writer staging — is blocked until its next
+    /// fresh drop-bearing packet converges the latch down. When the slot is not
+    /// latched disconnected the returned value is inert (only the
+    /// `(disconnected, connected)` merge arm consults it).
     fn reactivation_provenance(
         &self,
         host_index: usize,
         player_index: usize,
+        incoming_epoch: u16,
     ) -> ReactivationProvenance {
-        let witnessed_freeze = self
+        let witness = self
             .host_drop_witness
             .get(host_index)
-            .and_then(|witness| witness.get(player_index))
+            .and_then(|row| row.get(player_index))
             .copied()
             .flatten();
-        let Some(witnessed_freeze) = witnessed_freeze else {
+        let Some(witness) = witness else {
             return ReactivationProvenance::Unwitnessed;
         };
         match self.host_connect_status.get(player_index) {
-            Some(current) if current.disconnected && witnessed_freeze >= current.last_frame => {
+            Some(current)
+                if current.disconnected
+                    && witness.freeze >= current.last_frame
+                    && incoming_epoch >= witness.epoch =>
+            {
                 ReactivationProvenance::Witnessed
             },
             Some(_) | None => ReactivationProvenance::Unwitnessed,
@@ -1476,9 +1556,10 @@ impl<T: Config> SpectatorSession<T> {
     }
 
     /// Re-arms the COMMITTING host's disconnect witness at the adopted freeze
-    /// frame (max-merge, mirroring [`Self::witness_host_drop_reports`]) when
-    /// the `(connected, disconnected)` ADOPT arm of [`merge_connection_status`]
-    /// fires at commit time.
+    /// frame and generation (mirroring [`Self::witness_host_status_reports`]'s
+    /// newer-resets / same-max-merges policy) when the `(connected,
+    /// disconnected)` ADOPT arm of [`merge_connection_status`] fires at commit
+    /// time.
     ///
     /// Needed because witnessing is otherwise arrival-time only
     /// ([`Self::handle_host_input`]) while adoption happens at COMMIT time: a
@@ -1492,13 +1573,27 @@ impl<T: Config> SpectatorSession<T> {
     /// drop in its own stream, so following it merely undoes the spectator's
     /// own adopt. See the adopt-arm interaction notes on
     /// [`merge_connection_status`] for the analyzed soundness cost.
-    fn witness_adopted_drop(&mut self, host_index: usize, player_index: usize, freeze: Frame) {
+    fn witness_adopted_drop(
+        &mut self,
+        host_index: usize,
+        player_index: usize,
+        freeze: Frame,
+        epoch: u16,
+    ) {
         if let Some(slot) = self
             .host_drop_witness
             .get_mut(host_index)
             .and_then(|witness| witness.get_mut(player_index))
         {
-            *slot = Some(slot.map_or(freeze, |witnessed| witnessed.max(freeze)));
+            *slot = Some(match *slot {
+                Some(witness) if epoch > witness.epoch => DropWitness { freeze, epoch },
+                Some(witness) if epoch == witness.epoch => DropWitness {
+                    freeze: witness.freeze.max(freeze),
+                    epoch: witness.epoch,
+                },
+                Some(witness) => witness,
+                None => DropWitness { freeze, epoch },
+            });
         }
     }
 
@@ -1646,7 +1741,7 @@ impl<T: Config> SpectatorSession<T> {
             // (the c25fc1f asymmetric-loss desync, spectator-side).
             let status =
                 self.converged_drop_status(host_index, frame, player_index, canonical_status);
-            let provenance = self.reactivation_provenance(host_index, player_index);
+            let provenance = self.reactivation_provenance(host_index, player_index, status.epoch);
             let outcome = self.host_connect_status.get_mut(player_index).map_or(
                 MergeOutcome::NoTransition,
                 |slot| {
@@ -1690,7 +1785,12 @@ impl<T: Config> SpectatorSession<T> {
                     // must stay able to undo the spectator's own adopt — even
                     // when a follow consumed the arrival-time witness between
                     // staging and commit (`witness_adopted_drop`).
-                    self.witness_adopted_drop(host_index, player_index, status.last_frame);
+                    self.witness_adopted_drop(
+                        host_index,
+                        player_index,
+                        status.last_frame,
+                        status.epoch,
+                    );
                 },
                 MergeOutcome::NoTransition => {},
             }
@@ -1748,7 +1848,7 @@ impl<T: Config> SpectatorSession<T> {
         // regardless of which host is canonical, of arrival order, and of the
         // first-writer-wins staged-snapshot policy below (which would mask a
         // retransmitted frame's newer status).
-        self.witness_host_drop_reports(host_index, &status_snapshot);
+        self.witness_host_status_reports(host_index, &status_snapshot);
 
         let Some(frame_index) = input.frame.buffer_index(self.buffer_size) else {
             return;
@@ -1948,6 +2048,20 @@ fn retain_surviving_hosts<E>(entries: &mut Vec<E>, disconnected_hosts: &[usize])
     });
 }
 
+/// A host's most-recent forwarded drop of a slot, recorded in
+/// [`SpectatorSession::host_drop_witness`]: the freeze frame it dropped at and
+/// the [`ConnectionStatus::epoch`] generation of that drop. The epoch lets
+/// [`SpectatorSession::reactivation_provenance`] discriminate drop cycles a bare
+/// freeze frame cannot (an earlier cycle's pre-convergence-high freeze can
+/// numerically cover a later cycle's converged freeze).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DropWitness {
+    /// Highest freeze `last_frame` reported for this drop cycle.
+    freeze: Frame,
+    /// The [`ConnectionStatus::epoch`] generation of this drop.
+    epoch: u16,
+}
+
 /// Whether a host's `disconnected -> connected` report may be followed as a
 /// genuine reactivation. Computed per (canonical host, player) by
 /// [`SpectatorSession::reactivation_provenance`] from the per-host
@@ -2023,67 +2137,48 @@ enum MergeOutcome {
 /// so a spectator-authored freeze remains re-openable by its own author (see
 /// the adopt-arm interaction below).
 ///
-/// Residual (known, narrower than before): provenance is spectator-local
-/// arrival-time observation of each host's forwarded stream, so it degrades in
-/// one fail-closed and two fail-open ways.
+/// Cross-cycle / within-cycle discrimination is by the per-slot
+/// [`ConnectionStatus::epoch`] generation the owning host arms on every
+/// `connected <-> disconnected` transition (`P2PSession::arm_status_epoch`),
+/// tracked per (host, player) as a high-water in
+/// [`SpectatorSession::host_status_epoch`] and recorded with each drop in
+/// [`DropWitness::epoch`]. The two formerly fail-open corners (Session 31's
+/// documented residuals) are CLOSED by it:
 ///
-/// - Fail-closed (safe): a genuine reactivation gossiped only by hosts whose
-///   drop-era packets never reached this spectator — or reached it only BEFORE
-///   the previous follow consumed the witness table, with no drop-bearing
-///   packet after it — is not followed; the spectator keeps the frozen label
-///   rather than resurrecting.
-/// - Fail-open (cross-cycle, the remaining unsoundness, not closable
-///   spectator-side): a
-///   drop-era report from an EARLIER cycle that ARRIVES only after the follow
-///   consumed the witnesses re-arms that host's witness with stale provenance.
-///   A `disc@v` report carries no cycle identity — an earlier cycle's report
-///   and a current one are byte-identical, and the input frame a report rides
-///   on does not index the sender's status epoch (a host lagging on rearm
-///   processing forwards high frames while still holding the old drop view).
-///   If `v` is at or above the NEXT drop's converged freeze (possible: `v` is
-///   the host's own pre-convergence-high view, the latch converges to the
-///   global minimum, and a rejoin re-bases `last_frame` to
-///   `activation_frame - 1`, so the next freeze can land at or below `v`), and
-///   that host then becomes canonical while gossiping a stale connected view
-///   having missed the new drop, the resurrect re-opens. Fully closing this
-///   needs a dedicated host -> spectator reactivation/epoch signal (a wire
-///   change; future work). A freeze-frame floor recorded at follow time was
-///   considered and rejected: it would also reject genuine next-cycle
-///   witnesses from hosts that saw fewer of the player's inputs than the
-///   follow's reporter (asymmetric loss — the premise of this feature),
-///   breaking reactivation liveness for hosts whose drop-era packets DID
-///   arrive.
-/// - Fail-open (within-cycle, transient): a host that genuinely witnessed the
-///   current drop holds follow authority for the whole cycle — its witness
-///   persists until the next consume — so that host's own REORDERED pre-drop
-///   connected snapshot, first-writer staged at a later frame, passes the
-///   gate while the host is canonical and transiently resurrects the slot
-///   until its next drop-bearing packet re-adopts via the unconditional
-///   `(connected, disconnected)` arm. This exists independent of the
-///   commit-time re-arm, is strictly narrower than the pre-provenance
-///   unconditional follow (only an actual current-drop witness can trigger
-///   it), and shares the cross-cycle family's root cause — reports carry no
-///   cycle/epoch identity — so the same wire-level signal is the fix; it
-///   self-corrects meanwhile.
+/// - **Cross-cycle (CLOSED):** a drop-era report from an EARLIER cycle that
+///   ARRIVES only after a follow consumed the witnesses can no longer re-arm
+///   stale provenance — [`SpectatorSession::witness_host_status_reports`] only
+///   records a drop whose epoch is NOT strictly below the host's high-water, and
+///   a host that forwarded the intervening reactivation has already advanced its
+///   high-water past the stale drop's generation, so the re-arm is rejected.
+/// - **Within-cycle (CLOSED):** a host's own REORDERED PRE-drop connected
+///   snapshot carries the older pre-drop generation, so the
+///   `incoming_epoch >= witness.epoch` clause in
+///   [`SpectatorSession::reactivation_provenance`] rejects it (a genuine
+///   reactivation strictly postdates the drop that bumped the generation).
 ///
-/// Adopt-arm interaction (mitigated by the commit-time re-arm): the
-/// `(connected, disconnected)` ADOPT arm is unconditional, so a stale STAGED
-/// drop snapshot that commits after a follow consumed the witness table
-/// re-freezes the just-reactivated slot — a freeze the SPECTATOR authored from
-/// a snapshot whose drop-era arrival predates the consume, leaving the
-/// committing host's own witness `None`. Without mitigation nothing could ever
-/// re-open that slot: the host's later genuine connected gossip would be
-/// `Unwitnessed` forever, a permanent freeze the pre-provenance code recovered
-/// from. The mitigation re-arms the COMMITTING host's witness at the adopted
-/// freeze (max-merge) whenever the adopt arm fires at commit time: the
+/// Residual (documented, NARROW): one fail-closed micro-window remains (the safe
+/// direction, self-correcting) — a genuine reactivation gossiped only by hosts
+/// whose drop-era packets never reached this spectator, or only before the
+/// previous follow consumed the witness with no drop-bearing packet after it, is
+/// not followed; the spectator keeps the frozen label until the host's next
+/// drop-bearing packet re-establishes provenance. (In the legacy uniform-epoch
+/// world — peers that never arm the epoch, all reports at generation `0` — the
+/// `>=` gate and the not-strictly-below witness test are inert, so the gate
+/// reduces exactly to the pre-epoch freeze-only behavior, with the old
+/// transient corners; no regression for un-upgraded peers.)
+///
+/// Adopt-arm interaction (commit-time re-arm): the `(connected, disconnected)`
+/// ADOPT arm is unconditional, so a stale STAGED drop snapshot that commits
+/// after a follow consumed the witness table re-freezes the just-reactivated
+/// slot — a freeze the SPECTATOR authored, leaving the committing host's own
+/// witness `None`. The mitigation re-arms the COMMITTING host's witness at the
+/// adopted freeze and generation (`witness_adopted_drop`, mirroring the
+/// newer-resets / same-max-merges policy) whenever the adopt arm fires: the
 /// spectator just made that host's report the latch, and per-host in-order
-/// delivery means that host's later connected report postdates this drop in
-/// its own stream, so following it merely undoes the spectator's own adopt.
-/// Analyzed soundness cost: the re-arm adds fail-open only where the adopted
-/// report was itself stale AND a genuine later drop then lowers the latch
-/// underneath it via the `(true, true)` min arm — a sub-case of the
-/// stale-provenance family above, no worse than the adopt that admitted the
-/// stale report in the first place. The late-arrival path
+/// delivery means that host's later connected report postdates this drop in its
+/// own stream (carrying a strictly newer generation), so following it merely
+/// undoes the spectator's own adopt. The late-arrival path
 /// ([`SpectatorSession::converge_latched_drop_status`]) needs no analogous
 /// re-arm: it only LOWERS an already-disconnected slot's freeze frame (never
 /// adopts from connected), and lowering the latch only widens the set of
@@ -2116,6 +2211,11 @@ fn merge_connection_status(
         (false, true) => {
             current.disconnected = true;
             current.last_frame = incoming.last_frame;
+            // Carry the adopting host's drop generation onto the latch. The latch
+            // epoch is informational (the reactivation gate reads the per-host
+            // witness/incoming epochs, never the latch); this just keeps it
+            // faithful to the drop the spectator latched.
+            current.epoch = incoming.epoch;
             MergeOutcome::AdoptedDrop
         },
         (false, false) => {
@@ -3212,6 +3312,7 @@ mod tests {
         let dropped = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(1),
+            epoch: 0,
         };
         let status = vec![ConnectionStatus::default(), dropped];
 
@@ -3325,6 +3426,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         // CRITICAL: at the OVERLAPPING frame 1 host 0 forwards the SAME value the
@@ -3360,6 +3462,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         // test:
@@ -3459,6 +3562,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
 
@@ -3544,6 +3648,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(Frame::new(1), 60_u8), (Frame::new(2), 50_u8)] {
@@ -3813,20 +3918,24 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame0,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame0,
+                epoch: 0,
             },
         ];
         let status1 = vec![
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame1,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: frame1,
+                epoch: 0,
             },
         ];
 
@@ -3859,12 +3968,14 @@ mod tests {
         let mut both_disc = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
+            epoch: 0,
         };
         let outcome = merge_connection_status(
             &mut both_disc,
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(8),
+                epoch: 0,
             },
             ReactivationProvenance::Witnessed,
         );
@@ -3874,6 +3985,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
             "both-disconnected must take the min freeze frame, never raise it"
         );
@@ -3882,6 +3994,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(3),
+                epoch: 0,
             },
             ReactivationProvenance::Unwitnessed,
         );
@@ -3891,6 +4004,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(3),
+                epoch: 0,
             },
             "both-disconnected converges further down to a lower incoming freeze"
         );
@@ -3901,12 +4015,14 @@ mod tests {
         let mut reactivating = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(2),
+            epoch: 0,
         };
         let outcome = merge_connection_status(
             &mut reactivating,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
             ReactivationProvenance::Witnessed,
         );
@@ -3920,6 +4036,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
             "disconnected+incoming-connected must follow a witnessed reactivation"
         );
@@ -3930,12 +4047,14 @@ mod tests {
         let mut stale_resurrect = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(2),
+            epoch: 0,
         };
         let outcome = merge_connection_status(
             &mut stale_resurrect,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
             ReactivationProvenance::Unwitnessed,
         );
@@ -3945,6 +4064,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
             "disconnected+incoming-connected must NOT be followed without witness provenance"
         );
@@ -3953,12 +4073,14 @@ mod tests {
         let mut newly_dropped = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(7),
+            epoch: 0,
         };
         let outcome = merge_connection_status(
             &mut newly_dropped,
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
             ReactivationProvenance::Unwitnessed,
         );
@@ -3972,6 +4094,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
             "connected+incoming-disconnected must adopt the new drop"
         );
@@ -3980,12 +4103,14 @@ mod tests {
         let mut both_conn = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(4),
+            epoch: 0,
         };
         let outcome = merge_connection_status(
             &mut both_conn,
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ReactivationProvenance::Unwitnessed,
         );
@@ -3995,6 +4120,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             "both-connected must advance the last_frame via max"
         );
@@ -4012,10 +4138,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
         ];
 
@@ -4028,10 +4156,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
             ]
         );
@@ -4040,10 +4170,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(99),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(3),
+                epoch: 0,
             },
         ];
         queue_host_input(&mut session, 1, frame, [11, 22], stale_same_frame_status);
@@ -4055,10 +4187,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
             ]
         );
@@ -4076,10 +4210,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         queue_host_input(&mut session, 1, frame, [11, 22], lower_status);
@@ -4090,10 +4226,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
         ];
         queue_host_input(&mut session, 0, frame, [11, 22], primary_status);
@@ -4106,10 +4244,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
             ]
         );
@@ -4130,10 +4270,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: frame,
+                epoch: 0,
             },
         ];
         queue_host_input(&mut session, 1, frame, [31, 32], promoted_status);
@@ -4153,10 +4295,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(4),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: frame,
+                    epoch: 0,
                 },
             ]
         );
@@ -4192,20 +4336,24 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(0),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         let dropped_high = vec![
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(0),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(8),
+                epoch: 0,
             },
         ];
 
@@ -4220,10 +4368,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(0),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(4),
+                    epoch: 0,
                 },
             ]
         );
@@ -4237,10 +4387,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(frame),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(8),
+                    epoch: 0,
                 },
             ];
             queue_host_input(
@@ -4276,10 +4428,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(6),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(4),
+                    epoch: 0,
                 },
             ]
         );
@@ -4310,10 +4464,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(0),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         for frame in 0..=2_i32 {
@@ -4333,10 +4489,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(0),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(2),
+                    epoch: 0,
                 },
             ]
         );
@@ -4348,10 +4506,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for frame in 3..=6_i32 {
@@ -4375,10 +4535,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(10),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(10),
+                    epoch: 0,
                 },
             ]
         );
@@ -4420,6 +4582,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21), (2, 22)] {
@@ -4446,6 +4609,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             }
         );
 
@@ -4459,10 +4623,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(frame),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(6),
+                    epoch: 0,
                 },
             ];
             // test:
@@ -4514,6 +4680,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             }
         );
     }
@@ -4540,6 +4707,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
@@ -4591,6 +4759,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(2_i32, 32_u8), (3, 33)] {
@@ -4624,6 +4793,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(4_i32, 34_u8), (5, 35)] {
@@ -4650,6 +4820,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             }
         );
 
@@ -4661,10 +4832,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(frame),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(12),
+                    epoch: 0,
                 },
             ];
             // test:
@@ -4711,6 +4884,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             }
         );
     }
@@ -4743,6 +4917,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
@@ -4775,6 +4950,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(6),
+                epoch: 0,
             },
         ];
         // test:
@@ -4799,6 +4975,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             }
         );
 
@@ -4811,6 +4988,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(2_i32, 32_u8), (3, 33)] {
@@ -4845,6 +5023,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(4_i32, 34_u8), (5, 35)] {
@@ -4871,6 +5050,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             }
         );
 
@@ -4882,10 +5062,12 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(frame),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(12),
+                    epoch: 0,
                 },
             ];
             // test:
@@ -4933,8 +5115,207 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             }
         );
+    }
+
+    // S46 — CROSS-CYCLE fail-open corner, CLOSED by the per-slot connect-status
+    // `epoch`. The pre-epoch gate discriminated drop cycles only by consumption:
+    // a followed reactivation consumes the witness table, but a host's reordered
+    // EARLIER-cycle drop report that ARRIVES after the consume RE-ARMS that
+    // host's witness with stale provenance — and a `disc@v` report carried no
+    // cycle identity, so the gate could not tell it from a current-cycle drop.
+    // If `v` numerically covers the NEXT drop's converged freeze and that host
+    // then becomes canonical with a stale-connected view (it forwarded the
+    // reactivation but missed the next drop), the slot wrongly RESURRECTS.
+    //
+    // The epoch closes it: host 1's reordered cycle-1 drop carries `epoch = 1`,
+    // strictly below host 1's latest-seen generation `2` (advanced by the
+    // reactivation host 1 forwarded), so the witness re-arm is rejected and the
+    // resurrect cannot fire. RED on an epoch-blind gate (player 1 → Confirmed);
+    // GREEN with the epoch gate (player 1 stays Disconnected at the cycle-2
+    // frozen value). Sibling of
+    // `second_drop_after_reactivation_not_resurrected_by_high_view_cycle_one_witness`
+    // (which is the fail-CLOSED variant: no post-consume re-arm).
+    #[test]
+    fn cross_cycle_stale_drop_epoch_blocks_resurrect_after_consume() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7515), test_addr(7516)], DummySocket)
+            .unwrap();
+        let cs = |disconnected: bool, last_frame: Frame, epoch: u16| ConnectionStatus {
+            disconnected,
+            last_frame,
+            epoch,
+        };
+
+        // Cycle 1: host 0 (canonical) commits frames 0..=1 with player 1 dropped
+        // at the converged F1 = 1 (host 0 drop generation = epoch 1).
+        let h0_drop1 = vec![cs(false, Frame::NULL, 0), cs(true, Frame::new(1), 1)];
+        for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(Frame::new(frame), 10 + frame as u8),
+                PlayerHandle::new(0),
+                h0_drop1.clone(),
+                test_addr(7515),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(Frame::new(frame), p1),
+                PlayerHandle::new(1),
+                h0_drop1.clone(),
+                test_addr(7515),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(1));
+
+        // Host 1 witnessed cycle-1's drop at its own pre-convergence HIGH view
+        // (disc@6, host 1 drop generation = epoch 1); byte-identical at frame 1.
+        let h1_drop6 = vec![cs(false, Frame::NULL, 0), cs(true, Frame::new(6), 1)];
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 11),
+            PlayerHandle::new(0),
+            h1_drop6.clone(),
+            test_addr(7516),
+        );
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 21),
+            PlayerHandle::new(1),
+            h1_drop6.clone(),
+            test_addr(7516),
+        );
+
+        // Genuine reactivation: host 0 re-opens player 1 (epoch 2), frames 2..=3.
+        // Followed (host 0 witnessed the latch); the follow CONSUMES witnesses.
+        // Host 1 ALSO forwards the reactivation (epoch 2), advancing its
+        // latest-seen generation for player 1 to 2.
+        let react = vec![cs(false, Frame::NULL, 0), cs(false, Frame::new(10), 2)];
+        for (frame, p1) in [(2_i32, 32_u8), (3, 33)] {
+            for host in [0_usize, 1] {
+                let addr = if host == 0 {
+                    test_addr(7515)
+                } else {
+                    test_addr(7516)
+                };
+                // test:
+                session.handle_host_input(
+                    host,
+                    PlayerInput::new(Frame::new(frame), 10 + frame as u8),
+                    PlayerHandle::new(0),
+                    react.clone(),
+                    addr,
+                );
+                // test:
+                session.handle_host_input(
+                    host,
+                    PlayerInput::new(Frame::new(frame), p1),
+                    PlayerHandle::new(1),
+                    react.clone(),
+                    addr,
+                );
+            }
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(3));
+        assert!(
+            !session.host_connect_status[1].disconnected,
+            "genuine reactivation from a drop-witness host must be followed"
+        );
+
+        // Cycle 2: host 0 drops player 1 AGAIN at F2 = 5 (epoch 3) — numerically
+        // BELOW host 1's retained cycle-1 high view of 6.
+        let h0_drop5 = vec![cs(false, Frame::NULL, 0), cs(true, Frame::new(5), 3)];
+        for (frame, p1) in [(4_i32, 34_u8), (5, 35)] {
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(Frame::new(frame), 10 + frame as u8),
+                PlayerHandle::new(0),
+                h0_drop5.clone(),
+                test_addr(7515),
+            );
+            // test:
+            session.handle_host_input(
+                0,
+                PlayerInput::new(Frame::new(frame), p1),
+                PlayerHandle::new(1),
+                h0_drop5.clone(),
+                test_addr(7515),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(5));
+
+        // THE FAIL-OPEN TRIGGER: host 1's REORDERED cycle-1 drop report
+        // (disc@6, epoch 1) arrives LATE, after the consume — re-delivered on an
+        // already-staged old frame so only the witness table is touched. On an
+        // epoch-blind gate it re-arms host 1's witness (6 >= latched 5); the
+        // epoch gate rejects it (epoch 1 < host 1's latest-seen generation 2).
+        // test:
+        session.handle_host_input(
+            1,
+            PlayerInput::new(Frame::new(1), 21),
+            PlayerHandle::new(1),
+            h1_drop6,
+            test_addr(7516),
+        );
+
+        // Host 1 is stale across cycle 2: it forwarded the reactivation but never
+        // the second drop, so its gossip still reports player 1 CONNECTED
+        // (epoch 2). It stages frames 6..=9 with player-1 values from the frozen
+        // region.
+        for frame in 6..=9_i32 {
+            let stale_conn = vec![
+                cs(false, Frame::new(frame), 0),
+                cs(false, Frame::new(12), 2),
+            ];
+            // test:
+            session.handle_host_input(
+                1,
+                PlayerInput::new(Frame::new(frame), 10 + frame as u8),
+                PlayerHandle::new(0),
+                stale_conn.clone(),
+                test_addr(7516),
+            );
+            // test:
+            session.handle_host_input(
+                1,
+                PlayerInput::new(Frame::new(frame), 90 + frame as u8),
+                PlayerHandle::new(1),
+                stale_conn,
+                test_addr(7516),
+            );
+        }
+        assert_eq!(session.last_recv_frame, Frame::new(5));
+
+        // Host 0 dies; stale host 1 becomes canonical and commits 6..=9. Its
+        // re-armed cycle-1 witness must NOT authorize a resurrect of cycle 2.
+        session.remove_disconnected_hosts(vec![0]);
+        session.try_commit_ready_frames();
+        assert_eq!(session.last_recv_frame, Frame::new(9));
+        assert!(session.spectator_divergence.is_none());
+
+        let synced = session.inputs_at_frame(Frame::new(7)).unwrap();
+        assert_eq!(synced[0].1, InputStatus::Confirmed);
+        assert_eq!(
+            synced[1].1,
+            InputStatus::Disconnected,
+            "a reordered EARLIER-cycle drop report (epoch 1 < latest-seen 2) must \
+             not re-arm provenance and resurrect the cycle-2 drop"
+        );
+        assert_eq!(
+            synced[1].0, 35_u8,
+            "dropped slot must keep replaying the cycle-2 frozen value at F2 = 5"
+        );
+        assert!(session.host_connect_status[1].disconnected);
+        assert_eq!(session.host_connect_status[1].last_frame, Frame::new(5));
     }
 
     // Positive provenance guard: a failover host that DID witness the drop
@@ -4958,6 +5339,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21), (2, 22)] {
@@ -5008,6 +5390,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for frame in 3..=6_i32 {
@@ -5060,25 +5443,33 @@ mod tests {
             .unwrap();
 
         // The host reports player 1 dropped before it ever confirmed an input.
-        session.witness_host_drop_reports(
+        session.witness_host_status_reports(
             0,
             &[
                 ConnectionStatus::default(),
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::NULL,
+                    epoch: 0,
                 },
             ],
         );
-        assert_eq!(session.host_drop_witness[0][1], Some(Frame::NULL));
+        assert_eq!(
+            session.host_drop_witness[0][1],
+            Some(DropWitness {
+                freeze: Frame::NULL,
+                epoch: 0
+            })
+        );
 
         // Latch also frozen at NULL: the witness covers it -> follow.
         session.host_connect_status[1] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::NULL,
+            epoch: 0,
         };
         assert_eq!(
-            session.reactivation_provenance(0, 1),
+            session.reactivation_provenance(0, 1, 0),
             ReactivationProvenance::Witnessed,
             "witness Some(NULL) must cover a latch frozen at NULL"
         );
@@ -5088,11 +5479,81 @@ mod tests {
         session.host_connect_status[1] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(0),
+            epoch: 0,
         };
         assert_eq!(
-            session.reactivation_provenance(0, 1),
+            session.reactivation_provenance(0, 1, 0),
             ReactivationProvenance::Unwitnessed,
             "witness Some(NULL) must not cover a latch frozen at a real frame"
+        );
+    }
+
+    // S46 — WITHIN-CYCLE fail-open corner, CLOSED by the connect-status `epoch`.
+    // A host that genuinely witnessed the current drop holds follow authority for
+    // the whole cycle, so on a freeze-only gate its OWN reordered PRE-drop
+    // connected snapshot (first-writer staged at a later frame) passed the gate
+    // while it was canonical and transiently RESURRECTED the slot. The epoch
+    // discriminates: the pre-drop connected report carries the older pre-drop
+    // generation (`< witnessed.epoch`, which the drop bumped past), so it is
+    // rejected; a genuine reactivation carries `> witnessed.epoch` and is
+    // followed. `>=` keeps the legacy uniform-epoch follow intact. Direct
+    // provenance probe (the discriminator the corner turns on).
+    #[test]
+    fn within_cycle_pre_drop_epoch_blocks_follow_post_drop_epoch_follows() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7517)], DummySocket)
+            .unwrap();
+
+        // Host 0 witnessed its own drop of player 1 at freeze 2, generation 1
+        // (connected at gen 0, then the drop bumped it to gen 1).
+        session.witness_host_status_reports(
+            0,
+            &[
+                ConnectionStatus::default(),
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(2),
+                    epoch: 1,
+                },
+            ],
+        );
+        assert_eq!(
+            session.host_drop_witness[0][1],
+            Some(DropWitness {
+                freeze: Frame::new(2),
+                epoch: 1
+            })
+        );
+        // Spectator latched the drop at freeze 2.
+        session.host_connect_status[1] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(2),
+            epoch: 1,
+        };
+
+        // A reordered PRE-drop connected snapshot carries generation 0 (< the
+        // witnessed drop's generation 1): must NOT be followed (within-cycle).
+        assert_eq!(
+            session.reactivation_provenance(0, 1, 0),
+            ReactivationProvenance::Unwitnessed,
+            "a reordered pre-drop connected report (epoch 0 < drop epoch 1) must \
+             not resurrect the dropped slot"
+        );
+        // The `>=` boundary (generation equal to the witnessed drop) follows —
+        // this is exactly the legacy uniform-epoch world (all reports gen 0), so
+        // there is no regression for peers that never arm the epoch.
+        assert_eq!(
+            session.reactivation_provenance(0, 1, 1),
+            ReactivationProvenance::Witnessed,
+            "epoch == witnessed drop generation follows (legacy uniform-epoch parity)"
+        );
+        // A genuine reactivation carries a strictly newer generation: followed.
+        assert_eq!(
+            session.reactivation_provenance(0, 1, 2),
+            ReactivationProvenance::Witnessed,
+            "a genuine reactivation (epoch 2 > drop epoch 1) is followed"
         );
     }
 
@@ -5115,6 +5576,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
@@ -5135,7 +5597,13 @@ mod tests {
                 test_addr(7512),
             );
         }
-        assert_eq!(session.host_drop_witness[0][1], Some(Frame::new(1)));
+        assert_eq!(
+            session.host_drop_witness[0][1],
+            Some(DropWitness {
+                freeze: Frame::new(1),
+                epoch: 0
+            })
+        );
 
         // Reactivation #1 (frames 2..=3): followed, and the follow CONSUMES
         // the witness.
@@ -5144,6 +5612,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(2_i32, 32_u8), (3, 33)] {
@@ -5177,6 +5646,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(4_i32, 34_u8), (5, 35)] {
@@ -5202,9 +5672,16 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             }
         );
-        assert_eq!(session.host_drop_witness[0][1], Some(Frame::new(5)));
+        assert_eq!(
+            session.host_drop_witness[0][1],
+            Some(DropWitness {
+                freeze: Frame::new(5),
+                epoch: 0
+            })
+        );
 
         // Reactivation #2 (frames 6..=7): the re-established witness covers
         // the cycle-2 latch (5 >= 5), so the second genuine reactivation is
@@ -5214,6 +5691,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(12),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(6_i32, 36_u8), (7, 37)] {
@@ -5265,6 +5743,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21), (2, 22)] {
@@ -5294,10 +5773,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(6),
+                epoch: 0,
             },
         ];
         // test:
@@ -5323,6 +5804,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
             "a late-arriving stale-connected snapshot must not resurrect the latched drop"
         );
@@ -5362,6 +5844,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
@@ -5388,6 +5871,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             }
         );
 
@@ -5415,7 +5899,13 @@ mod tests {
             );
         }
         assert_eq!(session.last_recv_frame, Frame::new(1));
-        assert_eq!(session.host_drop_witness[1][1], Some(Frame::new(1)));
+        assert_eq!(
+            session.host_drop_witness[1][1],
+            Some(DropWitness {
+                freeze: Frame::new(1),
+                epoch: 0
+            })
+        );
 
         // Host 0's frame 2 (genuine rearm: player 1 connected again with a
         // real input) arrives and COMMITS: the reactivation is followed and
@@ -5426,6 +5916,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         // test:
@@ -5470,6 +5961,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
             "the stale staged snapshots re-freeze the slot via the adopt arm"
         );
@@ -5485,7 +5977,10 @@ mod tests {
         );
         assert_eq!(
             session.host_drop_witness[0][1],
-            Some(Frame::new(1)),
+            Some(DropWitness {
+                freeze: Frame::new(1),
+                epoch: 0
+            }),
             "the commit-time adopt must re-arm the COMMITTING host's witness at \
              the adopted freeze (the consume wiped its arrival-time witness)"
         );
@@ -5501,6 +5996,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(12),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(5_i32, 55_u8), (6, 56)] {
@@ -5562,6 +6058,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(1),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(0_i32, 20_u8), (1, 21)] {
@@ -5598,7 +6095,13 @@ mod tests {
             dropped_at_1,
             test_addr(7516),
         );
-        assert_eq!(session.host_drop_witness[1][1], Some(Frame::new(1)));
+        assert_eq!(
+            session.host_drop_witness[1][1],
+            Some(DropWitness {
+                freeze: Frame::new(1),
+                epoch: 0
+            })
+        );
 
         // Rearm #1: host 0 forwards frames 2..=3 with player 1 connected and
         // real inputs; the follow CONSUMES every witness for player 1. Host
@@ -5608,6 +6111,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(10),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(2_i32, 32_u8), (3, 33)] {
@@ -5640,6 +6144,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(4_i32, 34_u8), (5, 35)] {
@@ -5673,6 +6178,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(12),
+                epoch: 0,
             },
         ];
         for (frame, p1) in [(6_i32, 66_u8), (7, 67)] {
@@ -5706,6 +6212,7 @@ mod tests {
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(5),
+                epoch: 0,
             },
             "a witness-less genuine reactivation fails closed at the frozen \
              label (documented residual; safe direction)"
