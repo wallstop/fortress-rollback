@@ -38,7 +38,10 @@
 (* The S41 write-up records three candidate fixes and the project rule "no    *)
 (* partial fix shipped — a partial fix regresses liveness." This module turns  *)
 (* the prose arbitration into a machine-checked one. The confirmation rule is  *)
-(* a CONSTANT `FIX_MODE` with four values, each exercised by its own .cfg:     *)
+(* a CONSTANT `FIX_MODE`. The four ORIGINAL values below were the S41/S42/S44   *)
+(* arbitration; the S47 async LADDER (AsyncAckStale / AsyncAckGossip /          *)
+(* AsyncAckTwoPhase) and the S48 CERTIFIED-SOUND culmination (AsyncAckSound)    *)
+(* are documented at the AsyncMode definition. Each value has its own .cfg:     *)
 (*                                                                          *)
 (*   - "Baseline"  — current production (prune the dead origin from the fold,  *)
 (*                   confirm/discard on the surviving stale-high cache). The   *)
@@ -94,6 +97,18 @@
 (*                   DoubleFailureRelay_InheritedFloor.cfg — expected to FAIL on   *)
 (*                   safety; the third documented dead-end, the no-wire shortcut.) *)
 (*                                                                          *)
+(*   - The S47 async LADDER + S48 SOUND mode (see the AsyncMode definition for the *)
+(*     full prose): "AsyncAckStale" / "AsyncAckGossip" / "AsyncAckTwoPhase"          *)
+(*     discharge MeshAgree's two idealizations (modeling a concrete in-flight ack     *)
+(*     round + per-observer death) and are ALL machine-DISPROVEN UNSOUND (each its    *)
+(*     own expected-FAIL demo .cfg); "AsyncAckSound" is the CERTIFIED-SOUND           *)
+(*     implementable culmination — the AsyncAckStale machinery with the SINGLE delta  *)
+(*     of a PESSIMISTIC queue-min report — which PASSES safety AND liveness           *)
+(*     (DoubleFailureRelay_AsyncAckSound.cfg). It is the implementable analog of the  *)
+(*     idealized MeshAgree positive: the design a production red-green cycle should    *)
+(*     implement (S47 blueprint: pessimistic report + fresh-ack round + no            *)
+(*     partition-hold, on the S46 connect-status gossip).                            *)
+(*                                                                          *)
 (* Properties:                                                              *)
 (*   - Safety: NoConfirmedDivergence — no two alive survivors ever hold        *)
 (*     divergent recorded confirmed state for the dropped slot at any frame    *)
@@ -137,7 +152,7 @@
 (*     rather than as a concrete ack-round wire format; the wire format is the  *)
 (*     production design choice this proof informs, not constrains.            *)
 (*                                                                          *)
-(* SCOPE OF THE FOUR RESULTS (honest bounds — what each claim does and does NOT  *)
+(* SCOPE OF THE RESULTS (honest bounds — what each claim does and does NOT       *)
 (* prove; established in an adversarial faithfulness review):                    *)
 (*                                                                          *)
 (*   - The NEGATIVE results are UNCONDITIONAL within the modeled world. Baseline  *)
@@ -177,6 +192,29 @@
 (*       paths, which share the fold-pruning relay shape). And the MeshAgree         *)
 (*       LIVENESS pass assumes monotone-healing partitions (no flap); the Tombstone  *)
 (*       liveness FAILURE is structural and needs no such assumption.               *)
+(*                                                                          *)
+(*   - The S48 POSITIVE result (AsyncAckSound sound) models a CONCRETE in-flight     *)
+(*     ack round (the observer reads the snapshot `ackFloor`, not a live `PeerFloor`) *)
+(*     and PER-OBSERVER death (`pruned`, the skewed timeout) — GENUINELY discharging  *)
+(*     idealization (b) — and still PASSES safety AND liveness. So unlike MeshAgree   *)
+(*     (an idealized POLICY), AsyncAckSound is a directly implementable design. The   *)
+(*     decisive fold change is the PESSIMISTIC report (a relay surfaces a            *)
+(*     folded/departed low immediately): flipping ONLY the report from own-floor to  *)
+(*     pessimistic flips the disproven AsyncAckStale FAIL->PASS (verified at a        *)
+(*     matched EPOCH_MAX=0), so it is what closes idealization (a)'s DEPARTED-LOW     *)
+(*     facet, with NO epoch freshness gate. HONEST PRECISION (do not over-read as     *)
+(*     "the report alone discharges (a)"): safety has TWO faithful load-bearing       *)
+(*     ingredients — (1) the pessimistic report applied FROM WARMUP (the `GlobalMin`  *)
+(*     `ackFloor` seed: every observer holds a pessimistic ack <= GlobalMin before    *)
+(*     any drop; reverting it to the own-receipt seed reproduces the residual,        *)
+(*     mutation-pinned) and (2) `FreezeNeverBelowGlobalMin`, which makes a stale       *)
+(*     warmup ack a permanently-valid lower bound. So (a)'s STALE-IN-FLIGHT facet is   *)
+(*     closed by the GlobalMin floor + warmup seed, NOT by ack freshness. The shared   *)
+(*     model bound is therefore the warm-GlobalMin convention (every survivor has      *)
+(*     heard every receipt AND holds a pessimistic ack before any drop); a cold-cache  *)
+(*     "never received a pessimistic ack" world is out of scope and is where the       *)
+(*     drop-epoch / fresh-round COMMITMENT additionally binds — plus the non-hot-join  *)
+(*     fold arms and the monotone-healing-partition liveness premise.                 *)
 (***************************************************************************)
 
 EXTENDS Integers, FiniteSets, TLC
@@ -188,8 +226,9 @@ CONSTANTS
     WINDOW,        \* prediction window: frames > bound - WINDOW are still re-rollable
     RECEIPTS,      \* allowed per-survivor receipts of the dropped slot (adversarial at Init)
     FIX_MODE,      \* "Baseline" | "Tombstone" | "MeshAgree" | "InheritedFloor"
-                   \*   | "AsyncAckTwoPhase" | "AsyncAckStale" (S45 — in-flight ack + per-observer death)
-    EPOCH_MAX      \* (AsyncAckTwoPhase/Stale) max per-slot drop-epoch generation (small, e.g. 2)
+                   \*   | "AsyncAckTwoPhase" | "AsyncAckGossip" | "AsyncAckStale" (S47 — in-flight ack
+                   \*   + per-observer death) | "AsyncAckSound" (S48 — the CERTIFIED-SOUND implementable mode)
+    EPOCH_MAX      \* (AsyncAckTwoPhase/Gossip/Stale) max per-slot drop-epoch generation (small, e.g. 2)
 
 ASSUME SURVIVORS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
@@ -197,36 +236,73 @@ ASSUME NULL_FRAME \notin 0..MAX_FRAME
 ASSUME WINDOW \in Nat /\ WINDOW >= 1
 ASSUME RECEIPTS \subseteq (0..MAX_FRAME) /\ RECEIPTS # {}
 ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree", "InheritedFloor",
-                     "AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase"}
+                     "AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase", "AsyncAckSound"}
 ASSUME EPOCH_MAX \in Nat
 
-\* The three S47 modes that discharge the MeshAgree idealizations (a) instantaneous-
+\* The S47/S48 modes that discharge the MeshAgree idealizations (a) instantaneous-
 \* fresh-ack and (b) synchronized-death by modeling a CONCRETE in-flight ack round +
-\* per-observer (async) death. They form a soundness LADDER of three increasingly
-\* sophisticated IMPLEMENTABLE epoch mechanisms, ALL machine-DISPROVEN UNSOUND — the
-\* central S47 finding (each has its own demo .cfg expected to FAIL on a safety invariant):
-\*   - AsyncAckStale  : in-flight ack, NO epoch freshness gate           -> UNSOUND.
+\* per-observer (async) death. The first three form the S47 soundness LADDER of increasingly
+\* sophisticated IMPLEMENTABLE epoch mechanisms, ALL machine-DISPROVEN UNSOUND (each has its
+\* own demo .cfg expected to FAIL on a safety invariant); the fourth, AsyncAckSound, is the
+\* S48 CERTIFIED-SOUND culmination that PASSES safety AND liveness (its own registered cfg):
+\*   - AsyncAckStale  : in-flight ack, NO epoch freshness gate, OWN-floor report -> UNSOUND.
 \*   - AsyncAckGossip : in-flight ack + PASSIVE gossip-epoch freshness gate
-\*                      (the S46 wire epoch, compared against the gossip cache)
-\*                                                                       -> UNSOUND
+\*                      (the S46 wire epoch, compared against the gossip cache), OWN-floor
+\*                      report                                            -> UNSOUND
 \*                      (the epoch-bump gossip RACES the observer's lock).
 \*   - AsyncAckTwoPhase : in-flight ack + the gossip-epoch gate + a TWO-PHASE
 \*                      announce/HOLD-commit COMMITMENT (the lowering peer announces its
 \*                      epoch bump and HOLDS its freeze until every folding observer has
-\*                      heard it)                                        -> UNSOUND
+\*                      heard it), OWN/announced-floor report             -> UNSOUND
 \*                      (the DEPARTED-LOW race: per-observer death lets the relay adopt the
 \*                      dead origin's low while the victim, having pruned the origin, has
 \*                      forgotten it — the S44 InheritedFloor obstruction, now structural).
+\*   - AsyncAckSound  : in-flight ack + reachability-gated fresh-ack round (NO partition-hold)
+\*                      + the PESSIMISTIC QUEUE-MIN report (the relay reports the min over its
+\*                      own floor AND every folded source's cached last_frame, surfacing a
+\*                      departed origin's low IMMEDIATELY)                -> SOUND
+\*                      (safety + liveness PASS). The pessimistic report is the decisive delta
+\*                      from the disproven AsyncAckStale (flipping ONLY the report flips
+\*                      FAIL->PASS, verified at a matched EPOCH_MAX=0). Because a pessimistic
+\*                      floor is monotone-NON-DECREASING (it RISES only when the source prunes a
+\*                      departed origin, and then the source ALSO freezes/confirms high), every
+\*                      pessimistic ack snapshot is <= the source's eventual freeze, so it is a
+\*                      sound lower bound with NO epoch freshness gate or two-phase commitment.
+\*                      TWO load-bearing ingredients, both faithful (do NOT read this as
+\*                      "the report alone"): (1) the pessimistic report, applied FROM WARMUP —
+\*                      the `GlobalMin` `ackFloor` Init seed encodes a completed warmup round in
+\*                      which every observer obtained a pessimistic ack (= GlobalMin) BEFORE any
+\*                      drop/partition; reverting that seed to the own-receipt value (a
+\*                      NON-pessimistic warmup) reproduces the residual (mutation-pinned), so the
+\*                      warmup propagation is genuinely load-bearing, not free; and (2) the
+\*                      `FreezeNeverBelowGlobalMin` floor, which makes even a stale warmup ack a
+\*                      permanently-valid lower bound. So idealization (b) is GENUINELY discharged
+\*                      (per-observer `pruned`); idealization (a)'s DEPARTED-LOW facet is closed by
+\*                      the report, but its STALE-IN-FLIGHT facet is closed by the GlobalMin floor +
+\*                      the warmup-pessimistic seed, NOT by ack freshness. This is S47's blueprint
+\*                      (pessimistic report + fresh-ack round + no partition-hold) made concrete —
+\*                      with the honest sharpening that the fresh-ack round must have DELIVERED a
+\*                      pessimistic ack to every observer (the warm-GlobalMin premise); the
+\*                      cold-cache corner, where it has not, still needs the epoch commitment.
 \* The discharge of idealization (b) is itself the key insight: under SYNCHRONIZED death
 \* (MeshAgree's idealization) the low-receipt origin is pruned from EVERY fold at once, so
 \* no relay adopts its low while a victim has lost it — which is why the idealized MeshAgree
-\* PASSES and every faithful async model here does not. The S46 passive drop-epoch is thus
-\* NECESSARY but NOT SUFFICIENT on the player side; the sound implementable mechanism (relay
-\* reports PESSIMISTIC queue-min + FRESH ack postdating intent + no partition-hold) is the
-\* precisely-scoped follow-up. The MeshAgree POLICY positive (default cfg) still stands.
-\* AsyncMode gates ALL the new per-observer-death + in-flight-ack machinery so the four
-\* original modes stay state-identical (their new variables stay pinned at Init forever).
-AsyncMode == FIX_MODE \in {"AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase"}
+\* PASSES and the three OWN-floor async models do not. The pessimistic report is what lets a
+\* per-observer-death async model PASS again: whichever survivor still folds the departed
+\* origin reports its low, so no observer can confirm past a frame a survivor will freeze
+\* below. The S46 passive drop-epoch is thus NECESSARY-on-the-wire-but-not-SUFFICIENT-as-a-
+\* -gate on the player side (AsyncAckGossip); the sufficient mechanism is the pessimistic
+\* report (AsyncAckSound). The MeshAgree POLICY positive (its cfg) still stands.
+\* AsyncMode gates ALL the per-observer-death + in-flight-ack machinery so the four
+\* NON-async modes (Baseline/Tombstone/MeshAgree/InheritedFloor) stay state-identical (their
+\* async variables stay pinned at Init forever).
+AsyncMode == FIX_MODE \in {"AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase", "AsyncAckSound"}
+
+\* The certified-sound implementable mode (S48). Gates the PESSIMISTIC queue-min report
+\* (AckReportFloor / AsyncSoundTarget). It reuses the AsyncAckStale machinery (in-flight ack,
+\* per-observer death, reachability-gated round, NO passive epoch gate) and changes ONLY the
+\* reported floor — isolating the pessimistic report as the load-bearing fix.
+SoundMode == FIX_MODE = "AsyncAckSound"
 
 \* The two-phase announce/HOLD-commit mechanism (the `announced` variable + the
 \* AnnounceLower action + the LowerSafe gate on the lowering actions). The strongest of the
@@ -516,6 +592,71 @@ AsyncAckTarget(s) ==
     ELSE Min2(BaselineTarget(s), AsyncAckedFloor(s))
 
 (***************************************************************************)
+(* S48 — the CERTIFIED-SOUND implementable mode ("AsyncAckSound"). The SINGLE      *)
+(* delta from the disproven AsyncAckStale is the PESSIMISTIC queue-min report: a    *)
+(* survivor's fresh ack carries the lowest frame it could STILL freeze D to given   *)
+(* everything it currently folds — the min over its OWN floor (receipt while live,  *)
+(* freeze once dropped) AND every non-pruned folded source's cached last_frame —     *)
+(* rather than its own floor alone. This surfaces a DEPARTED origin's low the         *)
+(* instant it is in the relay's fold, BEFORE the relay commits its own freeze, which   *)
+(* is exactly what the AsyncAckStale/Gossip own-floor report omitted (the gossip race) *)
+(* and what the AsyncAckTwoPhase announce/freeze report omitted (the departed-low      *)
+(* race). It is S47's "relay reports its pessimistic queue-min" requirement made        *)
+(* concrete.                                                                          *)
+(*                                                                                    *)
+(* WHY NO EPOCH FRESHNESS GATE OR TWO-PHASE COMMITMENT IS NEEDED (warm-GlobalMin scope). *)
+(* In the WARM-CACHE convention (caches AND acks seeded at warmup — see the Init           *)
+(* `GlobalMin` ackFloor seed), a pessimistic floor is monotone-NON-DECREASING: it equals   *)
+(* the min over the source's folds, so it only ever RISES — and rises ONLY when the source  *)
+(* PRUNES a departed origin (losing that origin's low), after which the source ALSO         *)
+(* freezes/confirms high (it no longer folds the low). So a snapshot ack is either current  *)
+(* or stale-LOW (the source has since pruned and risen); a stale-LOW ack makes the observer *)
+(* HOLD lower than necessary (liveness, healed by WF re-ack), never advance too far         *)
+(* (safety). CAVEAT — this monotone-rise argument relies on the warmup having delivered a   *)
+(* pessimistic ack (<= GlobalMin) to every observer (the seed) PLUS FreezeNeverBelowGlobalMin: *)
+(* an observer's stale ack is then a permanently-valid lower bound. Reverting the seed to     *)
+(* the own-receipt value (a NON-pessimistic warmup) reproduces the residual — the seed is     *)
+(* load-bearing, so this is NOT "the report alone." The fresh-ack ROUND is modeled by         *)
+(* (i) advancing only when every folded non-pruned peer is REACHABLE (the round can complete) *)
+(* and (ii) WF SendAck refreshing the snapshots; NO partition-hold (the observer itself holds *)
+(* when it cannot reach a folded peer — the lowering side never assumes the observer holds,   *)
+(* which the S47 link-heal race proved unsound). The S47-ladder finding sharpened: once the   *)
+(* report is pessimistic AND warmup-propagated, AsyncAckGossip's passive epoch GATE is moot   *)
+(* (the report VALUE, not the freshness gate, was the broken part) — so the sound consumer     *)
+(* needs the pessimistic report (on a fresh-ack round), NOT an epoch comparison. The cold-cache *)
+(* corner (an observer that never received a pessimistic ack) is where the epoch still binds.   *)
+(***************************************************************************)
+\* The pessimistic queue-min a survivor s reports in a fresh ack (and uses for its own
+\* local term): the min over its own floor and every non-pruned folded source's cache.
+PessimisticFloor(s) ==
+    LET ownFloor == IF localDisc[s] THEN localFrame[s] ELSE recvThrough[s]
+        folded   == { o \in SURVIVORS \ {s} : ~pruned[s][o] }
+    IN IF folded = {} THEN ownFloor
+       ELSE Min2(ownFloor, MinI({cacheLast[s][o] : o \in folded}))
+
+\* What a survivor deposits in a fresh ack (SendAck): AsyncAckSound reports its PESSIMISTIC
+\* queue-min; every other async mode reports its own (announce/freeze/receipt) PeerFloor —
+\* exactly the non-pessimistic report whose staleness the departed-low + gossip races exploit.
+\* (Evaluates to PeerFloor in every non-Sound mode, so their SendAck is state-identical.)
+AckReportFloor(s) == IF SoundMode THEN PessimisticFloor(s) ELSE PeerFloor(s)
+
+\* The floor s may advance to: the min over its OWN current pessimistic floor and every
+\* folded non-pruned reachable peer's last (pessimistic) ack snapshot. Uses the in-flight
+\* ackFloor snapshot (discharging idealization (a)), NOT a live read of the peer's floor.
+AsyncSoundAckedFloor(s) ==
+    MinI({PessimisticFloor(s)} \union {ackFloor[s][o] : o \in AsyncReachableFolded(s)})
+
+AsyncSoundTarget(s) ==
+    \* No-partition-hold: cannot complete a fresh round with an unreachable folded peer -> HOLD.
+    IF ~AsyncAllFoldedReachable(s) THEN CurBound(s)
+    \* Mesh-agreed AND the local freeze has fully converged to the acked floor: the slot is
+    \* excluded and every higher frame is the (final) frozen value, so advance to MAX.
+    ELSE IF SlotMeshAgreed(s) /\ localFrame[s] = AsyncSoundAckedFloor(s) THEN MAX_FRAME
+    \* Otherwise cap by the pessimistic acked floor — never lock past a frame a folded peer's
+    \* pessimistic report says it (or a departed origin it still folds) may still freeze below.
+    ELSE Min2(BaselineTarget(s), AsyncSoundAckedFloor(s))
+
+(***************************************************************************)
 (* Candidate fix #4 ("InheritedFloor"): the CACHE-ONLY / NO-WIRE / PASSIVE-          *)
 (* CORROBORATION variant — the cheapest, most TEMPTING design, MACHINE-DISPROVEN      *)
 (* UNSOUND here (run DoubleFailureRelay_InheritedFloor.cfg: `NoConfirmedDivergence`    *)
@@ -554,6 +695,7 @@ InheritedFloorTarget(s) ==
 BoundTarget(s) ==
     CASE FIX_MODE = "MeshAgree"      -> MeshAgreeTarget(s)
       [] FIX_MODE = "InheritedFloor" -> InheritedFloorTarget(s)
+      [] SoundMode                   -> AsyncSoundTarget(s)   \* S48 — checked before AsyncMode
       [] AsyncMode                   -> AsyncAckTarget(s)
       [] OTHER                       -> BaselineTarget(s)
 
@@ -625,7 +767,17 @@ Init ==
     /\ gone = [s \in SURVIVORS |-> FALSE]
     /\ pruned = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
     /\ slotEpoch = [s \in SURVIVORS |-> 0]
-    /\ ackFloor = [o \in SURVIVORS |-> [s \in SURVIVORS |-> recvThrough[s]]]
+    \* SoundMode seeds each warmup ack with the PESSIMISTIC floor: at warmup every survivor
+    \* folds every other (no pruning), so its pessimistic floor is the GlobalMin (it sees the
+    \* low origin's receipt). The non-Sound modes keep the own-receipt seed (state-identical).
+    \* THIS SEED IS LOAD-BEARING (not free): it encodes a completed warmup round in which every
+    \* observer obtained a pessimistic ack (<= GlobalMin) BEFORE any drop/partition. Replacing it
+    \* with the own-receipt seed (`recvThrough[s]`, a NON-pessimistic warmup) reproduces the
+    \* residual under SoundMode (LockedRecordMatchesFreeze VIOLATED — a victim advances on a
+    \* stale-high warmup ack while c->b is up, so it does not partition-hold) — a mutation probe
+    \* pinning that the report must be pessimistic FROM WARMUP, the warm-GlobalMin scope premise.
+    /\ ackFloor = [o \in SURVIVORS |-> [s \in SURVIVORS |->
+                     IF SoundMode THEN GlobalMin ELSE recvThrough[s]]]
     /\ ackEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
     /\ cacheEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
     /\ announced = [s \in SURVIVORS |-> NULL_FRAME]
@@ -973,7 +1125,7 @@ SendAck(src, obs) ==
     /\ ~gone[src]
     /\ ~pruned[obs][src]
     /\ link[src][obs]
-    /\ ackFloor' = [ackFloor EXCEPT ![obs][src] = PeerFloor(src)]
+    /\ ackFloor' = [ackFloor EXCEPT ![obs][src] = AckReportFloor(src)]
     /\ ackEpoch' = [ackEpoch EXCEPT ![obs][src] = slotEpoch[src]]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc, floor, corrob,
