@@ -38,7 +38,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 | `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 | `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
-| `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration: reproduces the residual under the current fold (Baseline → safety violated), proves the dead-survivor tombstone regresses liveness (Tombstone → liveness violated), proves the cache-only no-wire shortcut unsound via the corroborate-then-drop race (InheritedFloor → safety violated), and proves candidate fix #3 (mesh-acked-floor) sound (MeshAgree → safety+liveness PASS). The audit's last open potential-desync item (S41 REAL/deferred) |
+| `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos, and the S47 `_AsyncAckStale.cfg`, `_AsyncAckGossip.cfg`, `_AsyncAckTwoPhase.cfg` demos) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration. POLICY (original 4): residual is real (Baseline → safety violated), dead-survivor tombstone regresses liveness (Tombstone → liveness violated), cache-only no-wire shortcut unsound via corroborate-then-drop (InheritedFloor → safety violated), mesh-acked-floor *policy* sound (MeshAgree → safety+liveness PASS). S47 IMPLEMENTABILITY (3 new): discharging MeshAgree's instantaneous-fresh-ack + synchronized-death idealizations (in-flight ack round + per-observer death) breaks safety for the naive (AsyncAckStale), the passive-gossip-epoch = landed S46 wire epoch (AsyncAckGossip), and the active two-phase (AsyncAckTwoPhase) mechanisms — so the S46 passive drop-epoch is necessary but NOT sufficient on the player side. The audit's last open potential-desync item (S41 REAL/deferred) |
 
 ## Properties Verified
 
@@ -211,7 +211,9 @@ the per-endpoint gossip caches (which can go stale under partition), endpoint de
 (pruning), the prediction window (irreversible discard of confirmed frames below the
 window floor), and the freeze re-roll.
 
-The confirmation rule is a `FIX_MODE` constant exercised by four configs:
+The confirmation rule is a `FIX_MODE` constant exercised by **seven** configs — the
+original four (the policy-level arbitration), plus three **S47** modes that discharge
+the two idealizations the MeshAgree *positive* rested on (see below):
 
 - **Baseline** (`DoubleFailureRelay_Baseline.cfg`, expected to FAIL): the current
   production fold. TLC reproduces the residual as a **safety** counterexample
@@ -249,20 +251,66 @@ The confirmation rule is a `FIX_MODE` constant exercised by four configs:
   counter). This is the evidence that the production fix needs a fresh-ack *round* +
   drop-epoch commitment, not passive gossip. The third documented dead-end.
 
+**S47 — discharging the MeshAgree idealizations (the in-flight-ack + per-observer-death
+ladder).** The MeshAgree *positive* is proven only under two idealizations its own scope
+section flags: **(a)** an instantaneous, fresh `PeerFloor` read (a real survivor has only
+a possibly-stale per-endpoint cache / an in-flight ack) and **(b)** a single global `alive`
+flag (real death is per-observer, during the disconnect-timeout skew). S47 discharges both
+— modeling a concrete in-flight ack round (`ackFloor`/`ackEpoch`/`cacheEpoch`/`SendAck`),
+per-observer death (`gone`/`pruned`/`Prune`), and the per-slot drop-epoch (`slotEpoch`) —
+and tests three increasingly sophisticated **implementable** epoch mechanisms. **All three
+are machine-DISPROVEN UNSOUND** (each has its own demo `.cfg`, expected to FAIL on a safety
+invariant; gated behind the new modes so the four original configs stay byte-identical —
+MeshAgree still 865,558 distinct):
+
+- **AsyncAckStale** (`_AsyncAckStale.cfg`): in-flight ack, **no** epoch freshness gate →
+  unsound. The control showing the epoch is load-bearing.
+- **AsyncAckGossip** (`_AsyncAckGossip.cfg`): in-flight ack + a **passive gossip-epoch**
+  freshness gate — *exactly the S46 wire epoch, consumed by comparing the ack's epoch
+  against the gossip cache* → unsound. The epoch-bump **gossip races the observer's lock**:
+  an observer that has not yet received the bump still sees `ackEpoch == cacheEpoch`, trusts
+  its stale-high ack, and locks above the eventual freeze (the S44 corroborate-then-drop
+  race, now at the epoch layer).
+- **AsyncAckTwoPhase** (`_AsyncAckTwoPhase.cfg`): in-flight ack + an **active two-phase**
+  announce/HOLD-commit commitment (the lowering peer announces its epoch bump and holds its
+  freeze until every folding observer has heard it) → **still unsound**, via the
+  **departed-low race** that per-observer death exposes: the low-receipt origin dies and is
+  pruned from the *victim's* fold while the *relay* still folds it and adopts its low, so the
+  victim — having forgotten the origin's low — advances+discards above the eventual freeze.
+  (An earlier variant also fell to a **link-heal race**: a partition-hold is unsound because
+  partitions heal.)
+
+The discharge of idealization **(b)** is the key insight: under MeshAgree's *synchronized*
+death the low-receipt origin is pruned from **every** fold at once, so no relay ever adopts
+its low while a victim has lost it — which is precisely why the idealized MeshAgree PASSES
+and every faithful async model does not. **Conclusion (machine-backed): the S46 passively-
+gossiped drop-epoch is NECESSARY but NOT SUFFICIENT on the player side.** The production
+`src/` consumer must therefore *not* be implemented as a passive gossip-epoch comparison in
+`remote_slot_confirmed_bound`; the sound implementable mechanism must additionally have the
+relay report its **pessimistic queue-min** (surface a folded low immediately, not its
+committed freeze), use a **fresh ack postdating the observer's intent** (no reuse of a stale
+ack), and **not** rely on a partition-hold. Pinning that combined mechanism is the
+precisely-scoped follow-up; the MeshAgree POLICY positive still stands as the idealized sound
+aggregation rule.
+
 **Safety:** `NoConfirmedDivergence` (no two alive survivors permanently — both
 window-locked — disagree on the dropped slot's recorded confirmed value);
 `LockedRecordMatchesFreeze` (a mesh-agreed survivor's locked record equals the agreed
 freeze value); plus `FreezeNeverBelowGlobalMin` and `RecordedSourceInRange` sanity
 invariants. **Liveness:** `ConfirmationProgresses` (every alive survivor eventually
-confirms to the living mesh floor; partitions heal monotonically). The four configs
-together are the machine-checked arbitration: the residual is real (Baseline), the
-dead-survivor tombstone regresses liveness (Tombstone), the cache-only no-wire
-shortcut is unsound via the corroborate-then-drop race (InheritedFloor), and the
-mesh-acked-floor design is sound (MeshAgree). The MeshAgree config is the design a
-future production red-green cycle should implement — and the InheritedFloor result is
-why it cannot be done without the wire piece: it needs a per-slot ack/epoch
-(fresh-ack round + drop-epoch commitment) on connect-status gossip, not passive
-gossip corroboration.
+confirms to the living mesh floor; partitions heal monotonically). The seven configs
+together are the machine-checked arbitration. The original four establish the POLICY:
+the residual is real (Baseline), the dead-survivor tombstone regresses liveness
+(Tombstone), the cache-only no-wire shortcut is unsound via the corroborate-then-drop
+race (InheritedFloor), and the mesh-acked-floor *policy* is sound (MeshAgree). The three
+S47 modes establish that the policy's IMPLEMENTABLE realizations are subtle: discharging
+MeshAgree's instantaneous-fresh-ack and synchronized-death idealizations breaks safety
+for the naive (Stale), the passive-gossip-epoch (Gossip — i.e. the landed S46 wire epoch
+consumed by gossip comparison), and the active two-phase (TwoPhase) mechanisms alike. Net:
+the wire ack/epoch is **necessary** (InheritedFloor) but the passive gossip epoch is **not
+sufficient** (Gossip); the sound `src/` consumer needs a fresh-ack *round* postdating the
+observer's intent + a pessimistic queue-min report + no partition-hold — a precisely-scoped
+follow-up the S47 ladder pins.
 
 ### PeerDrop.tla
 
@@ -437,6 +485,9 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `SpectatorFailover.cfg` | HOSTS={1,2,3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — canonical=min(live), liveness) | ~96,800 distinct states (~446,000 generated), ~6s single worker |
 | `DoubleFailureRelay.cfg` | SURVIVORS={a,b,c}, MAX_FRAME=3, WINDOW=1, RECEIPTS={0,3}, FIX_MODE="MeshAgree" (no symmetry — liveness; links monotone-heal, weak fairness) | ~865,600 distinct states (~3.88M generated), ~2min single worker |
 | `DoubleFailureRelay_InheritedFloor.cfg` (demo, expected FAIL — safety) | same constants, FIX_MODE="InheritedFloor" (cache-only no-wire shortcut) | `NoConfirmedDivergence` violated in ~2min (corroborate-then-drop race) |
+| `DoubleFailureRelay_AsyncAckStale.cfg` (S47 demo, expected FAIL — safety) | same constants + EPOCH_MAX=2, FIX_MODE="AsyncAckStale" (in-flight ack, no epoch gate) | safety violated (`LockedRecordMatchesFreeze`) — the no-gate control |
+| `DoubleFailureRelay_AsyncAckGossip.cfg` (S47 demo, expected FAIL — safety) | same constants + EPOCH_MAX=2, FIX_MODE="AsyncAckGossip" (passive gossip-epoch gate = the S46 wire epoch) | safety violated — the epoch-bump gossip races the observer's lock |
+| `DoubleFailureRelay_AsyncAckTwoPhase.cfg` (S47 demo, expected FAIL — safety) | same constants + EPOCH_MAX=2, FIX_MODE="AsyncAckTwoPhase" (active two-phase announce/HOLD-commit) | `NoConfirmedDivergence` violated (~5.4M distinct, ~8min) — the departed-low race per-observer death exposes |
 
 **Note on NULL_FRAME:** TLC config files don't support negative numbers,
 so we use `NULL_FRAME = 999` as a sentinel value instead of -1.
@@ -535,7 +586,7 @@ These specifications model the key algorithms from:
 | `TimeSync` | `src/time_sync.rs` (TimeSync; `advance_frame`, `average_frame_advantage`) |
 | `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
 | `SpectatorFailover` | `src/sessions/p2p_spectator_session.rs` (`merge_connection_status`, `converged_drop_status`, `converge_latched_drop_status`, `reactivation_provenance`, `witness_host_drop_reports`, `consume_drop_witnesses`, `witness_adopted_drop`, `commit_canonical_snapshot`, `host_drop_witness`, `host_connect_status`) |
-| `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`); models the N≥4 residual the in-process test `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors` characterizes. The MeshAgree fix is a *design* (mesh-acked-floor / per-slot ack-epoch) for a future production red-green cycle — not yet implemented in `src/`; the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary |
+| `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`); models the N≥4 residual the in-process test `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors` characterizes. The MeshAgree fix is a *design* (mesh-acked-floor / per-slot ack-epoch) for a future production red-green cycle — not yet implemented in `src/`; the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary; the S47 ladder (AsyncAckStale/Gossip/TwoPhase) proves the landed S46 passive gossip-epoch is *not sufficient* to consume in `remote_slot_confirmed_bound` — the sound consumer needs a fresh-ack round postdating the observer's intent + a pessimistic queue-min report + no partition-hold |
 
 ## Extending the Specifications
 

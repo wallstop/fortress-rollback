@@ -187,14 +187,51 @@ CONSTANTS
     NULL_FRAME,    \* sentinel "no frame" (-1 in impl)
     WINDOW,        \* prediction window: frames > bound - WINDOW are still re-rollable
     RECEIPTS,      \* allowed per-survivor receipts of the dropped slot (adversarial at Init)
-    FIX_MODE       \* "Baseline" | "Tombstone" | "MeshAgree" | "InheritedFloor"
+    FIX_MODE,      \* "Baseline" | "Tombstone" | "MeshAgree" | "InheritedFloor"
+                   \*   | "AsyncAckTwoPhase" | "AsyncAckStale" (S45 — in-flight ack + per-observer death)
+    EPOCH_MAX      \* (AsyncAckTwoPhase/Stale) max per-slot drop-epoch generation (small, e.g. 2)
 
 ASSUME SURVIVORS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
 ASSUME NULL_FRAME \notin 0..MAX_FRAME
 ASSUME WINDOW \in Nat /\ WINDOW >= 1
 ASSUME RECEIPTS \subseteq (0..MAX_FRAME) /\ RECEIPTS # {}
-ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree", "InheritedFloor"}
+ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree", "InheritedFloor",
+                     "AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase"}
+ASSUME EPOCH_MAX \in Nat
+
+\* The three S47 modes that discharge the MeshAgree idealizations (a) instantaneous-
+\* fresh-ack and (b) synchronized-death by modeling a CONCRETE in-flight ack round +
+\* per-observer (async) death. They form a soundness LADDER of three increasingly
+\* sophisticated IMPLEMENTABLE epoch mechanisms, ALL machine-DISPROVEN UNSOUND — the
+\* central S47 finding (each has its own demo .cfg expected to FAIL on a safety invariant):
+\*   - AsyncAckStale  : in-flight ack, NO epoch freshness gate           -> UNSOUND.
+\*   - AsyncAckGossip : in-flight ack + PASSIVE gossip-epoch freshness gate
+\*                      (the S46 wire epoch, compared against the gossip cache)
+\*                                                                       -> UNSOUND
+\*                      (the epoch-bump gossip RACES the observer's lock).
+\*   - AsyncAckTwoPhase : in-flight ack + the gossip-epoch gate + a TWO-PHASE
+\*                      announce/HOLD-commit COMMITMENT (the lowering peer announces its
+\*                      epoch bump and HOLDS its freeze until every folding observer has
+\*                      heard it)                                        -> UNSOUND
+\*                      (the DEPARTED-LOW race: per-observer death lets the relay adopt the
+\*                      dead origin's low while the victim, having pruned the origin, has
+\*                      forgotten it — the S44 InheritedFloor obstruction, now structural).
+\* The discharge of idealization (b) is itself the key insight: under SYNCHRONIZED death
+\* (MeshAgree's idealization) the low-receipt origin is pruned from EVERY fold at once, so
+\* no relay adopts its low while a victim has lost it — which is why the idealized MeshAgree
+\* PASSES and every faithful async model here does not. The S46 passive drop-epoch is thus
+\* NECESSARY but NOT SUFFICIENT on the player side; the sound implementable mechanism (relay
+\* reports PESSIMISTIC queue-min + FRESH ack postdating intent + no partition-hold) is the
+\* precisely-scoped follow-up. The MeshAgree POLICY positive (default cfg) still stands.
+\* AsyncMode gates ALL the new per-observer-death + in-flight-ack machinery so the four
+\* original modes stay state-identical (their new variables stay pinned at Init forever).
+AsyncMode == FIX_MODE \in {"AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase"}
+
+\* The two-phase announce/HOLD-commit mechanism (the `announced` variable + the
+\* AnnounceLower action + the LowerSafe gate on the lowering actions). The strongest of the
+\* three disproven async candidates — still UNSOUND via the departed-low race.
+TwoPhase == FIX_MODE = "AsyncAckTwoPhase"
 
 Frame == {NULL_FRAME} \union (0..MAX_FRAME)
 
@@ -219,14 +256,52 @@ VARIABLES
                    \*   (NULL = none). While non-NULL, s must not confirm D past floor[s]. Snapshotted
                    \*   SYNCHRONOUSLY when a CONNECTED folded source leaves s's fold (Die), from that
                    \*   source's last cached term — the production "do not forget a departed low term."
-    corrob         \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]] (InheritedFloor mode): corrob[s][o] = since
+    corrob,        \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]] (InheritedFloor mode): corrob[s][o] = since
                    \*   floor[s] was armed, o sent s FRESH gossip (a Gossip event, NOT a stale cache read)
                    \*   reporting D CONNECTED above floor[s]. Releasing floor[s] requires every alive
                    \*   folded source to corroborate — the event-driven "fresh ack" that closes the
                    \*   S42 instantaneous-ack idealization without reading any peer's true receipt.
+    \* ----- S45 (AsyncAckTwoPhase / AsyncAckStale) machinery; pinned at Init in the other modes -----
+    gone,          \* [SURVIVORS -> BOOLEAN]: s has ACTUALLY stopped (true death). Discharges
+                   \*   idealization (b): unlike the global `alive` flag, death is observed
+                   \*   per-observer via `pruned` (below) at skewed times. `gone[s]` is the ground
+                   \*   truth; gossip/ack SEND from s requires `~gone[s]`.
+    pruned,        \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]]: pruned[obs][src] = obs has timed-out and
+                   \*   pruned src from its own fold. May flip TRUE only once gone[src] (the disconnect
+                   \*   timeout), independently per observer — different observers prune at skewed times
+                   \*   (the per-observer death idealization (b)). In the async modes the folds iterate
+                   \*   `~pruned[s][o]` instead of the global `alive[o]`.
+    slotEpoch,     \* [SURVIVORS -> 0..EPOCH_MAX]: s's per-slot drop generation. BUMPED whenever s
+                   \*   strictly LOWERS its floor (DetectDrop, or a lowering UpdateDisconnects). The
+                   \*   epoch is what turns an ack into a COMMITMENT: an ack carrying epoch E asserts
+                   \*   "I will not be below my floor for epoch E"; a later floor-lower bumps to E+1 and
+                   \*   the old ack is superseded.
+    ackFloor,      \* [SURVIVORS -> [SURVIVORS -> Frame]]: ackFloor[obs][src] = obs's last-RECEIVED ack
+                   \*   floor from src (src's PeerFloor at the moment SendAck fired). In-flight latency:
+                   \*   src may then LOWER its floor without a new SendAck, leaving this stale-HIGH.
+    ackEpoch,      \* [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]: epoch carried by that last ack
+                   \*   (src's slotEpoch at SendAck time). Freshness gate: the ack is fresh iff this
+                   \*   equals obs's gossip-tracked latest epoch cacheEpoch[obs][src].
+    cacheEpoch,    \* [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]: obs's gossip-tracked latest epoch from
+                   \*   src (merged monotone-up in Gossip). AsyncAckGossip/Commit count an ack as fresh
+                   \*   only when ackEpoch >= cacheEpoch; AsyncAckStale ignores this gate.
+    announced      \* [SURVIVORS -> Frame] (AsyncAckTwoPhase two-phase only): the pending-low frame s has
+                   \*   ANNOUNCED it will lower to (NULL = nothing pending). On AnnounceLower s bumps +
+                   \*   gossips its drop-epoch and PUBLISHES this pending-low as its reported floor
+                   \*   (PeerFloor reads it), so any FRESH re-ack already carries the low — and the
+                   \*   COMMIT (DetectDrop / lowering UpdateDisconnects) is gated on LowerSafe (every
+                   \*   folding observer has heard the epoch bump or is partitioned/holding), so an
+                   \*   observer with a not-yet-refreshed stale-HIGH ack has already gone stale-and-held
+                   \*   before s actually lowers. Pinned NULL in every non-AsyncAckTwoPhase mode.
 
 vars == <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
-          link, bound, recSrc, floor, corrob>>
+          link, bound, recSrc, floor, corrob,
+          gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
+
+\* The S47 async variables, as a tuple — left UNCHANGED by every original-mode action
+\* (so the four original modes keep them pinned at their Init values, contributing a
+\* factor of 1 to the state space). The async actions touch them explicitly.
+asyncVars == <<gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
 
 (***************************************************************************)
 (* Min over a non-empty set of integers. CHOOSE ranges over integer frame    *)
@@ -263,11 +338,20 @@ Committed(s, g) == recSrc[s][g] # NULL_FRAME
 (* fix additionally retains a dead survivor's last gossiped term for a          *)
 (* not-yet-mesh-agreed slot (the proposal under test).                          *)
 (***************************************************************************)
+(***************************************************************************)
+(* "o is in s's fold" — production's `endpoint.is_running()` membership. In the *)
+(* four original modes this is the GLOBAL alive flag (idealization (b),          *)
+(* synchronized death). In the S45 async modes it is s's OWN per-observer prune   *)
+(* view `~pruned[s][o]` (death is observed at skewed times). Gating on AsyncMode  *)
+(* keeps the original four modes byte-identical (they never read `pruned`).       *)
+(***************************************************************************)
+InFold(s, o) == IF AsyncMode THEN ~pruned[s][o] ELSE alive[o]
+
 SlotMeshAgreed(s) ==
     \* s considers D mesh-agreed-disconnected: s locally disconnected AND no
     \* folded running peer still reports it connected (the (true,false,_) arm).
     /\ localDisc[s]
-    /\ \A o \in SURVIVORS \ {s} : alive[o] => cacheDisc[s][o]
+    /\ \A o \in SURVIVORS \ {s} : InFold(s, o) => cacheDisc[s][o]
 
 FoldedSources(s) ==
     \* Tombstone (candidate fix #2): retain a DEAD survivor's last gossiped term
@@ -277,9 +361,13 @@ FoldedSources(s) ==
     \* only kept DISCONNECTED dead terms would not even fix the relay. Keeping
     \* the connected-low term is exactly what regresses liveness (a dead laggy
     \* peer's {connected, F} pins a still-LIVE slot's confirmation forever).
-    IF FIX_MODE = "Tombstone"
-    THEN { o \in SURVIVORS \ {s} : alive[o] \/ ~SlotMeshAgreed(s) }
-    ELSE { o \in SURVIVORS \ {s} : alive[o] }
+    CASE FIX_MODE = "Tombstone" ->
+            { o \in SURVIVORS \ {s} : alive[o] \/ ~SlotMeshAgreed(s) }
+      \* Async modes: per-observer fold membership (s's own prune view), discharging (b).
+      [] AsyncMode ->
+            { o \in SURVIVORS \ {s} : ~pruned[s][o] }
+      [] OTHER ->
+            { o \in SURVIVORS \ {s} : alive[o] }
 
 (***************************************************************************)
 (* remote_slot_confirmed_bound(s): the freeze-barrier bound on s's confirmed    *)
@@ -335,7 +423,12 @@ BaselineTarget(s) ==
 (* implement (a per-slot ack/epoch on connect-status gossip); the wire format is the        *)
 (* production choice this proof informs, not constrains.                                     *)
 (***************************************************************************)
-PeerFloor(o) == IF localDisc[o] THEN localFrame[o] ELSE recvThrough[o]
+PeerFloor(o) ==
+    \* AsyncAckTwoPhase two-phase: while o has ANNOUNCED a pending lower (but not yet
+    \* committed it), o already PUBLISHES that pending-low as its floor — so any fresh
+    \* (current-epoch) ack o gives already carries the low value, never the stale high.
+    IF TwoPhase /\ announced[o] # NULL_FRAME THEN announced[o]
+    ELSE IF localDisc[o] THEN localFrame[o] ELSE recvThrough[o]
 
 ReachableAlive(s) == { o \in SURVIVORS \ {s} : alive[o] /\ link[o][s] }
 
@@ -361,6 +454,66 @@ MeshAgreeTarget(s) ==
     \* Otherwise cap by the fresh mesh-acked floor (never lock past a frame the freeze
     \* could still converge below).
     ELSE Min2(BaselineTarget(s), MeshAckedFloor(s))
+
+(***************************************************************************)
+(* S47 — the IMPLEMENTABLE-mechanism LADDER (AsyncAckStale / AsyncAckGossip /          *)
+(* AsyncAckTwoPhase), ALL machine-disproven UNSOUND. This shared confirmation rule     *)
+(* discharges the two idealizations the MeshAgree proof assumed away:               *)
+(*                                                                                 *)
+(*   (a) INSTANTANEOUS FRESH ACK -> a CONCRETE in-flight ack round. Each observer  *)
+(*       o holds, per source p, the LAST-RECEIVED ack (ackFloor[o][p],            *)
+(*       ackEpoch[o][p]) — set by a SendAck(p,o) action reading p's CURRENT floor  *)
+(*       AT SEND TIME. p may then LOWER its floor WITHOUT a new ack, leaving o's    *)
+(*       ack stale-HIGH with an old epoch. This is the staleness MeshAgree's        *)
+(*       PeerFloor(o) read elided.                                                  *)
+(*   (b) SYNCHRONIZED DEATH -> per-observer prune (`pruned[o][p]`, fold membership *)
+(*       above), so observers disagree on who is alive during the timeout skew.     *)
+(*                                                                                  *)
+(* The DROP-EPOCH (slotEpoch) is what turns a snapshot into a COMMITMENT: an ack     *)
+(* carries the source's epoch; the source bumps its epoch when it lowers its floor;  *)
+(* the observer tracks the latest epoch it has heard via gossip (cacheEpoch).        *)
+(*                                                                                   *)
+(* AsyncAckTwoPhase advances a not-yet-mesh-agreed slot only to the min, over its       *)
+(* folded non-pruned peers p, of ackFloor[o][p], counting p ONLY IF the ack is        *)
+(* FRESH (ackEpoch[o][p] == cacheEpoch[o][p]) AND not stale-superseded                *)
+(* (ackEpoch[o][p] >= cacheEpoch[o][p]). If any folded non-pruned peer lacks a fresh   *)
+(* ack, or o is partitioned from any folded non-pruned peer, o HOLDS. AsyncAckStale     *)
+(* is identical EXCEPT it drops the freshness gate (acts on the last ack regardless     *)
+(* of epoch) — the control that proves the epoch commitment is load-bearing.            *)
+(***************************************************************************)
+AsyncReachableFolded(s) == { o \in SURVIVORS \ {s} : ~pruned[s][o] /\ link[o][s] }
+
+\* Every folded (non-pruned) peer is reachable to s — the ack round can complete.
+AsyncAllFoldedReachable(s) == \A o \in SURVIVORS \ {s} : ~pruned[s][o] => link[o][s]
+
+\* Is s's last ack from p FRESH (its epoch matches the latest epoch s has heard from p
+\* via gossip)? A stale ack carries an OLDER epoch than cacheEpoch (p has since lowered
+\* and re-gossiped a higher epoch that s merged). AsyncAckStale ignores this gate.
+AckFresh(s, p) ==
+    IF FIX_MODE = "AsyncAckStale" THEN TRUE
+    ELSE ackEpoch[s][p] >= cacheEpoch[s][p]
+
+\* The floor s may advance to from its non-pruned folded peers' acks: the min over the
+\* local view and every folded non-pruned peer's last ackFloor.
+AsyncAckedFloor(s) ==
+    MinI({PeerFloor(s)} \union {ackFloor[s][o] : o \in AsyncReachableFolded(s)})
+
+\* Does EVERY folded non-pruned peer have a FRESH ack? (Commit holds otherwise.)
+AsyncAllAcksFresh(s) ==
+    \A o \in SURVIVORS \ {s} : ~pruned[s][o] => AckFresh(s, o)
+
+AsyncAckTarget(s) ==
+    \* Partitioned from a folded non-pruned peer: hold (ack round cannot complete).
+    IF ~AsyncAllFoldedReachable(s) THEN CurBound(s)
+    \* Any folded non-pruned peer lacks a fresh, current-epoch ack: hold. (For
+    \* AsyncAckStale this is vacuously true, so the stale mode never holds on freshness —
+    \* it acts on the last ack and reintroduces the in-flight race.)
+    ELSE IF ~AsyncAllAcksFresh(s) THEN CurBound(s)
+    \* Mesh-agreed AND fully converged to the acked floor: excluded, advance to MAX.
+    ELSE IF SlotMeshAgreed(s) /\ localFrame[s] = AsyncAckedFloor(s) THEN MAX_FRAME
+    \* Otherwise cap by the (committed) acked floor — never lock past a frame a peer's
+    \* commitment says it may still converge below.
+    ELSE Min2(BaselineTarget(s), AsyncAckedFloor(s))
 
 (***************************************************************************)
 (* Candidate fix #4 ("InheritedFloor"): the CACHE-ONLY / NO-WIRE / PASSIVE-          *)
@@ -401,6 +554,7 @@ InheritedFloorTarget(s) ==
 BoundTarget(s) ==
     CASE FIX_MODE = "MeshAgree"      -> MeshAgreeTarget(s)
       [] FIX_MODE = "InheritedFloor" -> InheritedFloorTarget(s)
+      [] AsyncMode                   -> AsyncAckTarget(s)
       [] OTHER                       -> BaselineTarget(s)
 
 (***************************************************************************)
@@ -426,6 +580,13 @@ TypeInvariant ==
     /\ recSrc \in [SURVIVORS -> [0..MAX_FRAME -> Frame]]
     /\ floor \in [SURVIVORS -> Frame]
     /\ corrob \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
+    /\ gone \in [SURVIVORS -> BOOLEAN]
+    /\ pruned \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
+    /\ slotEpoch \in [SURVIVORS -> 0..EPOCH_MAX]
+    /\ ackFloor \in [SURVIVORS -> [SURVIVORS -> Frame]]
+    /\ ackEpoch \in [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]
+    /\ cacheEpoch \in [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]
+    /\ announced \in [SURVIVORS -> Frame]
 
 (***************************************************************************)
 (* Initial state. The warmup phase (repro Phase 1: all links open, all survivors *)
@@ -455,6 +616,19 @@ Init ==
     /\ recSrc = [s \in SURVIVORS |-> [g \in 0..MAX_FRAME |-> NULL_FRAME]]
     /\ floor = [s \in SURVIVORS |-> NULL_FRAME]
     /\ corrob = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
+    \* S45 async machinery. Deterministic at Init (single value) so the OTHER four modes,
+    \* which never touch these, keep a byte-identical state space (each contributes a
+    \* factor of 1). gone mirrors ~alive (all alive => none gone); pruned all FALSE
+    \* (nobody timed-out yet); slotEpoch 0 (no drop yet); the acks seeded from the
+    \* warmed-up true receipt at epoch 0 (post-warmup every survivor has a fresh ack of
+    \* every other's live receipt), and cacheEpoch 0.
+    /\ gone = [s \in SURVIVORS |-> FALSE]
+    /\ pruned = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
+    /\ slotEpoch = [s \in SURVIVORS |-> 0]
+    /\ ackFloor = [o \in SURVIVORS |-> [s \in SURVIVORS |-> recvThrough[s]]]
+    /\ ackEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
+    /\ cacheEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
+    /\ announced = [s \in SURVIVORS |-> NULL_FRAME]
 
 (***************************************************************************)
 (* Action: src gossips its CURRENT local view of the dropped slot to obs        *)
@@ -469,6 +643,7 @@ Gossip(src, obs) ==
     /\ src # obs
     /\ alive[src]
     /\ alive[obs]
+    /\ ~gone[src]                          \* async: a stopped survivor cannot SEND (no effect in other modes — gone pinned FALSE)
     /\ link[src][obs]
     /\ LET sd == localDisc[src]
            sf == localFrame[src]
@@ -491,7 +666,15 @@ Gossip(src, obs) ==
                           /\ newLast > floor[obs]
                        THEN [corrob EXCEPT ![obs][src] = TRUE]
                        ELSE corrob
-    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, link, bound, recSrc, floor>>
+          \* Async: gossip also carries src's CURRENT drop-epoch, merged monotone-UP into
+          \* obs's epoch tracker (obs learns the latest generation src has reached). This is
+          \* the gossip-delivered epoch the AsyncAckTwoPhase freshness gate compares against —
+          \* the floor of what the observer knows about src's commitment generation.
+          /\ cacheEpoch' = IF AsyncMode
+                           THEN [cacheEpoch EXCEPT ![obs][src] = Max2(cacheEpoch[obs][src], slotEpoch[src])]
+                           ELSE cacheEpoch
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, link, bound, recSrc, floor,
+                   gone, pruned, slotEpoch, ackFloor, ackEpoch, announced>>
 
 (***************************************************************************)
 (* Action: src directly concludes the dropped slot disconnected (an explicit    *)
@@ -515,17 +698,82 @@ QueueMin(s) ==
        THEN Min2(cacheMin, floor[s])
        ELSE cacheMin
 
+\* s's currently-PUBLISHED floor (what its gossip/acks carry), ignoring any pending
+\* two-phase announce.
+ReportedFloor(s) == IF localDisc[s] THEN localFrame[s] ELSE recvThrough[s]
+
+(***************************************************************************)
+(* (AsyncAckTwoPhase two-phase) LowerSafe — s may COMMIT a freeze-lowering only when      *)
+(* every observer that still folds s has, for the announced epoch, EITHER already heard  *)
+(* the bump (cacheEpoch caught up -> its stale-high ack is now stale -> it HOLDS on the   *)
+(* freshness gate) OR is partitioned from s (-> it HOLDS on reachability) OR already       *)
+(* holds an ack no higher than the pending low. This is the reverse half of the           *)
+(* fresh-ack ROUND: the announce (epoch bump + gossip + published pending-low) must have   *)
+(* REACHED every observer before s exposes the actual freeze, so no observer can still     *)
+(* lock against a stale-high ack. (Reading cacheEpoch[o][s] directly models the           *)
+(* production observer->source REVERSE ACK of the epoch — the commitment handshake the     *)
+(* S42 instantaneous-fresh-ack idealization elided; see the header.)                       *)
+(***************************************************************************)
+\* NOTE the ABSENCE of a `~link[s][o]` (partitioned -> o holds) disjunct: a partition-hold
+\* is UNSOUND because partitions HEAL — if s commits its freeze while o is partitioned and
+\* the link then heals before o hears the bump, o races on its stale pre-partition ack
+\* (the S47 link-heal counterexample). So s must wait until every folding observer has
+\* ACTUALLY heard the epoch bump (cacheEpoch caught up -> its stale-high ack is now stale
+\* -> it HOLDS on the freshness gate), or already holds an ack no higher than the pending
+\* low. A permanently-unreachable observer is instead removed by Prune once it is `gone`.
+LowerSafe(s) ==
+    \A o \in SURVIVORS \ {s} :
+        (~gone[o] /\ ~pruned[o][s]) =>
+            \/ cacheEpoch[o][s] >= slotEpoch[s]
+            \/ ackFloor[o][s] <= announced[s]
+
+(***************************************************************************)
+(* Action (AsyncAckTwoPhase two-phase only): ANNOUNCE a pending freeze-lowering — PHASE 1.  *)
+(* s bumps + (via Gossip) propagates its drop-epoch and PUBLISHES the pending-low frame    *)
+(* as its reported floor (PeerFloor reads `announced`), WITHOUT yet exposing the freeze in  *)
+(* its own confirmed records. A fresh re-ack during the window therefore already carries    *)
+(* the low; an un-refreshed observer's stale-high ack goes stale once the bump gossip lands. *)
+(* The COMMIT (DetectDrop / lowering UpdateDisconnects, PHASE 2) waits on LowerSafe.        *)
+(***************************************************************************)
+AnnounceLower(s) ==
+    /\ TwoPhase
+    /\ ~gone[s]
+    /\ announced[s] = NULL_FRAME
+    /\ QueueMin(s) < ReportedFloor(s)        \* a genuine lowering is pending
+    /\ slotEpoch[s] < EPOCH_MAX              \* bound the per-slot epoch (model finiteness)
+    /\ announced' = [announced EXCEPT ![s] = QueueMin(s)]
+    /\ slotEpoch' = [slotEpoch EXCEPT ![s] = slotEpoch[s] + 1]
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
+                   link, bound, recSrc, floor, corrob,
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
+
 DetectDrop(s) ==
     /\ alive[s]
     /\ ~localDisc[s]
+    \* AsyncAckTwoPhase two-phase gate: a freeze BELOW the published floor must be
+    \* announced (phase 1) and LowerSafe (every observer heard / partitioned) before it
+    \* commits; a freeze AT s's own receipt (no lower) commits freely.
+    /\ TwoPhase => (QueueMin(s) = recvThrough[s] \/ (announced[s] # NULL_FRAME /\ LowerSafe(s)))
     /\ localDisc' = [localDisc EXCEPT ![s] = TRUE]
-    /\ localFrame' = [localFrame EXCEPT ![s] = QueueMin(s)]
+    /\ localFrame' = [localFrame EXCEPT ![s] =
+           IF TwoPhase /\ announced[s] # NULL_FRAME THEN announced[s] ELSE QueueMin(s)]
     \* InheritedFloor: once s has its own disconnect view of D, the real freeze + frozen
     \* value govern, so the pre-disconnect connected-term floor is obsolete (subsumed).
     /\ floor' = IF FIX_MODE = "InheritedFloor" THEN [floor EXCEPT ![s] = NULL_FRAME] ELSE floor
     /\ corrob' = IF FIX_MODE = "InheritedFloor"
                  THEN [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]] ELSE corrob
-    /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound, recSrc>>
+    \* Async (a): this connected->disconnected transition LOWERS s's floor, so it BUMPS s's
+    \* per-slot drop-epoch — superseding every ack s has outstanding at the old generation.
+    \* In AsyncAckStale/Gossip the bump is here (single-phase). In AsyncAckTwoPhase the bump
+    \* already happened in AnnounceLower (phase 1), so it is NOT repeated here. (In the four
+    \* original modes slotEpoch stays pinned.)
+    /\ slotEpoch' = IF AsyncMode /\ ~TwoPhase
+                    THEN [slotEpoch EXCEPT ![s] = Min2(slotEpoch[s] + 1, EPOCH_MAX)]
+                    ELSE slotEpoch
+    \* AsyncAckTwoPhase: clear the consumed pending-low announcement.
+    /\ announced' = IF TwoPhase THEN [announced EXCEPT ![s] = NULL_FRAME] ELSE announced
+    /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound, recSrc,
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
 
 (***************************************************************************)
 (* Action: a survivor dies / is pruned (explicit remove_player by a peer, or a  *)
@@ -561,8 +809,14 @@ Die(s) ==
                         THEN [x \in SURVIVORS |-> FALSE]
                         ELSE corrob[o]]
                  ELSE corrob
+    \* Async (b): the death is the GROUND TRUTH stop (`gone`); unlike the synchronized
+    \* `alive` prune of the original modes, observers learn it at SKEWED times via the
+    \* separate per-observer `Prune` action below. (In the original modes `gone` stays
+    \* pinned FALSE — nothing reads it there, so they are byte-identical.)
+    /\ gone' = IF AsyncMode THEN [gone EXCEPT ![s] = TRUE] ELSE gone
     /\ UNCHANGED <<recvThrough, localDisc, localFrame, cacheDisc, cacheLast,
-                   link, bound, recSrc>>
+                   link, bound, recSrc, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch,
+                   announced>>
 
 (***************************************************************************)
 (* Action: a partitioned (directed) link HEALS. Partitions are modeled as          *)
@@ -584,7 +838,7 @@ Unblock(src, dst) ==
     /\ ~link[src][dst]
     /\ link' = [link EXCEPT ![src][dst] = TRUE]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc,
-                   cacheLast, bound, recSrc, floor, corrob>>
+                   cacheLast, bound, recSrc, floor, corrob, asyncVars>>
 
 (***************************************************************************)
 (* Action: update_player_disconnects — fold the caches, and if the dropped      *)
@@ -600,9 +854,16 @@ UpdateDisconnects(s) ==
     /\ FoldedDisc(s)                          \* some folded peer reports D disconnected
     /\ LET qmin == QueueMin(s)
            newDisc == TRUE
-           newFrame == IF localDisc[s] THEN Min2(localFrame[s], qmin) ELSE qmin
+           rawFrame == IF localDisc[s] THEN Min2(localFrame[s], qmin) ELSE qmin
+           \* AsyncAckTwoPhase commits to the ANNOUNCED pending-low (phase 2); otherwise the
+           \* freshly-folded value.
+           newFrame == IF TwoPhase /\ announced[s] # NULL_FRAME THEN announced[s] ELSE rawFrame
        IN /\ \/ ~localDisc[s]                  \* first adopt
              \/ qmin < localFrame[s]           \* or a strictly-lower converge-down
+          \* AsyncAckTwoPhase two-phase gate: a genuine lowering must be announced (phase 1) +
+          \* LowerSafe; an adopt at the already-published floor (no value lower) commits free.
+          /\ TwoPhase => (rawFrame = ReportedFloor(s)
+                          \/ (announced[s] # NULL_FRAME /\ LowerSafe(s)))
           /\ localDisc' = [localDisc EXCEPT ![s] = newDisc]
           /\ localFrame' = [localFrame EXCEPT ![s] = newFrame]
           /\ recSrc' = [recSrc EXCEPT ![s] =
@@ -620,7 +881,18 @@ UpdateDisconnects(s) ==
                       THEN [floor EXCEPT ![s] = NULL_FRAME] ELSE floor
           /\ corrob' = IF FIX_MODE = "InheritedFloor"
                        THEN [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]] ELSE corrob
-    /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound>>
+          \* Async (a): this fold only fires when it LOWERS s's floor (first-adopt
+          \* connected->disconnected, or a strictly-lower converge-down), so it BUMPS
+          \* s's drop-epoch. NOTE FOR PRODUCTION: the S46 `arm_status_epoch` bumps only on
+          \* connected<->disconnected, NOT on a freeze converge-DOWN; the converge-down bump
+          \* (single-phase in Stale/Gossip; in AnnounceLower for two-phase Commit) is a
+          \* concrete REQUIREMENT the src/ fix must add (see the header finding).
+          /\ slotEpoch' = IF AsyncMode /\ ~TwoPhase
+                          THEN [slotEpoch EXCEPT ![s] = Min2(slotEpoch[s] + 1, EPOCH_MAX)]
+                          ELSE slotEpoch
+          /\ announced' = IF TwoPhase THEN [announced EXCEPT ![s] = NULL_FRAME] ELSE announced
+    /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound,
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
 
 (***************************************************************************)
 (* Action: AdvanceConfirm — confirm the dropped slot up to the freeze-barrier    *)
@@ -641,7 +913,7 @@ AdvanceConfirm(s) ==
                      THEN RecordValue(s, g)
                      ELSE recSrc[s][g]]]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc,
-                   cacheLast, link, floor, corrob>>
+                   cacheLast, link, floor, corrob, asyncVars>>
 
 (***************************************************************************)
 (* Action (InheritedFloor mode): RELEASE the inherited floor once EVERY alive       *)
@@ -660,7 +932,52 @@ ReleaseFloor(s) ==
     /\ floor' = [floor EXCEPT ![s] = NULL_FRAME]
     /\ corrob' = [corrob EXCEPT ![s] = [x \in SURVIVORS |-> FALSE]]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
-                   link, bound, recSrc>>
+                   link, bound, recSrc, asyncVars>>
+
+(***************************************************************************)
+(* Action (async modes only): PER-OBSERVER PRUNE — obs's disconnect-timeout      *)
+(* observation of src's death. Discharges idealization (b): obs removes src from  *)
+(* its OWN fold (`pruned[obs][src]`) only after src has actually stopped           *)
+(* (`gone[src]`), and DIFFERENT observers fire this at SKEWED times (production's  *)
+(* per-endpoint disconnect timeout), so the synchronized global `alive` prune is   *)
+(* replaced by a per-observer view. A link-down-but-alive peer is NOT pruned       *)
+(* (production keeps it Running until the timeout) — only a genuinely `gone` peer  *)
+(* leaves a fold here, which is the death-driven fold-membership asymmetry the      *)
+(* residual exploits. WF (below) forces every gone src to eventually be pruned by   *)
+(* every obs, so folds converge.                                                   *)
+(***************************************************************************)
+Prune(obs, src) ==
+    /\ AsyncMode
+    /\ obs # src
+    /\ gone[src]
+    /\ ~pruned[obs][src]
+    /\ pruned' = [pruned EXCEPT ![obs][src] = TRUE]
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
+                   link, bound, recSrc, floor, corrob,
+                   gone, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
+
+(***************************************************************************)
+(* Action (async modes only): SEND-ACK — src answers obs's fresh floor-request     *)
+(* over a live link, depositing src's CURRENT floor and drop-epoch into obs's        *)
+(* per-source ack slot. This is the CONCRETE in-flight ack that discharges            *)
+(* idealization (a): MeshAgree's `PeerFloor(o)` read src's true CURRENT floor with    *)
+(* zero delay; here obs only ever holds the value src last SENT. THE STALENESS: src   *)
+(* may afterwards LOWER its floor (DetectDrop / converge-down) and bump its epoch      *)
+(* WITHOUT a new SendAck, leaving obs's ack stale-HIGH at an OLD epoch — exactly the   *)
+(* in-flight gap. A gone src cannot ack; obs requests only from peers still in its     *)
+(* fold (`~pruned[obs][src]`) and reachable. WF forces acks to eventually refresh.     *)
+(***************************************************************************)
+SendAck(src, obs) ==
+    /\ AsyncMode
+    /\ src # obs
+    /\ ~gone[src]
+    /\ ~pruned[obs][src]
+    /\ link[src][obs]
+    /\ ackFloor' = [ackFloor EXCEPT ![obs][src] = PeerFloor(src)]
+    /\ ackEpoch' = [ackEpoch EXCEPT ![obs][src] = slotEpoch[src]]
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
+                   link, bound, recSrc, floor, corrob,
+                   gone, pruned, slotEpoch, cacheEpoch, announced>>
 
 Next ==
     \/ \E src, obs \in SURVIVORS : Gossip(src, obs)
@@ -670,6 +987,11 @@ Next ==
     \/ \E s \in SURVIVORS : UpdateDisconnects(s)
     \/ \E s \in SURVIVORS : AdvanceConfirm(s)
     \/ \E s \in SURVIVORS : ReleaseFloor(s)
+    \* Async-only (guarded by AsyncMode / TwoPhase, so disabled — zero new states — in the
+    \* four original modes, keeping them byte-identical).
+    \/ \E obs, src \in SURVIVORS : Prune(obs, src)
+    \/ \E src, obs \in SURVIVORS : SendAck(src, obs)
+    \/ \E s \in SURVIVORS : AnnounceLower(s)
 
 (***************************************************************************)
 (* Fairness for the liveness property. WEAK fairness suffices because partitions    *)
@@ -691,6 +1013,13 @@ Fairness ==
     /\ \A s \in SURVIVORS : WF_vars(AdvanceConfirm(s))
     /\ \A s \in SURVIVORS : WF_vars(ReleaseFloor(s))
     /\ WF_vars(\E src, dst \in SURVIVORS : Unblock(src, dst))
+    \* Async-only liveness: every gone peer is eventually pruned by every observer
+    \* (folds converge), and acks eventually refresh (a held survivor re-requests and
+    \* re-hears a current-epoch floor). Vacuously satisfied in the original modes
+    \* (Prune/SendAck never enabled there), so the four modes' liveness is unchanged.
+    /\ \A obs, src \in SURVIVORS : WF_vars(Prune(obs, src))
+    /\ \A src, obs \in SURVIVORS : WF_vars(SendAck(src, obs))
+    /\ \A s \in SURVIVORS : WF_vars(AnnounceLower(s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
