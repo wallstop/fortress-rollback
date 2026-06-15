@@ -53,7 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. A reserved-slot
     endpoint whose synchronized-but-never-joined peer dies is re-armed on its disconnect timeout, so a
     fresh joiner session from the same address can always be served (a dead joiner cannot permanently
-    poison its slot's endpoint). Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
+    poison its slot's endpoint). Each such re-arm advances the endpoint's packet-filter `magic` as a
+    monotonic per-endpoint era counter, so a still-live peer from *any* recent era can never answer (and
+    wedge) the rebuilt handshake — collision is impossible across a 65535-rejoin window, not merely with
+    the immediately-previous era. Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
     time).
   - **N-peer meshes (3 or more machines) are supported end-to-end**, for both first-time joins of
     build-time reserved slots and re-joins/reconnections of gracefully-dropped slots: the serving host

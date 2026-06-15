@@ -914,22 +914,31 @@ impl<T: Config> UdpProtocol<T> {
     /// connection can leak into the new one, and it stays correct automatically if
     /// `new` gains or drops fields.
     ///
-    /// # Era fence (the rebuilt endpoint's magic is guaranteed fresh)
+    /// # Era fence (monotonic per-endpoint era counter)
     ///
-    /// The rebuilt endpoint must NEVER reuse the previous era's magic. If the
-    /// vacating peer is still live when the slot re-arms (a voluntary leave: the
-    /// session removed the player while the remote process keeps running briefly),
-    /// that peer still holds the OLD magic as its learned `remote_magic`. With a
-    /// reused magic it would accept and answer the rebuilt endpoint's sync
-    /// handshake; the rebuilt endpoint would then complete synchronization against
-    /// the doomed peer and lock `remote_magic` to it — permanently filtering out
-    /// the future rejoiner (a silent liveness blackhole). With a deterministic
-    /// `protocol_rng_seed`, naive reconstruction re-seeds identically and reuses
-    /// the magic EVERY time, so this path CONTINUES the endpoint's RNG stream
-    /// across the rebuild instead of re-seeding, and (for both seeded and
-    /// thread-local RNG) re-rolls until the magic differs from the previous era's
-    /// — deterministic configs stay fully reproducible, and the unseeded
-    /// 1-in-65535 organic magic reuse is excluded too.
+    /// The rebuilt endpoint must NEVER reuse a recent era's magic. If a vacating
+    /// peer is still live when the slot re-arms (a voluntary leave: the session
+    /// removed the player while the remote process keeps running briefly), that
+    /// peer still holds the OLD magic as its learned `remote_magic`. With a reused
+    /// magic it would accept and answer the rebuilt endpoint's sync handshake; the
+    /// rebuilt endpoint would then complete synchronization against the doomed peer
+    /// and lock `remote_magic` to it — permanently filtering out the future
+    /// rejoiner (a silent liveness blackhole).
+    ///
+    /// The fence is a **monotonic counter**: the rebuilt era's magic is the
+    /// previous era's magic plus one (wrapping past the reserved `0`). This is
+    /// strictly stronger than re-rolling a fresh random magic and excluding only
+    /// the *immediately-previous* value — it makes the magic distinct from EVERY
+    /// era within a 65535-rearm window, so a ghost from *any* recent era (not just
+    /// the last one) can never match. Recurrence is impossible until 65535 rearms
+    /// of the same slot alias, at no extra state and with no wire-format change
+    /// (the previous fence drove only the *adjacent* collision to zero and left a
+    /// ~1-in-65535 per-double-rearm multi-era residual). The **initial** magic
+    /// stays randomly drawn — so two unrelated endpoints do not share a counter
+    /// origin and a stale packet from an earlier *connection* to the same address
+    /// is still filtered — and only the rearm transition is monotonic. The RNG
+    /// stream is still carried across the rebuild so the unrelated sync-request IDs
+    /// stay reproducible under a deterministic `protocol_rng_seed` and never reset.
     ///
     /// # Errors
     ///
@@ -958,25 +967,24 @@ impl<T: Config> UdpProtocol<T> {
             self.time_sync_config,
         )?;
 
-        // Era fence (see the rustdoc): continue the deterministic RNG stream
-        // across the rebuild (instead of restarting it from the seed) and
-        // guarantee a fresh-era magic, so a still-live previous-era peer can
-        // never answer — and wedge — the rebuilt endpoint's handshake.
+        // Era fence (see the rustdoc): advance the magic as a MONOTONIC
+        // per-endpoint counter — the previous era's magic plus one, wrapping past
+        // the reserved `0`. This makes the rebuilt era's magic distinct from EVERY
+        // era within a 65535-rearm window (not merely the immediately-previous
+        // one), so a still-live peer from ANY recent era — which holds that era's
+        // magic as its learned `remote_magic` — can never answer, and wedge, the
+        // rebuilt endpoint's handshake. The RNG stream is still carried across the
+        // rebuild so the unrelated sync-request IDs stay reproducible under a
+        // deterministic `protocol_rng_seed` and never reset to the seed origin.
         let old_magic = self.magic;
         if self.protocol_rng.is_some() {
             rebuilt.protocol_rng = self.protocol_rng.take();
         }
-        let mut magic: u16 = match &mut rebuilt.protocol_rng {
-            Some(rng) => rng.gen(),
-            None => random(),
+        rebuilt.magic = match old_magic.wrapping_add(1) {
+            // `wrapping_add(1)` only reaches 0 from u16::MAX; the magic is never 0.
+            0 => 1,
+            next => next,
         };
-        while magic == 0 || magic == old_magic {
-            magic = match &mut rebuilt.protocol_rng {
-                Some(rng) => rng.gen(),
-                None => random(),
-            };
-        }
-        rebuilt.magic = magic;
 
         *self = rebuilt;
         self.synchronize()
@@ -5756,15 +5764,16 @@ mod tests {
         assert_ne!(protocol.magic, 0, "Magic number should never be zero");
     }
 
-    /// Session-33 round-6 era-fence pin: a deterministic (seeded) endpoint
-    /// that re-arms for a hot-join rejoin must NOT reuse the previous era's
-    /// magic. A naive rebuild re-seeds identically and reuses it — a
+    /// Session-33 round-6 era-fence pin (adjacent-era case): a deterministic
+    /// (seeded) endpoint that re-arms for a hot-join rejoin must NOT reuse the
+    /// previous era's magic. A naive rebuild re-seeds identically and reuses it — a
     /// still-live vacating peer (which holds the old magic as its learned
-    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks
-    /// onto the doomed peer, and the real rejoiner is filtered out forever
-    /// (the deterministic form of the unseeded 1-in-65535 organic magic
-    /// reuse). The fence must also stay deterministic: identical seed +
-    /// identical history must yield the identical rebuilt magic.
+    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks onto
+    /// the doomed peer, and the real rejoiner is filtered out forever. The fence
+    /// must also stay deterministic: identical seed + identical history must yield
+    /// the identical rebuilt magic. (The monotonic counter that now backs the fence
+    /// also closes the *non-adjacent* multi-era case — see
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`.)
     #[test]
     #[cfg(feature = "hot-join")]
     fn rearm_for_rejoin_era_fence_never_reuses_previous_magic_and_stays_deterministic() {
@@ -5811,6 +5820,281 @@ mod tests {
             protocol1.state,
             ProtocolState::Synchronizing,
             "rearm re-enters Synchronizing"
+        );
+    }
+
+    /// Multi-era magic-recurrence hardening (`N-PLAYER-DESYNC-AUDIT.md`): the era
+    /// fence is a **monotonic** per-endpoint counter, so across many rejoins the
+    /// rebuilt magic never recurs within a 65535-rearm window — not merely
+    /// differing from the *immediately-previous* era. The pre-fix fence re-rolled
+    /// a fresh random magic and excluded **only the single previous era's value**,
+    /// so a non-adjacent era could reuse an earlier era's magic; a still-live ghost
+    /// peer from that earlier era (holding it as its learned `remote_magic`) would
+    /// then answer the rebuilt handshake and wedge the rejoin. This test drives far
+    /// more rejoins than the u16 birthday bound (~300), so the pre-fix random fence
+    /// reuses an earlier era's magic with overwhelming probability (**RED**), while
+    /// the monotonic fence is collision-free by construction (**GREEN**). This is
+    /// the red-green security-invariant pin for the fix.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(0x00C0_FFEE),
+        );
+
+        // Well above the u16 birthday threshold (~300): the pre-fix random re-roll
+        // collides with an earlier era with > 99.9% probability over this many
+        // rejoins (P(no collision) ~ e^-8), while the monotonic counter never does
+        // (it walks 65535 distinct non-zero values before any repeat).
+        const REJOINS: usize = 1024;
+
+        let mut seen = std::collections::HashSet::with_capacity(REJOINS + 1);
+        seen.insert(protocol.magic);
+        let mut prev = protocol.magic;
+        for i in 0..REJOINS {
+            protocol
+                .rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            let magic = protocol.magic;
+            assert_ne!(magic, 0, "magic stays non-zero at rejoin {i}");
+            assert_ne!(
+                magic, prev,
+                "magic differs from the immediately-previous era at rejoin {i}"
+            );
+            assert!(
+                seen.insert(magic),
+                "era fence breached: magic {magic} recurred within {REJOINS} rejoins \
+                 (a still-live ghost from that earlier era could answer it) at rejoin {i}"
+            );
+            prev = magic;
+        }
+    }
+
+    /// The monotonic era fence advances the magic by exactly one (wrapping past the
+    /// reserved `0`) on every rejoin — a deterministic, self-evidently
+    /// collision-free step that stays reproducible under a seed. RED on the pre-fix
+    /// random re-roll (which equals `old + 1` only by a 1-in-65535 fluke).
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_magic_advances_by_monotonic_step() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(7),
+        );
+        for i in 0..8 {
+            let old = protocol.magic;
+            protocol
+                .rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            let expected = match old.wrapping_add(1) {
+                0 => 1,
+                next => next,
+            };
+            assert_eq!(
+                protocol.magic, expected,
+                "rejoin {i}: magic advances by a monotonic step (old {old} -> {expected})"
+            );
+        }
+    }
+
+    /// Wrap-around pin for the monotonic era fence: when the previous era's magic
+    /// is `u16::MAX`, the next era must skip the reserved `0` and land on `1` — a
+    /// `0` would violate the never-zero magic invariant and, on the wire, collide
+    /// with the "magic not yet learned" sentinel (`remote_magic == 0` accepts any
+    /// packet). The boundary is forced directly (walking 65535 real rejoins would
+    /// be far too slow). This pins the `0 => 1` arm: mutating it to `0 => 0` turns
+    /// this test RED.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_magic_wraps_past_zero_to_one() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(1),
+        );
+        protocol.magic = u16::MAX;
+        protocol
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+        assert_eq!(
+            protocol.magic, 1,
+            "u16::MAX + 1 must skip the reserved 0 and land on 1"
+        );
+        assert_ne!(protocol.magic, 0, "the wrapped era magic is never zero");
+
+        // The counter keeps stepping monotonically from there.
+        protocol
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+        assert_eq!(
+            protocol.magic, 2,
+            "the counter continues monotonically after the wrap"
+        );
+    }
+
+    /// The monotonic magic no longer consults the protocol RNG, so the RNG carry
+    /// across the rebuild (`rebuilt.protocol_rng = self.protocol_rng.take()`) now
+    /// exists solely to keep the unrelated sync-request IDs reproducible and
+    /// flowing: a rearmed seeded endpoint CONTINUES its stream rather than
+    /// resetting to the seed origin. This pins that carry as load-bearing — a
+    /// rearmed endpoint's post-rearm sync-request IDs differ from a freshly-built
+    /// endpoint with the same seed (proving the stream did not reset), while two
+    /// seeded twins with identical history produce identical post-rearm streams
+    /// (proving determinism). Deleting the carry (re-seeding on rebuild) makes the
+    /// rearmed stream reset to the origin and turns the inequality RED.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_continues_rng_stream_for_sync_requests() {
+        let seed = 4242u64;
+        let mk = || -> UdpProtocol<TestConfig> {
+            create_protocol_with_config(
+                vec![PlayerHandle::new(0)],
+                2,
+                1,
+                8,
+                SyncConfig::default(),
+                ProtocolConfig::deterministic(seed),
+            )
+        };
+
+        // A fresh endpoint's sync-request IDs come from the seed origin.
+        let mut fresh = mk();
+        fresh.synchronize().expect("synchronize");
+        let fresh_requests = fresh.sync_random_requests.clone();
+        assert!(
+            !fresh_requests.is_empty(),
+            "synchronize populates sync-request IDs"
+        );
+
+        // A rearmed endpoint first advances its stream (the pre-rearm synchronize),
+        // then carries it across the rebuild, so its post-rearm IDs come from the
+        // advanced position rather than the origin.
+        let mut rearmed = mk();
+        rearmed
+            .synchronize()
+            .expect("pre-rearm synchronize advances the stream");
+        rearmed
+            .rearm_for_rejoin()
+            .expect("rearm carries the stream");
+        let rearmed_requests = rearmed.sync_random_requests.clone();
+
+        // Determinism: an identical-history twin yields the identical stream.
+        let mut twin = mk();
+        twin.synchronize().expect("synchronize");
+        twin.rearm_for_rejoin().expect("rearm");
+        assert_eq!(
+            rearmed_requests, twin.sync_random_requests,
+            "identical seed + history => identical post-rearm sync-request IDs"
+        );
+
+        // Load-bearing carry: the rearmed stream did NOT reset to the seed origin.
+        assert_ne!(
+            rearmed_requests, fresh_requests,
+            "the carried RNG stream continues past the pre-rearm draws (it does not reset to the seed origin)"
+        );
+    }
+
+    /// End-to-end consequence of the monotonic era fence (the audit's "the
+    /// stale-era packet is still filtered AND a live packet is not"): a still-live
+    /// ghost peer that synchronized against an EARLY era of our endpoint (and so
+    /// holds that era's magic as its learned `remote_magic`) filters out every
+    /// packet the rebuilt endpoint now sends under its current-era magic — so it
+    /// can never answer and wedge the rejoin — while a packet carrying the magic it
+    /// actually learned is still accepted (the filter discriminates, it does not
+    /// blanket-drop). The red-green proof that the current era is distinct from
+    /// every recent era lives in
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`; this test
+    /// pins the wire-level behaviour that distinctness buys. (It passes on both
+    /// pre- and post-fix code — the filter logic is unchanged; only the upstream
+    /// era distinctness the fix guarantees is what this behaviour relies on.)
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_ghost_from_early_era_filters_rebuilt_endpoints_current_magic() {
+        // Our endpoint walks through several eras of rejoin.
+        let mut ours: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(99),
+        );
+        let early_era_magic = ours.magic;
+        let mut prior = vec![early_era_magic];
+        for _ in 0..5 {
+            ours.rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            prior.push(ours.magic);
+        }
+        let current_magic = ours.magic;
+        // The current era is distinct from EVERY prior era (the fence's guarantee).
+        let priors_before_current = &prior[..prior.len() - 1];
+        assert!(
+            !priors_before_current.contains(&current_magic),
+            "current era magic {current_magic} must differ from all prior eras {priors_before_current:?}"
+        );
+
+        // A ghost peer that synchronized against our EARLIEST era, so it holds that
+        // era's magic as its learned `remote_magic`.
+        let mut ghost: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        ghost.synchronize().unwrap();
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *ghost.sync_random_requests.iter().next().unwrap();
+            ghost.on_sync_reply(
+                MessageHeader {
+                    magic: early_era_magic,
+                },
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+        assert_eq!(ghost.remote_magic, early_era_magic);
+
+        // The rebuilt endpoint's current-era packet is FILTERED by the ghost: no
+        // observable state change (the ghost cannot answer it -> cannot wedge us).
+        ghost.send_queue.clear();
+        let last_recv_before = ghost.last_recv_time;
+        ghost.handle_message(&Message {
+            header: MessageHeader {
+                magic: current_magic,
+            },
+            body: MessageBody::KeepAlive,
+        });
+        assert!(
+            ghost.send_queue.is_empty(),
+            "ghost must filter the rebuilt endpoint's current-era magic"
+        );
+        assert_eq!(
+            ghost.last_recv_time, last_recv_before,
+            "a filtered packet does not refresh the ghost's recv clock"
+        );
+
+        // The filter discriminates rather than blanket-dropping: a packet carrying
+        // the magic the ghost actually learned is still accepted.
+        std::thread::sleep(Duration::from_millis(1));
+        ghost.handle_message(&Message {
+            header: MessageHeader {
+                magic: early_era_magic,
+            },
+            body: MessageBody::KeepAlive,
+        });
+        assert!(
+            ghost.last_recv_time > last_recv_before,
+            "ghost still accepts a packet carrying its learned magic"
         );
     }
 
