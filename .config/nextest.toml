@@ -36,18 +36,26 @@ max-threads = 1
 # UDP loopback. The extreme/flaky chaos scenarios AND the long-running endurance
 # / high-latency sessions are `#[ignore]`d and only run in the nightly network
 # suite (.github/workflows/ci-network-nightly.yml) under the dedicated
-# `ci-network-nightly` profile below. The remaining per-PR `multi_process` tests
-# are short smoke tests (~100 frames; they normally finish in seconds) but each
-# carries an internal peer-level timeout of up to 120s as a safety net, and the
-# harness adds ~30s on top before giving up with diagnostics. The per-test
-# budget below (period 60s, terminate-after 3 = 180s) therefore sits just ABOVE
-# that ~150s harness ceiling, so a genuinely hung peer is reported by the
-# harness (with full diagnostics) rather than being SIGKILLed early by nextest,
-# while a wedged test still cannot block PR CI for the old 12 minutes.
+# `ci-network-nightly` profile below.
+#
+# The per-PR `multi_process` tests are NON-ADVERSARIAL real-UDP smoke tests:
+# the `spawn_peer` smoke-tier guard rejects any scenario that injects
+# packet loss (the dominant driver of real-time CI starvation), so every per-PR
+# scenario makes guaranteed forward progress and finishes in a few seconds even
+# on a loaded runner. Determinism / progress-under-loss for the lossy scenarios
+# is proven deterministically (virtual time) in tests/network/in_process_chaos.rs.
+#
+# The per-test budget below (period 60s, terminate-after 3 = 180s) is a generous
+# safety ceiling. Every kept per-PR smoke test caps its internal peer timeout at
+# <= 90s, so even with the macOS x1.5 timing scale (apply_platform_timeout_scaling)
+# the worst-case harness ceiling is 90*1.5 + 30 = 165s -- BELOW this 180s budget.
+# A genuinely hung peer is therefore reported by the harness (with full
+# diagnostics) rather than being SIGKILLed early by nextest, while a wedged test
+# still cannot block PR CI for the old 12 minutes.
 [[profile.default.overrides]]
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
-slow-timeout = { period = "60s", terminate-after = 3 } # 180s: just above the ~150s harness ceiling
+slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s macOS-scaled harness ceiling
 
 [profile.default.junit]
 # Generate JUnit XML reports for CI integration
@@ -60,11 +68,12 @@ fail-fast = false                                      # Run all tests to see fu
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 # Per-PR multi_process budget mirrors the default profile (see the comment
-# above): 180s, just above the ~150s harness ceiling of the kept smoke tests.
+# above): 180s, above the 165s worst-case macOS-scaled harness ceiling of the
+# kept smoke tests (<=90s internal timeout * 1.5 + 30s).
 [[profile.ci.overrides]]
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
-slow-timeout = { period = "60s", terminate-after = 3 } # 180s: just above the ~150s harness ceiling
+slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s macOS-scaled harness ceiling
 
 # Nightly network profile - used ONLY by ci-network-nightly.yml via
 # `--profile ci-network-nightly --run-ignored ignored-only`. The ignored tests

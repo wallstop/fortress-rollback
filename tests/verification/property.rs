@@ -1881,9 +1881,14 @@ mod p2p_checksum_tests {
         }
     }
 
-    // Use synchronize_sessions from test_utils to avoid duplicating constants
+    // Shared sync helpers/constants from test_utils to avoid duplicating constants.
+    // `synchronize_sessions_deterministic` (virtual time, no real sockets/sleep) is
+    // used by `test_checksum_exchange_reaches_in_sync`; the remaining socket-creation
+    // -only tests below still use `bind_socket_with_retry`.
+    use crate::common::channel_socket::create_channel_pair;
     use crate::common::test_utils::{
-        bind_socket_with_retry, synchronize_sessions, SyncConfig, POLL_INTERVAL_DETERMINISTIC,
+        bind_socket_with_retry, synchronize_sessions_deterministic, SyncConfig,
+        POLL_INTERVAL_DETERMINISTIC,
     };
 
     /// Property: sync_health returns Pending when desync detection is off
@@ -2042,16 +2047,16 @@ mod p2p_checksum_tests {
     #[test]
     #[serial]
     fn test_checksum_exchange_reaches_in_sync() -> Result<(), FortressError> {
-        let port1 = get_test_port(13);
-        let port2 = get_test_port(14);
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port1);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port2);
         let clock = TestClock::new();
+
+        // In-memory channel sockets: fully deterministic transport, no real UDP,
+        // no port binding, no `thread::sleep`. `socket1` is at `addr1` (sends to
+        // `addr2`); `socket2` is at `addr2` (sends to `addr1`).
+        let (socket1, socket2, addr1, addr2) = create_channel_pair();
 
         // Use a small interval for faster testing
         let interval = 5;
 
-        let socket1 = bind_socket_with_retry(port1)?;
         let mut sess1 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
             .with_protocol_config(protocol_config(&clock))
@@ -2059,7 +2064,6 @@ mod p2p_checksum_tests {
             .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
             .start_p2p_session(socket1)?;
 
-        let socket2 = bind_socket_with_retry(port2)?;
         let mut sess2 = SessionBuilder::<TestConfig>::new()
             .with_desync_detection_mode(DesyncDetection::On { interval })
             .with_protocol_config(protocol_config(&clock))
@@ -2067,8 +2071,9 @@ mod p2p_checksum_tests {
             .add_player(PlayerType::Local, PlayerHandle::new(1))?
             .start_p2p_session(socket2)?;
 
-        // Synchronize sessions first using the helper from test_utils
-        synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())
+        // Synchronize sessions first using the deterministic helper from test_utils
+        // (advances the TestClock to drive sync retries; no real timers/sleeps).
+        synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
             .expect("Sessions should synchronize");
 
         assert_eq!(sess1.current_state(), SessionState::Running);

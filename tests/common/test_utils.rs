@@ -615,76 +615,9 @@ impl Default for SyncConfig {
     }
 }
 
-/// Synchronizes two P2P sessions and returns the number of iterations taken.
-///
-/// This helper ensures BOTH sessions are in the `Running` state before returning.
-/// The loop uses `||` (OR) in the condition because we want to continue while
-/// at least one session is NOT running — this is the correct logic per De Morgan's law.
-///
-/// # Returns
-/// - `Ok(iterations)` if both sessions synchronized successfully
-/// - `Err(FortressError)` if synchronization timed out
-#[allow(dead_code)]
-#[track_caller]
-pub fn synchronize_sessions<C: Config>(
-    sess1: &mut P2PSession<C>,
-    sess2: &mut P2PSession<C>,
-    config: &SyncConfig,
-) -> Result<usize, FortressError> {
-    let mut iterations = 0;
-    let start = Instant::now();
-
-    // Use || (OR) because we want to continue while EITHER session is not Running.
-    // Using && would exit as soon as ONE session is Running, which is incorrect.
-    while sess1.current_state() != SessionState::Running
-        || sess2.current_state() != SessionState::Running
-    {
-        // Check both iteration count AND time-based timeout for robustness.
-        // Time-based timeout is more reliable across different platforms (especially macOS CI).
-        if iterations >= config.max_iterations || start.elapsed() > SYNC_TIMEOUT {
-            // Use legacy InternalError for test code - it provides detailed debugging
-            // info that's useful when tests fail. Structured errors are preferred in
-            // production code, but test helpers benefit from rich context.
-            return Err(FortressError::InternalError {
-                context: format!(
-                    "Synchronization timed out after {} iterations ({:?}). \
-                     sess1 state: {:?}, sess2 state: {:?}",
-                    iterations,
-                    start.elapsed(),
-                    sess1.current_state(),
-                    sess2.current_state()
-                ),
-            });
-        }
-
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        iterations += 1;
-
-        // Small sleep to allow network layer to process messages.
-        // This is crucial on fast systems where tight loops may not give
-        // the OS enough time to deliver UDP packets.
-        thread::sleep(POLL_INTERVAL);
-    }
-
-    // Verify both are actually Running
-    assert_eq!(
-        sess1.current_state(),
-        SessionState::Running,
-        "Session 1 should be Running after synchronization"
-    );
-    assert_eq!(
-        sess2.current_state(),
-        SessionState::Running,
-        "Session 2 should be Running after synchronization"
-    );
-
-    Ok(iterations)
-}
-
 /// Synchronizes two P2P sessions using virtual time (no `thread::sleep`).
 ///
-/// This is the deterministic replacement for [`synchronize_sessions()`].
+/// This is the canonical deterministic synchronization helper.
 /// Instead of sleeping, it advances the test clock to trigger protocol
 /// retry timers, making synchronization fully deterministic regardless
 /// of system load or platform.
@@ -744,32 +677,9 @@ pub fn synchronize_sessions_deterministic<C: Config>(
     })
 }
 
-/// Performs robust polling of two sessions with sleep intervals.
-///
-/// This helper ensures the network layer has adequate time to process packets,
-/// which is crucial on systems with different scheduling behavior (e.g., macOS CI).
-/// Without proper sleep intervals between polls, tight loops may not give the
-/// OS enough time to deliver UDP packets.
-///
-/// # Arguments
-/// * `sess1`, `sess2` - The sessions to poll
-/// * `iterations` - Number of poll cycles (each cycle includes a sleep)
-#[allow(dead_code)]
-pub fn poll_with_sleep<C: Config>(
-    sess1: &mut P2PSession<C>,
-    sess2: &mut P2PSession<C>,
-    iterations: usize,
-) {
-    for _ in 0..iterations {
-        sess1.poll_remote_clients();
-        sess2.poll_remote_clients();
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
 /// Polls two sessions and advances virtual time (no `thread::sleep`).
 ///
-/// This is the deterministic replacement for [`poll_with_sleep()`].
+/// This is the canonical deterministic polling helper.
 /// Instead of sleeping between polls, it advances the test clock by
 /// [`POLL_INTERVAL_DETERMINISTIC`], making poll timing fully deterministic.
 ///
@@ -802,8 +712,8 @@ pub fn poll_with_advance<C: Config>(
 
 /// Drains synchronization events from sessions and returns them for inspection.
 ///
-/// This should be called after `synchronize_sessions` to clear any accumulated
-/// sync events before testing other functionality.
+/// This should be called after `synchronize_sessions_deterministic` to clear any
+/// accumulated sync events before testing other functionality.
 #[allow(dead_code)]
 #[track_caller]
 pub fn drain_sync_events<C: Config + std::fmt::Debug>(
@@ -1006,84 +916,9 @@ pub trait GameStubHandler<C: Config> {
     fn current_frame(&self) -> i32;
 }
 
-/// Generic test for P2P frame advancement.
-///
-/// This helper runs a complete P2P session test:
-/// 1. Creates two P2P sessions with the provided ports
-/// 2. Synchronizes them
-/// 3. Advances frames using the provided input generator
-/// 4. Verifies frames advanced correctly
-///
-/// # Type Parameters
-/// * `C` - The Config type to use
-/// * `S` - The game stub type (must implement GameStubHandler<C>)
-///
-/// # Arguments
-/// * `port1`, `port2` - Ports for the two sessions
-/// * `input_gen` - Function that generates input for a given frame number
-/// * `num_frames` - Number of frames to advance
-#[allow(dead_code)]
-#[track_caller]
-pub fn run_p2p_frame_advancement_test<C, S>(
-    input_gen: impl Fn(u32) -> C::Input,
-    num_frames: u32,
-) -> Result<(), FortressError>
-where
-    C: Config<Address = SocketAddr>,
-    S: GameStubHandler<C>,
-{
-    use fortress_rollback::SessionBuilder;
-
-    // Use ephemeral ports to avoid TIME_WAIT conflicts on Windows CI
-    let (socket1, addr1) = bind_socket_ephemeral()?;
-    let (socket2, addr2) = bind_socket_ephemeral()?;
-
-    let mut sess1 = SessionBuilder::<C>::new()
-        .add_player(PlayerType::Local, PlayerHandle::new(0))?
-        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))?
-        .start_p2p_session(socket1)?;
-
-    let mut sess2 = SessionBuilder::<C>::new()
-        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))?
-        .add_player(PlayerType::Local, PlayerHandle::new(1))?
-        .start_p2p_session(socket2)?;
-
-    assert!(sess1.current_state() == SessionState::Synchronizing);
-    assert!(sess2.current_state() == SessionState::Synchronizing);
-
-    // Use robust synchronization with time-based timeout
-    synchronize_sessions(&mut sess1, &mut sess2, &SyncConfig::default())?;
-
-    assert!(sess1.current_state() == SessionState::Running);
-    assert!(sess2.current_state() == SessionState::Running);
-
-    let mut stub1 = S::new();
-    let mut stub2 = S::new();
-
-    for i in 0..num_frames {
-        // Poll with multiple iterations and sleep to ensure packets are delivered
-        poll_with_sleep(&mut sess1, &mut sess2, 3);
-
-        sess1.add_local_input(PlayerHandle::new(0), input_gen(i))?;
-        let requests1 = sess1.advance_frame()?;
-        stub1.handle_requests(requests1);
-
-        sess2.add_local_input(PlayerHandle::new(1), input_gen(i))?;
-        let requests2 = sess2.advance_frame()?;
-        stub2.handle_requests(requests2);
-
-        // Gamestate evolves
-        assert_eq!(stub1.current_frame(), i as i32 + 1);
-        assert_eq!(stub2.current_frame(), i as i32 + 1);
-    }
-
-    Ok(())
-}
-
 /// Generic test for P2P frame advancement using deterministic infrastructure.
 ///
-/// This is the deterministic replacement for [`run_p2p_frame_advancement_test()`].
-/// Instead of real UDP sockets and `thread::sleep`, it uses `ChannelSocket`,
+/// Instead of real UDP sockets and `thread::sleep`, this uses `ChannelSocket`,
 /// `TestClock`, and `poll_with_advance` for fully deterministic execution.
 ///
 /// # Type Parameters

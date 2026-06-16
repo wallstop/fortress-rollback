@@ -372,15 +372,19 @@ run_all_tests() {
     test_packet_reorder
 }
 
-# Run quick tests (subset for CI)
+# Run quick tests (subset for per-PR CI).
+#
+# LOSS-FREE BY DESIGN. Packet-loss netem scenarios depend on real-time kernel
+# retransmission and are flaky under CI host starvation -- the same class the
+# in-test smoke-tier guard keeps out of the per-PR native suite. They run in the
+# nightly Docker lane (`--all`, ci-network-nightly.yml) instead; determinism
+# under loss is proven deterministically in tests/network/in_process_chaos.rs.
 run_quick_tests() {
-    log_info "Running quick Docker network tests (CI mode)..."
+    log_info "Running quick Docker network tests (CI mode, loss-free smoke)..."
     echo ""
 
     test_basic
     test_latency_50ms
-    test_packet_loss_5
-    test_poor_network
 }
 
 # Print summary

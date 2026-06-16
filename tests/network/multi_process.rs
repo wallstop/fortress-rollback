@@ -264,6 +264,36 @@ impl PeerConfig {
             burst_loss_len: self.burst_loss_len,
         }
     }
+
+    /// Classifies whether this real-UDP scenario is too fragile for the per-PR
+    /// smoke tier, returning `Some(reason)` if so.
+    ///
+    /// **Packet loss (sporadic or burst) is the dominant driver of real-time CI
+    /// starvation.** A dropped UDP datagram is only recovered when a
+    /// retransmission timer fires in real wall-clock time, so on a slow/loaded
+    /// CI runner those timers slip, progress stalls, and the test times out
+    /// before reaching its frame target -- exactly the macOS flake this guard
+    /// exists to prevent. Latency / jitter / reordering / duplication at the
+    /// modest rates and small reorder buffers used by the per-PR smoke tests do
+    /// not *drop* datagrams (the chaos engine only drops on extreme buffer/
+    /// in-flight overflow, far above these scenarios), so every packet still
+    /// arrives and the rollback protocol makes guaranteed forward progress
+    /// (just with more rollback); those conditions are therefore safe per-PR.
+    ///
+    /// Determinism and progress-under-loss for the lossy scenarios are covered
+    /// deterministically (virtual time, bit-for-bit reproducible) in
+    /// `tests/network/in_process_chaos.rs`; the real-UDP "does it survive real
+    /// sockets under loss" check belongs in the nightly suite
+    /// (`.github/workflows/ci-network-nightly.yml`).
+    fn adversarial_reason(&self) -> Option<String> {
+        if self.packet_loss > 0.0 {
+            Some(format!("packet_loss={:.2}", self.packet_loss))
+        } else if self.burst_loss_prob > 0.0 {
+            Some(format!("burst_loss_prob={:.2}", self.burst_loss_prob))
+        } else {
+            None
+        }
+    }
 }
 
 // =============================================================================
@@ -975,6 +1005,17 @@ macro_rules! skip_if_no_peer_binary {
 fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
     validate_peer_config_sync_preset("spawn_peer", config);
 
+    // Smoke-tier guard. spawn_peer is the single choke point every real-UDP
+    // session flows through -- run_n_peer_test AND the direct-spawn
+    // staggered-startup tests -- so enforcing here makes the per-PR/nightly
+    // split structurally complete: a loss-bearing scenario that forgets
+    // `#[ignore]` fails fast with an actionable message instead of silently
+    // re-introducing CI-starvation flake. The per-config check reports the
+    // offending peer via its port in the diagnostic summary.
+    if let Err(message) = check_smoke_tier(std::slice::from_ref(config), smoke_tier_enforced()) {
+        panic!("{message}");
+    }
+
     let peer_binary = find_peer_binary().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -1177,6 +1218,148 @@ fn wait_for_peer(child: Child, name: &str) -> TestResult {
     wait_for_peer_with_timeout(child, name, Duration::from_secs(timeout_secs))
 }
 
+/// Environment variable that selects the real-UDP test tier.
+///
+/// The per-PR **smoke** tier is enforced unless this is set to `nightly`.
+/// Enforcing by default means a plain `cargo nextest run` and per-PR CI are
+/// protected with zero configuration: a newly added loss-bearing real-UDP test
+/// fails fast with a clear message instead of silently re-introducing the CI
+/// flake this guard exists to prevent. The nightly suite
+/// (`.github/workflows/ci-network-nightly.yml`) sets `FORTRESS_NETWORK_TIER=nightly`
+/// to run the `#[ignore]`d loss-bearing scenarios; do the same to run them
+/// locally via `--run-ignored`.
+const NETWORK_TIER_ENV: &str = "FORTRESS_NETWORK_TIER";
+
+/// Whether the per-PR smoke-tier invariant is enforced for this process.
+///
+/// Enforced by default; disabled only when `FORTRESS_NETWORK_TIER=nightly`
+/// (case-insensitive).
+fn smoke_tier_enforced() -> bool {
+    std::env::var(NETWORK_TIER_ENV).map_or(true, |tier| !tier.eq_ignore_ascii_case("nightly"))
+}
+
+/// Pure smoke-tier classification check enforced by [`spawn_peer`].
+///
+/// When `enforced` (the per-PR smoke tier), returns `Err` naming the first
+/// config that injects packet loss. Loss-bearing real-UDP scenarios depend on
+/// real-time retransmission, so they are flaky under CI host starvation and
+/// must run only in the nightly suite (see [`PeerConfig::adversarial_reason`]).
+/// Extracted as a pure function (no env reads, no process spawning) so the
+/// invariant is unit-tested deterministically.
+fn check_smoke_tier(configs: &[PeerConfig], enforced: bool) -> Result<(), String> {
+    if !enforced {
+        return Ok(());
+    }
+    for (index, config) in configs.iter().enumerate() {
+        if let Some(reason) = config.adversarial_reason() {
+            return Err(format!(
+                "real-UDP peer {index} injects {reason}, but it is running in the per-PR \
+                 smoke tier. Packet loss makes real-UDP progress depend on real-time \
+                 retransmission, so loss-bearing scenarios are flaky under CI host \
+                 starvation (this is the macOS network-test timeout class). Mark the test \
+                 `#[ignore]` so it runs only in the nightly real-UDP suite \
+                 (.github/workflows/ci-network-nightly.yml); its determinism and \
+                 progress-under-loss are already proven deterministically in \
+                 tests/network/in_process_chaos.rs. To run the nightly suite locally, set \
+                 {NETWORK_TIER_ENV}=nightly. Offending config: {}",
+                config.diagnostic_summary()
+            ));
+        }
+    }
+    Ok(())
+}
+
+// --- Smoke-tier guard unit tests -------------------------------------------
+// Pure, deterministic, no process spawning and no env reads -- they pin the
+// classification rule that keeps loss-bearing real-UDP scenarios out of per-PR
+// CI. These run in every tier (they do not call `skip_if_no_peer_binary!`).
+
+#[test]
+fn adversarial_reason_flags_packet_loss() {
+    let config = PeerConfig {
+        packet_loss: 0.05,
+        ..Default::default()
+    };
+    assert_eq!(
+        config.adversarial_reason().as_deref(),
+        Some("packet_loss=0.05")
+    );
+}
+
+#[test]
+fn adversarial_reason_flags_burst_loss() {
+    let config = PeerConfig {
+        burst_loss_prob: 0.10,
+        burst_loss_len: 4,
+        ..Default::default()
+    };
+    assert_eq!(
+        config.adversarial_reason().as_deref(),
+        Some("burst_loss_prob=0.10")
+    );
+}
+
+#[test]
+fn adversarial_reason_allows_pure_timing_conditions() {
+    // Latency / jitter / reordering / duplication never DROP a datagram, so the
+    // rollback protocol makes guaranteed forward progress: safe for per-PR CI.
+    let config = PeerConfig {
+        latency_ms: 100,
+        jitter_ms: 50,
+        reorder_rate: 0.20,
+        reorder_buffer_size: 5,
+        duplicate_rate: 0.15,
+        ..Default::default()
+    };
+    assert_eq!(config.adversarial_reason(), None);
+}
+
+#[test]
+fn check_smoke_tier_rejects_packet_loss_when_enforced() {
+    let configs = vec![
+        PeerConfig {
+            local_port: 1,
+            ..Default::default()
+        },
+        PeerConfig {
+            local_port: 2,
+            packet_loss: 0.15,
+            ..Default::default()
+        },
+    ];
+    let err = check_smoke_tier(&configs, true).expect_err("loss must be rejected in smoke tier");
+    assert!(err.contains("packet_loss=0.15"), "missing reason: {err}");
+    assert!(err.contains("peer 1"), "missing offending index: {err}");
+    assert!(err.contains("#[ignore]"), "missing remediation: {err}");
+}
+
+#[test]
+fn check_smoke_tier_allows_loss_in_nightly_tier() {
+    // When not enforced (nightly), loss-bearing scenarios are allowed to run.
+    let configs = vec![PeerConfig {
+        packet_loss: 0.15,
+        ..Default::default()
+    }];
+    assert!(check_smoke_tier(&configs, false).is_ok());
+}
+
+#[test]
+fn check_smoke_tier_allows_clean_configs_when_enforced() {
+    let configs = vec![
+        PeerConfig {
+            latency_ms: 50,
+            jitter_ms: 20,
+            ..Default::default()
+        },
+        PeerConfig {
+            latency_ms: 50,
+            jitter_ms: 20,
+            ..Default::default()
+        },
+    ];
+    assert!(check_smoke_tier(&configs, true).is_ok());
+}
+
 /// Runs an N-peer test (N >= 2) with the given per-peer configurations.
 ///
 /// This is the generic spawn/wait engine shared by the 2-peer and N-peer paths.
@@ -1198,6 +1381,10 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
         "run_n_peer_test requires at least 2 peers, got {}",
         configs.len()
     );
+
+    // (The smoke-tier guard lives in spawn_peer -- the single choke point EVERY
+    // real-UDP session flows through, including the direct-spawn staggered-startup
+    // tests that bypass this function.)
 
     // Check if the binary exists - fail fast with a clear message
     assert!(
@@ -1728,6 +1915,7 @@ fn test_extended_session() {
 /// Test with 5% packet loss - should still complete successfully.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_packet_loss_5_percent() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -1762,6 +1950,7 @@ fn test_packet_loss_5_percent() {
 /// Test with 15% packet loss - more challenging but should work.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_packet_loss_15_percent() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -1876,6 +2065,7 @@ fn test_latency_with_jitter() {
 /// Test "poor network" conditions: latency + loss + jitter combined.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_poor_network_combined() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2059,6 +2249,7 @@ fn test_high_jitter_50ms() {
 /// Test with combined loss, latency, and jitter - simulating mobile network.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_mobile_network_simulation() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2152,6 +2343,7 @@ fn test_heavily_asymmetric_network() {
 /// Test with higher input delay (4 frames).
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_higher_input_delay() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -2321,6 +2513,7 @@ fn test_stress_very_long_session() {
 /// Test with different random seeds to validate determinism is seed-independent.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_determinism_different_seeds() {
     skip_if_no_peer_binary!();
     // Same network conditions but different chaos seeds
@@ -2877,6 +3070,7 @@ fn test_sustained_moderate_adversity() {
 /// Both peers should have identical network chaos, making behavior highly predictable.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_reproducible_chaos_same_seed() {
     skip_if_no_peer_binary!();
     // Same chaos seed on both peers
@@ -2973,6 +3167,7 @@ fn test_baseline_no_chaos() {
 /// WiFi with interference has low base latency but burst loss events.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_wifi_interference_simulation() {
     skip_if_no_peer_binary!();
     let peer1_config = PeerConfig {
@@ -3160,10 +3355,15 @@ impl NetworkConditionCase {
             burst_loss_len: 0,
         };
 
+        // Loss-free cases are per-PR smoke tests: cap at 90s so the macOS-scaled
+        // harness ceiling (90 * 1.5 + 30 = 165s) stays below the per-PR nextest
+        // budget (180s). Loss-bearing cases only run in the nightly tier (720s
+        // budget), where the extra headroom is harmless.
+        let timeout_secs = if self.packet_loss > 0.0 { 120 } else { 90 };
         let scenario = NetworkScenario::symmetric(self.name, profile)
             .with_frames(self.frames)
             .with_input_delay(self.input_delay)
-            .with_timeout(120);
+            .with_timeout(timeout_secs);
 
         if let Some(sync_preset) = self.sync_preset {
             scenario.with_sync_preset(sync_preset)
@@ -3368,7 +3568,9 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             sync_preset: None,
             expect_success: true,
         },
-        // High latency with jitter - stresses timing
+        // High latency with jitter - stresses timing. No packet loss, so the
+        // protocol still makes guaranteed forward progress (latency/jitter only
+        // delay datagrams, never drop them): safe for the per-PR smoke tier.
         NetworkConditionCase {
             name: "high_latency_timing_stress",
             port_base: 10224,
@@ -3380,18 +3582,13 @@ fn test_timing_sensitive_edge_cases_data_driven() {
             sync_preset: Some("high_latency"),
             expect_success: true,
         },
-        // Combined stress: loss + latency + jitter
-        NetworkConditionCase {
-            name: "combined_timing_stress",
-            port_base: 10226,
-            frames: 50,
-            packet_loss: 0.10,
-            latency_ms: 50,
-            jitter_ms: 30,
-            input_delay: 3,
-            sync_preset: Some("lossy"),
-            expect_success: true,
-        },
+        // NOTE: a combined loss+latency+jitter row used to live here, but
+        // packet loss makes real-UDP progress depend on real-time retransmission
+        // and so is flaky under CI host starvation (the smoke-tier guard in
+        // spawn_peer now rejects it). That coverage lives in the nightly
+        // suite -- test_packet_loss_determinism_data_driven's `moderate_loss_10pct`
+        // (10% loss) -- and is proven deterministically in
+        // tests/network/in_process_chaos.rs.
     ];
 
     println!("=== Timing-Sensitive Edge Cases ===");
@@ -4532,6 +4729,7 @@ fn test_packet_reordering() {
 /// Test with aggressive packet reordering.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_heavy_packet_reordering() {
     skip_if_no_peer_binary!();
     let scenario = NetworkScenario::symmetric("heavy_reorder", NetworkProfile::heavy_reorder())
@@ -4588,6 +4786,7 @@ fn test_packet_duplication() {
 /// Test with high packet duplication rate.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_heavy_packet_duplication() {
     skip_if_no_peer_binary!();
     let scenario = NetworkScenario::symmetric("duplicating", NetworkProfile::duplicating())
@@ -4956,7 +5155,10 @@ fn test_max_input_delay_edge_case() {
         peer_addr: "127.0.0.1:10601".to_string(),
         frames: 100,
         input_delay: 7, // Very high input delay
-        timeout_secs: 120,
+        // 0-loss smoke test: completes in seconds. The 90s cap is a generous
+        // hang safety net that keeps the macOS-scaled harness ceiling
+        // (90 * 1.5 + 30 = 165s) below the per-PR nextest budget (180s).
+        timeout_secs: 90,
         ..Default::default()
     };
 
@@ -4966,7 +5168,7 @@ fn test_max_input_delay_edge_case() {
         peer_addr: "127.0.0.1:10600".to_string(),
         frames: 100,
         input_delay: 7,
-        timeout_secs: 120,
+        timeout_secs: 90,
         seed: Some(43),
         ..Default::default()
     };
@@ -5221,6 +5423,7 @@ fn run_extended_chaos_scenario(port: u16, scenario: NetworkScenario) {
 /// Average WiFi with moderate packet loss, jitter, reordering, and duplication.
 #[test]
 #[serial]
+#[ignore = "loss-bearing real-UDP scenario: nightly-only (see the spawn_peer smoke-tier guard for the full rationale)"]
 fn test_extended_chaos_wifi_average() {
     skip_if_no_peer_binary!();
     run_extended_chaos_scenario(

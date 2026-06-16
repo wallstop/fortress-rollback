@@ -11,9 +11,9 @@
 //! ```ignore
 //! mod common;
 //! use common::stubs::{GameStub, StubConfig, StubInput};
-//! use common::test_utils::{synchronize_sessions, test_addr, MAX_SYNC_ITERATIONS};
+//! use common::test_utils::{synchronize_sessions_deterministic, test_addr, MAX_SYNC_ITERATIONS};
 //! // Or use the re-exported items:
-//! use common::{synchronize_sessions, test_addr};
+//! use common::{synchronize_sessions_deterministic, test_addr};
 //! ```
 
 pub mod bus_socket;
@@ -45,10 +45,9 @@ pub use test_clock::TestClock;
 #[allow(unused_imports)]
 pub use test_utils::{
     assert_spectator_synchronized, bind_socket_ephemeral, bind_socket_with_retry, calculate_hash,
-    create_chaos_socket, drain_sync_events, poll_with_advance, poll_with_sleep,
-    run_p2p_frame_advancement_test, run_p2p_frame_advancement_test_deterministic,
-    run_synctest_with_delayed_input, synchronize_sessions, synchronize_sessions_deterministic,
-    synchronize_spectator, synchronize_spectator_deterministic, test_addr, GameStubHandler,
-    PortAllocator, SyncConfig, SyncResult, MAX_SYNC_ITERATIONS, POLL_INTERVAL,
-    POLL_INTERVAL_DETERMINISTIC, SYNC_TIMEOUT,
+    create_chaos_socket, drain_sync_events, poll_with_advance,
+    run_p2p_frame_advancement_test_deterministic, run_synctest_with_delayed_input,
+    synchronize_sessions_deterministic, synchronize_spectator, synchronize_spectator_deterministic,
+    test_addr, GameStubHandler, PortAllocator, SyncConfig, SyncResult, MAX_SYNC_ITERATIONS,
+    POLL_INTERVAL, POLL_INTERVAL_DETERMINISTIC, SYNC_TIMEOUT,
 };

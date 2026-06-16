@@ -139,8 +139,56 @@ jobs:
       - name: Run ignored extreme real-UDP network tests (nextest)
         run: cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(multi_process)' --test network
         env:
+          # Nightly tier: stand the per-PR smoke-tier guard down so the ignored
+          # loss-bearing real-UDP scenarios are allowed to run (the spawn_peer
+          # guard enforces the smoke invariant unless this is set to `nightly`).
+          FORTRESS_NETWORK_TIER: nightly
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
+
+  # Docker tc/netem chaos lane (with packet loss).
+  #
+  # The per-PR Docker job (ci-network.yml) runs only the LOSS-FREE `--quick`
+  # smoke scenarios because kernel-netem packet loss is flaky under CI host
+  # starvation. The full netem suite (`--all`: packet loss 5/10/20%, poor /
+  # terrible network, burst, reorder, dup) belongs here in the nightly lane,
+  # alongside the ignored real-UDP scenarios above. Best-effort: a Docker Hub
+  # registry blip must not fail the nightly run.
+  docker-network-nightly:
+    name: Network Tests Nightly (Docker netem)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Pre-pull base images (retry on registry flake)
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 15
+          command: |
+            docker pull rust:1.86-slim-bookworm
+            docker pull debian:bookworm-slim
+
+      - name: Build Docker image
+        run: docker compose -f docker/docker-compose.yml build
+
+      - name: Run Docker network tests (full netem suite, with loss)
+        run: ./scripts/ci/docker-network-tests.sh --all
+        timeout-minutes: 45
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-network-nightly-results
+          path: test-results/
+          retention-days: 7
