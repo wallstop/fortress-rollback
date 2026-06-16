@@ -157,12 +157,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the peer's self-claim always covers the inputs it sent, and a dropped peer's terminal endpoint leaves the
   fold), with two named conservative transient windows documented in the source (peer-initiated disconnect
   packets, and hot-join reactivation reporting `Frame::NULL` until the joiner's first input). Remaining
-  residuals (documented in the source, all requiring 4 or more players, none a regression): a third
-  survivor can still freeze the dropped slot from a stale cache of another survivor's old claim (the
-  "stale-echo" race), and an origin survivor dying mid-relay can leave a window where the bound exceeds the
-  later-relayed override (the double-failure corner); byzantine peers are out of scope. The existing
-  defense-in-depth — the prediction-window rollback clamp, the sparse earlier-checkpoint search, and the
-  disconnect-rollback checksum invalidation/deferral — is unchanged and now mostly dormant.
+  residuals (documented in the source, all requiring 4 or more players, none a regression): the
+  "stale-echo" race (a third survivor freezing the dropped slot from a stale cache of another survivor's old
+  claim) was arbitrated **not a bug** — a still-running endpoint's stale-low term is folded into the
+  confirmed bound and the freeze override identically, so confirmation is pinned at the freeze and never
+  overruns it. The **double-failure-relay corner** (an origin survivor dying mid-relay, leaving a window
+  where the bound exceeds the later-relayed override) is **narrowed**: its warm / in-order facet is now
+  closed by a **pessimistic queue-min report**. Each peer additionally gossips, per slot, the minimum over
+  its own and its still-folded peers' last-received frames — a fixed-width `pessimistic_floor` vector
+  carried on every input packet alongside the existing connect-status vector. **This is a wire-format
+  addition, so all peers in a session must run a wire-compatible build** (mixed builds across this change
+  cannot exchange input packets; the field rides the same unversioned framing as the connect-status
+  vector). A survivor that has pruned the global-min origin from its own fold then consumes a relay's
+  pessimistic floor — but only while a relay topology actually remains (a remote has been pruned **and** at
+  least two remotes still run, so the steady state and 2-survivor post-drop pacing are unchanged) — holding
+  its confirmed bound at the mesh minimum instead of confirming and discarding the dropped slot's real
+  inputs above a freeze the relaying survivor will agree to. The cold-cache facet (an observer that never
+  received a relay's pessimistic floor) and the mid-game-drop reorder facet (a relay's floor reported
+  high-then-low and reordered on the wire) are **not** closed by this — they need an observer-side fresh-ack
+  round and the connect-status drop-epoch as a freshness gate respectively, and remain tracked. Byzantine
+  peers are out of scope. The existing defense-in-depth — the prediction-window rollback clamp, the sparse
+  earlier-checkpoint search, and the disconnect-rollback checksum invalidation/deferral — is unchanged and
+  now mostly dormant.
 
 ## [0.9.0] - 2026-06-04
 

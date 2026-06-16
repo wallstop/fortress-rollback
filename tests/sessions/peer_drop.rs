@@ -3170,26 +3170,46 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // origin B is pruned from A's fold (its low view never reaches A directly) AND
 // C->A is delayed past A's record+discard of the high frames.
 //
+// NARROWED in Session 50 by the `AsyncAckSound` pessimistic queue-min report
+// (every peer gossips, per slot, the `min` over its own and its folded sources'
+// `last_frame`): C reports the pessimistic floor `F` while it still folds B's low
+// view, so A — caching that floor before the C->A sever (the WARM / in-order
+// facet) — holds its confirmed bound for D at `F` and never discards the
+// contested window. The cold-cache (`AsyncAckSoundFresh`, S49) and mid-game-drop
+// reorder (S46 epoch freshness gate) facets are the tracked chunk-2 follow-up.
+//
 // Oracle (F4 byte pattern): over the shared confirmed-frame range, A's and C's
-// recorded confirmed StateStub must be byte-equal; a NON-EMPTY divergence list is
-// the RED signal. The decisive SIGNATURE of this corner (vs a plain input split)
-// is that D's confirmed *inputs* CONVERGE across A and C (both frozen at F, so the
-// library's own input-checksum desync detector stays silent) while the recorded
-// *state* silently diverges. The assertions pin the empirically-observed
-// reproduction (first divergence at `F + 1`) as a CI-safe characterization guard.
+// recorded confirmed StateStub must be byte-equal; an EMPTY divergence list is the
+// GREEN signal (a NON-EMPTY one is a REGRESSION). The decisive SIGNATURE of this
+// corner (vs a plain input split) is that D's confirmed *inputs* also CONVERGE
+// across A and C (both frozen at F) — so the library's own input-checksum desync
+// detector (BLIND to the pre-fix state divergence) now agrees with the converged
+// state. The assertions pin the post-fix convergence as a CI-safe guard.
 
-/// Double-failure-relay arbitration (VERDICT: REAL, S41). Builds a D-receipt
-/// gradient (B low = `F`, A/C high = `M`), then prunes the origin B from A's fold
-/// via `A.remove_player(B)` while A's direct link to C is severed and B has already
-/// relayed its low freeze to C — so A records D's slot above `F` with real inputs
-/// and discards those frames before C's relayed `{disconnected, F}` reaches A. The
-/// late relay lowers A's D term below A's discarded window; the S20 clamp keeps A
-/// live but cannot repair the discarded frames, leaving A and C with divergent
-/// confirmed state. Records confirmed states per survivor, runs the F4 byte oracle,
-/// and probes (on genuinely-queryable in-window frames) that D's confirmed inputs
-/// nonetheless converged — so an input-checksum desync detector stays blind.
+/// Double-failure-relay arbitration (VERDICT: REAL, S41) — now a positive
+/// CONVERGENCE guard after the Session-50 production fix closed the **warm /
+/// in-order facet** of the residual (the case this in-process repro exercises:
+/// the relay's pessimistic floor is delivered to A *before* the C->A sever). The
+/// cold-cache and mid-game-drop reorder facets remain the tracked chunk-2
+/// follow-up, so the N>=4 residual is NARROWED here, not fully eliminated.
+/// Builds a D-receipt gradient (B low = `F`, A/C high = `M`), then prunes the
+/// origin B from A's fold via `A.remove_player(B)` while A's direct link to C is
+/// severed and B has already relayed its low freeze to C. Pre-fix, A would record
+/// D's slot above `F` with real inputs and DISCARD those frames before C's relayed
+/// `{disconnected, F}` reached A, leaving A and C with divergent confirmed state.
+///
+/// The fix (the `AsyncAckSound` pessimistic queue-min report — every peer gossips,
+/// per slot, the `min` over its own and its folded sources' `last_frame`) makes C's
+/// gossip carry the **pessimistic floor `F`** while it still folds B's low view, so
+/// A — having cached that pessimistic floor before the C->A sever — HOLDS its
+/// confirmed bound for D at `F` and never discards the contested window. When the
+/// late relay lands, A re-simulates the still-in-window frames with D frozen at `F`
+/// and converges; D then mesh-excludes and confirmation advances. This test pins
+/// that the full double-failure choreography still runs (A learns D's drop only via
+/// the late relay, A stays live via the S20 clamp) yet A's and C's recorded
+/// confirmed state is now byte-identical, and D's confirmed inputs match too.
 #[test]
-fn p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors() -> Result<(), FortressError>
+fn p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors() -> Result<(), FortressError>
 {
     // LONG symmetric timeouts so NO auto-timeout fires: every endpoint pruning
     // here is driven by an explicit `remove_player`, so the choreography fully
@@ -3495,39 +3515,38 @@ fn p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors() -> Resul
          {a_stall_error:?} (bound={confirmed_bound})"
     );
 
-    // ARBITRATION VERDICT — pinned to the empirically-observed CURRENT-code
-    // behavior: the "double-failure relay" residual (documented as REAL, the
-    // genuine N>=4 residual, in `remote_slot_confirmed_bound`'s rustdoc) REPRODUCES
-    // in-process as a REAL, deterministic, cross-survivor CONFIRMED-STATE
-    // divergence. A confirmed and recorded frames above the global-min freeze `F`
-    // with D's real inputs while its only low-view sources were out of fold (origin
-    // B pruned, relay C severed); the late relay then lowered A's D term below A's
-    // already-discarded window, and the S20 clamp kept A live but could not repair
-    // the discarded frames. This is the N>=4 instance of the discard-before
-    // -convergence residual the S32 barrier narrowed but did not close. The queryable
-    // input probe above shows the insidious part: D's confirmed *inputs* converged
-    // across peers (so an input-checksum desync detector stays silent) while the
-    // recorded *state* diverged.
+    // POSITIVE CONVERGENCE GUARD (Session 50) — the "double-failure relay"
+    // residual (documented REAL in `remote_slot_confirmed_bound`'s rustdoc, the
+    // genuine N>=4 instance of the discard-before-convergence residual the S32
+    // barrier narrowed but did not close) is now FIXED by the `AsyncAckSound`
+    // pessimistic queue-min report. Across the SAME double-failure choreography
+    // the asserts above pin (A learns D's drop ONLY via the late relay, A stays
+    // live via the S20 clamp), A's and C's recorded confirmed StateStub is now
+    // byte-identical: C's gossip carried the pessimistic floor `F` while it still
+    // folded B's low view, so A held its confirmed bound for D at `F` and never
+    // discarded the contested window — when the late relay landed, A re-simulated
+    // the still-in-window frames with D frozen at `F` and converged.
     //
-    // This assertion CHARACTERIZES that reproduction: it PASSES while the corner
-    // remains open. If a future fix closes the residual (a stale-aware override
-    // fold, or full mesh-agreement-before-freeze convergence), `divergences` goes
-    // empty and this assertion flips — at which point convert this test into a
-    // positive convergence guard (assert `divergences.is_empty()`), mirroring the
-    // F4 `..._converges_across_survivors` test.
+    // This is the converse of the pre-fix characterization guard: an EMPTY
+    // `divergences` is now the GREEN signal. A regression (the fix reverted /
+    // the pessimistic report no longer folded / consumed) would re-populate
+    // `divergences` and flip this assert RED.
     assert!(
-        !divergences.is_empty(),
-        "double-failure-relay did NOT reproduce: confirmed state converged across \
-         survivors (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
-         a_stall_error={a_stall_error:?}). If a fix landed, convert this to a positive \
-         convergence guard (assert divergences.is_empty())."
+        divergences.is_empty(),
+        "double-failure-relay REGRESSED: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
+         a_stall_error={a_stall_error:?}, divergences={divergences:?}). The \
+         pessimistic-floor barrier should hold A's confirmed bound at F so the \
+         contested window is never discarded before the relay converges it."
     );
 
-    // And the decisive signature: D's confirmed INPUTS converged across A and C
-    // even though their recorded STATE diverged (input-based desync detection is
-    // blind to this residual). This must rest on GENUINELY-QUERYABLE frames — at
-    // least one frame queryable on both peers (else the "match" is a vacuous
-    // `None == None` on discarded history), and no queryable mismatch.
+    // The decisive signature of THIS corner (vs a plain input split): D's
+    // confirmed INPUTS also converge across A and C (both frozen at `F`), so the
+    // library's own input-checksum desync detector — which was BLIND to the
+    // pre-fix state divergence — agrees with the now-converged state. Rests on
+    // GENUINELY-QUERYABLE frames: at least one frame queryable on both peers
+    // (else the "match" is a vacuous `None == None` on discarded history), and no
+    // queryable mismatch.
     assert!(
         queryable_matches > 0,
         "input probe was vacuous: no sampled frame was queryable on BOTH A and C \
@@ -3537,8 +3556,7 @@ fn p2p_n4_double_failure_relay_dropped_slot_diverges_across_survivors() -> Resul
     assert!(
         !queryable_mismatch,
         "expected D's confirmed inputs to MATCH across A and C on every queryable \
-         frame (the freeze frame converged) despite the state divergence; \
-         got {input_probe:?}"
+         frame (the freeze frame converged); got {input_probe:?}"
     );
 
     Ok(())

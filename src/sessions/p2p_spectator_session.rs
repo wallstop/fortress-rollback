@@ -2338,6 +2338,7 @@ mod tests {
                 start_frame: frame,
                 ack_frame: Frame::NULL,
                 bytes: encoded,
+                pessimistic_floor: Vec::new(),
             }),
         }
     }

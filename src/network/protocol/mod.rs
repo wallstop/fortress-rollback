@@ -155,6 +155,16 @@ where
     peer_addr: T::Address,
     remote_magic: u16,
     peer_connect_status: Vec<ConnectionStatus>,
+    /// This endpoint's cache of the peer's per-slot **pessimistic confirmed
+    /// floor** (the double-failure-relay fix; see [`Input::pessimistic_floor`]).
+    /// Parallel to [`Self::peer_connect_status`] (index = player handle,
+    /// length `num_players`) and written together with it in
+    /// [`Self::merge_peer_connect_status`]. A slot left at [`Frame::NULL`] (the
+    /// initializer, or a packet whose `pessimistic_floor` was empty / the wrong
+    /// length) means "no pessimistic report", and the session's
+    /// `remote_slot_confirmed_bound` fold falls back to that slot's
+    /// `last_frame` — the legacy (pre-fix) barrier value.
+    peer_pessimistic_floor: Vec<Frame>,
 
     // input compression
     pending_output: VecDeque<InputBytes>,
@@ -409,6 +419,7 @@ pub fn fuzz_protocol_input_packet(
         start_frame: Frame::new(start_frame),
         ack_frame: Frame::new(ack_frame),
         bytes: packet_bytes,
+        pessimistic_floor: Vec::new(),
     };
     protocol.on_input(&body);
 
@@ -593,6 +604,17 @@ impl<T: Config> UdpProtocol<T> {
             peer_connect_status.push(ConnectionStatus::default());
         }
 
+        // peer pessimistic confirmed floors (double-failure-relay fix), parallel
+        // to `peer_connect_status`. Seeded to `Frame::NULL` ("no report yet"),
+        // which the session fold reads as "fall back to last_frame".
+        let mut peer_pessimistic_floor = Vec::new();
+        peer_pessimistic_floor
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("protocol.peer_pessimistic_floor", num_players))?;
+        for _ in 0..num_players {
+            peer_pessimistic_floor.push(Frame::NULL);
+        }
+
         // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
         recv_inputs.insert(
@@ -645,6 +667,7 @@ impl<T: Config> UdpProtocol<T> {
             peer_addr,
             remote_magic: 0,
             peer_connect_status,
+            peer_pessimistic_floor,
 
             // input compression
             pending_output: VecDeque::new(),
@@ -846,6 +869,23 @@ impl<T: Config> UdpProtocol<T> {
         }
     }
 
+    /// Test-only companion to [`set_peer_connect_status_for_tests`] for the
+    /// per-slot **pessimistic confirmed floor** cache (double-failure-relay fix).
+    /// In production this cache is written only by `merge_peer_connect_status`
+    /// from a received `Input`'s `pessimistic_floor`; this lets session-level
+    /// tests pin a known relay floor without replaying a packet exchange.
+    /// Out-of-range handles are ignored.
+    #[cfg(test)]
+    pub(crate) fn set_peer_pessimistic_floor_for_tests(
+        &mut self,
+        handle: PlayerHandle,
+        floor: Frame,
+    ) {
+        if let Some(slot) = self.peer_pessimistic_floor.get_mut(handle.as_usize()) {
+            *slot = floor;
+        }
+    }
+
     /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
     /// average so that [`average_frame_advantage`](Self::average_frame_advantage)
     /// returns exactly `target`. Delegates to `TimeSync::seed_average_for_tests`.
@@ -863,6 +903,20 @@ impl<T: Config> UdpProtocol<T> {
             .get(handle.as_usize())
             .copied()
             .unwrap_or_default()
+    }
+
+    /// This endpoint's cached view of the peer's **pessimistic confirmed floor**
+    /// for `handle` (the double-failure-relay fix; see
+    /// [`Input::pessimistic_floor`] and [`Self::peer_pessimistic_floor`]). Returns
+    /// [`Frame::NULL`] when the peer has not reported one (an out-of-range handle,
+    /// a default cache, or a packet whose `pessimistic_floor` was empty / the
+    /// wrong length); the session fold reads `NULL` as "fall back to
+    /// `last_frame`".
+    pub(crate) fn peer_pessimistic_floor(&self, handle: PlayerHandle) -> Frame {
+        self.peer_pessimistic_floor
+            .get(handle.as_usize())
+            .copied()
+            .unwrap_or(Frame::NULL)
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -1024,7 +1078,9 @@ impl<T: Config> UdpProtocol<T> {
                 // receiving NEW inputs (progress-free duplicates and connect-status
                 // nudges do not refresh the pacer — see the gate in `on_input`)
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
-                    self.send_pending_output(connect_status);
+                    // Retransmit path: empty `pessimistic_floor` (no receiver
+                    // cache clobber — the floor rides fresh `send_input`s).
+                    self.send_pending_output(connect_status, &[]);
                     self.running_last_input_recv = now;
                 }
 
@@ -1200,6 +1256,7 @@ impl<T: Config> UdpProtocol<T> {
         &mut self,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
         connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
     ) {
         if self.state != ProtocolState::Running {
             return;
@@ -1238,7 +1295,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.pending_output.push_back(endpoint_data);
 
-        self.send_pending_output(connect_status);
+        self.send_pending_output(connect_status, pessimistic_floor);
     }
 
     /// Pushes a replicated input frame onto `pending_output` without advancing
@@ -1353,7 +1410,8 @@ impl<T: Config> UdpProtocol<T> {
         if self.state != ProtocolState::Running {
             return;
         }
-        self.send_pending_output(connect_status);
+        // Flush path: empty `pessimistic_floor` (no receiver cache clobber).
+        self.send_pending_output(connect_status, &[]);
     }
 
     fn pending_output_batch_len_with_cap(&self, decoded_byte_cap: usize) -> Option<usize> {
@@ -1365,9 +1423,21 @@ impl<T: Config> UdpProtocol<T> {
         )
     }
 
-    fn send_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
+    /// Re-sends the pending-output batch. `pessimistic_floor` carries this
+    /// peer's per-slot pessimistic confirmed floors (double-failure-relay fix)
+    /// when the caller is the fresh-input path ([`Self::send_input`]); the
+    /// retransmit/flush/nudge paths pass an empty slice, which leaves the body's
+    /// `pessimistic_floor` empty so the receiver's
+    /// [`Self::peer_pessimistic_floor`] cache retains its last reported value
+    /// (the merge only updates a slot it receives a value for — no clobber).
+    fn send_pending_output(
+        &mut self,
+        connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
+    ) {
         self.send_pending_output_with_decoded_byte_cap(
             connect_status,
+            pessimistic_floor,
             rle::DEFAULT_MAX_DECODED_LEN,
         );
     }
@@ -1375,6 +1445,7 @@ impl<T: Config> UdpProtocol<T> {
     fn send_pending_output_with_decoded_byte_cap(
         &mut self,
         connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
         decoded_byte_cap: usize,
     ) {
         let mut body = Input::default();
@@ -1459,6 +1530,11 @@ impl<T: Config> UdpProtocol<T> {
             body.ack_frame = self.last_recv_frame();
             body.disconnect_requested = self.state == ProtocolState::Disconnected;
             connect_status.clone_into(&mut body.peer_connect_status);
+            // Per-slot pessimistic confirmed floors (double-failure-relay fix).
+            // Empty on the retransmit/flush/nudge paths (no cache clobber on the
+            // receiver); populated by `send_input` with the session's current
+            // per-slot `min(own last_frame, folded peers' last_frame)`.
+            pessimistic_floor.clone_into(&mut body.pessimistic_floor);
 
             self.queue_message(MessageBody::Input(body));
             // Real input traffic went out: the connect-status nudge (an
@@ -1588,6 +1664,12 @@ impl<T: Config> UdpProtocol<T> {
             start_frame: self.last_acked_input.frame,
             ack_frame: self.last_recv_frame(),
             bytes,
+            // The connect-status nudge intentionally carries NO pessimistic-floor
+            // gossip (double-failure-relay fix): the floor rides fresh
+            // `send_input` packets, and an empty vector leaves each receiver's
+            // `peer_pessimistic_floor` cache at its last reported value (no
+            // clobber). Input-idle floor propagation is a tracked follow-up.
+            pessimistic_floor: Vec::new(),
         };
         connect_status.clone_into(&mut body.peer_connect_status);
         self.queue_message(MessageBody::Input(body));
@@ -1880,6 +1962,48 @@ impl<T: Config> UdpProtocol<T> {
             } else {
                 // Both connected: monotone forward progress.
                 local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+            }
+        }
+
+        // Cache the peer's per-slot pessimistic confirmed floor (double-failure
+        // -relay fix), parallel to the connect-status merge above. Separate loop
+        // so `peer_pessimistic_floor` (mut) and `peer_connect_status` /
+        // `reactivation_floor` (read) are disjoint field borrows. We OVERWRITE
+        // with the latest reported floor rather than `min`/`max`-merging: it is
+        // an in-flight SNAPSHOT of the peer's current pessimism (the
+        // `AsyncAckSound` `ackFloor` semantics). In the WARM-cache scope this
+        // chunk targets — every relay has already folded the global-min origin's
+        // low before any drop, and connected receipts only rise — a pessimistic
+        // floor is monotone-non-decreasing, so a reordered packet carries a
+        // stale-LOW value (transiently conservative, self-heals on the next
+        // in-order packet). The OUT-OF-SCOPE corner (honestly tracked, NOT closed
+        // here): in a cold-gossip-cache / mid-game-drop world a relay can report
+        // high-then-low for the same slot, so a reordered stale-HIGH floor could
+        // overwrite a fresh low and re-open the residual — that facet needs the
+        // S46 `ConnectionStatus.epoch` as a freshness gate on this overwrite (the
+        // chunk-2 follow-up; see `N-PLAYER-DESYNC-AUDIT.md` and
+        // `specs/tla/DoubleFailureRelay.tla`'s `AsyncAckSoundFresh`/cold-cache
+        // results). We skip the SAME stale DISCONNECTED claims the reactivation
+        // floor rejects (so a stale relay's floor cannot re-stick a reactivated
+        // slot). A missing entry (empty / wrong-length `pessimistic_floor`)
+        // leaves the cache untouched — the fold falls back to `last_frame`.
+        for (slot, cached) in self.peer_pessimistic_floor.iter_mut().enumerate() {
+            let Some(remote) = body.peer_connect_status.get(slot) else {
+                break;
+            };
+            #[cfg(feature = "hot-join")]
+            if remote.disconnected
+                && self
+                    .reactivation_floor
+                    .get(slot)
+                    .is_some_and(|floor| !floor.is_null() && remote.last_frame < *floor)
+            {
+                continue;
+            }
+            #[cfg(not(feature = "hot-join"))]
+            let _ = remote;
+            if let Some(&floor) = body.pessimistic_floor.get(slot) {
+                *cached = floor;
             }
         }
     }
@@ -2989,6 +3113,7 @@ mod tests {
                     start_frame: Frame::new(0),
                     ack_frame: Frame::new(0),
                     bytes: vec![1, 2, 3],
+                    pessimistic_floor: Vec::new(),
                 }),
             },
             Message {
@@ -3191,6 +3316,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
 
         assert!(protocol.recv_inputs.contains_key(&Frame::new(0)));
@@ -3230,6 +3356,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: true,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
 
         let events: Vec<_> = protocol.event_queue.drain(..).collect();
@@ -3274,6 +3401,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
         protocol.event_queue.clear();
         protocol
@@ -3309,6 +3437,7 @@ mod tests {
                     epoch: 0,
                 },
             ],
+            pessimistic_floor: Vec::new(),
         });
     }
 
@@ -3602,6 +3731,52 @@ mod tests {
         ]
     }
 
+    /// MERGE (double-failure-relay fix): a received `Input.pessimistic_floor` is
+    /// cached per-slot in `peer_pessimistic_floor`, OVERWRITING with the latest
+    /// report (in-flight snapshot semantics); an EMPTY floor (a retransmit / flush
+    /// / nudge) leaves the cache untouched so it retains the value the last fresh
+    /// `send_input` delivered — no clobber.
+    #[test]
+    fn merge_peer_connect_status_caches_pessimistic_floor_and_skips_empty() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Nothing reported yet -> NULL (the fold falls back to last_frame).
+        assert_eq!(protocol.peer_pessimistic_floor(slot2), Frame::NULL);
+
+        // A packet carrying a pessimistic floor for slot 2 caches it.
+        let mut body = Input {
+            peer_connect_status: status_slot2(false, 9),
+            pessimistic_floor: vec![Frame::new(7), Frame::new(8), Frame::new(4)],
+            ..Input::default()
+        };
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(4),
+            "the merge must cache the received pessimistic floor for slot 2"
+        );
+
+        // A later packet with an EMPTY pessimistic_floor (retransmit/nudge) must
+        // NOT clobber the cache.
+        body.pessimistic_floor = Vec::new();
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(4),
+            "an empty pessimistic_floor (retransmit/nudge) must not clobber the cached value"
+        );
+
+        // A fresh packet with a new floor overwrites (latest-snapshot semantics).
+        body.pessimistic_floor = vec![Frame::new(7), Frame::new(8), Frame::new(6)];
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(6),
+            "a fresh pessimistic_floor overwrites the cache (latest-snapshot semantics)"
+        );
+    }
+
     // (a) REACHABILITY: a FRESH gossip packet whose `start_frame` is too far AHEAD
     //     of the window takes the GAP-TOO-LARGE early return (line ~1472), NOT the
     //     decode-reference-missing guard. This pins WHICH branch the finding's
@@ -3638,6 +3813,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 99),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 5),
+            pessimistic_floor: Vec::new(),
         });
 
         // POST-HOIST: slot 2's drop gossip is applied even though the packet's
@@ -3694,6 +3870,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 49),
+            pessimistic_floor: Vec::new(),
         };
         let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
         protocol.on_input(&stale);
@@ -3744,6 +3921,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 42),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
+            pessimistic_floor: Vec::new(),
         });
 
         let status = protocol.peer_connect_status(PlayerHandle::new(2));
@@ -3780,6 +3958,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
+            pessimistic_floor: Vec::new(),
         });
         assert_eq!(
             protocol
@@ -3803,6 +3982,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 2),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 8),
+            pessimistic_floor: Vec::new(),
         });
 
         // The stale higher freeze must NOT un-converge us: min(4, 8) == 4.
@@ -3824,7 +4004,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         // Should not queue any messages
         assert!(protocol.send_queue.is_empty());
@@ -4543,6 +4723,7 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&dup_reference, std::iter::once(&dup_reference))
                 .expect("duplicate encode succeeds"),
+            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&dup_body);
         assert_eq!(
@@ -4567,6 +4748,7 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&fresh_reference, std::iter::once(&fresh_bytes))
                 .expect("fresh encode succeeds"),
+            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&fresh_body);
         assert_eq!(
@@ -4846,6 +5028,7 @@ mod tests {
             bytes: vec![1, 2, 3, 4],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         // Clear event queue and record input count before
@@ -4914,6 +5097,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -4986,6 +5170,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -5038,6 +5223,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -5092,6 +5278,7 @@ mod tests {
             bytes: vec![1, 2, 3],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5140,6 +5327,7 @@ mod tests {
             bytes: bomb,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5167,6 +5355,7 @@ mod tests {
             bytes: vec![0],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default()],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5230,6 +5419,7 @@ mod tests {
             ),
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5277,6 +5467,7 @@ mod tests {
             bytes: vec![1, 2, 3, 4], // Won't be decoded anyway
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -6358,7 +6549,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert_eq!(protocol.pending_output.len(), small_limit);
         assert!(protocol.send_queue.is_empty());
@@ -6402,7 +6593,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output(&connect_status);
+        protocol.send_pending_output(&connect_status, &[]);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6459,7 +6650,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, decoded_byte_cap);
+        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, &[], decoded_byte_cap);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6535,7 +6726,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -6579,7 +6770,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -8047,6 +8238,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             // Process the input
@@ -8102,7 +8294,7 @@ mod property_tests {
             let initial_send_queue_len = protocol.send_queue.len();
 
             // Call send_pending_output - should detect violation and not queue message
-            protocol.send_pending_output(&connect_status);
+            protocol.send_pending_output(&connect_status, &[]);
 
             // The violation path should return early without queueing a message
             // (The actual violation is reported, but we can verify no message was sent
@@ -8270,6 +8462,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); num_players],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8361,6 +8554,7 @@ mod property_tests {
                 bytes: vec![1, 2, 3, 4], // Won't be decoded
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             let inputs_before = protocol.recv_inputs.len();
@@ -8447,6 +8641,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8519,6 +8714,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();

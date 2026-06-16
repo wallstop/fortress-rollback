@@ -325,6 +325,11 @@ fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<Con
 // 1-byte bool + 4-byte fixed-int i32 + 2-byte fixed-int u16.
 const CONNECTION_STATUS_WIRE_LEN: usize = 7;
 
+/// The fixed wire footprint, in bytes, of one encoded [`Frame`] (a fixed-int
+/// `i32`). Used to bound length-prefixed `Vec<Frame>` decodes (e.g. an
+/// `Input`'s `pessimistic_floor`).
+const FRAME_WIRE_LEN: usize = 4;
+
 /// Rejects a length prefix that cannot possibly fit in the unread input bytes,
 /// *before* any memory is reserved for it.
 ///
@@ -395,12 +400,44 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     })?;
     input_bytes.extend_from_slice(byte_slice);
 
+    // Per-slot pessimistic confirmed floors (double-failure-relay fix). A
+    // length-prefixed `Vec<Frame>` (each `Frame` a fixed 4-byte `i32`), bounded
+    // like `peer_connect_status` so a hostile/garbled length cannot
+    // over-reserve. The field is advisory: a receiver that finds the wrong
+    // length (e.g. an empty vector) falls back to `last_frame`, so we decode it
+    // faithfully here and let the session layer apply the length policy.
+    let floor_len = read_usize(bytes, cursor, "input.pessimistic_floor.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        floor_len,
+        FRAME_WIRE_LEN,
+        "input.pessimistic_floor",
+    )?;
+    let mut pessimistic_floor = Vec::new();
+    pessimistic_floor
+        .try_reserve_exact(floor_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {} pessimistic floor entries",
+                floor_len
+            ))
+        })?;
+    for _ in 0..floor_len {
+        pessimistic_floor.push(Frame::new(read_i32(
+            bytes,
+            cursor,
+            "input.pessimistic_floor",
+        )?));
+    }
+
     Ok(Input {
         peer_connect_status,
         disconnect_requested,
         start_frame,
         ack_frame,
         bytes: input_bytes,
+        pessimistic_floor,
     })
 }
 
@@ -944,6 +981,7 @@ mod tests {
                     start_frame: Frame::new(100),
                     ack_frame: Frame::new(50),
                     bytes: vec![1, 2, 3, 4, 5],
+                    pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
                 }),
             },
             Message {
@@ -1008,6 +1046,7 @@ mod tests {
                 start_frame: Frame::new(100),
                 ack_frame: Frame::new(50),
                 bytes: vec![1, 2, 3, 4, 5],
+                pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
             }),
         };
         let bytes = encode(&original).unwrap();

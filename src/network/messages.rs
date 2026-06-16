@@ -89,6 +89,30 @@ pub(crate) struct Input {
     pub start_frame: Frame,
     pub ack_frame: Frame,
     pub bytes: Vec<u8>,
+    /// Per-slot **pessimistic confirmed floor** the sender reports for the
+    /// double-failure-relay fix (audit follow-up; verified-sound mode
+    /// `AsyncAckSound`/`AsyncAckSoundFresh` in
+    /// `specs/tla/DoubleFailureRelay.tla`). Index = player handle; value = the
+    /// lowest frame the sender could *still* freeze that slot to given
+    /// everything it currently folds — the `min` over the sender's own
+    /// `local_connect_status[slot].last_frame` AND every running, non-reserved
+    /// remote endpoint's cached `peer_connect_status(slot).last_frame`.
+    ///
+    /// Unlike `last_frame` (the sender's *own* receipt/freeze), this surfaces a
+    /// **departed origin's low** the sender still folds, so an observer that has
+    /// pruned that origin from its own fold can still hold its confirmation at
+    /// the mesh minimum instead of confirming + discarding the dropped slot's
+    /// real inputs above a freeze a relay will later agree to (the N>=4
+    /// double-failure-relay desync).
+    ///
+    /// Advisory and always `<= last_frame`, so consuming it never confirms
+    /// *higher* than the legacy `last_frame` fold (no safety regression): a
+    /// receiver that finds this empty / the wrong length / `Frame::NULL` for a
+    /// slot simply falls back to `last_frame` (the pre-fix barrier). Carried on
+    /// every `Input` packet alongside `peer_connect_status`; see
+    /// [`super::protocol`]'s `peer_pessimistic_floor` cache.
+    #[serde(default)]
+    pub pessimistic_floor: Vec<Frame>,
 }
 
 impl Default for Input {
@@ -99,6 +123,7 @@ impl Default for Input {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: Vec::new(),
+            pessimistic_floor: Vec::new(),
         }
     }
 }
@@ -112,6 +137,7 @@ impl std::fmt::Debug for Input {
             start_frame,
             ack_frame,
             bytes,
+            pessimistic_floor,
         } = self;
 
         f.debug_struct("Input")
@@ -120,6 +146,7 @@ impl std::fmt::Debug for Input {
             .field("start_frame", start_frame)
             .field("ack_frame", ack_frame)
             .field("bytes", &BytesDebug(bytes))
+            .field("pessimistic_floor", pessimistic_floor)
             .finish()
     }
 }
@@ -419,6 +446,7 @@ mod tests {
             start_frame: Frame::new(10),
             ack_frame: Frame::new(5),
             bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("Input"));
@@ -538,6 +566,7 @@ mod tests {
             start_frame: Frame::new(100),
             ack_frame: Frame::new(50),
             bytes: vec![1, 2, 3, 4, 5],
+            pessimistic_floor: Vec::new(),
         };
 
         let serialized = codec::encode(&input).expect("serialization should succeed");
@@ -554,6 +583,7 @@ mod tests {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: vec![],
+            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("0x")); // Empty bytes should still show "0x" prefix
