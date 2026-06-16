@@ -18,7 +18,7 @@ pub struct ConnectionStatus {
     /// on every `connected <-> disconnected` transition (a drop or a
     /// reactivation/hot-join re-open) of this slot in its own
     /// `local_connect_status`. It rides on the connect-status gossip carried by
-    /// every [`Input`] packet so a receiver can order a slot's reports by drop
+    /// every input packet so a receiver can order a slot's reports by drop
     /// cycle: a report with a strictly-lower `epoch` is from an earlier cycle
     /// (a reordered or relay-lagged packet) and must not be mistaken for a fresh
     /// one.

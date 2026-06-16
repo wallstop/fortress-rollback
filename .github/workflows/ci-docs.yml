@@ -448,7 +448,6 @@ jobs:
             'docs/**/*.md'
             'README.md'
             'CHANGELOG.md'
-            'CONTRIBUTING.md'
             'LICENSE*'
             '*.md'
           output: lychee-report.md
