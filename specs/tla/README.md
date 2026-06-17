@@ -211,9 +211,10 @@ the per-endpoint gossip caches (which can go stale under partition), endpoint de
 (pruning), the prediction window (irreversible discard of confirmed frames below the
 window floor), and the freeze re-roll.
 
-The confirmation rule is a `FIX_MODE` constant exercised by **seven** configs — the
-original four (the policy-level arbitration), plus three **S47** modes that discharge
-the two idealizations the MeshAgree *positive* rested on (see below):
+The confirmation rule has **nine** `FIX_MODE` modes — the original four (the
+policy-level arbitration), the three **S47** modes that discharge the two
+idealizations the MeshAgree *positive* rested on, the **S48** sound mode
+(`AsyncAckSound`), and the **S49** cold-cache mode (`AsyncAckSoundFresh`) (see below):
 
 - **Baseline** (`DoubleFailureRelay_Baseline.cfg`, expected to FAIL): the current
   production fold. TLC reproduces the residual as a **safety** counterexample
@@ -331,8 +332,8 @@ window-locked — disagree on the dropped slot's recorded confirmed value);
 `LockedRecordMatchesFreeze` (a mesh-agreed survivor's locked record equals the agreed
 freeze value); plus `FreezeNeverBelowGlobalMin` and `RecordedSourceInRange` sanity
 invariants. **Liveness:** `ConfirmationProgresses` (every alive survivor eventually
-confirms to the living mesh floor; partitions heal monotonically). The eight FIX_MODE
-configs together are the machine-checked arbitration. The original four establish the POLICY:
+confirms to the living mesh floor; partitions heal monotonically). The nine FIX_MODE
+modes together are the machine-checked arbitration. The original four establish the POLICY:
 the residual is real (Baseline), the dead-survivor tombstone regresses liveness
 (Tombstone), the cache-only no-wire shortcut is unsound via the corroborate-then-drop
 race (InheritedFloor), and the mesh-acked-floor *policy* is sound (MeshAgree). The three
@@ -346,7 +347,10 @@ disproven `AsyncAckStale` machinery with a pessimistic queue-min report — the 
 change (no epoch freshness gate needed in the warm-GlobalMin scope; safety also rests on the
 warmup pessimistic-ack seed + the `FreezeNeverBelowGlobalMin` floor), the implementable analog
 of the `MeshAgree` policy positive and the design a production red-green cycle should implement
-(a fresh-ack round reporting each peer's pessimistic queue-min, no partition-hold).
+(a fresh-ack round reporting each peer's pessimistic queue-min, no partition-hold). **S49 adds
+the cold-cache mode (`AsyncAckSoundFresh`, PASS):** the same pessimistic report plus an
+observer-side unreceived-ack HOLD (NULL-seeded `ackFloor`; do not trust a cold cache), which
+closes the cold-cache corner that the report alone (`AsyncAckSound_Cold`, FAIL) reopens.
 
 ### PeerDrop.tla
 

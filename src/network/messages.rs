@@ -96,7 +96,11 @@ pub(crate) struct Input {
     /// lowest frame the sender could *still* freeze that slot to given
     /// everything it currently folds — the `min` over the sender's own
     /// `local_connect_status[slot].last_frame` AND every running, non-reserved
-    /// remote endpoint's cached `peer_connect_status(slot).last_frame`.
+    /// remote endpoint's cached `peer_connect_status(slot).last_frame`,
+    /// **skipping remote caches that are `Frame::NULL`** (no-info, so a peer
+    /// that has not yet gossiped a receipt does not poison the floor). The
+    /// sender computes it in `P2PSession::pessimistic_floors`, the canonical
+    /// fold — see there for the exact membership.
     ///
     /// Unlike `last_frame` (the sender's *own* receipt/freeze), this surfaces a
     /// **departed origin's low** the sender still folds, so an observer that has

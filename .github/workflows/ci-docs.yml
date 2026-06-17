@@ -12,6 +12,7 @@ on:
       - "wiki/**"
       - "scripts/docs/**"
       - "scripts/tests/**"
+      - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
       - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/ci/check-derive-bounds.sh"
@@ -33,6 +34,7 @@ on:
       - "wiki/**"
       - "scripts/docs/**"
       - "scripts/tests/**"
+      - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
       - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/ci/check-derive-bounds.sh"
@@ -198,6 +200,9 @@ jobs:
 
       - name: Validate wiki consistency
         run: python scripts/docs/check-wiki-consistency.py
+
+      - name: Validate TLA FIX_MODE / config / prose consistency
+        run: python scripts/docs/check-tla-config-consistency.py
 
   # ============================================================================
   # SCRIPT TESTS & WIKI DRY-RUN - Run all script tests and validate wiki generation

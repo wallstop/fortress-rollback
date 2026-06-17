@@ -90,6 +90,20 @@ def is_changelog_file(path: str) -> bool:
     return path == "CHANGELOG.md"
 
 
+def is_tla_consistency_surface_file(path: str) -> bool:
+    """Return True for files that can affect the TLA FIX_MODE consistency check.
+
+    The check derives the FIX_MODE set from the spec and compares it against the
+    ``.cfg`` files and ``README.md`` in ``specs/tla/``, so any of those (or the
+    checker itself) can change its result.
+    """
+    if path == "scripts/docs/check-tla-config-consistency.py":
+        return True
+    if not path.startswith("specs/tla/"):
+        return False
+    return path.endswith((".tla", ".cfg")) or path == "specs/tla/README.md"
+
+
 def is_rust_source_file(path: str) -> bool:
     """Return True for Rust source files under `src/`."""
     return path.startswith("src/") and path.endswith(".rs")
@@ -174,6 +188,9 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     )
     doc_claims_changed = any(
         is_doc_claims_surface_file(path) for path in changed_files
+    )
+    tla_consistency_changed = any(
+        is_tla_consistency_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
 
@@ -318,6 +335,29 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "Update stale rustdoc/test names, or adjust the implementation "
                     "if the documented contract is the intended behavior."
                 ),
+            )
+        )
+
+    if run_all or tla_consistency_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="tla-config-consistency",
+                description=(
+                    "validate the TLA FIX_MODE set, its .cfg files, and the "
+                    "specs/tla/README.md prose stay in sync"
+                ),
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/docs/check-tla-config-consistency.py",
+                ],
+                fix_hint=(
+                    "Align the count/mode names in specs/tla/README.md with the "
+                    "spec's `ASSUME FIX_MODE \\in {...}` set, add a .cfg that "
+                    "exercises any new mode, and document it."
+                ),
+                # The right fix depends on intent (spec vs prose vs config), so
+                # there is no safe blind auto-fix.
+                fix_command=None,
             )
         )
 

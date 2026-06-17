@@ -214,6 +214,34 @@ After bumping `Cargo.toml` version, update ALL doc snippets:
 rg 'fortress-rollback.*=.*"\d+\.\d+' docs/ wiki/ README.md --type md
 ```
 
+## Enumerated-Set Counts in Prose (derive, don't hand-count)
+
+Prose that states a *count* of an enumerable set ("seven `FIX_MODE` configs",
+"the four error variants") rots the moment the set grows. Two defenses, in order
+of preference:
+
+1. **State the fact once; link, don't restate.** When the same invariant lives in
+   N doc comments, fixing one leaves N-1 stale. Make one site canonical and have
+   the others defer to it. Example: the double-failure-relay pessimistic floor is
+   defined once on `P2PSession::pessimistic_floors`; the cache field
+   (`UdpProtocol::peer_pessimistic_floor`), the wire field
+   (`Input::pessimistic_floor`), and the consumer (`remote_slot_confirmed_bound`)
+   all point there instead of re-describing the `Frame::NULL`-skip fold.
+2. **Derive machine-checkable counts from the source of truth.** For an
+   enumerable set with a single definition site, add a checker that reads the
+   definition and compares. The TLA `FIX_MODE` set lives in one
+   `ASSUME FIX_MODE \in {...}` clause in `specs/tla/DoubleFailureRelay.tla`;
+   `scripts/docs/check-tla-config-consistency.py` derives it (after stripping TLA
+   comments) and enforces that every `.cfg` names a defined mode, every defined
+   mode has a `.cfg` and a README mention, and every prose mode-count equals the
+   defined size. Run it via agent preflight (`tla-config-consistency`) or the
+   `ci-docs` workflow. Tests: `scripts/tests/test_check_tla_config_consistency.py`.
+
+The checker only reads a count claim written in the form `<N> FIX_MODE modes`
+(FIX_MODE inside the counted phrase) — so author mode counts that way. There is
+no proximity guessing: a bare "<N> configs" near a `FIX_MODE=` table cell, and
+sub-counts like "the four original configs", are deliberately left alone.
+
 ## Detecting Inconsistencies
 
 ```bash

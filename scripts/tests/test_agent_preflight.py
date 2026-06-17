@@ -41,6 +41,10 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("doc-claims", "tests/common/channel_socket.rs"),
     ("advance-frame-error-handling", "tests/sessions/spectator.rs"),
     ("kani-violation-cost", "src/lib.rs"),
+    ("tla-config-consistency", "specs/tla/DoubleFailureRelay.cfg"),
+    ("tla-config-consistency", "specs/tla/README.md"),
+    ("tla-config-consistency", "specs/tla/DoubleFailureRelay.tla"),
+    ("tla-config-consistency", "scripts/docs/check-tla-config-consistency.py"),
 ]
 
 
@@ -132,6 +136,12 @@ def test_normalize_paths_preserves_leading_dot_segments() -> None:
 def test_plan_checks_returns_empty_for_non_matching_changes() -> None:
     checks = plan_checks({"notes/design.txtx"})
     assert checks == []
+
+
+def test_plan_checks_skips_tla_consistency_for_non_surface_specs_file() -> None:
+    # A non-(.tla/.cfg/README) file under specs/tla/ must NOT trigger the check.
+    checks = plan_checks({"specs/tla/notes.txt"})
+    assert "tla-config-consistency" not in _ids(checks)
 
 
 def test_plan_checks_run_all_forces_all_checks() -> None:

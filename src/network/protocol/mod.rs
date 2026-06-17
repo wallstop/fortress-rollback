@@ -158,12 +158,20 @@ where
     /// This endpoint's cache of the peer's per-slot **pessimistic confirmed
     /// floor** (the double-failure-relay fix; see [`Input::pessimistic_floor`]).
     /// Parallel to [`Self::peer_connect_status`] (index = player handle,
-    /// length `num_players`) and written together with it in
-    /// [`Self::merge_peer_connect_status`]. A slot left at [`Frame::NULL`] (the
-    /// initializer, or a packet whose `pessimistic_floor` was empty / the wrong
-    /// length) means "no pessimistic report", and the session's
-    /// `remote_slot_confirmed_bound` fold falls back to that slot's
-    /// `last_frame` — the legacy (pre-fix) barrier value.
+    /// length `num_players`) and written in [`Self::merge_peer_connect_status`].
+    ///
+    /// [`Self::merge_peer_connect_status`] OVERWRITES a slot with the latest
+    /// reported floor (in-flight snapshot semantics), but only when the packet
+    /// actually carries one: a packet whose `pessimistic_floor` is empty or
+    /// shorter than the slot index (a retransmit / flush / nudge, which
+    /// deliberately omit the floor to avoid clobbering the receiver's last
+    /// report) leaves the cached slot **UNCHANGED** — it keeps the value the
+    /// last fresh report delivered, rather than reverting to no-info. A slot is
+    /// therefore [`Frame::NULL`] only from the initializer (before the first
+    /// report) or because a report explicitly carried `Frame::NULL`. A
+    /// [`Frame::NULL`] slot means "no pessimistic report", and the session's
+    /// `remote_slot_confirmed_bound` fold falls back to that slot's `last_frame`
+    /// — the legacy (pre-fix) barrier value.
     peer_pessimistic_floor: Vec<Frame>,
 
     // input compression
@@ -1532,8 +1540,9 @@ impl<T: Config> UdpProtocol<T> {
             connect_status.clone_into(&mut body.peer_connect_status);
             // Per-slot pessimistic confirmed floors (double-failure-relay fix).
             // Empty on the retransmit/flush/nudge paths (no cache clobber on the
-            // receiver); populated by `send_input` with the session's current
-            // per-slot `min(own last_frame, folded peers' last_frame)`.
+            // receiver); otherwise the session's per-slot pessimistic queue-min,
+            // computed in `P2PSession::pessimistic_floors` (the canonical fold:
+            // min over the own receipt and non-NULL folded peers' `last_frame`).
             pessimistic_floor.clone_into(&mut body.pessimistic_floor);
 
             self.queue_message(MessageBody::Input(body));

@@ -8282,14 +8282,28 @@ impl<T: Config> P2PSession<T> {
     /// pessimistic queue-min report (verified-sound mode `AsyncAckSound` in
     /// [`specs/tla/DoubleFailureRelay.tla`](https://github.com/wallstop/fortress-rollback)).
     ///
+    /// This is the **canonical** definition of the floor's fold; the cache
+    /// (`peer_pessimistic_floor`), the wire field
+    /// ([`Input::pessimistic_floor`](crate::network::messages::Input::pessimistic_floor)),
+    /// and the consumer ([`Self::remote_slot_confirmed_bound`]) all describe
+    /// themselves by deferring here, so the one fact lives in one place.
+    ///
     /// For each slot, the value is the lowest frame this peer could *still*
     /// freeze that slot to given everything it currently folds:
     /// `min(local_connect_status[slot].last_frame, min over running,
-    /// non-reserved remote endpoints of peer_connect_status(slot).last_frame)`.
-    /// The fold membership mirrors [`Self::remote_slot_confirmed_bound`] exactly
+    /// non-reserved remote endpoints of peer_connect_status(slot).last_frame)`,
+    /// **skipping any remote endpoint whose cached view is `Frame::NULL`**
+    /// (no-info — e.g. a freshly `Running` peer that has not gossiped a receipt
+    /// yet): folding such a cache would `min` the whole reported floor down to
+    /// `Frame::NULL` and poison every observer that consumes it.
+    ///
+    /// The endpoint-set membership mirrors [`Self::remote_slot_confirmed_bound`]
     /// (skip non-running and reserved hot-join endpoints) so the value a peer
     /// *reports* is folded over the same endpoint set the mesh barrier *consumes*
-    /// — what makes the report a faithful pessimistic floor.
+    /// — what makes the report a faithful pessimistic floor. The `Frame::NULL`
+    /// remote-cache skip above is the one refinement on top of that shared
+    /// membership; the consumer applies the mirror-image fallback (a reported
+    /// `Frame::NULL` is read as "use `last_frame`").
     ///
     /// Unlike a peer's own `last_frame` (its receipt/freeze of the slot), this
     /// surfaces a **departed origin's low** the peer still folds. An observer
@@ -8298,9 +8312,13 @@ impl<T: Config> P2PSession<T> {
     /// `remote_slot_confirmed_bound`), instead of confirming + discarding the
     /// dropped slot's real inputs above a freeze the mesh will later agree to.
     ///
-    /// A slot whose fold includes a default/no-info (`Frame::NULL`) cache yields
-    /// `Frame::NULL`, which the receiver reads as "fall back to `last_frame`" —
-    /// the warm-cache boundary (the cold-cache corner is the tracked follow-up).
+    /// Because remote no-info caches are skipped (above), this yields
+    /// `Frame::NULL` for a slot ONLY when this peer's OWN receipt
+    /// (`local_connect_status[slot].last_frame`) is `Frame::NULL` — i.e. this
+    /// peer is itself cold for the slot (the cold-cache corner, out of the
+    /// warm-cache scope this chunk targets). A receiver reads that `Frame::NULL`
+    /// as "fall back to `last_frame`" — see [`Self::remote_slot_confirmed_bound`],
+    /// which folds `last_frame` whenever the reported floor is `Frame::NULL`.
     fn pessimistic_floors(&self) -> Vec<Frame> {
         // alloc-bound: `num_players` is validated at session construction (mirrors `local_connect_status`).
         let mut floors = Vec::with_capacity(self.num_players);
@@ -13747,6 +13765,93 @@ mod tests {
             Some(Frame::new(7)),
             "a non-running endpoint's view is excluded from the gossiped pessimistic floor \
              (min over our 9 and the RUNNING C 7, D 9 = 7), not the pruned B's 2"
+        );
+    }
+
+    /// COMPUTATION (no-info skip): a RUNNING remote endpoint whose cached view
+    /// is `Frame::NULL` (a freshly `Running` peer that has not yet gossiped a
+    /// receipt) is SKIPPED from the fold, NOT folded — folding it would `min`
+    /// the whole reported floor down to `Frame::NULL` and poison every observer.
+    /// This pins the canonical-fold rustdoc claim ("skipping any remote endpoint
+    /// whose cached view is `Frame::NULL`"). Mutation-proof: a fold that did not
+    /// skip would report `Frame::NULL` instead of the real low (4).
+    #[test]
+    fn pessimistic_floors_skips_null_no_info_remote_caches() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Our own receipt of D is 9; B holds the real low (4); C is freshly
+        // running and has NOT gossiped a receipt for D yet (NULL = no info).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(9),
+            epoch: 0,
+        };
+        for (addr, frame) in [
+            (addr_b, Frame::new(4)),
+            (addr_c, Frame::NULL),
+            (addr_d, Frame::new(9)),
+        ] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: frame,
+                        epoch: 0,
+                    },
+                );
+        }
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::new(4)),
+            "a remote endpoint cached at Frame::NULL (no info) must be SKIPPED, not folded: \
+             the floor is min over our 9 and B's real low 4 = 4, never poisoned to NULL by C"
+        );
+    }
+
+    /// COMPUTATION (own cold receipt): with remote no-info caches skipped, the
+    /// reported floor is `Frame::NULL` ONLY when this peer's OWN receipt is
+    /// `Frame::NULL` (it is itself cold for the slot — the cold-cache corner).
+    /// This pins the second half of the canonical-fold rustdoc.
+    #[test]
+    fn pessimistic_floors_null_only_when_own_receipt_is_null() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Our OWN receipt of D is NULL (we are cold), even though running
+        // remotes hold real lows — the fold must surface NULL (cold corner).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::NULL,
+            epoch: 0,
+        };
+        for (addr, frame) in [(addr_b, 4), (addr_c, 7), (addr_d, 9)] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(frame),
+                        epoch: 0,
+                    },
+                );
+        }
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::NULL),
+            "a NULL OWN receipt yields a NULL reported floor (the cold-cache corner), \
+             which a receiver reads as 'fall back to last_frame'"
         );
     }
 
