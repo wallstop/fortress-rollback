@@ -12,10 +12,19 @@
 #   - tla2tools.jar downloaded (script will fetch if missing)
 #
 # Environment Variables:
-#   TLA_TOOLS_JAR    - Path to tla2tools.jar (default: .tla-tools/tla2tools.jar)
-#   TLA_WORKERS      - Number of worker threads (default: auto)
-#   TLA_MEMORY       - JVM heap size (default: 4g)
-#   TLA_DEPTH        - Maximum state graph depth (default: unlimited)
+#   TLA_TOOLS_JAR     - Path to tla2tools.jar (default: .tla-tools/tla2tools.jar)
+#   TLA_WORKERS       - TLC worker threads; "auto" = one per core (default: auto).
+#                       Multi-worker parallelizes the safety BFS *and* the
+#                       liveness behavior-graph construction (only the final SCC
+#                       pass is single-threaded), so it is the single largest
+#                       lever on wall-clock here. Set to 1 to force single-thread.
+#   TLA_MEMORY        - JVM heap size (default: 4g)
+#   TLA_DEPTH         - Maximum state graph depth (default: unlimited)
+#   TLA_SPEC_TIMEOUT  - Per-spec wall-clock cap in seconds, enforced via the
+#                       external `timeout` command (default: 900; empty disables).
+#                       SIGTERM-kills a runaway spec so it is reported FAILED with
+#                       partial progress, instead of the whole CI step being
+#                       hard-killed with no per-spec attribution.
 
 set -euo pipefail
 
@@ -41,6 +50,7 @@ TLA_TOOLS_URL="${TLA_TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/down
 TLA_WORKERS="${TLA_WORKERS:-auto}"
 TLA_MEMORY="${TLA_MEMORY:-4g}"
 TLA_DEPTH="${TLA_DEPTH:-}"
+TLA_SPEC_TIMEOUT="${TLA_SPEC_TIMEOUT:-900}"
 
 # Colors
 RED='\033[0;31m'
@@ -175,19 +185,25 @@ verify_spec() {
 
     echo -e "${BLUE}Verifying $spec_name...${NC}"
 
-    # Build TLC command
+    # Build TLC command.
+    #   -workers: parallelizes state exploration AND liveness-graph construction
+    #             (the bottleneck for large liveness specs); "auto" = one per
+    #             core. Always passed -- an omitted -workers silently defaults to
+    #             a SINGLE worker, which is what previously made the liveness leg
+    #             time out in CI.
+    #   -lncheck final: run liveness checking once, over the complete state graph,
+    #             instead of repeatedly as the graph grows. Sound (for a complete
+    #             graph the verdict is identical); the maintainer-recommended CI
+    #             setting. No effect on safety-only specs.
     local tlc_cmd=(
         java
         "-Xmx$TLA_MEMORY"
         -XX:+UseParallelGC
         -jar "$TLA_TOOLS_JAR"
         -deadlock
+        -workers "$TLA_WORKERS"
+        -lncheck final
     )
-
-    # Add worker count
-    if [[ "$TLA_WORKERS" != "auto" ]]; then
-        tlc_cmd+=(-workers "$TLA_WORKERS")
-    fi
 
     # Add depth limit if set
     if [[ -n "$TLA_DEPTH" ]]; then
@@ -196,6 +212,20 @@ verify_spec() {
 
     # Add config and spec files
     tlc_cmd+=(-config "$cfg_file" "$tla_file")
+
+    # Wrap in a per-spec wall-clock cap. We use the EXTERNAL `timeout` (SIGTERM)
+    # rather than TLC's own -Dtlc2.TLC.stopAfter: stopAfter stops gracefully but
+    # then prints "Model checking completed. No error has been found." over the
+    # PARTIAL state space (non-zero "states left on queue"), which the success
+    # grep below would mis-read as a pass. An external SIGTERM is not trapped by
+    # TLC, so a capped run never prints the success line and is correctly
+    # reported as FAILED, with its partial progress retained for diagnosis.
+    local -a run_cmd
+    if [[ -n "$TLA_SPEC_TIMEOUT" ]] && command -v timeout &> /dev/null; then
+        run_cmd=(timeout "$TLA_SPEC_TIMEOUT" "${tlc_cmd[@]}")
+    else
+        run_cmd=("${tlc_cmd[@]}")
+    fi
 
     # Run TLC
     local start_time
@@ -206,17 +236,30 @@ verify_spec() {
 
     local exit_code=0
     if [[ "$verbose" == "true" ]]; then
-        "${tlc_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
+        "${run_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
     else
-        "${tlc_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+        "${run_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
     fi
 
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
-    # Check results
-    if [[ $exit_code -eq 0 ]] && grep -q "Model checking completed. No error has been found." "$output_file"; then
+    # Check results.
+    #
+    # A PASS requires (1) a zero exit code, (2) the success line, and (3) NO
+    # partial-completion summary. Condition (3) is defense-in-depth: a graceful
+    # early stop prints the success line over an INCOMPLETE state space, leaving
+    # a non-zero "states left on queue" in the final summary (a complete run
+    # always ends with "0 states left on queue"). The current external-`timeout`
+    # cap can't reach this state (a SIGTERM'd TLC prints no success line at all),
+    # but TLC's own -Dtlc2.TLC.stopAfter would, so we fail closed regardless of
+    # how a future cap is wired. The regex anchors to the final summary line
+    # (which starts with the generated-state count) so the legitimately non-zero
+    # "states left on queue" of in-progress "Progress(...)" lines never matches.
+    if [[ $exit_code -eq 0 ]] \
+        && grep -q "Model checking completed. No error has been found." "$output_file" \
+        && ! grep -qE '^[0-9][0-9,]* states generated,.* [1-9][0-9,]* states left on queue' "$output_file"; then
         echo -e "${GREEN}✓ $spec_name passed (${duration}s)${NC}"
 
         # Extract stats

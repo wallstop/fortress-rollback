@@ -60,7 +60,7 @@ jobs:
   tla-verification:
     name: TLA+ Model Checking
     runs-on: ubuntu-latest
-    # Job budget must exceed the 30-min verification step plus Java/TLA setup.
+    # Job budget must exceed the verification step plus Java/TLA setup.
     timeout-minutes: 45
 
     steps:
@@ -79,9 +79,19 @@ jobs:
           path: .tla-tools
           key: tla-tools-${{ hashFiles('.tla-tools-version') }}
 
+      # No --fail-fast: every spec runs and is reported each time, so a single
+      # slow/failing spec can no longer starve the ones after it (previously a
+      # liveness blow-up in one spec hit the step timeout and left three specs
+      # unchecked). Each spec is independently wall-clock-capped inside the
+      # script (TLA_SPEC_TIMEOUT, default 900s) and runs multi-worker, so the
+      # whole suite completes in a few minutes. A single runaway spec is caught
+      # and attributed by its own per-spec cap while the rest still run; the
+      # step timeout below is only a coarse backstop for the pathological case
+      # of several specs regressing at once. The script exits non-zero if any
+      # spec fails, failing the job.
       - name: Run TLA+ verification
-        run: ./scripts/verification/verify-tla.sh --fail-fast
-        timeout-minutes: 30
+        run: ./scripts/verification/verify-tla.sh
+        timeout-minutes: 35
 
   # Z3 SMT Solver Verification
   z3-verification:
