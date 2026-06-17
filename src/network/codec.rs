@@ -7,7 +7,8 @@
 //! # Design Rationale
 //!
 //! - **Centralized Configuration**: The bincode config is defined once, avoiding
-//!   repeated `bincode::config::standard().with_fixed_int_encoding()` calls.
+//!   repeated `bincode::config::standard().with_little_endian().with_fixed_int_encoding()`
+//!   calls.
 //! - **Buffer Reuse**: Provides `encode_into` variants that write into existing
 //!   buffers, reducing allocations in hot paths.
 //! - **Clear Error Handling**: All functions return `Result` types with descriptive
@@ -60,7 +61,9 @@ use crate::Frame;
 //
 // This is a zero-cost abstraction - the config is computed at compile time.
 fn config() -> impl bincode::config::Config {
-    bincode::config::standard().with_fixed_int_encoding()
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
 }
 
 struct FallibleVecWriter<'a> {
@@ -901,12 +904,14 @@ fn reject_over_cap(len: usize) -> CodecResult<()> {
 }
 
 /// The bincode config for bounded peer-decodes: the shared codec config
-/// ([`config`]'s `standard().with_fixed_int_encoding()`, kept byte-for-byte
-/// identical) plus a [`MAX_BOUNDED_DECODE_LEN`] byte limit. `with_limit` is an
-/// inherent method on the concrete `Configuration`, so this is built from the
-/// concrete base rather than the `impl Config` return of [`config`].
+/// ([`config`]'s `standard().with_little_endian().with_fixed_int_encoding()`,
+/// kept byte-for-byte identical) plus a [`MAX_BOUNDED_DECODE_LEN`] byte limit.
+/// `with_limit` is an inherent method on the concrete `Configuration`, so this
+/// is built from the concrete base rather than the `impl Config` return of
+/// [`config`].
 fn bounded_decode_config() -> impl bincode::config::Config {
     bincode::config::standard()
+        .with_little_endian()
         .with_fixed_int_encoding()
         .with_limit::<MAX_BOUNDED_DECODE_LEN>()
 }
@@ -945,6 +950,50 @@ mod tests {
         let bytes = encode(&original).unwrap();
         let (decoded, _): (Message, _) = decode(&bytes).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn codec_wire_format_uses_fixed_little_endian_bytes() {
+        let cases = [
+            (
+                "sync_request",
+                Message {
+                    header: MessageHeader { magic: 0xABCD },
+                    body: MessageBody::SyncRequest(SyncRequest {
+                        random_request: 999,
+                    }),
+                },
+                vec![0xCD, 0xAB, 0x00, 0x00, 0x00, 0x00, 0xE7, 0x03, 0x00, 0x00],
+            ),
+            (
+                "quality_report",
+                Message {
+                    header: MessageHeader { magic: 0x1234 },
+                    body: MessageBody::QualityReport(QualityReport {
+                        frame_advantage: -2,
+                        ping: 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10,
+                    }),
+                },
+                vec![
+                    0x34, 0x12, // MessageHeader::magic
+                    0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
+                    0xFE, 0xFF, // frame_advantage: i16 -2
+                    0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
+                    0x03, 0x02, 0x01, // ping: u128
+                ],
+            ),
+        ];
+
+        for (name, original, expected) in cases {
+            let bytes = encode(&original).unwrap();
+            assert_eq!(bytes, expected, "encoded bytes for {name}");
+
+            let generic: Message = decode_value(&bytes).unwrap();
+            let (manual, consumed) = decode_message(&bytes).unwrap();
+            assert_eq!(generic, original, "generic decode for {name}");
+            assert_eq!(manual, original, "manual decode for {name}");
+            assert_eq!(consumed, bytes.len(), "consumed bytes for {name}");
+        }
     }
 
     #[test]

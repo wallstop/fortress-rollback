@@ -665,7 +665,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn bincode_config() -> impl bincode::config::Config {
-        bincode::config::standard().with_fixed_int_encoding()
+        bincode::config::standard()
+            .with_little_endian()
+            .with_fixed_int_encoding()
     }
 
     fn encode<T: Serialize>(value: &T) -> Vec<u8> {

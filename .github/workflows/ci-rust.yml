@@ -216,7 +216,12 @@ jobs:
   # - Windows: 2 jobs with 1 seed, platform-specific UB detection
   #   (input_queue grouped with misc for fewer total jobs)
   # - macOS: 2 jobs with 1 seed, platform-specific UB detection
-  # - Big-endian (s390x): Separate step on Linux misc job (tests misc only)
+  #
+  # Big-endian wire-format coverage is intentionally handled by fast
+  # host-native golden byte tests plus a source guard that rejects native-endian
+  # wire APIs. Do not install cross-compilers inside Miri jobs: the uncached
+  # s390x apt path is mirror-speed dependent and can consume the whole job
+  # timeout before tests start.
   #
   # Performance notes:
   # - Property tests are 50-300x slower under Miri (skipped, use proptest directly)
@@ -241,7 +246,6 @@ jobs:
             seeds: "0..2"
             test_filter: "sessions::"
             skip_filter: "--skip property_tests --skip concurrent"
-            big_endian: false
 
           # Linux Job 2: Network module (~225 tests)
           - name: Linux - network
@@ -249,7 +253,6 @@ jobs:
             seeds: "0..2"
             test_filter: "network::"
             skip_filter: "--skip property_tests --skip concurrent"
-            big_endian: false
 
           # Linux Job 3: Input queue + sync_layer (~154 tests)
           - name: Linux - queues
@@ -257,17 +260,15 @@ jobs:
             seeds: "0..2"
             test_filter: "input_queue:: sync_layer::"
             skip_filter: "--skip property_tests --skip concurrent"
-            big_endian: false
 
-          # Linux Job 4: Everything else (~319 tests) + separate big-endian step
+          # Linux Job 4: Everything else (~319 tests)
           # Covers: error::, hash::, rng::, checksum::, time_sync::,
           #         telemetry::, frame_info::, sync::, rle::, tests::
-          - name: Linux - misc + big-endian
+          - name: Linux - misc
             os: ubuntu-latest
             seeds: "0..2"
             test_filter: ""
             skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip input_queue:: --skip sync_layer::"
-            big_endian: true
 
           # ============================================================
           # Windows jobs (1 seed each, 2 jobs total)
@@ -279,7 +280,6 @@ jobs:
             seeds: "0..1"
             test_filter: "sessions:: network:: sync_layer::"
             skip_filter: "--skip property_tests --skip concurrent"
-            big_endian: false
 
           # Windows Job 2: Everything else (~377 tests)
           - name: Windows - misc
@@ -287,7 +287,6 @@ jobs:
             seeds: "0..1"
             test_filter: ""
             skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip sync_layer::"
-            big_endian: false
 
           # ============================================================
           # macOS jobs (1 seed each, 2 jobs total)
@@ -299,7 +298,6 @@ jobs:
             seeds: "0..1"
             test_filter: "sessions:: network:: sync_layer::"
             skip_filter: "--skip property_tests --skip concurrent"
-            big_endian: false
 
           # macOS Job 2: Everything else (~377 tests)
           - name: macOS - misc
@@ -307,7 +305,6 @@ jobs:
             seeds: "0..1"
             test_filter: ""
             skip_filter: "--skip property_tests --skip concurrent --skip sessions:: --skip network:: --skip sync_layer::"
-            big_endian: false
 
     steps:
       - uses: actions/checkout@v6
@@ -370,24 +367,6 @@ jobs:
           cargo miri test --lib -- $test_filter $skip_filter
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-symbolic-alignment-check"
-
-      # Install s390x cross-compiler for big-endian tests.
-      # Miri needs a C compiler for the target when criterion (via alloca crate)
-      # is a transitive dependency that requires native code compilation.
-      - name: Install s390x cross-compiler
-        if: matrix.big_endian
-        run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
-
-      - name: Run Miri tests (big-endian s390x)
-        if: matrix.big_endian
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo miri test --lib --target s390x-unknown-linux-gnu -- \
-            --skip property_tests --skip concurrent \
-            --skip sessions:: --skip network:: --skip input_queue:: --skip sync_layer::
-        env:
-          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
   # MSRV (Minimum Supported Rust Version) verification
   msrv-check:

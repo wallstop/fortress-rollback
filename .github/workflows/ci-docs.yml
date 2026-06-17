@@ -23,6 +23,7 @@ on:
       - ".vale/**"
       - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
+      - ".github/workflows/ci-rust.yml"
   pull_request:
     branches: [main]
     paths:
@@ -45,6 +46,7 @@ on:
       - ".vale/**"
       - ".github/actions/install-cargo-tool/**"
       - ".github/workflows/ci-docs.yml"
+      - ".github/workflows/ci-rust.yml"
   workflow_dispatch:
 
 jobs:
