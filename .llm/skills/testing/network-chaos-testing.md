@@ -23,6 +23,7 @@ assert_eq!(result.retry_count, 0, "acceptance paths must not depend on retries")
 ```
 
 **Key principles:**
+
 1. Correctness regressions use deterministic channel sockets plus `TestClock`
 2. Real UDP chaos tests are smoke coverage only, never the required acceptance gate
 3. Any acceptance path that uses retry helpers must assert `retry_count == 0`
@@ -30,6 +31,9 @@ assert_eq!(result.retry_count, 0, "acceptance paths must not depend on retries")
 5. Bidirectional chaos compounds -- both peers apply chaos to outgoing packets
 6. Use explicit `SyncConfig` construction, not presets, for chaos smoke tests
 7. Use `sync_timeout: None` -- let iteration budget be the only limit
+8. Channel-socket tests need no `#[serial]` (no port binding, no shared global
+   state); only real-UDP tests that bind ports via
+   `get_test_port`/`bind_socket_with_retry` require it
 
 ## Correctness Regression Policy
 
@@ -125,19 +129,23 @@ Rule: A test should use **<=50% of its iteration budget locally**.
 ## Failure Mode Diagnosis
 
 ### Frame 0 Sync Timeout
+
 - Symptom: `success=false, final_frame=0`
 - Cause: Sync handshake never completed
 - Fix: Add appropriate sync preset
 
 ### Flaky Test (~50% pass rate)
+
 - Symptom: Passes sometimes, always sync timeouts when failing
 - Fix: Upgrade sync preset, or use `bursty_survivable()` for CI
 
 ### Mid-Session Timeout
+
 - Symptom: `final_frame > 0` (made progress)
 - Fix: Increase `timeout_secs` or reduce chaos severity
 
 ### Desync After Rollback
+
 - Symptom: Both peers `success=true` but values/checksums differ
 - Cause: Determinism bug (HashMap iteration, floating point, etc.)
 - Fix: Review game logic, not network config

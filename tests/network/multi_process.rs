@@ -1382,9 +1382,17 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
         configs.len()
     );
 
-    // (The smoke-tier guard lives in spawn_peer -- the single choke point EVERY
-    // real-UDP session flows through, including the direct-spawn staggered-startup
-    // tests that bypass this function.)
+    // Pre-flight smoke-tier guard: validate the ENTIRE scenario before spawning
+    // any peer. Spawning is irreversible -- dropping a `Child` does NOT kill the
+    // process -- so a loss-bearing config discovered mid-loop, after earlier clean
+    // peers are already live, would orphan those children when the per-config
+    // check in `spawn_peer` panics. Checking every config up front fails before
+    // the first spawn (the message names the first offending peer). `spawn_peer`
+    // keeps its per-config check as a backstop for the direct-spawn
+    // staggered-startup tests that bypass this engine.
+    if let Err(message) = check_smoke_tier(&configs, smoke_tier_enforced()) {
+        panic!("{message}");
+    }
 
     // Check if the binary exists - fail fast with a clear message
     assert!(

@@ -80,6 +80,12 @@ repos:
         types: [python]
         files: 'test_.*\.py$|.*_test\.py$'
 
+      - id: check-tomllib-fallback
+        name: require tomli fallback for tomllib imports
+        entry: python scripts/hooks/check-tomllib-fallback.py
+        language: python
+        types: [python]
+
       # ══════════════════════════════════════════════════════════════════════
       # Rust checks
       # ══════════════════════════════════════════════════════════════════════

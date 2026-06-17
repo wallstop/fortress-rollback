@@ -6,11 +6,26 @@ from __future__ import annotations
 import json
 import re
 import shlex
-import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
+
+# Python 3.11+ ships tomllib in the stdlib; older interpreters fall back to the
+# tomli backport so these script tests run on the same Python range as the rest
+# of the repo tooling (mirrors scripts/hooks/check-toml.py). The
+# check-tomllib-fallback hook enforces this pattern repo-wide.
+try:
+    import tomllib
+
+    HAS_TOML = True
+except ImportError:  # Python < 3.11
+    try:
+        import tomli as tomllib
+
+        HAS_TOML = True
+    except ImportError:
+        HAS_TOML = False
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -86,6 +101,8 @@ def test_lychee_literal_path_args_exist(
 )
 def test_lychee_ignores_templated_runtime_urls(url: str) -> None:
     """Runtime-interpolated documentation examples are not fetchable URLs."""
+    if not HAS_TOML:
+        pytest.skip("tomllib/tomli not available (Python < 3.11 without tomli)")
     config = tomllib.loads((REPO_ROOT / ".lychee.toml").read_text(encoding="utf-8"))
     assert any(re.search(pattern, url) for pattern in config["exclude"])
 

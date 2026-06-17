@@ -27,6 +27,21 @@ SYNC_VERSION_EXTENSIONS = {
     ".json",
 }
 
+# Text source extensions that `typos` (the CI spell-check gate) scans. Used only
+# to decide WHETHER to run the whole-repo spell check, not to limit its scope --
+# a change to any of these triggers the same repo-wide scan CI performs.
+SPELLCHECK_EXTENSIONS = {
+    ".rs",
+    ".md",
+    ".toml",
+    ".yml",
+    ".yaml",
+    ".sh",
+    ".py",
+    ".txt",
+    ".json",
+}
+
 
 @dataclass(frozen=True)
 class PlannedCheck:
@@ -136,6 +151,16 @@ def is_doc_claims_surface_file(path: str) -> bool:
     }
 
 
+def is_python_file(path: str) -> bool:
+    """Return True for any Python file (tomllib-fallback surface)."""
+    return path.endswith(".py")
+
+
+def is_spellcheck_surface_file(path: str) -> bool:
+    """Return True for text files whose change should trigger the spell check."""
+    return Path(path).suffix in SPELLCHECK_EXTENSIONS
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -193,6 +218,10 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
         is_tla_consistency_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
+    python_files = sorted(path for path in changed_files if is_python_file(path))
+    spellcheck_changed = any(
+        is_spellcheck_surface_file(path) for path in changed_files
+    )
 
     if run_all or any(is_sync_version_surface_file(path) for path in changed_files):
         checks.append(
@@ -424,6 +453,49 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "args still surface in CBMC analysis. Reduce format-arg "
                     "count or simplify the message in flagged callsites."
                 ),
+            )
+        )
+
+    if run_all or python_files:
+        tomllib_command = [
+            PYTHON_EXECUTABLE,
+            "scripts/hooks/check-tomllib-fallback.py",
+        ]
+        tomllib_command.extend(python_files)
+        checks.append(
+            PlannedCheck(
+                check_id="tomllib-fallback",
+                description=(
+                    "require a tomli fallback wherever tomllib is imported "
+                    "(tomllib is stdlib only on Python 3.11+)"
+                ),
+                command=tomllib_command,
+                fix_hint=(
+                    "Wrap `import tomllib` with a tomli fallback (mirrors "
+                    "scripts/hooks/check-toml.py): try: import tomllib / "
+                    "except ImportError: import tomli as tomllib."
+                ),
+            )
+        )
+
+    if run_all or spellcheck_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="typos",
+                description=(
+                    "spell check the repo via `typos` (mirrors the CI "
+                    "spell-check gate; uses .typos.toml)"
+                ),
+                command=[PYTHON_EXECUTABLE, "scripts/hooks/agent-typos.py"],
+                fix_hint=(
+                    "Fix the flagged spelling, or add a legitimate project term "
+                    "to .typos.toml [default.extend-words]. No auto-fix: typos' "
+                    "suggestions are not always the intended word, so review "
+                    "each before applying it."
+                ),
+                # No fix_command: `typos --write-changes` can pick the wrong
+                # correction for hyphenation/compound cases.
+                fix_command=None,
             )
         )
 

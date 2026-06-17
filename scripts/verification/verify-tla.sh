@@ -217,7 +217,7 @@ verify_spec() {
     # rather than TLC's own -Dtlc2.TLC.stopAfter: stopAfter stops gracefully but
     # then prints "Model checking completed. No error has been found." over the
     # PARTIAL state space (non-zero "states left on queue"), which the success
-    # grep below would mis-read as a pass. An external SIGTERM is not trapped by
+    # grep below would misread as a pass. An external SIGTERM is not trapped by
     # TLC, so a capped run never prints the success line and is correctly
     # reported as FAILED, with its partial progress retained for diagnosis.
     local -a run_cmd

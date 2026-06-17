@@ -2044,8 +2044,11 @@ mod p2p_checksum_tests {
     /// 1. Both sessions start in Pending state
     /// 2. After enough frames pass (at the checksum interval), checksums are sent
     /// 3. After checksums are compared, sync_health transitions to InSync
+    // No `#[serial]`: unlike the real-UDP tests above (which bind ports via
+    // `get_test_port` + `bind_socket_with_retry`), this uses in-memory channel
+    // sockets and a `TestClock`, so it owns no process-global resource and is
+    // free to run in parallel.
     #[test]
-    #[serial]
     fn test_checksum_exchange_reaches_in_sync() -> Result<(), FortressError> {
         let clock = TestClock::new();
 

@@ -244,7 +244,7 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 - **Hook policy:** `pre-commit`/`pre-push` target <10s; slow full-repo checks belong in manual hooks, agent preflight, or CI.
 - **After `.llm/` changes:** All `.md` files under `.llm/` must be **300 lines or fewer** (enforced by pre-commit hook `llm-line-limit`)
 - **Doc/link validation:** `python3 scripts/docs/check-links.py` plus `bash scripts/ci/check-doc-claims.sh` for Rust semantic claim drift (also flags rustdoc intra-doc links whose backticked text names an item the `crate::`/`super::`/`self::` target's last segment does not -- they resolve but land on the wrong page; see [doc-code-sync.md](skills/ci-cd-tooling/doc-code-sync.md#intra-doc-link-text-vs-target)). Runs in agent preflight when `.rs`/`.md` files change.
-- **Spell check:** `typos`
+- **Spell check:** `typos` (also runs in agent preflight via `agent-typos.py`)
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.llm/skills/workflows/user-facing-docs.md`](skills/workflows/user-facing-docs.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
 - **Full local validation:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture`
 
