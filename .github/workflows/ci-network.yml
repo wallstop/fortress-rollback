@@ -124,30 +124,37 @@ jobs:
           SCCACHE_IDLE_TIMEOUT: "0"
 
       - name: Run multi-process network tests (nextest)
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 30
-          max_attempts: 2
-          retry_wait_seconds: 30
-          retry_on_exit_code: 143
-          command: cargo nextest run --profile ci --release -E 'test(multi_process)' --test network
+        # No retry wrapper. Per-PR is now a deterministic, loss-free smoke tier
+        # (the spawn_peer guard rejects loss-bearing scenarios), so a failure
+        # is a real regression to surface immediately -- NOT a flake to paper over
+        # with a second attempt. This honors the "ZERO TOLERANCE FOR FLAKY TESTS /
+        # do NOT add retries to mask flakiness" policy in .config/nextest.toml.
+        # Each test is still individually bounded by the nextest budget (180s).
+        timeout-minutes: 15
+        shell: bash
+        run: cargo nextest run --profile ci --release -E 'test(multi_process)' --test network
         env:
+          # Per-PR smoke tier: the spawn_peer guard rejects any loss-bearing
+          # real-UDP scenario (they are flaky under CI host starvation and live in
+          # the nightly suite). Enforced by default; set explicitly for intent.
+          FORTRESS_NETWORK_TIER: smoke
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-  # Docker-based network tests with tc/netem.
+  # Docker-based network smoke test (loss-free).
   #
-  # This job ONLY adds Linux tc/netem kernel chaos on top of the multi-process
-  # tests; the three native-OS `network-tests` jobs above are the real
-  # correctness gate (they run the same multi_process suite on ubuntu/windows/
-  # macos). A transient Docker Hub registry blip (e.g. run 588:
-  # `Get "https://registry-1.docker.io/v2/": context deadline exceeded`) must
-  # never block a PR, so this job is best-effort: `continue-on-error` lets a
-  # registry flake go yellow instead of red while the native gates still fail
-  # hard on real regressions.
+  # This per-PR job runs the LOSS-FREE Docker scenarios (`--quick`: basic
+  # connectivity + latency) to confirm the container/tc path still works. The
+  # packet-loss netem scenarios are flaky under CI host starvation (real-time
+  # kernel retransmission), exactly the class the smoke-tier guard keeps out of
+  # the native per-PR suite, so they run in the nightly Docker lane
+  # (ci-network-nightly.yml, `--all`) instead. The three native-OS
+  # `network-tests` jobs above remain the real correctness gate. A transient
+  # Docker Hub registry blip must never block a PR, so this job is best-effort:
+  # `continue-on-error` lets a registry flake go yellow instead of red.
   docker-network-tests:
     name: Network Tests (Docker)
     runs-on: ubuntu-latest
@@ -179,7 +186,7 @@ jobs:
       - name: Build Docker image
         run: docker compose -f docker/docker-compose.yml build
 
-      - name: Run Docker network tests (quick)
+      - name: Run Docker network tests (quick, loss-free smoke)
         run: ./scripts/ci/docker-network-tests.sh --quick
         timeout-minutes: 15
 

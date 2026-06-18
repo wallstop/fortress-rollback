@@ -155,6 +155,24 @@ where
     peer_addr: T::Address,
     remote_magic: u16,
     peer_connect_status: Vec<ConnectionStatus>,
+    /// This endpoint's cache of the peer's per-slot **pessimistic confirmed
+    /// floor** (the double-failure-relay fix; see [`Input::pessimistic_floor`]).
+    /// Parallel to [`Self::peer_connect_status`] (index = player handle,
+    /// length `num_players`) and written in [`Self::merge_peer_connect_status`].
+    ///
+    /// [`Self::merge_peer_connect_status`] OVERWRITES a slot with the latest
+    /// reported floor (in-flight snapshot semantics), but only when the packet
+    /// actually carries one: a packet whose `pessimistic_floor` is empty or
+    /// shorter than the slot index (a retransmit / flush / nudge, which
+    /// deliberately omit the floor to avoid clobbering the receiver's last
+    /// report) leaves the cached slot **UNCHANGED** — it keeps the value the
+    /// last fresh report delivered, rather than reverting to no-info. A slot is
+    /// therefore [`Frame::NULL`] only from the initializer (before the first
+    /// report) or because a report explicitly carried `Frame::NULL`. A
+    /// [`Frame::NULL`] slot means "no pessimistic report", and the session's
+    /// `remote_slot_confirmed_bound` fold falls back to that slot's `last_frame`
+    /// — the legacy (pre-fix) barrier value.
+    peer_pessimistic_floor: Vec<Frame>,
 
     // input compression
     pending_output: VecDeque<InputBytes>,
@@ -389,6 +407,7 @@ pub fn fuzz_protocol_input_packet(
         status.push(ConnectionStatus {
             disconnected,
             last_frame: Frame::new(last_frame),
+            epoch: 0,
         });
     }
 
@@ -408,6 +427,7 @@ pub fn fuzz_protocol_input_packet(
         start_frame: Frame::new(start_frame),
         ack_frame: Frame::new(ack_frame),
         bytes: packet_bytes,
+        pessimistic_floor: Vec::new(),
     };
     protocol.on_input(&body);
 
@@ -592,6 +612,17 @@ impl<T: Config> UdpProtocol<T> {
             peer_connect_status.push(ConnectionStatus::default());
         }
 
+        // peer pessimistic confirmed floors (double-failure-relay fix), parallel
+        // to `peer_connect_status`. Seeded to `Frame::NULL` ("no report yet"),
+        // which the session fold reads as "fall back to last_frame".
+        let mut peer_pessimistic_floor = Vec::new();
+        peer_pessimistic_floor
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("protocol.peer_pessimistic_floor", num_players))?;
+        for _ in 0..num_players {
+            peer_pessimistic_floor.push(Frame::NULL);
+        }
+
         // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
         recv_inputs.insert(
@@ -644,6 +675,7 @@ impl<T: Config> UdpProtocol<T> {
             peer_addr,
             remote_magic: 0,
             peer_connect_status,
+            peer_pessimistic_floor,
 
             // input compression
             pending_output: VecDeque::new(),
@@ -845,6 +877,23 @@ impl<T: Config> UdpProtocol<T> {
         }
     }
 
+    /// Test-only companion to [`set_peer_connect_status_for_tests`] for the
+    /// per-slot **pessimistic confirmed floor** cache (double-failure-relay fix).
+    /// In production this cache is written only by `merge_peer_connect_status`
+    /// from a received `Input`'s `pessimistic_floor`; this lets session-level
+    /// tests pin a known relay floor without replaying a packet exchange.
+    /// Out-of-range handles are ignored.
+    #[cfg(test)]
+    pub(crate) fn set_peer_pessimistic_floor_for_tests(
+        &mut self,
+        handle: PlayerHandle,
+        floor: Frame,
+    ) {
+        if let Some(slot) = self.peer_pessimistic_floor.get_mut(handle.as_usize()) {
+            *slot = floor;
+        }
+    }
+
     /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
     /// average so that [`average_frame_advantage`](Self::average_frame_advantage)
     /// returns exactly `target`. Delegates to `TimeSync::seed_average_for_tests`.
@@ -862,6 +911,20 @@ impl<T: Config> UdpProtocol<T> {
             .get(handle.as_usize())
             .copied()
             .unwrap_or_default()
+    }
+
+    /// This endpoint's cached view of the peer's **pessimistic confirmed floor**
+    /// for `handle` (the double-failure-relay fix; see
+    /// [`Input::pessimistic_floor`] and [`Self::peer_pessimistic_floor`]). Returns
+    /// [`Frame::NULL`] when the peer has not reported one (an out-of-range handle,
+    /// a default cache, or a packet whose `pessimistic_floor` was empty / the
+    /// wrong length); the session fold reads `NULL` as "fall back to
+    /// `last_frame`".
+    pub(crate) fn peer_pessimistic_floor(&self, handle: PlayerHandle) -> Frame {
+        self.peer_pessimistic_floor
+            .get(handle.as_usize())
+            .copied()
+            .unwrap_or(Frame::NULL)
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -914,22 +977,31 @@ impl<T: Config> UdpProtocol<T> {
     /// connection can leak into the new one, and it stays correct automatically if
     /// `new` gains or drops fields.
     ///
-    /// # Era fence (the rebuilt endpoint's magic is guaranteed fresh)
+    /// # Era fence (monotonic per-endpoint era counter)
     ///
-    /// The rebuilt endpoint must NEVER reuse the previous era's magic. If the
-    /// vacating peer is still live when the slot re-arms (a voluntary leave: the
-    /// session removed the player while the remote process keeps running briefly),
-    /// that peer still holds the OLD magic as its learned `remote_magic`. With a
-    /// reused magic it would accept and answer the rebuilt endpoint's sync
-    /// handshake; the rebuilt endpoint would then complete synchronization against
-    /// the doomed peer and lock `remote_magic` to it — permanently filtering out
-    /// the future rejoiner (a silent liveness blackhole). With a deterministic
-    /// `protocol_rng_seed`, naive reconstruction re-seeds identically and reuses
-    /// the magic EVERY time, so this path CONTINUES the endpoint's RNG stream
-    /// across the rebuild instead of re-seeding, and (for both seeded and
-    /// thread-local RNG) re-rolls until the magic differs from the previous era's
-    /// — deterministic configs stay fully reproducible, and the unseeded
-    /// 1-in-65535 organic magic reuse is excluded too.
+    /// The rebuilt endpoint must NEVER reuse a recent era's magic. If a vacating
+    /// peer is still live when the slot re-arms (a voluntary leave: the session
+    /// removed the player while the remote process keeps running briefly), that
+    /// peer still holds the OLD magic as its learned `remote_magic`. With a reused
+    /// magic it would accept and answer the rebuilt endpoint's sync handshake; the
+    /// rebuilt endpoint would then complete synchronization against the doomed peer
+    /// and lock `remote_magic` to it — permanently filtering out the future
+    /// rejoiner (a silent liveness blackhole).
+    ///
+    /// The fence is a **monotonic counter**: the rebuilt era's magic is the
+    /// previous era's magic plus one (wrapping past the reserved `0`). This is
+    /// strictly stronger than re-rolling a fresh random magic and excluding only
+    /// the *immediately-previous* value — it makes the magic distinct from EVERY
+    /// era within a 65535-rearm window, so a ghost from *any* recent era (not just
+    /// the last one) can never match. Recurrence is impossible until 65535 rearms
+    /// of the same slot alias, at no extra state and with no wire-format change
+    /// (the previous fence drove only the *adjacent* collision to zero and left a
+    /// ~1-in-65535 per-double-rearm multi-era residual). The **initial** magic
+    /// stays randomly drawn — so two unrelated endpoints do not share a counter
+    /// origin and a stale packet from an earlier *connection* to the same address
+    /// is still filtered — and only the rearm transition is monotonic. The RNG
+    /// stream is still carried across the rebuild so the unrelated sync-request IDs
+    /// stay reproducible under a deterministic `protocol_rng_seed` and never reset.
     ///
     /// # Errors
     ///
@@ -958,25 +1030,24 @@ impl<T: Config> UdpProtocol<T> {
             self.time_sync_config,
         )?;
 
-        // Era fence (see the rustdoc): continue the deterministic RNG stream
-        // across the rebuild (instead of restarting it from the seed) and
-        // guarantee a fresh-era magic, so a still-live previous-era peer can
-        // never answer — and wedge — the rebuilt endpoint's handshake.
+        // Era fence (see the rustdoc): advance the magic as a MONOTONIC
+        // per-endpoint counter — the previous era's magic plus one, wrapping past
+        // the reserved `0`. This makes the rebuilt era's magic distinct from EVERY
+        // era within a 65535-rearm window (not merely the immediately-previous
+        // one), so a still-live peer from ANY recent era — which holds that era's
+        // magic as its learned `remote_magic` — can never answer, and wedge, the
+        // rebuilt endpoint's handshake. The RNG stream is still carried across the
+        // rebuild so the unrelated sync-request IDs stay reproducible under a
+        // deterministic `protocol_rng_seed` and never reset to the seed origin.
         let old_magic = self.magic;
         if self.protocol_rng.is_some() {
             rebuilt.protocol_rng = self.protocol_rng.take();
         }
-        let mut magic: u16 = match &mut rebuilt.protocol_rng {
-            Some(rng) => rng.gen(),
-            None => random(),
+        rebuilt.magic = match old_magic.wrapping_add(1) {
+            // `wrapping_add(1)` only reaches 0 from u16::MAX; the magic is never 0.
+            0 => 1,
+            next => next,
         };
-        while magic == 0 || magic == old_magic {
-            magic = match &mut rebuilt.protocol_rng {
-                Some(rng) => rng.gen(),
-                None => random(),
-            };
-        }
-        rebuilt.magic = magic;
 
         *self = rebuilt;
         self.synchronize()
@@ -1015,7 +1086,9 @@ impl<T: Config> UdpProtocol<T> {
                 // receiving NEW inputs (progress-free duplicates and connect-status
                 // nudges do not refresh the pacer — see the gate in `on_input`)
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
-                    self.send_pending_output(connect_status);
+                    // Retransmit path: empty `pessimistic_floor` (no receiver
+                    // cache clobber — the floor rides fresh `send_input`s).
+                    self.send_pending_output(connect_status, &[]);
                     self.running_last_input_recv = now;
                 }
 
@@ -1191,6 +1264,7 @@ impl<T: Config> UdpProtocol<T> {
         &mut self,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
         connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
     ) {
         if self.state != ProtocolState::Running {
             return;
@@ -1229,7 +1303,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.pending_output.push_back(endpoint_data);
 
-        self.send_pending_output(connect_status);
+        self.send_pending_output(connect_status, pessimistic_floor);
     }
 
     /// Pushes a replicated input frame onto `pending_output` without advancing
@@ -1344,7 +1418,8 @@ impl<T: Config> UdpProtocol<T> {
         if self.state != ProtocolState::Running {
             return;
         }
-        self.send_pending_output(connect_status);
+        // Flush path: empty `pessimistic_floor` (no receiver cache clobber).
+        self.send_pending_output(connect_status, &[]);
     }
 
     fn pending_output_batch_len_with_cap(&self, decoded_byte_cap: usize) -> Option<usize> {
@@ -1356,9 +1431,21 @@ impl<T: Config> UdpProtocol<T> {
         )
     }
 
-    fn send_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
+    /// Re-sends the pending-output batch. `pessimistic_floor` carries this
+    /// peer's per-slot pessimistic confirmed floors (double-failure-relay fix)
+    /// when the caller is the fresh-input path ([`Self::send_input`]); the
+    /// retransmit/flush/nudge paths pass an empty slice, which leaves the body's
+    /// `pessimistic_floor` empty so the receiver's
+    /// [`Self::peer_pessimistic_floor`] cache retains its last reported value
+    /// (the merge only updates a slot it receives a value for — no clobber).
+    fn send_pending_output(
+        &mut self,
+        connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
+    ) {
         self.send_pending_output_with_decoded_byte_cap(
             connect_status,
+            pessimistic_floor,
             rle::DEFAULT_MAX_DECODED_LEN,
         );
     }
@@ -1366,6 +1453,7 @@ impl<T: Config> UdpProtocol<T> {
     fn send_pending_output_with_decoded_byte_cap(
         &mut self,
         connect_status: &[ConnectionStatus],
+        pessimistic_floor: &[Frame],
         decoded_byte_cap: usize,
     ) {
         let mut body = Input::default();
@@ -1450,6 +1538,12 @@ impl<T: Config> UdpProtocol<T> {
             body.ack_frame = self.last_recv_frame();
             body.disconnect_requested = self.state == ProtocolState::Disconnected;
             connect_status.clone_into(&mut body.peer_connect_status);
+            // Per-slot pessimistic confirmed floors (double-failure-relay fix).
+            // Empty on the retransmit/flush/nudge paths (no cache clobber on the
+            // receiver); otherwise the session's per-slot pessimistic queue-min,
+            // computed in `P2PSession::pessimistic_floors` (the canonical fold:
+            // min over the own receipt and non-NULL folded peers' `last_frame`).
+            pessimistic_floor.clone_into(&mut body.pessimistic_floor);
 
             self.queue_message(MessageBody::Input(body));
             // Real input traffic went out: the connect-status nudge (an
@@ -1579,6 +1673,12 @@ impl<T: Config> UdpProtocol<T> {
             start_frame: self.last_acked_input.frame,
             ack_frame: self.last_recv_frame(),
             bytes,
+            // The connect-status nudge intentionally carries NO pessimistic-floor
+            // gossip (double-failure-relay fix): the floor rides fresh
+            // `send_input` packets, and an empty vector leaves each receiver's
+            // `peer_pessimistic_floor` cache at its last reported value (no
+            // clobber). Input-idle floor propagation is a tracked follow-up.
+            pessimistic_floor: Vec::new(),
         };
         connect_status.clone_into(&mut body.peer_connect_status);
         self.queue_message(MessageBody::Input(body));
@@ -1871,6 +1971,48 @@ impl<T: Config> UdpProtocol<T> {
             } else {
                 // Both connected: monotone forward progress.
                 local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
+            }
+        }
+
+        // Cache the peer's per-slot pessimistic confirmed floor (double-failure
+        // -relay fix), parallel to the connect-status merge above. Separate loop
+        // so `peer_pessimistic_floor` (mut) and `peer_connect_status` /
+        // `reactivation_floor` (read) are disjoint field borrows. We OVERWRITE
+        // with the latest reported floor rather than `min`/`max`-merging: it is
+        // an in-flight SNAPSHOT of the peer's current pessimism (the
+        // `AsyncAckSound` `ackFloor` semantics). In the WARM-cache scope this
+        // chunk targets — every relay has already folded the global-min origin's
+        // low before any drop, and connected receipts only rise — a pessimistic
+        // floor is monotone-non-decreasing, so a reordered packet carries a
+        // stale-LOW value (transiently conservative, self-heals on the next
+        // in-order packet). The OUT-OF-SCOPE corner (honestly tracked, NOT closed
+        // here): in a cold-gossip-cache / mid-game-drop world a relay can report
+        // high-then-low for the same slot, so a reordered stale-HIGH floor could
+        // overwrite a fresh low and re-open the residual — that facet needs the
+        // S46 `ConnectionStatus.epoch` as a freshness gate on this overwrite (the
+        // chunk-2 follow-up; see `N-PLAYER-DESYNC-AUDIT.md` and
+        // `specs/tla/DoubleFailureRelay.tla`'s `AsyncAckSoundFresh`/cold-cache
+        // results). We skip the SAME stale DISCONNECTED claims the reactivation
+        // floor rejects (so a stale relay's floor cannot re-stick a reactivated
+        // slot). A missing entry (empty / wrong-length `pessimistic_floor`)
+        // leaves the cache untouched — the fold falls back to `last_frame`.
+        for (slot, cached) in self.peer_pessimistic_floor.iter_mut().enumerate() {
+            let Some(remote) = body.peer_connect_status.get(slot) else {
+                break;
+            };
+            #[cfg(feature = "hot-join")]
+            if remote.disconnected
+                && self
+                    .reactivation_floor
+                    .get(slot)
+                    .is_some_and(|floor| !floor.is_null() && remote.last_frame < *floor)
+            {
+                continue;
+            }
+            #[cfg(not(feature = "hot-join"))]
+            let _ = remote;
+            if let Some(&floor) = body.pessimistic_floor.get(slot) {
+                *cached = floor;
             }
         }
     }
@@ -2441,6 +2583,14 @@ impl<T: Config> UdpProtocol<T> {
             *status = ConnectionStatus {
                 disconnected: false,
                 last_frame,
+                // Preserve the cached generation. This is the receiver-side
+                // player-mesh cache, whose `epoch` is inert: the confirmed/freeze
+                // folds read only `disconnected`/`last_frame`, and a spectator
+                // consumes each host's own armed `local_connect_status`, never
+                // this relayed cache (`merge_peer_connect_status` likewise never
+                // copies a sender's epoch in). Preserved only to avoid a spurious
+                // field reset.
+                ..*status
             };
         }
     }
@@ -2680,6 +2830,22 @@ mod tests {
         .expect("Failed to create test protocol")
     }
 
+    fn mutable_clock_config() -> (ProtocolConfig, Arc<Mutex<Instant>>) {
+        let current = Arc::new(Mutex::new(Instant::now()));
+        let clock_handle = Arc::clone(&current);
+        let config = ProtocolConfig {
+            clock: Some(Arc::new(move || *clock_handle.lock().unwrap())),
+            ..ProtocolConfig::default()
+        };
+        (config, current)
+    }
+
+    fn advance_test_clock(clock: &Arc<Mutex<Instant>>, duration: Duration) -> Instant {
+        let mut current = clock.lock().unwrap();
+        *current += duration;
+        *current
+    }
+
     fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
@@ -2906,8 +3072,15 @@ mod tests {
 
     #[test]
     fn handle_message_accepts_correct_magic() {
-        let mut protocol: UdpProtocol<TestConfig> =
-            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let (config, clock) = mutable_clock_config();
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
         protocol.synchronize().unwrap();
 
         // Complete sync with magic 999
@@ -2924,8 +3097,7 @@ mod tests {
 
         let initial_recv_time = protocol.last_recv_time;
 
-        // Wait a tiny bit
-        std::thread::sleep(Duration::from_millis(1));
+        let accepted_recv_time = advance_test_clock(&clock, Duration::from_millis(1));
 
         // Send message with correct magic
         let msg = Message {
@@ -2935,6 +3107,7 @@ mod tests {
         protocol.handle_message(&msg);
 
         // Should update recv time
+        assert_eq!(protocol.last_recv_time, accepted_recv_time);
         assert!(protocol.last_recv_time > initial_recv_time);
     }
 
@@ -2964,6 +3137,7 @@ mod tests {
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(99),
+                            epoch: 0,
                         };
                         2
                     ],
@@ -2971,6 +3145,7 @@ mod tests {
                     start_frame: Frame::new(0),
                     ack_frame: Frame::new(0),
                     bytes: vec![1, 2, 3],
+                    pessimistic_floor: Vec::new(),
                 }),
             },
             Message {
@@ -3173,6 +3348,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
 
         assert!(protocol.recv_inputs.contains_key(&Frame::new(0)));
@@ -3212,6 +3388,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: true,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
 
         let events: Vec<_> = protocol.event_queue.drain(..).collect();
@@ -3256,6 +3433,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         });
         protocol.event_queue.clear();
         protocol
@@ -3288,8 +3466,10 @@ mod tests {
                 ConnectionStatus {
                     disconnected,
                     last_frame: Frame::new(last_frame),
+                    epoch: 0,
                 },
             ],
+            pessimistic_floor: Vec::new(),
         });
     }
 
@@ -3578,8 +3758,55 @@ mod tests {
             ConnectionStatus {
                 disconnected,
                 last_frame: Frame::new(last_frame),
+                epoch: 0,
             },
         ]
+    }
+
+    /// MERGE (double-failure-relay fix): a received `Input.pessimistic_floor` is
+    /// cached per-slot in `peer_pessimistic_floor`, OVERWRITING with the latest
+    /// report (in-flight snapshot semantics); an EMPTY floor (a retransmit / flush
+    /// / nudge) leaves the cache untouched so it retains the value the last fresh
+    /// `send_input` delivered — no clobber.
+    #[test]
+    fn merge_peer_connect_status_caches_pessimistic_floor_and_skips_empty() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Nothing reported yet -> NULL (the fold falls back to last_frame).
+        assert_eq!(protocol.peer_pessimistic_floor(slot2), Frame::NULL);
+
+        // A packet carrying a pessimistic floor for slot 2 caches it.
+        let mut body = Input {
+            peer_connect_status: status_slot2(false, 9),
+            pessimistic_floor: vec![Frame::new(7), Frame::new(8), Frame::new(4)],
+            ..Input::default()
+        };
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(4),
+            "the merge must cache the received pessimistic floor for slot 2"
+        );
+
+        // A later packet with an EMPTY pessimistic_floor (retransmit/nudge) must
+        // NOT clobber the cache.
+        body.pessimistic_floor = Vec::new();
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(4),
+            "an empty pessimistic_floor (retransmit/nudge) must not clobber the cached value"
+        );
+
+        // A fresh packet with a new floor overwrites (latest-snapshot semantics).
+        body.pessimistic_floor = vec![Frame::new(7), Frame::new(8), Frame::new(6)];
+        protocol.merge_peer_connect_status(&body);
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(6),
+            "a fresh pessimistic_floor overwrites the cache (latest-snapshot semantics)"
+        );
     }
 
     // (a) REACHABILITY: a FRESH gossip packet whose `start_frame` is too far AHEAD
@@ -3618,6 +3845,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 99),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 5),
+            pessimistic_floor: Vec::new(),
         });
 
         // POST-HOIST: slot 2's drop gossip is applied even though the packet's
@@ -3674,6 +3902,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 49),
+            pessimistic_floor: Vec::new(),
         };
         let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
         protocol.on_input(&stale);
@@ -3724,6 +3953,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 42),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
+            pessimistic_floor: Vec::new(),
         });
 
         let status = protocol.peer_connect_status(PlayerHandle::new(2));
@@ -3760,6 +3990,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
+            pessimistic_floor: Vec::new(),
         });
         assert_eq!(
             protocol
@@ -3783,6 +4014,7 @@ mod tests {
             bytes: encode_one_frame(&bytes, 2),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 8),
+            pessimistic_floor: Vec::new(),
         });
 
         // The stale higher freeze must NOT un-converge us: min(4, 8) == 4.
@@ -3804,7 +4036,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         // Should not queue any messages
         assert!(protocol.send_queue.is_empty());
@@ -4006,7 +4238,7 @@ mod tests {
 
     #[test]
     fn sync_timeout_event_emitted_only_once() {
-        use std::time::Duration;
+        let (protocol_config, clock) = mutable_clock_config();
 
         // Create a protocol with a very short sync timeout
         let sync_config = SyncConfig {
@@ -4025,14 +4257,13 @@ mod tests {
             60,
             DesyncDetection::Off,
             sync_config,
-            ProtocolConfig::default(),
+            protocol_config,
             TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol");
         protocol.synchronize().unwrap();
 
-        // Wait for timeout to elapse
-        std::thread::sleep(Duration::from_millis(10));
+        advance_test_clock(&clock, Duration::from_millis(2));
 
         let connect_status = vec![ConnectionStatus::default(); 2];
 
@@ -4109,10 +4340,6 @@ mod tests {
         (protocol, current)
     }
 
-    fn advance_test_clock(clock: &Arc<Mutex<Instant>>, duration: Duration) {
-        *clock.lock().unwrap() += duration;
-    }
-
     fn queued_inputs(protocol: &UdpProtocol<TestConfig>) -> Vec<&Input> {
         protocol
             .send_queue
@@ -4146,10 +4373,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4193,10 +4422,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4363,10 +4594,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
@@ -4405,10 +4638,12 @@ mod tests {
             ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(9),
+                epoch: 0,
             },
             ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(4),
+                epoch: 0,
             },
         ];
         assert!(sender.send_connect_status_nudge(&nudge_status));
@@ -4515,6 +4750,7 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&dup_reference, std::iter::once(&dup_reference))
                 .expect("duplicate encode succeeds"),
+            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&dup_body);
         assert_eq!(
@@ -4539,6 +4775,7 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&fresh_reference, std::iter::once(&fresh_bytes))
                 .expect("fresh encode succeeds"),
+            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&fresh_body);
         assert_eq!(
@@ -4613,6 +4850,7 @@ mod tests {
         protocol.peer_connect_status[1] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
 
         let status = protocol.peer_connect_status(PlayerHandle::new(1));
@@ -4817,6 +5055,7 @@ mod tests {
             bytes: vec![1, 2, 3, 4],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         // Clear event queue and record input count before
@@ -4885,6 +5124,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -4957,6 +5197,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -5009,6 +5250,7 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -5063,6 +5305,7 @@ mod tests {
             bytes: vec![1, 2, 3],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5111,6 +5354,7 @@ mod tests {
             bytes: bomb,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5138,6 +5382,7 @@ mod tests {
             bytes: vec![0],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default()],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5201,6 +5446,7 @@ mod tests {
             ),
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5248,6 +5494,7 @@ mod tests {
             bytes: vec![1, 2, 3, 4], // Won't be decoded anyway
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
+            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -5756,15 +6003,16 @@ mod tests {
         assert_ne!(protocol.magic, 0, "Magic number should never be zero");
     }
 
-    /// Session-33 round-6 era-fence pin: a deterministic (seeded) endpoint
-    /// that re-arms for a hot-join rejoin must NOT reuse the previous era's
-    /// magic. A naive rebuild re-seeds identically and reuses it — a
+    /// Session-33 round-6 era-fence pin (adjacent-era case): a deterministic
+    /// (seeded) endpoint that re-arms for a hot-join rejoin must NOT reuse the
+    /// previous era's magic. A naive rebuild re-seeds identically and reuses it — a
     /// still-live vacating peer (which holds the old magic as its learned
-    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks
-    /// onto the doomed peer, and the real rejoiner is filtered out forever
-    /// (the deterministic form of the unseeded 1-in-65535 organic magic
-    /// reuse). The fence must also stay deterministic: identical seed +
-    /// identical history must yield the identical rebuilt magic.
+    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks onto
+    /// the doomed peer, and the real rejoiner is filtered out forever. The fence
+    /// must also stay deterministic: identical seed + identical history must yield
+    /// the identical rebuilt magic. (The monotonic counter that now backs the fence
+    /// also closes the *non-adjacent* multi-era case — see
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`.)
     #[test]
     #[cfg(feature = "hot-join")]
     fn rearm_for_rejoin_era_fence_never_reuses_previous_magic_and_stays_deterministic() {
@@ -5811,6 +6059,292 @@ mod tests {
             protocol1.state,
             ProtocolState::Synchronizing,
             "rearm re-enters Synchronizing"
+        );
+    }
+
+    /// Multi-era magic-recurrence hardening (`N-PLAYER-DESYNC-AUDIT.md`): the era
+    /// fence is a **monotonic** per-endpoint counter, so across many rejoins the
+    /// rebuilt magic never recurs within a 65535-rearm window — not merely
+    /// differing from the *immediately-previous* era. The pre-fix fence re-rolled
+    /// a fresh random magic and excluded **only the single previous era's value**,
+    /// so a non-adjacent era could reuse an earlier era's magic; a still-live ghost
+    /// peer from that earlier era (holding it as its learned `remote_magic`) would
+    /// then answer the rebuilt handshake and wedge the rejoin. This test drives far
+    /// more rejoins than the u16 birthday bound (~300), so the pre-fix random fence
+    /// reuses an earlier era's magic with overwhelming probability (**RED**), while
+    /// the monotonic fence is collision-free by construction (**GREEN**). This is
+    /// the red-green security-invariant pin for the fix.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(0x00C0_FFEE),
+        );
+
+        // Well above the u16 birthday threshold (~300): the pre-fix random re-roll
+        // collides with an earlier era with > 99.9% probability over this many
+        // rejoins (P(no collision) ~ e^-8), while the monotonic counter never does
+        // (it walks 65535 distinct non-zero values before any repeat).
+        const REJOINS: usize = 1024;
+
+        let mut seen = std::collections::HashSet::with_capacity(REJOINS + 1);
+        seen.insert(protocol.magic);
+        let mut prev = protocol.magic;
+        for i in 0..REJOINS {
+            protocol
+                .rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            let magic = protocol.magic;
+            assert_ne!(magic, 0, "magic stays non-zero at rejoin {i}");
+            assert_ne!(
+                magic, prev,
+                "magic differs from the immediately-previous era at rejoin {i}"
+            );
+            assert!(
+                seen.insert(magic),
+                "era fence breached: magic {magic} recurred within {REJOINS} rejoins \
+                 (a still-live ghost from that earlier era could answer it) at rejoin {i}"
+            );
+            prev = magic;
+        }
+    }
+
+    /// The monotonic era fence advances the magic by exactly one (wrapping past the
+    /// reserved `0`) on every rejoin — a deterministic, self-evidently
+    /// collision-free step that stays reproducible under a seed. RED on the pre-fix
+    /// random re-roll (which equals `old + 1` only by a 1-in-65535 fluke).
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_magic_advances_by_monotonic_step() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(7),
+        );
+        for i in 0..8 {
+            let old = protocol.magic;
+            protocol
+                .rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            let expected = match old.wrapping_add(1) {
+                0 => 1,
+                next => next,
+            };
+            assert_eq!(
+                protocol.magic, expected,
+                "rejoin {i}: magic advances by a monotonic step (old {old} -> {expected})"
+            );
+        }
+    }
+
+    /// Wrap-around pin for the monotonic era fence: when the previous era's magic
+    /// is `u16::MAX`, the next era must skip the reserved `0` and land on `1` — a
+    /// `0` would violate the never-zero magic invariant and, on the wire, collide
+    /// with the "magic not yet learned" sentinel (`remote_magic == 0` accepts any
+    /// packet). The boundary is forced directly (walking 65535 real rejoins would
+    /// be far too slow). This pins the `0 => 1` arm: mutating it to `0 => 0` turns
+    /// this test RED.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_magic_wraps_past_zero_to_one() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(1),
+        );
+        protocol.magic = u16::MAX;
+        protocol
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+        assert_eq!(
+            protocol.magic, 1,
+            "u16::MAX + 1 must skip the reserved 0 and land on 1"
+        );
+        assert_ne!(protocol.magic, 0, "the wrapped era magic is never zero");
+
+        // The counter keeps stepping monotonically from there.
+        protocol
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+        assert_eq!(
+            protocol.magic, 2,
+            "the counter continues monotonically after the wrap"
+        );
+    }
+
+    /// The monotonic magic no longer consults the protocol RNG, so the RNG carry
+    /// across the rebuild (`rebuilt.protocol_rng = self.protocol_rng.take()`) now
+    /// exists solely to keep the unrelated sync-request IDs reproducible and
+    /// flowing: a rearmed seeded endpoint CONTINUES its stream rather than
+    /// resetting to the seed origin. This pins that carry as load-bearing — a
+    /// rearmed endpoint's post-rearm sync-request IDs differ from a freshly-built
+    /// endpoint with the same seed (proving the stream did not reset), while two
+    /// seeded twins with identical history produce identical post-rearm streams
+    /// (proving determinism). Deleting the carry (re-seeding on rebuild) makes the
+    /// rearmed stream reset to the origin and turns the inequality RED.
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_continues_rng_stream_for_sync_requests() {
+        let seed = 4242u64;
+        let mk = || -> UdpProtocol<TestConfig> {
+            create_protocol_with_config(
+                vec![PlayerHandle::new(0)],
+                2,
+                1,
+                8,
+                SyncConfig::default(),
+                ProtocolConfig::deterministic(seed),
+            )
+        };
+
+        // A fresh endpoint's sync-request IDs come from the seed origin.
+        let mut fresh = mk();
+        fresh.synchronize().expect("synchronize");
+        let fresh_requests = fresh.sync_random_requests.clone();
+        assert!(
+            !fresh_requests.is_empty(),
+            "synchronize populates sync-request IDs"
+        );
+
+        // A rearmed endpoint first advances its stream (the pre-rearm synchronize),
+        // then carries it across the rebuild, so its post-rearm IDs come from the
+        // advanced position rather than the origin.
+        let mut rearmed = mk();
+        rearmed
+            .synchronize()
+            .expect("pre-rearm synchronize advances the stream");
+        rearmed
+            .rearm_for_rejoin()
+            .expect("rearm carries the stream");
+        let rearmed_requests = rearmed.sync_random_requests.clone();
+
+        // Determinism: an identical-history twin yields the identical stream.
+        let mut twin = mk();
+        twin.synchronize().expect("synchronize");
+        twin.rearm_for_rejoin().expect("rearm");
+        assert_eq!(
+            rearmed_requests, twin.sync_random_requests,
+            "identical seed + history => identical post-rearm sync-request IDs"
+        );
+
+        // Load-bearing carry: the rearmed stream did NOT reset to the seed origin.
+        assert_ne!(
+            rearmed_requests, fresh_requests,
+            "the carried RNG stream continues past the pre-rearm draws (it does not reset to the seed origin)"
+        );
+    }
+
+    /// End-to-end consequence of the monotonic era fence (the audit's "the
+    /// stale-era packet is still filtered AND a live packet is not"): a still-live
+    /// ghost peer that synchronized against an EARLY era of our endpoint (and so
+    /// holds that era's magic as its learned `remote_magic`) filters out every
+    /// packet the rebuilt endpoint now sends under its current-era magic — so it
+    /// can never answer and wedge the rejoin — while a packet carrying the magic it
+    /// actually learned is still accepted (the filter discriminates, it does not
+    /// blanket-drop). The red-green proof that the current era is distinct from
+    /// every recent era lives in
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`; this test
+    /// pins the wire-level behaviour that distinctness buys. (It passes on both
+    /// pre- and post-fix code — the filter logic is unchanged; only the upstream
+    /// era distinctness the fix guarantees is what this behaviour relies on.)
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_ghost_from_early_era_filters_rebuilt_endpoints_current_magic() {
+        // Our endpoint walks through several eras of rejoin.
+        let mut ours: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(99),
+        );
+        let early_era_magic = ours.magic;
+        let mut prior = vec![early_era_magic];
+        for _ in 0..5 {
+            ours.rearm_for_rejoin()
+                .expect("rearm rebuilds the endpoint");
+            prior.push(ours.magic);
+        }
+        let current_magic = ours.magic;
+        // The current era is distinct from EVERY prior era (the fence's guarantee).
+        let priors_before_current = &prior[..prior.len() - 1];
+        assert!(
+            !priors_before_current.contains(&current_magic),
+            "current era magic {current_magic} must differ from all prior eras {priors_before_current:?}"
+        );
+
+        // A ghost peer that synchronized against our EARLIEST era, so it holds that
+        // era's magic as its learned `remote_magic`.
+        let (ghost_config, ghost_clock) = mutable_clock_config();
+        let mut ghost: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ghost_config,
+        );
+        ghost.synchronize().unwrap();
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *ghost.sync_random_requests.iter().next().unwrap();
+            ghost.on_sync_reply(
+                MessageHeader {
+                    magic: early_era_magic,
+                },
+                SyncReply {
+                    random_reply: random,
+                },
+            );
+        }
+        assert_eq!(ghost.remote_magic, early_era_magic);
+
+        // The rebuilt endpoint's current-era packet is FILTERED by the ghost: no
+        // observable state change (the ghost cannot answer it -> cannot wedge us).
+        ghost.send_queue.clear();
+        let last_recv_before = ghost.last_recv_time;
+        ghost.handle_message(&Message {
+            header: MessageHeader {
+                magic: current_magic,
+            },
+            body: MessageBody::KeepAlive,
+        });
+        assert!(
+            ghost.send_queue.is_empty(),
+            "ghost must filter the rebuilt endpoint's current-era magic"
+        );
+        assert_eq!(
+            ghost.last_recv_time, last_recv_before,
+            "a filtered packet does not refresh the ghost's recv clock"
+        );
+
+        // The filter discriminates rather than blanket-dropping: a packet carrying
+        // the magic the ghost actually learned is still accepted.
+        let accepted_recv_time = advance_test_clock(&ghost_clock, Duration::from_millis(1));
+        ghost.handle_message(&Message {
+            header: MessageHeader {
+                magic: early_era_magic,
+            },
+            body: MessageBody::KeepAlive,
+        });
+        assert_eq!(
+            ghost.last_recv_time, accepted_recv_time,
+            "accepted packets refresh the ghost's recv clock to the injected time"
+        );
+        assert!(
+            ghost.last_recv_time > last_recv_before,
+            "ghost still accepts a packet carrying its learned magic"
         );
     }
 
@@ -6053,7 +6587,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert_eq!(protocol.pending_output.len(), small_limit);
         assert!(protocol.send_queue.is_empty());
@@ -6097,7 +6631,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output(&connect_status);
+        protocol.send_pending_output(&connect_status, &[]);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6154,7 +6688,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, decoded_byte_cap);
+        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, &[], decoded_byte_cap);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6230,7 +6764,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -6274,7 +6808,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status);
+        protocol.send_input(&inputs, &connect_status, &[]);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -7742,6 +8276,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             // Process the input
@@ -7797,7 +8332,7 @@ mod property_tests {
             let initial_send_queue_len = protocol.send_queue.len();
 
             // Call send_pending_output - should detect violation and not queue message
-            protocol.send_pending_output(&connect_status);
+            protocol.send_pending_output(&connect_status, &[]);
 
             // The violation path should return early without queueing a message
             // (The actual violation is reported, but we can verify no message was sent
@@ -7965,6 +8500,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); num_players],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8056,6 +8592,7 @@ mod property_tests {
                 bytes: vec![1, 2, 3, 4], // Won't be decoded
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             let inputs_before = protocol.recv_inputs.len();
@@ -8142,6 +8679,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8214,6 +8752,7 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
+                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8445,6 +8984,7 @@ mod kani_proofs {
         let status = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(frame_val),
+            epoch: 0,
         };
 
         // Frame should be preserved
@@ -8476,6 +9016,7 @@ mod kani_proofs {
         let status = ConnectionStatus {
             disconnected: is_disconnected,
             last_frame: Frame::NULL,
+            epoch: 0,
         };
 
         kani::assert(

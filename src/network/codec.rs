@@ -7,7 +7,8 @@
 //! # Design Rationale
 //!
 //! - **Centralized Configuration**: The bincode config is defined once, avoiding
-//!   repeated `bincode::config::standard().with_fixed_int_encoding()` calls.
+//!   repeated `bincode::config::standard().with_little_endian().with_fixed_int_encoding()`
+//!   calls.
 //! - **Buffer Reuse**: Provides `encode_into` variants that write into existing
 //!   buffers, reducing allocations in hot paths.
 //! - **Clear Error Handling**: All functions return `Result` types with descriptive
@@ -60,7 +61,9 @@ use crate::Frame;
 //
 // This is a zero-cost abstraction - the config is computed at compile time.
 fn config() -> impl bincode::config::Config {
-    bincode::config::standard().with_fixed_int_encoding()
+    bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding()
 }
 
 struct FallibleVecWriter<'a> {
@@ -310,16 +313,25 @@ fn read_usize(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecRes
 }
 
 fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<ConnectionStatus> {
+    // Field order MUST match the `ConnectionStatus` declaration (serde/bincode
+    // serializes struct fields in declaration order): `disconnected`,
+    // `last_frame`, then `epoch`.
     Ok(ConnectionStatus {
         disconnected: read_bool(bytes, cursor, "connection_status.disconnected")?,
         last_frame: Frame::new(read_i32(bytes, cursor, "connection_status.last_frame")?),
+        epoch: read_u16(bytes, cursor, "connection_status.epoch")?,
     })
 }
 
 /// The fixed wire footprint, in bytes, of one encoded [`ConnectionStatus`].
 //
-// 1-byte bool + 4-byte fixed-int i32.
-const CONNECTION_STATUS_WIRE_LEN: usize = 5;
+// 1-byte bool + 4-byte fixed-int i32 + 2-byte fixed-int u16.
+const CONNECTION_STATUS_WIRE_LEN: usize = 7;
+
+/// The fixed wire footprint, in bytes, of one encoded [`Frame`] (a fixed-int
+/// `i32`). Used to bound length-prefixed `Vec<Frame>` decodes (e.g. an
+/// `Input`'s `pessimistic_floor`).
+const FRAME_WIRE_LEN: usize = 4;
 
 /// Rejects a length prefix that cannot possibly fit in the unread input bytes,
 /// *before* any memory is reserved for it.
@@ -391,12 +403,44 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     })?;
     input_bytes.extend_from_slice(byte_slice);
 
+    // Per-slot pessimistic confirmed floors (double-failure-relay fix). A
+    // length-prefixed `Vec<Frame>` (each `Frame` a fixed 4-byte `i32`), bounded
+    // like `peer_connect_status` so a hostile/garbled length cannot
+    // over-reserve. The field is advisory: a receiver that finds the wrong
+    // length (e.g. an empty vector) falls back to `last_frame`, so we decode it
+    // faithfully here and let the session layer apply the length policy.
+    let floor_len = read_usize(bytes, cursor, "input.pessimistic_floor.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        floor_len,
+        FRAME_WIRE_LEN,
+        "input.pessimistic_floor",
+    )?;
+    let mut pessimistic_floor = Vec::new();
+    pessimistic_floor
+        .try_reserve_exact(floor_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {} pessimistic floor entries",
+                floor_len
+            ))
+        })?;
+    for _ in 0..floor_len {
+        pessimistic_floor.push(Frame::new(read_i32(
+            bytes,
+            cursor,
+            "input.pessimistic_floor",
+        )?));
+    }
+
     Ok(Input {
         peer_connect_status,
         disconnect_requested,
         start_frame,
         ack_frame,
         bytes: input_bytes,
+        pessimistic_floor,
     })
 }
 
@@ -860,12 +904,14 @@ fn reject_over_cap(len: usize) -> CodecResult<()> {
 }
 
 /// The bincode config for bounded peer-decodes: the shared codec config
-/// ([`config`]'s `standard().with_fixed_int_encoding()`, kept byte-for-byte
-/// identical) plus a [`MAX_BOUNDED_DECODE_LEN`] byte limit. `with_limit` is an
-/// inherent method on the concrete `Configuration`, so this is built from the
-/// concrete base rather than the `impl Config` return of [`config`].
+/// ([`config`]'s `standard().with_little_endian().with_fixed_int_encoding()`,
+/// kept byte-for-byte identical) plus a [`MAX_BOUNDED_DECODE_LEN`] byte limit.
+/// `with_limit` is an inherent method on the concrete `Configuration`, so this
+/// is built from the concrete base rather than the `impl Config` return of
+/// [`config`].
 fn bounded_decode_config() -> impl bincode::config::Config {
     bincode::config::standard()
+        .with_little_endian()
         .with_fixed_int_encoding()
         .with_limit::<MAX_BOUNDED_DECODE_LEN>()
 }
@@ -907,6 +953,50 @@ mod tests {
     }
 
     #[test]
+    fn codec_wire_format_uses_fixed_little_endian_bytes() {
+        let cases = [
+            (
+                "sync_request",
+                Message {
+                    header: MessageHeader { magic: 0xABCD },
+                    body: MessageBody::SyncRequest(SyncRequest {
+                        random_request: 999,
+                    }),
+                },
+                vec![0xCD, 0xAB, 0x00, 0x00, 0x00, 0x00, 0xE7, 0x03, 0x00, 0x00],
+            ),
+            (
+                "quality_report",
+                Message {
+                    header: MessageHeader { magic: 0x1234 },
+                    body: MessageBody::QualityReport(QualityReport {
+                        frame_advantage: -2,
+                        ping: 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10,
+                    }),
+                },
+                vec![
+                    0x34, 0x12, // MessageHeader::magic
+                    0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
+                    0xFE, 0xFF, // frame_advantage: i16 -2
+                    0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
+                    0x03, 0x02, 0x01, // ping: u128
+                ],
+            ),
+        ];
+
+        for (name, original, expected) in cases {
+            let bytes = encode(&original).unwrap();
+            assert_eq!(bytes, expected, "encoded bytes for {name}");
+
+            let generic: Message = decode_value(&bytes).unwrap();
+            let (manual, consumed) = decode_message(&bytes).unwrap();
+            assert_eq!(generic, original, "generic decode for {name}");
+            assert_eq!(manual, original, "manual decode for {name}");
+            assert_eq!(consumed, bytes.len(), "consumed bytes for {name}");
+        }
+    }
+
+    #[test]
     fn decode_message_roundtrips_every_body_variant() {
         let messages = [
             Message {
@@ -926,16 +1016,21 @@ mod tests {
                         ConnectionStatus {
                             disconnected: false,
                             last_frame: Frame::new(10),
+                            // Non-zero epoch spanning both u16 bytes (> 255) pins
+                            // the connect-status `epoch` wire round-trip.
+                            epoch: 513,
                         },
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(20),
+                            epoch: 7,
                         },
                     ],
                     disconnect_requested: false,
                     start_frame: Frame::new(100),
                     ack_frame: Frame::new(50),
                     bytes: vec![1, 2, 3, 4, 5],
+                    pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
                 }),
             },
             Message {
@@ -988,16 +1083,19 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(10),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(20),
+                        epoch: 0,
                     },
                 ],
                 disconnect_requested: false,
                 start_frame: Frame::new(100),
                 ack_frame: Frame::new(50),
                 bytes: vec![1, 2, 3, 4, 5],
+                pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
             }),
         };
         let bytes = encode(&original).unwrap();
@@ -1270,14 +1368,17 @@ mod hot_join_tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(42),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(17),
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::NULL,
+                        epoch: 0,
                     },
                 ],
                 checksum: Some(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
@@ -1457,8 +1558,8 @@ mod hot_join_tests {
     }
 
     /// A `bridge_statuses` length that fits in `usize` but whose minimum wire
-    /// footprint (5 bytes per status) exceeds the remaining bytes must also
-    /// be rejected before reserve.
+    /// footprint (`CONNECTION_STATUS_WIRE_LEN` = 7 bytes per status) exceeds the
+    /// remaining bytes must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
         let mut bytes = Vec::new();
@@ -1495,8 +1596,10 @@ mod hot_join_tests {
     }
 
     /// A snapshot buffer truncated mid-`bridge_statuses` payload (the prefix
-    /// claims one status, only part of its 5-byte record present) must be
-    /// rejected, never read out of bounds.
+    /// claims one status but fewer than its `CONNECTION_STATUS_WIRE_LEN` = 7
+    /// record bytes are present) must be rejected, never read out of bounds.
+    /// Because the record is fixed-width, this is caught by the pre-reserve
+    /// length bound (`1 * 7 > remaining`), before any element is decoded.
     #[test]
     fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
         let mut bytes = Vec::new();
@@ -1507,7 +1610,7 @@ mod hot_join_tests {
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // bridge_inputs len = 0
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // bridge_statuses len = 1
-        bytes.extend_from_slice(&[0, 0xAA, 0xBB]); // 3 of the 5 status bytes
+        bytes.extend_from_slice(&[0, 0xAA, 0xBB]); // 3 of the 7 status bytes
 
         let result = decode_message(&bytes);
 

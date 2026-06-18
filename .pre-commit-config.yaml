@@ -80,6 +80,12 @@ repos:
         types: [python]
         files: 'test_.*\.py$|.*_test\.py$'
 
+      - id: check-tomllib-fallback
+        name: require tomli fallback for tomllib imports
+        entry: python scripts/hooks/check-tomllib-fallback.py
+        language: python
+        types: [python]
+
       # ══════════════════════════════════════════════════════════════════════
       # Rust checks
       # ══════════════════════════════════════════════════════════════════════
@@ -251,6 +257,13 @@ repos:
         language: python
         files: '(Dockerfile|devcontainer\.json)$'
         pass_filenames: true
+
+      - id: check-network-timing-invariants
+        name: check network timing invariants
+        entry: python scripts/hooks/check-network-timing-invariants.py
+        language: python
+        pass_filenames: false
+        files: '^(\.config/nextest\.toml|tests/network/multi_process\.rs|src/network/protocol/mod\.rs|\.github/workflows/ci-network-nightly\.yml|scripts/hooks/check-network-timing-invariants\.py)$'
 
       # ══════════════════════════════════════════════════════════════════════
       # Hook quality

@@ -41,6 +41,18 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("doc-claims", "tests/common/channel_socket.rs"),
     ("advance-frame-error-handling", "tests/sessions/spectator.rs"),
     ("kani-violation-cost", "src/lib.rs"),
+    ("tla-config-consistency", "specs/tla/DoubleFailureRelay.cfg"),
+    ("tla-config-consistency", "specs/tla/README.md"),
+    ("tla-config-consistency", "specs/tla/DoubleFailureRelay.tla"),
+    ("tla-config-consistency", "scripts/docs/check-tla-config-consistency.py"),
+    ("network-timing-invariants", ".config/nextest.toml"),
+    ("network-timing-invariants", ".github/workflows/ci-network-nightly.yml"),
+    ("network-timing-invariants", "scripts/hooks/check-network-timing-invariants.py"),
+    ("network-timing-invariants", "src/network/protocol/mod.rs"),
+    ("network-timing-invariants", "tests/network/multi_process.rs"),
+    ("tomllib-fallback", "scripts/hooks/check-toml.py"),
+    ("typos", "src/lib.rs"),
+    ("typos", "README.md"),
 ]
 
 
@@ -61,15 +73,32 @@ def test_plan_checks_runs_sync_version_for_version_surface_files() -> None:
     # README.md is a sync-version surface file but is NOT under docs/, so the
     # vale-advisory check should not trigger -- this isolates the
     # sync-version trigger from the docs/ trigger. It is a .md file, so the
-    # link-check (which gates on .md/.rs) also runs.
+    # link-check (which gates on .md/.rs) and the typos spell check (which
+    # gates on text extensions) also run.
     checks = plan_checks({"README.md"})
-    assert _ids(checks) == ["sync-version-check", "link-check"]
+    assert _ids(checks) == ["sync-version-check", "link-check", "typos"]
 
 
 def test_plan_checks_docs_markdown_triggers_both_sync_and_vale() -> None:
-    """A docs/*.md file is a sync-version surface, a vale target, AND a link-check target."""
+    """A docs/*.md file is a sync-version, vale, link-check, AND spell-check surface."""
     checks = plan_checks({"docs/index.md"})
-    assert _ids(checks) == ["sync-version-check", "vale-advisory", "link-check"]
+    assert _ids(checks) == [
+        "sync-version-check",
+        "vale-advisory",
+        "link-check",
+        "typos",
+    ]
+
+
+def test_plan_checks_python_file_triggers_tomllib_and_typos_only() -> None:
+    """A standalone .py change triggers the tomllib-fallback and spell checks.
+
+    `.py` is deliberately NOT a sync-version surface extension, so neither
+    sync-version-check nor the Rust/docs checks fire -- this isolates the two
+    Python-relevant gates.
+    """
+    checks = plan_checks({"scripts/hooks/check-toml.py"})
+    assert _ids(checks) == ["tomllib-fallback", "typos"]
 
 
 def test_plan_checks_runs_llm_checks_for_llm_markdown() -> None:
@@ -104,6 +133,22 @@ def test_plan_checks_runs_actionlint_for_workflow_files() -> None:
     ]
 
 
+def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> None:
+    checks = plan_checks(
+        {
+            ".config/nextest.toml",
+            "src/network/protocol/mod.rs",
+            "tests/network/multi_process.rs",
+        }
+    )
+    timing_check = next(c for c in checks if c.check_id == "network-timing-invariants")
+    assert timing_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-network-timing-invariants.py",
+    ]
+    assert timing_check.fix_hint is not None
+
+
 def test_plan_checks_passes_multiple_workflow_files_to_actionlint() -> None:
     checks = plan_checks({".github/workflows/ci.yml", ".github/workflows/lint.yaml"})
     actionlint_check = next(check for check in checks if check.check_id == "actionlint")
@@ -132,6 +177,12 @@ def test_normalize_paths_preserves_leading_dot_segments() -> None:
 def test_plan_checks_returns_empty_for_non_matching_changes() -> None:
     checks = plan_checks({"notes/design.txtx"})
     assert checks == []
+
+
+def test_plan_checks_skips_tla_consistency_for_non_surface_specs_file() -> None:
+    # A non-(.tla/.cfg/README) file under specs/tla/ must NOT trigger the check.
+    checks = plan_checks({"specs/tla/notes.txt"})
+    assert "tla-config-consistency" not in _ids(checks)
 
 
 def test_plan_checks_run_all_forces_all_checks() -> None:

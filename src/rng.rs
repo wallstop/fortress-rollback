@@ -568,22 +568,16 @@ mod tests {
 
     #[test]
     fn test_fill_bytes() {
-        let mut rng = Pcg32::seed_from_u64(42);
+        let expected_stream = [
+            0xB9, 0xDC, 0x5D, 0x1D, 0xA4, 0x11, 0x6C, 0x72, 0xC0, 0xB6, 0x4F, 0xD4, 0xC3, 0x58,
+            0xB6, 0x28, 0x08,
+        ];
 
-        // Test various lengths
         for len in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17] {
+            let mut rng = Pcg32::seed_from_u64(42);
             let mut buf = vec![0u8; len];
             rng.fill_bytes(&mut buf);
-
-            // After filling, at least some bytes should be non-zero (for len > 0)
-            if len > 0 {
-                // It's extremely unlikely all bytes are zero
-                let all_zero = buf.iter().all(|&b| b == 0);
-                // Allow for very small buffers where this might happen
-                if len >= 4 {
-                    assert!(!all_zero, "fill_bytes produced all zeros for len={len}");
-                }
-            }
+            assert_eq!(buf.as_slice(), &expected_stream[..len], "len={len}");
         }
     }
 

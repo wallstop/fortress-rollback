@@ -14,6 +14,27 @@ pub struct ConnectionStatus {
     pub disconnected: bool,
     /// The last frame received from this peer.
     pub last_frame: Frame,
+    /// Per-slot connection-status **generation**, incremented by the owning peer
+    /// on every `connected <-> disconnected` transition (a drop or a
+    /// reactivation/hot-join re-open) of this slot in its own
+    /// `local_connect_status`. It rides on the connect-status gossip carried by
+    /// every input packet so a receiver can order a slot's reports by drop
+    /// cycle: a report with a strictly-lower `epoch` is from an earlier cycle
+    /// (a reordered or relay-lagged packet) and must not be mistaken for a fresh
+    /// one.
+    ///
+    /// The spectator session is the only consumer today — it uses the epoch to
+    /// close the two host->spectator reactivation fail-open corners (a stale
+    /// earlier-cycle drop report re-arming consumed provenance; a reordered
+    /// pre-drop connected snapshot transiently resurrecting a dropped slot). The
+    /// player-mesh confirmed/freeze folds deliberately ignore it (they read only
+    /// `disconnected`/`last_frame`), so carrying the epoch is behavior-neutral
+    /// there.
+    ///
+    /// Wraps at [`u16::MAX`]; a single slot toggling 65535 times within one
+    /// session is unreachable in practice (the same astronomically-rare,
+    /// documented framing as the protocol packet-filter `magic` era counter).
+    pub epoch: u16,
 }
 
 impl Default for ConnectionStatus {
@@ -21,6 +42,7 @@ impl Default for ConnectionStatus {
         Self {
             disconnected: false,
             last_frame: Frame::NULL,
+            epoch: 0,
         }
     }
 }
@@ -31,12 +53,21 @@ impl std::fmt::Display for ConnectionStatus {
         let Self {
             disconnected,
             last_frame,
+            epoch,
         } = self;
 
         if *disconnected {
-            write!(f, "Disconnected(last_frame={})", last_frame.as_i32())
+            write!(
+                f,
+                "Disconnected(last_frame={}, epoch={epoch})",
+                last_frame.as_i32()
+            )
         } else {
-            write!(f, "Connected(last_frame={})", last_frame.as_i32())
+            write!(
+                f,
+                "Connected(last_frame={}, epoch={epoch})",
+                last_frame.as_i32()
+            )
         }
     }
 }
@@ -58,6 +89,34 @@ pub(crate) struct Input {
     pub start_frame: Frame,
     pub ack_frame: Frame,
     pub bytes: Vec<u8>,
+    /// Per-slot **pessimistic confirmed floor** the sender reports for the
+    /// double-failure-relay fix (audit follow-up; verified-sound mode
+    /// `AsyncAckSound`/`AsyncAckSoundFresh` in
+    /// `specs/tla/DoubleFailureRelay.tla`). Index = player handle; value = the
+    /// lowest frame the sender could *still* freeze that slot to given
+    /// everything it currently folds — the `min` over the sender's own
+    /// `local_connect_status[slot].last_frame` AND every running, non-reserved
+    /// remote endpoint's cached `peer_connect_status(slot).last_frame`,
+    /// **skipping remote caches that are `Frame::NULL`** (no-info, so a peer
+    /// that has not yet gossiped a receipt does not poison the floor). The
+    /// sender computes it in `P2PSession::pessimistic_floors`, the canonical
+    /// fold — see there for the exact membership.
+    ///
+    /// Unlike `last_frame` (the sender's *own* receipt/freeze), this surfaces a
+    /// **departed origin's low** the sender still folds, so an observer that has
+    /// pruned that origin from its own fold can still hold its confirmation at
+    /// the mesh minimum instead of confirming + discarding the dropped slot's
+    /// real inputs above a freeze a relay will later agree to (the N>=4
+    /// double-failure-relay desync).
+    ///
+    /// Advisory and always `<= last_frame`, so consuming it never confirms
+    /// *higher* than the legacy `last_frame` fold (no safety regression): a
+    /// receiver that finds this empty / the wrong length / `Frame::NULL` for a
+    /// slot simply falls back to `last_frame` (the pre-fix barrier). Carried on
+    /// every `Input` packet alongside `peer_connect_status`; see
+    /// [`super::protocol`]'s `peer_pessimistic_floor` cache.
+    #[serde(default)]
+    pub pessimistic_floor: Vec<Frame>,
 }
 
 impl Default for Input {
@@ -68,6 +127,7 @@ impl Default for Input {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: Vec::new(),
+            pessimistic_floor: Vec::new(),
         }
     }
 }
@@ -81,6 +141,7 @@ impl std::fmt::Debug for Input {
             start_frame,
             ack_frame,
             bytes,
+            pessimistic_floor,
         } = self;
 
         f.debug_struct("Input")
@@ -89,6 +150,7 @@ impl std::fmt::Debug for Input {
             .field("start_frame", start_frame)
             .field("ack_frame", ack_frame)
             .field("bytes", &BytesDebug(bytes))
+            .field("pessimistic_floor", pessimistic_floor)
             .finish()
     }
 }
@@ -320,6 +382,7 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
         let cloned = status;
         assert!(cloned.disconnected);
@@ -333,9 +396,10 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(42),
+            epoch: 5,
         };
         let display = format!("{}", status);
-        assert_eq!(display, "Connected(last_frame=42)");
+        assert_eq!(display, "Connected(last_frame=42, epoch=5)");
     }
 
     #[test]
@@ -343,16 +407,17 @@ mod tests {
         let status = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(100),
+            epoch: 3,
         };
         let display = format!("{}", status);
-        assert_eq!(display, "Disconnected(last_frame=100)");
+        assert_eq!(display, "Disconnected(last_frame=100, epoch=3)");
     }
 
     #[test]
     fn test_connection_status_display_null_frame() {
         let status = ConnectionStatus::default();
         let display = format!("{}", status);
-        assert_eq!(display, "Connected(last_frame=-1)");
+        assert_eq!(display, "Connected(last_frame=-1, epoch=0)");
     }
 
     #[test]
@@ -385,6 +450,7 @@ mod tests {
             start_frame: Frame::new(10),
             ack_frame: Frame::new(5),
             bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("Input"));
@@ -492,16 +558,19 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(10),
+                    epoch: 0,
                 },
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(20),
+                    epoch: 0,
                 },
             ],
             disconnect_requested: false,
             start_frame: Frame::new(100),
             ack_frame: Frame::new(50),
             bytes: vec![1, 2, 3, 4, 5],
+            pessimistic_floor: Vec::new(),
         };
 
         let serialized = codec::encode(&input).expect("serialization should succeed");
@@ -518,6 +587,7 @@ mod tests {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: vec![],
+            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("0x")); // Empty bytes should still show "0x" prefix

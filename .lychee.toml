@@ -58,6 +58,8 @@ exclude = [
     "^https://github\\.com/wallstop/fortress-rollback/compare/v",
     "^https://github\\.com/wallstop/fortress-rollback/releases/tag/v",
     "^https://github\\.com/wallstop/fortress-rollback/issues/new\\?.*template=",
+    # Shell-script examples interpolate this at runtime; the literal URL is intentionally invalid.
+    "^https://github\\.com/tlaplus/tlaplus/releases/download/v(\\$\\{|%24%7B)TLA_TOOLS_VERSION(\\}|%7D)/tla2tools\\.jar$",
 
     # Rate-limited sites
     "^https://twitter\\.com",

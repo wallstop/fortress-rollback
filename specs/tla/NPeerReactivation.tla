@@ -239,7 +239,23 @@ Init ==
     /\ L \in 1..(MaxFrame - 2)             \* room for F2 = L + 2 <= MaxFrame
     /\ phase = "paused"
     /\ frozenVal \in [Survivors -> FrozenValDomain]
-    /\ AssumePA => FrozenAgreement         \* pin P-A iff requested by the config
+    /\ AssumePA => FrozenAgreement         \* P-A: all survivors share one frozen value
+    \* Sound state-space reduction (a representative pin, NOT a new semantic
+    \* assumption). Under P-A every survivor holds the SAME frozen value, and the
+    \* two symbols in FrozenValDomain (0 and 1) are interchangeable -- they are
+    \* only ever compared by equality in Agreement, never used arithmetically --
+    \* so the all-0 and all-1 initial assignments are ISOMORPHIC: the all-1 half
+    \* of the reachable space is a redundant mirror of the all-0 half. Fixing the
+    \* shared value to the 0 representative (FrozenAgreement above already forces
+    \* equality, so this pins all survivors) halves the reachable space
+    \* (582,112 -> 291,056 distinct states) with ZERO loss of coverage. Unlike
+    \* SYMMETRY Permutations(Survivors) this is SOUND under LIVENESS checking: it
+    \* adds no permutation equivalence classes and no CHOOSE-over-a-symmetry-set
+    \* hazard (cf. SomeSurvivor / PeerFrozenSym), so EventuallyResolved is still
+    \* checked exhaustively. Guarded by AssumePA, so the NPeerReactivation_NoPA
+    \* demonstration (AssumePA = FALSE) is untouched and still exhibits its
+    \* Agreement counterexample (where survivors hold DIFFERENT frozen values).
+    /\ AssumePA => frozenVal[SomeSurvivor] = 0
     /\ \E start \in [Survivors -> Frames]:
          /\ \A s \in Survivors: start[s] <= L
          /\ committedUpTo = [p \in MeshPeers |-> IF p \in Survivors THEN start[p] ELSE L]

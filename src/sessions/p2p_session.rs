@@ -837,6 +837,13 @@ impl<T: Config> P2PSession<T> {
                 );
             }
             if let Some(status) = local_connect_status.get_mut(handle.as_usize()) {
+                // A reserved hot-join slot is born disconnected: this is its
+                // INITIAL state, not a `connected -> disconnected` runtime
+                // transition, so it deliberately keeps the epoch-0 baseline
+                // (NOT routed through `arm_status_epoch`). Its first reactivation
+                // arms 0 -> 1; epoch 0 = "no drop cycle observed yet", which is
+                // exactly the legacy uniform-epoch baseline a never-touched
+                // connected slot also carries.
                 status.disconnected = true;
             } else {
                 report_violation!(
@@ -1165,8 +1172,17 @@ impl<T: Config> P2PSession<T> {
 
         // if the local inputs have not been dropped by the sync layer, send to all remote clients
         if !self.local_inputs.values().any(|&i| i.frame == Frame::NULL) {
+            // Per-slot pessimistic confirmed floors to gossip on this packet
+            // (double-failure-relay fix). Computed once from the current caches
+            // and shared by every remote endpoint — this peer's pessimism is the
+            // same regardless of recipient.
+            let pessimistic_floor = self.pessimistic_floors();
             for endpoint in self.player_reg.remotes.values_mut() {
-                endpoint.send_input(&self.local_inputs, &self.local_connect_status);
+                endpoint.send_input(
+                    &self.local_inputs,
+                    &self.local_connect_status,
+                    &pessimistic_floor,
+                );
                 endpoint.send_all_messages(&mut self.socket);
             }
         }
@@ -1621,7 +1637,7 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-                status.disconnected = false;
+                Self::arm_status_epoch(status, false);
                 status.last_frame =
                     safe_frame_sub!(activation_frame, 1, "P2PSession::poll_hot_join_host reopen");
             } else {
@@ -2292,7 +2308,7 @@ impl<T: Config> P2PSession<T> {
             );
         }
         if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-            status.disconnected = false;
+            Self::arm_status_epoch(status, false);
             status.last_frame =
                 safe_frame_sub!(activation_frame, 1, "P2PSession::commit_npeer_serve");
         } else {
@@ -2544,6 +2560,8 @@ impl<T: Config> P2PSession<T> {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: std::cmp::min(local.last_frame, seeded_last_frame),
+                        // Forward the host's current generation for this slot.
+                        epoch: local.epoch,
                     }
                 };
                 endpoint.seed_peer_connect_status_for_joiner_bootstrap(bootstrap_handle, status);
@@ -2876,12 +2894,15 @@ impl<T: Config> P2PSession<T> {
     /// The frozen value is restored from the directive-time capture — the
     /// reopened queue's own tracked value may already hold a leaked joiner
     /// input (see [`PendingReactivation::pre_freeze_input`]) — the connection
-    /// status is restored verbatim to the pre-reopen freeze point, the slot
-    /// re-enters `reserved_slots` (the rearmed joiner endpoint must stay
-    /// excluded from the confirmed/disconnect folds), and a forced
-    /// re-simulation from `F` is armed so any speculative frame that embedded
-    /// the aborted attempt's real inputs is recomputed with the restored
-    /// frozen value.
+    /// status's freeze frame and disconnect flag are restored to the pre-reopen
+    /// freeze point (its [`ConnectionStatus::epoch`] generation instead advances
+    /// monotonically — the abort is a genuine `connected -> disconnected` wire
+    /// transition a spectator observes, never a regression to the captured
+    /// pre-reopen generation), the slot re-enters `reserved_slots` (the rearmed
+    /// joiner endpoint must stay excluded from the confirmed/disconnect folds),
+    /// and a forced re-simulation from `F` is armed so any speculative frame
+    /// that embedded the aborted attempt's real inputs is recomputed with the
+    /// restored frozen value.
     #[cfg(feature = "hot-join")]
     fn restore_pre_reopen_frozen_state(
         &mut self,
@@ -2903,7 +2924,19 @@ impl<T: Config> P2PSession<T> {
             );
         }
         if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-            *status = pre_freeze_status;
+            // Restore the pre-freeze freeze frame and disconnect flag while keeping
+            // the epoch generation MONOTONE. A reopened pending armed the slot
+            // forward (E -> E+1, connected); this abort restore is a genuine
+            // connected->disconnected transition and must ADVANCE the generation
+            // (-> E+2), never regress to the captured pre-freeze `E`. A wholesale
+            // `*status = pre_freeze_status` would forward a strictly-lower epoch
+            // for a current-cycle disconnected state, breaking the per-slot
+            // drop-cycle ordering the spectator relies on (see
+            // [`Self::arm_status_epoch`] / [`ConnectionStatus::epoch`]). When the
+            // pending never reopened (slot still disconnected), `arm_status_epoch`
+            // is a no-op on the flag and the epoch is left unchanged — correct.
+            status.last_frame = pre_freeze_status.last_frame;
+            Self::arm_status_epoch(status, pre_freeze_status.disconnected);
         } else {
             report_violation!(
                 ViolationSeverity::Error,
@@ -3773,7 +3806,7 @@ impl<T: Config> P2PSession<T> {
             );
         }
         if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-            status.disconnected = false;
+            Self::arm_status_epoch(status, false);
             status.last_frame =
                 safe_frame_sub!(frame, 1, "P2PSession::progress_pending_reactivation");
         } else {
@@ -3974,7 +4007,7 @@ impl<T: Config> P2PSession<T> {
                 );
             }
             if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-                status.disconnected = false;
+                Self::arm_status_epoch(status, false);
                 status.last_frame = safe_frame_sub!(
                     frame,
                     1,
@@ -4246,7 +4279,7 @@ impl<T: Config> P2PSession<T> {
             "P2PSession::poll_hot_join_joiner baseline"
         );
         for status in &mut self.local_connect_status {
-            status.disconnected = false;
+            Self::arm_status_epoch(status, false);
             status.last_frame = baseline;
         }
 
@@ -5126,14 +5159,14 @@ impl<T: Config> P2PSession<T> {
                 // the bridge seeded its frame-S input and its first real
                 // input lands at F.
                 Some(_) if idx == local_idx => {
-                    status.disconnected = false;
+                    Self::arm_status_epoch(status, false);
                     status.last_frame = snapshot_frame;
                 },
                 Some(carried) if carried.disconnected => {
                     *status = *carried;
                 },
                 Some(carried) => {
-                    status.disconnected = false;
+                    Self::arm_status_epoch(status, false);
                     status.last_frame = std::cmp::min(carried.last_frame, snapshot_frame);
                 },
                 None => {
@@ -5146,7 +5179,7 @@ impl<T: Config> P2PSession<T> {
                         "N-peer hot-join apply: no carried status for slot {} (statuses were validated at buffer time)",
                         idx
                     );
-                    status.disconnected = false;
+                    Self::arm_status_epoch(status, false);
                     status.last_frame = snapshot_frame;
                 },
             }
@@ -7184,6 +7217,30 @@ impl<T: Config> P2PSession<T> {
         self.disconnect_player_at_frames(player_handle, last_frame, None);
     }
 
+    /// Sets a `local_connect_status` slot's disconnect flag, bumping its
+    /// [`ConnectionStatus::epoch`] generation on a `connected <-> disconnected`
+    /// TRANSITION (a drop or a reactivation). A same-state update — e.g.
+    /// converging a freeze frame DOWN while the slot is already disconnected, or
+    /// re-asserting a connected slot — leaves the epoch untouched.
+    ///
+    /// The generation is the per-slot drop/reactivation counter the spectator
+    /// session orders this host's forwarded connect-status reports by, to
+    /// discriminate drop cycles (closing the host->spectator reactivation
+    /// fail-open corners). The player-mesh confirmed/freeze folds ignore the
+    /// epoch entirely, so arming it is behavior-neutral for player sessions —
+    /// only the spectator consumes it. Wraps at [`u16::MAX`] (a single slot
+    /// toggling 65535 times in one session is unreachable in practice).
+    ///
+    /// Associated (not a `&mut self` method) so callers may invoke it on a
+    /// `status` reborrowed from `self.local_connect_status` without a second
+    /// `self` borrow.
+    fn arm_status_epoch(status: &mut ConnectionStatus, disconnected: bool) {
+        if status.disconnected != disconnected {
+            status.epoch = status.epoch.wrapping_add(1);
+        }
+        status.disconnected = disconnected;
+    }
+
     fn disconnect_player_at_frames(
         &mut self,
         player_handle: PlayerHandle,
@@ -7277,7 +7334,7 @@ impl<T: Config> P2PSession<T> {
                         } else {
                             status.last_frame = handle_last_frame;
                         }
-                        status.disconnected = true;
+                        Self::arm_status_epoch(status, true);
                         status.last_frame
                     };
 
@@ -7710,10 +7767,12 @@ impl<T: Config> P2PSession<T> {
                 input_map.insert(PlayerHandle::new(handle), *input);
             }
 
-            // send it to all spectators
+            // send it to all spectators. Spectators do not participate in the
+            // player-mesh confirmed-bound fold, so they need no pessimistic-floor
+            // gossip (empty slice — double-failure-relay fix).
             for endpoint in self.player_reg.spectators.values_mut() {
                 if endpoint.is_running() {
-                    endpoint.send_input(&input_map, &self.local_connect_status);
+                    endpoint.send_input(&input_map, &self.local_connect_status, &[]);
                 }
             }
 
@@ -8088,6 +8147,52 @@ impl<T: Config> P2PSession<T> {
                     "P2PSession::remote_slot_confirmed_bound pending clamp"
                 )
             });
+        // Fold-membership-asymmetry gate (Session 41's unifying invariant): the
+        // double-failure-relay residual — and hence any need to consume a relay's
+        // PESSIMISTIC floor instead of its own `last_frame` — can arise ONLY when
+        // a low-value origin has LEFT this session's fold, i.e. this session has
+        // PRUNED a remote endpoint (an explicit `remove_player` or a disconnect
+        // timeout drove it non-running) AND a separate RELAY peer is still running
+        // to surface that pruned origin's low. Two conditions, both required:
+        //
+        //  1. `observer_pruned_a_peer`: at least one non-running, non-reserved
+        //     remote — the origin that left the fold. With every remote still
+        //     running, the one-hop fold below already folds each live peer's view
+        //     directly (a still-running endpoint's stale-low is the S41
+        //     *stale-echo* NOTABUG, caught here unconditionally).
+        //  2. `>= 2` running, non-reserved remotes — the residual is an N>=4
+        //     phenomenon (observer + pruned origin + a distinct RELAY + the
+        //     dropped slot), so after the prune the observer must still see at
+        //     least a relay AND the dropped slot running. A 2-survivor mesh (one
+        //     running remote after a drop) has no relay, so the S32 barrier
+        //     already converges it; consuming the pessimistic floor there only
+        //     adds a two-hop circular lag (each survivor bounded by the other's
+        //     stale view of it) that needlessly pins confirmation.
+        //
+        // Gating on both keeps steady-state AND N<=3 post-drop pacing at the
+        // one-hop minimum (ZERO added cost / no liveness pin) while still closing
+        // the residual the instant the N>=4 relay topology forms. **Soundness:**
+        // `specs/tla/DoubleFailureRelay.tla`'s `Baseline` (no pessimistic floor)
+        // violates `NoConfirmedDivergence` ONLY when an origin is pruned
+        // (`gone`/per-observer `pruned`) in the relay topology; outside it the
+        // one-hop fold is sound, so restricting the floor's consumption to that
+        // window is a sound strict subset of the model-verified unconditional
+        // `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
+        // joiner) are neither a prune nor a relay, so they are excluded from both.
+        let mut observer_pruned_a_peer = false;
+        let mut running_remote_count = 0_usize;
+        for endpoint in self.player_reg.remotes.values() {
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            if endpoint.is_running() {
+                running_remote_count += 1;
+            } else {
+                observer_pruned_a_peer = true;
+            }
+        }
+        let consume_pessimistic_floor = observer_pruned_a_peer && running_remote_count >= 2;
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
         for endpoint in self.player_reg.remotes.values() {
@@ -8099,13 +8204,47 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             let status = endpoint.peer_connect_status(handle);
-            #[cfg(not(feature = "hot-join"))]
-            let folded_frame = status.last_frame;
-            #[cfg(feature = "hot-join")]
-            let folded_frame = if status.disconnected {
-                attempt_clamp.unwrap_or(status.last_frame)
+            // Double-failure-relay fix (audit follow-up; verified-sound mode
+            // `AsyncAckSound` in `specs/tla/DoubleFailureRelay.tla`): fold this
+            // peer's PESSIMISTIC confirmed floor — the `min` over its own
+            // receipt/freeze AND every source IT folds — when it has reported
+            // one, instead of its own `last_frame`. That surfaces a departed
+            // global-min origin's low that THIS session has already pruned from
+            // its own fold, so we hold confirmation at the mesh minimum instead
+            // of confirming + discarding the dropped slot's real inputs above a
+            // freeze the relaying survivor will agree to (the N>=4
+            // discard-before-convergence residual). The pessimistic floor is
+            // always `<= last_frame`, so this never confirms HIGHER than the
+            // legacy fold (no safety regression); a slot the peer has not
+            // reported a floor for (`Frame::NULL` — a cold/un-upgraded cache)
+            // falls back to `last_frame` (the pre-fix barrier value). See
+            // `peer_pessimistic_floor` and `pessimistic_floors`.
+            //
+            // **Scope (honest):** this realizes the verified `AsyncAckSound`
+            // (WARM-cache) mode, which consumes the cached in-flight floor with
+            // no reachability hold — safe because in the warm scope a pessimistic
+            // floor is monotone-non-decreasing (a cached value is stale-LOW =
+            // conservative, never stale-HIGH). The cold-cache facet (the observer
+            // never received a relay's pessimistic floor — `AsyncAckSoundFresh`,
+            // S49, needing an observer-side fresh-ack-round HOLD) and the
+            // mid-game-drop reorder facet (needing the S46 epoch as a freshness
+            // gate, see `merge_peer_connect_status`) are NOT closed here — they
+            // are the tracked chunk-2 follow-up. So this NARROWS the N>=4 residual
+            // to those corners (closing the in-order/warm case the in-process
+            // guard reproduces), it does not fully eliminate it.
+            let pessimistic = endpoint.peer_pessimistic_floor(handle);
+            let reported = if consume_pessimistic_floor && pessimistic != Frame::NULL {
+                pessimistic
             } else {
                 status.last_frame
+            };
+            #[cfg(not(feature = "hot-join"))]
+            let folded_frame = reported;
+            #[cfg(feature = "hot-join")]
+            let folded_frame = if status.disconnected {
+                attempt_clamp.unwrap_or(reported)
+            } else {
+                reported
             };
             if !status.disconnected {
                 any_reports_connected = true;
@@ -8136,6 +8275,87 @@ impl<T: Config> P2PSession<T> {
             // case): exclude the slot — the frozen value carries it.
             (true, false, _) => None,
         }
+    }
+
+    /// Computes this peer's per-slot **pessimistic confirmed floor** vector to
+    /// gossip on outgoing `Input` packets — the double-failure-relay fix's
+    /// pessimistic queue-min report (verified-sound mode `AsyncAckSound` in
+    /// [`specs/tla/DoubleFailureRelay.tla`](https://github.com/wallstop/fortress-rollback)).
+    ///
+    /// This is the **canonical** definition of the floor's fold; the cache
+    /// (`peer_pessimistic_floor`), the wire field
+    /// ([`Input::pessimistic_floor`](crate::network::messages::Input::pessimistic_floor)),
+    /// and the consumer ([`Self::remote_slot_confirmed_bound`]) all describe
+    /// themselves by deferring here, so the one fact lives in one place.
+    ///
+    /// For each slot, the value is the lowest frame this peer could *still*
+    /// freeze that slot to given everything it currently folds:
+    /// `min(local_connect_status[slot].last_frame, min over running,
+    /// non-reserved remote endpoints of peer_connect_status(slot).last_frame)`,
+    /// **skipping any remote endpoint whose cached view is `Frame::NULL`**
+    /// (no-info — e.g. a freshly `Running` peer that has not gossiped a receipt
+    /// yet): folding such a cache would `min` the whole reported floor down to
+    /// `Frame::NULL` and poison every observer that consumes it.
+    ///
+    /// The endpoint-set membership mirrors [`Self::remote_slot_confirmed_bound`]
+    /// (skip non-running and reserved hot-join endpoints) so the value a peer
+    /// *reports* is folded over the same endpoint set the mesh barrier *consumes*
+    /// — what makes the report a faithful pessimistic floor. The `Frame::NULL`
+    /// remote-cache skip above is the one refinement on top of that shared
+    /// membership; the consumer applies the mirror-image fallback (a reported
+    /// `Frame::NULL` is read as "use `last_frame`").
+    ///
+    /// Unlike a peer's own `last_frame` (its receipt/freeze of the slot), this
+    /// surfaces a **departed origin's low** the peer still folds. An observer
+    /// that has pruned that origin from its own fold can therefore still hold its
+    /// confirmation at the mesh minimum (the receiver consumes this in
+    /// `remote_slot_confirmed_bound`), instead of confirming + discarding the
+    /// dropped slot's real inputs above a freeze the mesh will later agree to.
+    ///
+    /// Because remote no-info caches are skipped (above), this yields
+    /// `Frame::NULL` for a slot ONLY when this peer's OWN receipt
+    /// (`local_connect_status[slot].last_frame`) is `Frame::NULL` — i.e. this
+    /// peer is itself cold for the slot (the cold-cache corner, out of the
+    /// warm-cache scope this chunk targets). A receiver reads that `Frame::NULL`
+    /// as "fall back to `last_frame`" — see [`Self::remote_slot_confirmed_bound`],
+    /// which folds `last_frame` whenever the reported floor is `Frame::NULL`.
+    fn pessimistic_floors(&self) -> Vec<Frame> {
+        // alloc-bound: `num_players` is validated at session construction (mirrors `local_connect_status`).
+        let mut floors = Vec::with_capacity(self.num_players);
+        for idx in 0..self.num_players {
+            let handle = PlayerHandle::new(idx);
+            let mut floor = self
+                .local_connect_status
+                .get(idx)
+                .map_or(Frame::NULL, |status| status.last_frame);
+            for endpoint in self.player_reg.remotes.values() {
+                if !endpoint.is_running() {
+                    continue;
+                }
+                #[cfg(feature = "hot-join")]
+                if self.hot_join.endpoint_is_reserved(endpoint) {
+                    continue;
+                }
+                // Skip a no-info (`Frame::NULL` = -1) source. A single freshly
+                // `Running` endpoint that has not yet gossiped its receipt would
+                // otherwise `min` the whole slot's reported floor down to NULL —
+                // poisoning a relay's floor so its observer falls back to the
+                // relay's own (high) `last_frame` and the fix silently
+                // disengages even when a real low is known from another source.
+                // Skipping no-info sources reports the min over the sources we
+                // ACTUALLY fold (matching the residual's "the low a relay still
+                // folds"). A NULL *own* receipt (this peer is itself cold for the
+                // slot) still yields NULL — the cold-cache corner, out of the
+                // warm scope this chunk targets (see `remote_slot_confirmed_bound`
+                // and the tracked cold-cache / reorder follow-up).
+                let cached = endpoint.peer_connect_status(handle).last_frame;
+                if cached != Frame::NULL {
+                    floor = std::cmp::min(floor, cached);
+                }
+            }
+            floors.push(floor);
+        }
+        floors
     }
 
     /// Returns `true` while any remote slot is **locally disconnected but not
@@ -9360,6 +9580,41 @@ mod tests {
     fn recommendation_interval_is_reasonable() {
         // 60 frames at 60fps = 1 second
         assert_eq!(RECOMMENDATION_INTERVAL, Frame::new(60));
+    }
+
+    // The connect-status epoch arming helper bumps the generation ONLY on a
+    // `connected <-> disconnected` transition, never on a same-state freeze-frame
+    // update, and wraps at u16::MAX. This is the per-slot drop/reactivation
+    // counter the spectator orders reports by (S46).
+    #[test]
+    fn arm_status_epoch_bumps_only_on_transition_and_wraps() {
+        let mut status = ConnectionStatus::default(); // connected, epoch 0
+        assert_eq!(status.epoch, 0);
+
+        // connected -> disconnected: a drop bumps the generation.
+        P2PSession::<TestConfig>::arm_status_epoch(&mut status, true);
+        assert!(status.disconnected);
+        assert_eq!(status.epoch, 1, "drop toggle bumps the generation");
+
+        // disconnected -> disconnected (e.g. a freeze-frame converge-down): NO bump.
+        status.last_frame = Frame::new(3);
+        P2PSession::<TestConfig>::arm_status_epoch(&mut status, true);
+        assert_eq!(
+            status.epoch, 1,
+            "a same-state update must not bump the generation"
+        );
+
+        // disconnected -> connected: a reactivation bumps the generation.
+        P2PSession::<TestConfig>::arm_status_epoch(&mut status, false);
+        assert!(!status.disconnected);
+        assert_eq!(status.epoch, 2, "reactivation toggle bumps the generation");
+
+        // u16 wrap is saturating-free (wrapping) — documented as unreachable in
+        // practice, but must not panic under overflow checks.
+        status.epoch = u16::MAX;
+        status.disconnected = false;
+        P2PSession::<TestConfig>::arm_status_epoch(&mut status, true);
+        assert_eq!(status.epoch, 0, "epoch wraps at u16::MAX without panicking");
     }
 
     #[test]
@@ -12212,6 +12467,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
 
         // Survivor D stays RUNNING and reports a genuine low view of C: C's
@@ -12226,6 +12482,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(5),
+                    epoch: 0,
                 },
             );
 
@@ -12288,6 +12545,7 @@ mod tests {
             session.local_connect_status[c.as_usize()] = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(100),
+                epoch: 0,
             };
 
             // D (always running) reports C confirmed through frame 7.
@@ -12301,6 +12559,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(7),
+                        epoch: 0,
                     },
                 );
 
@@ -12317,6 +12576,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(3),
+                        epoch: 0,
                     },
                 );
                 if b_running {
@@ -12379,6 +12639,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(100),
+            epoch: 0,
         };
 
         // B is RUNNING and reports a low view of C (frame 4). D running, higher (9).
@@ -12392,6 +12653,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(4),
+                    epoch: 0,
                 },
             );
         session
@@ -12404,6 +12666,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(9),
+                    epoch: 0,
                 },
             );
 
@@ -12493,6 +12756,7 @@ mod tests {
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
         // A's own slots (handle 0) and the non-dropped survivors' slots must not
         // pin the confirmed frame BELOW D's terms — give them all a high
@@ -12500,14 +12764,17 @@ mod tests {
         session.local_connect_status[0] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
         session.local_connect_status[1] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
         session.local_connect_status[2] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
 
         // Endpoint B (U): STALE-LOW connected cache of D at frame 3 (B's `B->A`
@@ -12525,6 +12792,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(3),
+                    epoch: 0,
                 },
             );
             for h in [0, 1, 2] {
@@ -12533,6 +12801,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(20),
+                        epoch: 0,
                     },
                 );
             }
@@ -12551,6 +12820,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(if h == 3 { 18 } else { 20 }),
+                        epoch: 0,
                     },
                 );
             }
@@ -12590,11 +12860,13 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(18),
+                    epoch: 0,
                 },
             );
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
 
         // STEP 3 — the override fires. `update_player_disconnects` folds the SAME
@@ -12642,11 +12914,13 @@ mod tests {
                 session.local_connect_status[h] = ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(20),
+                    epoch: 0,
                 };
             }
             session.local_connect_status[d.as_usize()] = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(20),
+                epoch: 0,
             };
             let b_d_frame = if b_stale_low { 3 } else { 20 };
             {
@@ -12661,6 +12935,7 @@ mod tests {
                         ConnectionStatus {
                             disconnected: false,
                             last_frame: Frame::new(if h == 3 { b_d_frame } else { 20 }),
+                            epoch: 0,
                         },
                     );
                 }
@@ -12677,6 +12952,7 @@ mod tests {
                         ConnectionStatus {
                             disconnected: false,
                             last_frame: Frame::new(if h == 3 { 18 } else { 20 }),
+                            epoch: 0,
                         },
                     );
                 }
@@ -12701,11 +12977,13 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(18),
+                        epoch: 0,
                     },
                 );
             session.local_connect_status[d.as_usize()] = ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(20),
+                epoch: 0,
             };
             session.update_player_disconnects();
             let mined = session.local_connect_status[d.as_usize()].last_frame;
@@ -12767,6 +13045,7 @@ mod tests {
             session.local_connect_status[h] = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(20),
+                epoch: 0,
             };
         }
         // A received D through 20 and still believes D connected (A has NOT
@@ -12774,6 +13053,7 @@ mod tests {
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(20),
+            epoch: 0,
         };
         // Endpoint B: DISCONNECTED stale-low cache of D at frame 3.
         {
@@ -12788,6 +13068,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(20),
+                        epoch: 0,
                     },
                 );
             }
@@ -12796,6 +13077,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(3),
+                    epoch: 0,
                 },
             );
         }
@@ -12813,6 +13095,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(20),
+                        epoch: 0,
                     },
                 );
             }
@@ -12870,6 +13153,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
+            epoch: 0,
         };
         // Both running survivors gossip the slot as disconnected.
         for addr in [addr_b, addr_d] {
@@ -12883,6 +13167,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(5),
+                        epoch: 0,
                     },
                 );
         }
@@ -12922,6 +13207,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(9),
+            epoch: 0,
         };
         // B has NOT detected yet: stale connected view at its low receipt 4.
         session
@@ -12934,6 +13220,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(4),
+                    epoch: 0,
                 },
             );
         // D already froze C at 6.
@@ -12947,6 +13234,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(6),
+                    epoch: 0,
                 },
             );
 
@@ -12982,6 +13270,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(2),
+                    epoch: 0,
                 },
             );
         let status = session.local_connect_status[c.as_usize()];
@@ -13014,6 +13303,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(7),
+            epoch: 0,
         };
 
         let status = session.local_connect_status[c.as_usize()];
@@ -13038,6 +13328,7 @@ mod tests {
             session.local_connect_status[c.as_usize()] = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(7),
+                epoch: 0,
             };
             session
                 .player_reg
@@ -13049,6 +13340,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(9),
+                        epoch: 0,
                     },
                 );
             // D gossips C through 5; B holds a LOWER view (2).
@@ -13062,6 +13354,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(5),
+                        epoch: 0,
                     },
                 );
             {
@@ -13075,6 +13368,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(2),
+                        epoch: 0,
                     },
                 );
                 if b_running {
@@ -13173,6 +13467,7 @@ mod tests {
         let connected_status = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(5),
+            epoch: 0,
         };
         assert_eq!(
             host.remote_slot_confirmed_bound(dropped, &connected_status),
@@ -13206,12 +13501,14 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(9),
+                    epoch: 0,
                 },
             );
         }
         session.local_connect_status[remote.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(7),
+            epoch: 0,
         };
 
         let status = session.local_connect_status[remote.as_usize()];
@@ -13231,6 +13528,7 @@ mod tests {
         session.local_connect_status[remote.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(7),
+            epoch: 0,
         };
         let status = session.local_connect_status[remote.as_usize()];
         assert_eq!(
@@ -13255,6 +13553,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(8),
+            epoch: 0,
         };
         for (addr, frame) in [(addr_c, 8), (addr_d, 8), (addr_b, 4)] {
             session
@@ -13267,6 +13566,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(frame),
+                        epoch: 0,
                     },
                 );
         }
@@ -13317,6 +13617,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(3),
+            epoch: 0,
         };
         // Both survivors received C through 7 and still believe it connected.
         for addr in [addr_b, addr_d] {
@@ -13330,6 +13631,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(7),
+                        epoch: 0,
                     },
                 );
         }
@@ -13356,6 +13658,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: Frame::new(5),
+                    epoch: 0,
                 },
             );
         let status = session.local_connect_status[c.as_usize()];
@@ -13370,6 +13673,396 @@ mod tests {
             Frame::new(3),
             "an endpoint-terms override (5) above our own detection value (3) must not \
              re-raise the local view — Case 1 convergence lands at our original 3"
+        );
+    }
+
+    // ========================================================================
+    // Double-failure-relay fix (Session 50): the pessimistic queue-min report
+    // (`pessimistic_floors`) + its gated consumption in
+    // `remote_slot_confirmed_bound`. The integration guard
+    // `p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors`
+    // exercises the end-to-end mesh path; these pin the mechanism in isolation.
+    // ========================================================================
+
+    /// COMPUTATION: the per-slot pessimistic floor a peer GOSSIPS is the `min`
+    /// over its own receipt AND every running, non-reserved endpoint's cached
+    /// view — surfacing a folded source's low so a relay observer that pruned
+    /// that source can still hold its bound there.
+    #[test]
+    fn pessimistic_floors_reports_min_over_own_and_running_endpoints() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Our own receipt of D is 9; B's cached view is low (4), C's is 7, D
+        // self-claims 9. The floor we report for D is min(9, 4, 7, 9) = 4.
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(9),
+            epoch: 0,
+        };
+        for (addr, frame) in [(addr_b, 4), (addr_c, 7), (addr_d, 9)] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(frame),
+                        epoch: 0,
+                    },
+                );
+        }
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::new(4)),
+            "the gossiped pessimistic floor for D must be the min over our receipt and all \
+             running endpoints' views (min(9, 4, 7, 9) = 4)"
+        );
+    }
+
+    /// COMPUTATION: a non-running (pruned) endpoint's view is excluded from the
+    /// gossiped pessimistic floor, exactly as the confirmed-bound fold excludes
+    /// it — so a peer reports the min over the sources it STILL folds.
+    #[test]
+    fn pessimistic_floors_skips_non_running_endpoints() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(9),
+            epoch: 0,
+        };
+        for (addr, frame) in [(addr_b, 2), (addr_c, 7), (addr_d, 9)] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(frame),
+                        epoch: 0,
+                    },
+                );
+        }
+        // B holds the lowest view (2) but is pruned -> excluded.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::new(7)),
+            "a non-running endpoint's view is excluded from the gossiped pessimistic floor \
+             (min over our 9 and the RUNNING C 7, D 9 = 7), not the pruned B's 2"
+        );
+    }
+
+    /// COMPUTATION (no-info skip): a RUNNING remote endpoint whose cached view
+    /// is `Frame::NULL` (a freshly `Running` peer that has not yet gossiped a
+    /// receipt) is SKIPPED from the fold, NOT folded — folding it would `min`
+    /// the whole reported floor down to `Frame::NULL` and poison every observer.
+    /// This pins the canonical-fold rustdoc claim ("skipping any remote endpoint
+    /// whose cached view is `Frame::NULL`"). Mutation-proof: a fold that did not
+    /// skip would report `Frame::NULL` instead of the real low (4).
+    #[test]
+    fn pessimistic_floors_skips_null_no_info_remote_caches() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Our own receipt of D is 9; B holds the real low (4); C is freshly
+        // running and has NOT gossiped a receipt for D yet (NULL = no info).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(9),
+            epoch: 0,
+        };
+        for (addr, frame) in [
+            (addr_b, Frame::new(4)),
+            (addr_c, Frame::NULL),
+            (addr_d, Frame::new(9)),
+        ] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: frame,
+                        epoch: 0,
+                    },
+                );
+        }
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::new(4)),
+            "a remote endpoint cached at Frame::NULL (no info) must be SKIPPED, not folded: \
+             the floor is min over our 9 and B's real low 4 = 4, never poisoned to NULL by C"
+        );
+    }
+
+    /// COMPUTATION (own cold receipt): with remote no-info caches skipped, the
+    /// reported floor is `Frame::NULL` ONLY when this peer's OWN receipt is
+    /// `Frame::NULL` (it is itself cold for the slot — the cold-cache corner).
+    /// This pins the second half of the canonical-fold rustdoc.
+    #[test]
+    fn pessimistic_floors_null_only_when_own_receipt_is_null() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Our OWN receipt of D is NULL (we are cold), even though running
+        // remotes hold real lows — the fold must surface NULL (cold corner).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::NULL,
+            epoch: 0,
+        };
+        for (addr, frame) in [(addr_b, 4), (addr_c, 7), (addr_d, 9)] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(frame),
+                        epoch: 0,
+                    },
+                );
+        }
+
+        assert_eq!(
+            session.pessimistic_floors().get(d.as_usize()).copied(),
+            Some(Frame::NULL),
+            "a NULL OWN receipt yields a NULL reported floor (the cold-cache corner), \
+             which a receiver reads as 'fall back to last_frame'"
+        );
+    }
+
+    /// CONSUMPTION (gate ON): with the origin B pruned and a relay C plus the
+    /// dropped slot D both running (the N>=4 relay topology), the relay's
+    /// PESSIMISTIC floor is folded instead of its own `last_frame` — the
+    /// double-failure-relay fix. Mutation-proof: the pre-fix one-hop fold would
+    /// return 10 (C's own receipt), discarding the contested window.
+    #[test]
+    fn remote_slot_confirmed_bound_consumes_relay_pessimistic_floor_after_prune() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // A pruned the origin B (its endpoint is non-running) — the
+        // fold-membership asymmetry. C and D remain running (2 running remotes).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+
+        // A's own view of D is still high (real inputs through 10).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // The RELAY C reports D connected at its own receipt 10, but its
+        // pessimistic floor for D is 4 — it still folds the pruned origin B's low.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+        }
+        // D self-reports connected at 10 with a matching (no-low) pessimistic floor.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(4)),
+            "with B pruned and C+D running, the relay C's pessimistic floor (4) must bound \
+             confirmation — folding its own last_frame (10) would discard the contested window"
+        );
+    }
+
+    /// CONSUMPTION (gate OFF, no prune): with every remote running the one-hop
+    /// fold is complete, so a relay's pessimistic floor must be IGNORED — the
+    /// steady-state pacing must not pay the relay's extra hop of staleness.
+    #[test]
+    fn remote_slot_confirmed_bound_ignores_pessimistic_floor_without_prune() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        for addr in [addr_b, addr_c, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(10),
+                        epoch: 0,
+                    },
+                );
+        }
+        // C carries a low pessimistic floor — but with no prune it must be ignored.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(10)),
+            "with every remote running (no prune), the one-hop fold is complete and the \
+             relay's pessimistic floor (4) must be ignored (no steady-state pacing cost)"
+        );
+    }
+
+    /// CONSUMPTION (gate OFF, single running remote): a prune occurred but fewer
+    /// than two remotes remain running — there is no N>=4 relay topology (a
+    /// 2-survivor mesh), so the pessimistic floor must be ignored. Consuming it
+    /// here pins a 2-survivor post-drop mesh via a two-hop circular lag (the N0
+    /// liveness guard, `p2p_n0_clean_equal_receipt_timeout_drop_*`).
+    #[test]
+    fn remote_slot_confirmed_bound_ignores_pessimistic_floor_with_single_running_remote() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // B and D pruned -> only C running (1 running remote, no relay topology).
+        for addr in [addr_b, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint")
+                .disconnect();
+        }
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(10)),
+            "with only one running remote (no N>=4 relay topology), the pessimistic floor \
+             (4) must be ignored — consuming it pins a 2-survivor mesh (the N0 liveness guard)"
+        );
+    }
+
+    /// CONSUMPTION (gate ON, NULL floor): even with the relay topology engaged,
+    /// a relay that has reported NO pessimistic floor (`Frame::NULL` — a cold or
+    /// un-upgraded cache) falls back to its own `last_frame`, never a spurious
+    /// NULL-driven hold.
+    #[test]
+    fn remote_slot_confirmed_bound_pessimistic_null_falls_back_to_last_frame() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // C and D report last_frame 8 with NO pessimistic floor (default NULL).
+        for addr in [addr_c, addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist")
+                .set_peer_connect_status_for_tests(
+                    d,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(8),
+                        epoch: 0,
+                    },
+                );
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(8)),
+            "a NULL pessimistic floor (cold/un-upgraded cache) must fall back to last_frame \
+             (8) even with the gate engaged — never a spurious NULL-driven hold"
         );
     }
 
@@ -13412,6 +14105,7 @@ mod tests {
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
+            epoch: 0,
         };
         for addr in [addr_b, addr_d] {
             session
@@ -13424,6 +14118,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: Frame::new(5),
+                        epoch: 0,
                     },
                 );
         }
@@ -13453,6 +14148,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(5),
+                        epoch: 0,
                     },
                 );
         }
@@ -13515,10 +14211,12 @@ mod tests {
         session.local_connect_status[1] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(0),
+            epoch: 0,
         };
         session.local_connect_status[2] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(0),
+            epoch: 0,
         };
 
         // Act.
@@ -13565,10 +14263,12 @@ mod tests {
         session.local_connect_status[1] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(10),
+            epoch: 0,
         };
         session.local_connect_status[2] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(10),
+            epoch: 0,
         };
 
         let advantage_when_disconnected = session.max_frame_advantage();
@@ -13593,10 +14293,12 @@ mod tests {
         session.local_connect_status[1] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(10),
+            epoch: 0,
         };
         session.local_connect_status[2] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(10),
+            epoch: 0,
         };
 
         let advantage_when_connected = session.max_frame_advantage();
@@ -14155,7 +14857,7 @@ mod tests {
                 inputs.insert(PlayerHandle::new(2), PlayerInput::new(frame, value));
                 let status = self.status.clone();
                 for proto in self.protos.values_mut() {
-                    proto.send_input(&inputs, &status);
+                    proto.send_input(&inputs, &status, &[]);
                     proto.send_all_messages(&mut self.socket);
                 }
             }
@@ -14844,6 +15546,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(serve_f.as_i32() - 1),
+                    epoch: 2, // armed: drop (epoch 1) then reactivation (epoch 2)
                 },
                 "B reopened the slot at F (connected, last_frame = F - 1)"
             );
@@ -14898,6 +15601,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(serve_f.as_i32() - 1),
+                    epoch: 2, // armed generation
                 },
                 "A reactivated its own slot at F"
             );
@@ -15562,8 +16266,12 @@ mod tests {
                 "B re-froze the slot"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "B restored the pre-reopen connection status verbatim"
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    epoch: 3,
+                    ..pre_status
+                },
+                "B restored the pre-reopen freeze frame and disconnect flag (the epoch advances monotonically over the reopen+refreeze)"
             );
             assert!(
                 duo.b
@@ -15746,8 +16454,12 @@ mod tests {
                 "JoinAborted clears B's attempt"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "B restored the pre-reopen connection status verbatim"
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    epoch: 3,
+                    ..pre_status
+                },
+                "B restored the pre-reopen freeze frame and disconnect flag (the epoch advances monotonically over the reopen+refreeze)"
             );
 
             // --- Mechanism pin: an ABORTED world leaves NO reactivation
@@ -15949,8 +16661,12 @@ mod tests {
                 "the delivered JoinAborted closes B's attempt"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "B restored the pre-reopen connection status verbatim"
+                duo.b.local_connect_status[2],
+                ConnectionStatus {
+                    epoch: 3,
+                    ..pre_status
+                },
+                "B restored the pre-reopen freeze frame and disconnect flag (the epoch advances monotonically over the reopen+refreeze)"
             );
 
             // --- Liveness + byte-identity: the abort world re-converges,
@@ -16463,8 +17179,8 @@ mod tests {
                 "the user kick closed the reopened attempt"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "the close restored the pre-reopen connection status verbatim (NOT the leaked >= F receipt; F = {serve_f})"
+                duo.b.local_connect_status[2], ConnectionStatus { epoch: 3, ..pre_status },
+                "the close restored the pre-reopen freeze frame and disconnect flag (NOT the leaked >= F receipt; F = {serve_f}); the epoch advances monotonically"
             );
             assert!(
                 duo.b.hot_join.reserved_slots.contains(&slot),
@@ -16517,8 +17233,8 @@ mod tests {
                 "the user removal closed the reopened attempt"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "the close restored the pre-reopen connection status verbatim (NOT the leaked >= F receipt; F = {serve_f})"
+                duo.b.local_connect_status[2], ConnectionStatus { epoch: 3, ..pre_status },
+                "the close restored the pre-reopen freeze frame and disconnect flag (NOT the leaked >= F receipt; F = {serve_f}); the epoch advances monotonically"
             );
             assert!(
                 duo.b.hot_join.reserved_slots.contains(&slot),
@@ -17034,6 +17750,7 @@ mod tests {
             let restick = ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(serve_f.as_i32() - 3),
+                epoch: 0,
             };
             duo.b
                 .player_reg
@@ -17243,8 +17960,8 @@ mod tests {
                 "B re-froze the slot"
             );
             assert_eq!(
-                duo.b.local_connect_status[2], pre_status,
-                "B restored the pre-attempt connection status verbatim (not the joiner-era receipt)"
+                duo.b.local_connect_status[2], ConnectionStatus { epoch: 3, ..pre_status },
+                "B restored the pre-attempt freeze frame and disconnect flag (not the joiner-era receipt); the epoch advances monotonically"
             );
             assert!(
                 duo.b
@@ -18198,6 +18915,7 @@ mod tests {
             let evidence = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(serve_f1.as_i32() + 2),
+                epoch: 0,
             };
             for handle in 0..3 {
                 duo.b.local_connect_status[handle].disconnected = false;
@@ -18725,6 +19443,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: f0_low,
+                    epoch: 1, // armed: one drop toggle
                 },
                 "B's slot-2 freeze converges down to the mesh minimum f0_low = {f0_low}"
             );
@@ -18846,6 +19565,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: f0_high,
+                    epoch: 1, // armed: one drop toggle
                 },
                 "the rejected directive leaves the slot untouched"
             );
@@ -18884,6 +19604,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: f0_low,
+                    epoch: 1, // armed generation
                 },
                 "the pending's captured pre-freeze snapshot is the CONVERGED freeze"
             );
@@ -19260,6 +19981,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: f0,
+                    epoch: 0,
                 },
                 "staging precondition: B folded A's converged {{disconnected, f0}} claim"
             );
@@ -19299,6 +20021,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: f0,
+                        epoch: 0,
                     },
                 );
 
@@ -19349,6 +20072,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: lowered,
+                        epoch: 0,
                     },
                 );
 
@@ -19372,6 +20096,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: lowered,
+                    epoch: 1, // armed: one drop toggle
                 },
                 "the held pre-reopen pending must not suspend the status mine-down"
             );
@@ -19399,6 +20124,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: true,
                     last_frame: lowered,
+                    epoch: 1, // armed generation
                 },
                 "pre_freeze_status is refreshed to the converged freeze"
             );
@@ -19532,6 +20258,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new(f0.as_i32() - 1),
+                        epoch: 0,
                     },
                 );
 
@@ -19948,14 +20675,17 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: frame,
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: frame,
+                        epoch: 0,
                     },
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: Frame::new((frame.as_i32() - 3).max(0)),
+                        epoch: 0,
                     },
                 ],
             )
@@ -20127,6 +20857,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: snapshot_frame,
+                        epoch: 0,
                     }
                 );
             }
@@ -22372,6 +23103,7 @@ mod tests {
             let second_dead = ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
+                epoch: 0,
             };
             c2.coordinator_proto_mut()
                 .set_received_snapshot_for_test(seam_snapshot_with_statuses(
@@ -22385,11 +23117,13 @@ mod tests {
                             // received further): the stamp must clamp to S
                             // (what the snapshot + bridge provably cover).
                             last_frame: Frame::new(8),
+                            epoch: 0,
                         },
                         second_dead,
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(3),
+                            epoch: 0,
                         },
                     ],
                 ));
@@ -22414,11 +23148,13 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: snapshot_frame,
+                        epoch: 0,
                     },
                     second_dead,
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: snapshot_frame,
+                        epoch: 0,
                     },
                 ],
                 "live slots clamp to S, the carried-dead slot stays dead at \
@@ -22462,10 +23198,12 @@ mod tests {
             let live = |frame: i32| ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(frame),
+                epoch: 0,
             };
             let dead = |frame: i32| ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(frame),
+                epoch: 0,
             };
 
             // (a) Status count mismatch (also covers the empty-statuses /
@@ -24521,6 +25259,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: f_low,
+                        epoch: 0,
                     },
                 );
 
@@ -24614,6 +25353,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: true,
                         last_frame: b_receipt,
+                        epoch: 0,
                     },
                 );
             for _ in 0..3 {
@@ -24963,6 +25703,7 @@ mod tests {
                 Some(ConnectionStatus {
                     disconnected: true,
                     last_frame: stop_frame,
+                    epoch: 1, // armed: one drop toggle
                 }),
                 "A's freeze converged down to B's claim before serving"
             );
@@ -24973,6 +25714,7 @@ mod tests {
                 Some(ConnectionStatus {
                     disconnected: true,
                     last_frame: stop_frame,
+                    epoch: 1, // armed generation
                 }),
                 "the joiner stamps the converged carried freeze verbatim"
             );

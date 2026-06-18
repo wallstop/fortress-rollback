@@ -22,6 +22,15 @@
       "pattern": "^https://oss\\.sonatype\\.org/content/repositories/snapshots/org/lamport/tla2tools/?$"
     },
     {
+      "pattern": "^https://docs\\.tlapl\\.us/?$"
+    },
+    {
+      "pattern": "^https://docs\\.tlapl\\.us/using:vscode:start$"
+    },
+    {
+      "pattern": "^http://demsky\\.eecs\\.uci\\.edu/publications/c11modelcheck\\.pdf$"
+    },
+    {
       "pattern": "^https://twitter\\.com"
     },
     {

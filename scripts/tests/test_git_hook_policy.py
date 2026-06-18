@@ -71,6 +71,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     ".vale/**",
     ".github/actions/install-cargo-tool/**",
     ".github/workflows/ci-docs.yml",
+    ".github/workflows/ci-rust.yml",
 }
 DOCS_WORKFLOW_FORBIDDEN_PATHS = {
     "scripts/**",
