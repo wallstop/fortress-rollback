@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781481782738,
+  "lastUpdate": 1781815770974,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b82b309155056bff46732f20e91a44a892de5e5c",
-          "message": "chore(deps): bump clap from 4.5.55 to 4.5.56 (#72)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.55 to 4.5.56.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.56</h2>\n<h2>[4.5.56] - 2026-01-29</h2>\n<h3>Fixes</h3>\n<ul>\n<li>On conflict error, don't show conflicting arguments in the\nusage</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.56] - 2026-01-29</h2>\n<h3>Fixes</h3>\n<ul>\n<li>On conflict error, don't show conflicting arguments in the\nusage</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/9cec1007acdc3cd990feded4322a4bccd2fd471c\"><code>9cec100</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/00e72e06f46e2c21e5bb4dd82aa5fca02a9e5c16\"><code>00e72e0</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c7848ff6fc3f8e0f7b66eaee10d44b43eea54538\"><code>c7848ff</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6094\">#6094</a>\nfrom epage/home</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/60184fb76a3d88277f89430402d01a121feb858c\"><code>60184fb</code></a>\nfeat(complete): Expand ~ in native completions</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/09969d3c1af9dd22fb944c09f8b1c27274cad824\"><code>09969d3</code></a>\nchore(deps): Update Rust Stable to v1.89 (<a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6093\">#6093</a>)</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/520beb5ec2d2bb5dd11912d27127df4e97027965\"><code>520beb5</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/2bd8ab3c009fc975db28209c3c3fb526364342ae\"><code>2bd8ab3</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/220875b58511028ba9cd38f7195b8b3315b72d0d\"><code>220875b</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6091\">#6091</a>\nfrom epage/possible</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/e5eb6c9d84efac5d660322e92dbbc0158266602d\"><code>e5eb6c9</code></a>\nfix(help): Integrate 'Possible Values:' into 'Arg::help'</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/594a771030e43df8c806ea1a029862339739a0f3\"><code>594a771</code></a>\nrefactor(help): Make empty tracking more consistent</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.55...clap_complete-v4.5.56\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.55&new-version=4.5.56)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after\nyour CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge\nand block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating\nit. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-01-30T12:54:24-08:00",
-          "tree_id": "56f062c3b412cfa1062e4c53ed11280924bdfdb1",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b82b309155056bff46732f20e91a44a892de5e5c"
-        },
-        "date": 1769806826569,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 108,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 552,
-            "range": "± 28",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 813,
-            "range": "± 24",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1174,
-            "range": "± 23",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 110701,
-            "range": "± 1227",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 29080,
-            "range": "± 895",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1324,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1667,
-            "range": "± 110",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3e8e7eb630f2e69bac731f7398d58ad4c8690193",
+          "message": "feat: Protocol Hardening (#179)\n\n## Description\n\nThis PR hardens multi-peer disconnect/drop convergence and stale-signal\nhandling to prevent silent divergence and stuck states, with the biggest\npractical impact in sessions with 3+ peers.\n\nUser-facing outcomes:\n- Fixes edge cases where survivors could confirm past an agreed freeze\npoint and diverge after a peer drop.\n- Tightens stale relay/ack handling so old state cannot incorrectly\nre-open or mis-freeze slots.\n- Adds/extends spectator and hot-join convergence safeguards around\ndrop/reactivation behavior.\n- Expands TLA+ specs/configs for DoubleFailureRelay and async-ack\nscenarios to validate these safety properties.\n- Updates changelog/docs and peer-drop coverage tests.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/peer_drop.rs` (peer-drop convergence scenarios)\n\n**Manual testing performed:**\n\n- TLA+ spec/config scenario expansion under\n`specs/tla/DoubleFailureRelay*`\n- (No additional manual runtime testing documented in this draft)\n\n## Related Issues\n\n- (None linked)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Medium Risk**\n> CI and hook changes are low risk, but the changelog documents a\nwire-format addition (`pessimistic_floor`) and session compatibility\nrequirements that are security/correctness-critical if the corresponding\nRust changes ship in the same release.\n> \n> **Overview**\n> **Network CI** is re-tiered so per-PR runs stay **loss-free and\nnon-retried**: `FORTRESS_NETWORK_TIER=smoke` blocks packet-loss\n`multi_process` scenarios (retries removed on that step), Docker\n`--quick` drops lossy netem, and nextest slow timeouts are documented\nagainst the **macOS-scaled harness ceiling** (180s PR / 960s nightly).\nNightly jobs set `FORTRESS_NETWORK_TIER=nightly`, raise job timeout to\n240m, and add a **Docker `--all` netem** lane.\n> \n> **Enforcement** adds `check-network-timing-invariants.py` (nextest vs\n`multi_process.rs` constants, no direct `wait_for_peer()`, protocol\ntests use virtual clocks), wired into pre-commit and agent-preflight.\n> \n> **Docs/verification**: new `check-tla-config-consistency.py` (FIX_MODE\nset vs `.cfg` vs README counts) in `ci-docs`; TLA verify drops\n`--fail-fast`, uses **multi-worker TLC**, per-spec `timeout`, and\nstricter pass detection; Miri drops the **s390x cross-target** install\nin favor of host-native checks plus `test_wire_endianness.py`. Preflight\ngains **typos**, **tomllib→tomli fallback**, and expanded path triggers.\n> \n> **CHANGELOG** (in this diff) records user-visible protocol narrative:\n**`pessimistic_floor` on input packets** (wire-compatible session\nrequired), spectator **connect-status epoch** for drop/reactivation\nordering, hot-join **per-endpoint era `magic`**, and narrowed\ndouble-failure-relay residuals; `DoubleFailureRelay.cfg` adds\n`EPOCH_MAX` / `COLD_CACHE`.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n536cfa0d852341e43c573399d915f3caf69e7614. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-18T13:44:45-07:00",
+          "tree_id": "44f5b8aed317e1ab76f244d71b6a7bb9f5341259",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/3e8e7eb630f2e69bac731f7398d58ad4c8690193"
+        },
+        "date": 1781815770462,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 107,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 154,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 445,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 701,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1030,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 132436,
+            "range": "± 2883",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45622,
+            "range": "± 439",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 108",
             "unit": "ns/iter"
           },
           {
