@@ -45,6 +45,11 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("tla-config-consistency", "specs/tla/README.md"),
     ("tla-config-consistency", "specs/tla/DoubleFailureRelay.tla"),
     ("tla-config-consistency", "scripts/docs/check-tla-config-consistency.py"),
+    ("network-timing-invariants", ".config/nextest.toml"),
+    ("network-timing-invariants", ".github/workflows/ci-network-nightly.yml"),
+    ("network-timing-invariants", "scripts/hooks/check-network-timing-invariants.py"),
+    ("network-timing-invariants", "src/network/protocol/mod.rs"),
+    ("network-timing-invariants", "tests/network/multi_process.rs"),
     ("tomllib-fallback", "scripts/hooks/check-toml.py"),
     ("typos", "src/lib.rs"),
     ("typos", "README.md"),
@@ -126,6 +131,22 @@ def test_plan_checks_runs_actionlint_for_workflow_files() -> None:
         "scripts/hooks/actionlint.py",
         ".github/workflows/ci.yml",
     ]
+
+
+def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> None:
+    checks = plan_checks(
+        {
+            ".config/nextest.toml",
+            "src/network/protocol/mod.rs",
+            "tests/network/multi_process.rs",
+        }
+    )
+    timing_check = next(c for c in checks if c.check_id == "network-timing-invariants")
+    assert timing_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-network-timing-invariants.py",
+    ]
+    assert timing_check.fix_hint is not None
 
 
 def test_plan_checks_passes_multiple_workflow_files_to_actionlint() -> None:

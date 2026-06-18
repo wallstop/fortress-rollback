@@ -119,6 +119,17 @@ def is_tla_consistency_surface_file(path: str) -> bool:
     return path.endswith((".tla", ".cfg")) or path == "specs/tla/README.md"
 
 
+def is_network_timing_surface_file(path: str) -> bool:
+    """Return True for files that affect network timing invariant checks."""
+    return path in {
+        ".config/nextest.toml",
+        ".github/workflows/ci-network-nightly.yml",
+        "scripts/hooks/check-network-timing-invariants.py",
+        "src/network/protocol/mod.rs",
+        "tests/network/multi_process.rs",
+    }
+
+
 def is_rust_source_file(path: str) -> bool:
     """Return True for Rust source files under `src/`."""
     return path.startswith("src/") and path.endswith(".rs")
@@ -216,6 +227,9 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
     )
     tla_consistency_changed = any(
         is_tla_consistency_surface_file(path) for path in changed_files
+    )
+    network_timing_changed = any(
+        is_network_timing_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
     python_files = sorted(path for path in changed_files if is_python_file(path))
@@ -387,6 +401,26 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 # The right fix depends on intent (spec vs prose vs config), so
                 # there is no safe blind auto-fix.
                 fix_command=None,
+            )
+        )
+
+    if run_all or network_timing_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="network-timing-invariants",
+                description=(
+                    "validate multi-process nextest budgets, peer wait helpers, "
+                    "and protocol virtual-time test usage"
+                ),
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/hooks/check-network-timing-invariants.py",
+                ],
+                fix_hint=(
+                    "Keep nextest network budgets above the macOS-scaled harness "
+                    "ceilings, route direct peer waits through scenario-derived "
+                    "timeouts, and use ProtocolConfig.clock for protocol timer tests."
+                ),
             )
         )
 

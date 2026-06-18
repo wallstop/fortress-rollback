@@ -212,7 +212,7 @@ fn check_parse(input: &str, expected: Option<Ast>) {
 
 Consolidate integration tests into a single crate (`tests/it/main.rs`). Anti-patterns: `assert!(result.is_ok())` (use `assert_eq!`), sleep-based synchronization, testing implementation details, and `if let Ok(..) = session.advance_frame()` patterns that swallow all frame-advance errors instead of matching only expected errors.
 
-For protocol tests that poll in loops (`poll_remote_clients()` / protocol `poll()`), always inject `TestClock` via `ProtocolConfig.clock` and advance it each poll iteration (for example with `POLL_INTERVAL_DETERMINISTIC`). Interval-gated sends (retries, quality reports, keepalives, pending output) will not fire reliably if wall-clock time does not advance.
+For protocol tests that poll in loops or assert timer effects, always inject `TestClock`/`ProtocolConfig.clock` and advance it each poll iteration (for example with `POLL_INTERVAL_DETERMINISTIC`); interval-gated sends (retries, quality reports, keepalives, pending output) will not fire reliably if wall-clock time does not advance. Multi-process real-UDP child waits must derive from each `PeerConfig.timeout_secs` plus documented overhead and stay below nextest budgets; `scripts/hooks/check-network-timing-invariants.py` enforces this.
 
 ## Changelog Policy
 

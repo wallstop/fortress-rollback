@@ -1090,9 +1090,27 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
 }
 
-/// Maximum time to wait for a peer process before considering it hung.
-/// This prevents tests from hanging forever if something goes wrong.
-const PEER_PROCESS_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes max
+/// Extra wall-clock budget for peer process startup, stdout/stderr drain, and
+/// parent-side scheduling around a peer's own timeout.
+const PROCESS_TIMEOUT_OVERHEAD_SECS: u64 = 30;
+
+/// Maximum peer timeout allowed in the per-PR smoke tier.
+///
+/// The nextest per-test budget for `network::multi_process` must stay above this
+/// value after platform scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`].
+const PER_PR_MAX_PEER_TIMEOUT_SECS: u64 = 90;
+
+/// Maximum peer timeout used by the ignored nightly real-UDP suite.
+///
+/// The `ci-network-nightly` nextest profile must cover this value after platform
+/// scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`].
+const NIGHTLY_MAX_PEER_TIMEOUT_SECS: u64 = 600;
+
+/// macOS hosted runners need more real-time headroom for process-heavy UDP tests.
+#[cfg(target_os = "macos")]
+const MACOS_TIMEOUT_SCALE_NUMERATOR: u64 = 3;
+#[cfg(target_os = "macos")]
+const MACOS_TIMEOUT_SCALE_DENOMINATOR: u64 = 2;
 
 /// Applies platform-specific timeout scaling for real-UDP multi-process tests.
 ///
@@ -1102,12 +1120,29 @@ fn apply_platform_timeout_scaling(base_timeout_secs: u64) -> u64 {
     #[cfg(target_os = "macos")]
     {
         // Keep this conservative so tests still fail quickly on genuine hangs.
-        base_timeout_secs.saturating_mul(3) / 2
+        base_timeout_secs.saturating_mul(MACOS_TIMEOUT_SCALE_NUMERATOR)
+            / MACOS_TIMEOUT_SCALE_DENOMINATOR
     }
     #[cfg(not(target_os = "macos"))]
     {
         base_timeout_secs
     }
+}
+
+fn process_timeout_for_peer_timeout(peer_timeout_secs: u64) -> Duration {
+    Duration::from_secs(
+        apply_platform_timeout_scaling(peer_timeout_secs)
+            .saturating_add(PROCESS_TIMEOUT_OVERHEAD_SECS),
+    )
+}
+
+fn process_timeout_for_configs(configs: &[PeerConfig]) -> Duration {
+    let peer_timeout = configs
+        .iter()
+        .map(|config| config.timeout_secs)
+        .max()
+        .unwrap_or(0);
+    process_timeout_for_peer_timeout(peer_timeout)
 }
 
 /// Waits for a peer with a timeout to prevent infinite hangs.
@@ -1212,10 +1247,26 @@ fn wait_for_peer_with_timeout(mut child: Child, name: &str, timeout: Duration) -
     }
 }
 
-/// Waits for a peer and parses its result (with default timeout).
-fn wait_for_peer(child: Child, name: &str) -> TestResult {
-    let timeout_secs = apply_platform_timeout_scaling(PEER_PROCESS_TIMEOUT.as_secs());
-    wait_for_peer_with_timeout(child, name, Duration::from_secs(timeout_secs))
+fn wait_for_peer_results(
+    peers: Vec<(Child, String)>,
+    process_timeout: Duration,
+) -> Vec<TestResult> {
+    let mut wait_handles = Vec::with_capacity(peers.len());
+    for (child, name) in peers {
+        wait_handles.push(thread::spawn(move || {
+            wait_for_peer_with_timeout(child, &name, process_timeout)
+        }));
+    }
+
+    wait_handles
+        .into_iter()
+        .enumerate()
+        .map(|(index, handle)| {
+            handle
+                .join()
+                .unwrap_or_else(|_| panic!("Peer {index} wait thread panicked"))
+        })
+        .collect()
 }
 
 /// Environment variable that selects the real-UDP test tier.
@@ -1406,15 +1457,13 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
     );
     let test_start = std::time::Instant::now();
 
-    // Calculate timeout: use the max of peer timeouts + 30s buffer for process
-    // overhead, with platform scaling for CI variance.
-    let peer_timeout = configs.iter().map(|c| c.timeout_secs).max().unwrap_or(0);
-    let peer_timeout_scaled = apply_platform_timeout_scaling(peer_timeout);
-    let process_timeout = Duration::from_secs(peer_timeout_scaled + 30);
+    // Calculate timeout: use the max of peer timeouts + process overhead, with
+    // platform scaling for CI variance.
+    let process_timeout = process_timeout_for_configs(&configs);
 
     // Spawn every peer, staggering so each peer's listener is bound before later
     // peers start sending to it. This mirrors the 2-peer 100ms spawn stagger.
-    let mut wait_handles = Vec::with_capacity(configs.len());
+    let mut peers = Vec::with_capacity(configs.len());
     for (index, config) in configs.iter().enumerate() {
         if index > 0 {
             thread::sleep(Duration::from_millis(100));
@@ -1422,21 +1471,11 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
         let child =
             spawn_peer(config).unwrap_or_else(|e| panic!("Failed to spawn peer {index}: {e}"));
         let name = format!("Peer {index}");
-        wait_handles.push(thread::spawn(move || {
-            wait_for_peer_with_timeout(child, &name, process_timeout)
-        }));
+        peers.push((child, name));
     }
 
     // Wait for all peers concurrently.
-    let results: Vec<TestResult> = wait_handles
-        .into_iter()
-        .enumerate()
-        .map(|(index, handle)| {
-            handle
-                .join()
-                .unwrap_or_else(|_| panic!("Peer {index} wait thread panicked"))
-        })
-        .collect();
+    let results = wait_for_peer_results(peers, process_timeout);
 
     let test_duration = test_start.elapsed();
 
@@ -1498,6 +1537,68 @@ fn run_two_peer_test(
     // run_n_peer_test returns exactly as many results as configs passed in.
     let result2 = results.pop().expect("two-peer test must yield 2 results");
     let result1 = results.pop().expect("two-peer test must yield 2 results");
+    (result1, result2)
+}
+
+fn run_two_peer_staggered_test(
+    peer1_config: PeerConfig,
+    peer2_config: PeerConfig,
+    spawn_delay: Duration,
+    context: &str,
+) -> (TestResult, TestResult) {
+    let configs = vec![peer1_config, peer2_config];
+    if let Err(message) = check_smoke_tier(&configs, smoke_tier_enforced()) {
+        panic!("{message}");
+    }
+    assert!(
+        is_peer_binary_available(),
+        "PREREQUISITE NOT MET: network_test_peer binary not found.\n\
+         Build it with: cargo build -p network-test-peer\n\
+         Expected binary: {} in target directory\n\
+         \n\
+         This is not a test failure - the test requires the peer binary to be built first.",
+        PEER_BINARY_NAME
+    );
+
+    let process_timeout = process_timeout_for_configs(&configs);
+    let test_start = std::time::Instant::now();
+
+    let mut peer1 = spawn_peer(&configs[0]).expect("Failed to spawn peer 1");
+    thread::sleep(spawn_delay);
+    let peer2 = match spawn_peer(&configs[1]) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = peer1.kill();
+            let _ = peer1.wait();
+            panic!("Failed to spawn peer 2: {error}");
+        },
+    };
+
+    let mut results = wait_for_peer_results(
+        vec![(peer1, "Peer 1".to_string()), (peer2, "Peer 2".to_string())],
+        process_timeout,
+    );
+    let test_duration = test_start.elapsed();
+
+    if results.iter().any(|result| !result.success) {
+        eprintln!("=== Staggered Test Configuration ({context}) ===");
+        for (index, config) in configs.iter().enumerate() {
+            eprintln!("Peer {}: {}", index + 1, config.diagnostic_summary());
+        }
+        eprintln!("=== Test Results ===");
+        for (index, result) in results.iter().enumerate() {
+            eprintln!("Peer {}: {}", index + 1, result.diagnostic_summary());
+        }
+        eprintln!("Duration: {:.2}s", test_duration.as_secs_f64());
+        eprintln!("==============================================");
+    }
+
+    let result2 = results
+        .pop()
+        .expect("staggered two-peer test must yield 2 results");
+    let result1 = results
+        .pop()
+        .expect("staggered two-peer test must yield 2 results");
     (result1, result2)
 }
 
@@ -2587,18 +2688,12 @@ fn test_staggered_peer_startup() {
         ..Default::default()
     };
 
-    // Spawn peer 1 first
-    let peer1 = spawn_peer(&peer1_config).expect("Failed to spawn peer 1");
-
-    // Wait 500ms before spawning peer 2 (simulates staggered start)
-    thread::sleep(Duration::from_millis(500));
-
-    // Spawn peer 2
-    let peer2 = spawn_peer(&peer2_config).expect("Failed to spawn peer 2");
-
-    // Wait for both peers (wait_for_peer has a default 5-minute timeout)
-    let result1 = wait_for_peer(peer1, "Peer 1");
-    let result2 = wait_for_peer(peer2, "Peer 2");
+    let (result1, result2) = run_two_peer_staggered_test(
+        peer1_config,
+        peer2_config,
+        Duration::from_millis(500),
+        "staggered_peer_startup",
+    );
 
     // Verify both peers reached success (frame >= target with all inputs confirmed);
     // sync_health() is diagnostic-only and is NOT part of the success check.
@@ -2631,18 +2726,12 @@ fn test_heavily_staggered_startup() {
         ..Default::default()
     };
 
-    // Spawn peer 1 first
-    let peer1 = spawn_peer(&peer1_config).expect("Failed to spawn peer 1");
-
-    // Wait 2 seconds before spawning peer 2
-    thread::sleep(Duration::from_secs(2));
-
-    // Spawn peer 2
-    let peer2 = spawn_peer(&peer2_config).expect("Failed to spawn peer 2");
-
-    // Wait for both peers (wait_for_peer has a default 5-minute timeout)
-    let result1 = wait_for_peer(peer1, "Peer 1");
-    let result2 = wait_for_peer(peer2, "Peer 2");
+    let (result1, result2) = run_two_peer_staggered_test(
+        peer1_config,
+        peer2_config,
+        Duration::from_secs(2),
+        "heavily_staggered_startup",
+    );
 
     // Verify both peers reached success (frame >= target with all inputs confirmed);
     // sync_health() is diagnostic-only and is NOT part of the success check.
@@ -3365,8 +3454,8 @@ impl NetworkConditionCase {
 
         // Loss-free cases are per-PR smoke tests: cap at 90s so the macOS-scaled
         // harness ceiling (90 * 1.5 + 30 = 165s) stays below the per-PR nextest
-        // budget (180s). Loss-bearing cases only run in the nightly tier (720s
-        // budget), where the extra headroom is harmless.
+        // budget (180s). Loss-bearing cases only run in the nightly tier (960s
+        // budget), where the extra headroom covers the longest endurance tests.
         let timeout_secs = if self.packet_loss > 0.0 { 120 } else { 90 };
         let scenario = NetworkScenario::symmetric(self.name, profile)
             .with_frames(self.frames)
@@ -3831,6 +3920,43 @@ mod infrastructure_tests {
 
         #[cfg(not(target_os = "macos"))]
         assert_eq!(scaled, base);
+    }
+
+    #[test]
+    fn test_process_timeout_for_peer_timeout_includes_scaled_overhead() {
+        let smoke_ceiling = process_timeout_for_peer_timeout(PER_PR_MAX_PEER_TIMEOUT_SECS);
+        let nightly_ceiling = process_timeout_for_peer_timeout(NIGHTLY_MAX_PEER_TIMEOUT_SECS);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(smoke_ceiling, Duration::from_secs(165));
+            assert_eq!(nightly_ceiling, Duration::from_secs(930));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(smoke_ceiling, Duration::from_secs(120));
+            assert_eq!(nightly_ceiling, Duration::from_secs(630));
+        }
+    }
+
+    #[test]
+    fn test_process_timeout_for_configs_uses_max_peer_timeout() {
+        let configs = vec![
+            PeerConfig {
+                timeout_secs: 30,
+                ..Default::default()
+            },
+            PeerConfig {
+                timeout_secs: PER_PR_MAX_PEER_TIMEOUT_SECS,
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            process_timeout_for_configs(&configs),
+            process_timeout_for_peer_timeout(PER_PR_MAX_PEER_TIMEOUT_SECS)
+        );
     }
 
     /// Verify that find_peer_binary returns Some when binary exists.
@@ -5340,18 +5466,12 @@ fn test_very_long_staggered_startup() {
         ..Default::default()
     };
 
-    // Spawn peer 1 first
-    let peer1 = spawn_peer(&peer1_config).expect("Failed to spawn peer 1");
-
-    // Wait 5 seconds before spawning peer 2
-    thread::sleep(Duration::from_secs(5));
-
-    // Spawn peer 2
-    let peer2 = spawn_peer(&peer2_config).expect("Failed to spawn peer 2");
-
-    // Wait for both peers (wait_for_peer has a default 5-minute timeout)
-    let result1 = wait_for_peer(peer1, "Peer 1");
-    let result2 = wait_for_peer(peer2, "Peer 2");
+    let (result1, result2) = run_two_peer_staggered_test(
+        peer1_config,
+        peer2_config,
+        Duration::from_secs(5),
+        "very_long_staggered_startup",
+    );
 
     verify_determinism(&result1, &result2, "very_long_staggered_startup");
 }

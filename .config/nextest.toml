@@ -45,13 +45,13 @@ max-threads = 1
 # on a loaded runner. Determinism / progress-under-loss for the lossy scenarios
 # is proven deterministically (virtual time) in tests/network/in_process_chaos.rs.
 #
-# The per-test budget below (period 60s, terminate-after 3 = 180s) is a generous
-# safety ceiling. Every kept per-PR smoke test caps its internal peer timeout at
-# <= 90s, so even with the macOS x1.5 timing scale (apply_platform_timeout_scaling)
-# the worst-case harness ceiling is 90*1.5 + 30 = 165s -- BELOW this 180s budget.
-# A genuinely hung peer is therefore reported by the harness (with full
-# diagnostics) rather than being SIGKILLed early by nextest, while a wedged test
-# still cannot block PR CI for the old 12 minutes.
+# The per-test budget below (period 60s, terminate-after 3 = 180s) is a
+# safety ceiling over the harness source of truth in tests/network/multi_process.rs:
+# PER_PR_MAX_PEER_TIMEOUT_SECS=90, macOS scale=1.5, and
+# PROCESS_TIMEOUT_OVERHEAD_SECS=30 => 165s. A genuinely hung smoke peer is
+# therefore reported by the harness (with diagnostics) rather than being
+# SIGKILLed early by nextest. scripts/hooks/check-network-timing-invariants.py
+# enforces this relationship and rejects direct wait_for_peer() bypasses.
 [[profile.default.overrides]]
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
@@ -68,8 +68,7 @@ fail-fast = false                                      # Run all tests to see fu
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 # Per-PR multi_process budget mirrors the default profile (see the comment
-# above): 180s, above the 165s worst-case macOS-scaled harness ceiling of the
-# kept smoke tests (<=90s internal timeout * 1.5 + 30s).
+# above): 180s, above the 165s worst-case macOS-scaled harness ceiling.
 [[profile.ci.overrides]]
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
@@ -79,10 +78,10 @@ slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s ma
 # `--profile ci-network-nightly --run-ignored ignored-only`. The ignored tests
 # are the extreme-chaos scenarios (peer timeouts up to 240s) and the long
 # endurance sessions (peer timeouts up to 600s for the 5000-frame stress test).
-# Their nextest budget MUST exceed those internal timeouts + harness overhead,
-# otherwise nextest would SIGKILL them before their own timeout fires and the
-# nightly suite would always fail. 720s (period 60s, terminate-after 12) covers
-# the 600s + ~30s harness ceiling of the largest endurance test. Settings not
+# Their nextest budget MUST exceed those internal timeouts + harness overhead
+# on every matrix OS, otherwise nextest would SIGKILL them before their own
+# timeout fires. 960s (period 60s, terminate-after 16) covers the macOS-scaled
+# ceiling of the largest endurance test: 600s * 1.5 + 30s = 930s. Settings not
 # listed here fall back to [profile.default] (retries = 0, etc.).
 [profile.ci-network-nightly]
 retries = 0
@@ -92,7 +91,7 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [[profile.ci-network-nightly.overrides]]
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
-slow-timeout = { period = "60s", terminate-after = 12 } # 720s: covers the 600s endurance + harness ceiling
+slow-timeout = { period = "60s", terminate-after = 16 } # 960s: covers the 930s macOS-scaled endurance ceiling
 
 [profile.ci-network-nightly.junit]
 path = "target/nextest/ci-network-nightly/junit.xml"

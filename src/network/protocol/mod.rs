@@ -2830,6 +2830,22 @@ mod tests {
         .expect("Failed to create test protocol")
     }
 
+    fn mutable_clock_config() -> (ProtocolConfig, Arc<Mutex<Instant>>) {
+        let current = Arc::new(Mutex::new(Instant::now()));
+        let clock_handle = Arc::clone(&current);
+        let config = ProtocolConfig {
+            clock: Some(Arc::new(move || *clock_handle.lock().unwrap())),
+            ..ProtocolConfig::default()
+        };
+        (config, current)
+    }
+
+    fn advance_test_clock(clock: &Arc<Mutex<Instant>>, duration: Duration) -> Instant {
+        let mut current = clock.lock().unwrap();
+        *current += duration;
+        *current
+    }
+
     fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
@@ -3056,8 +3072,15 @@ mod tests {
 
     #[test]
     fn handle_message_accepts_correct_magic() {
-        let mut protocol: UdpProtocol<TestConfig> =
-            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let (config, clock) = mutable_clock_config();
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
         protocol.synchronize().unwrap();
 
         // Complete sync with magic 999
@@ -3074,8 +3097,7 @@ mod tests {
 
         let initial_recv_time = protocol.last_recv_time;
 
-        // Wait a tiny bit
-        std::thread::sleep(Duration::from_millis(1));
+        let accepted_recv_time = advance_test_clock(&clock, Duration::from_millis(1));
 
         // Send message with correct magic
         let msg = Message {
@@ -3085,6 +3107,7 @@ mod tests {
         protocol.handle_message(&msg);
 
         // Should update recv time
+        assert_eq!(protocol.last_recv_time, accepted_recv_time);
         assert!(protocol.last_recv_time > initial_recv_time);
     }
 
@@ -4215,7 +4238,7 @@ mod tests {
 
     #[test]
     fn sync_timeout_event_emitted_only_once() {
-        use std::time::Duration;
+        let (protocol_config, clock) = mutable_clock_config();
 
         // Create a protocol with a very short sync timeout
         let sync_config = SyncConfig {
@@ -4234,14 +4257,13 @@ mod tests {
             60,
             DesyncDetection::Off,
             sync_config,
-            ProtocolConfig::default(),
+            protocol_config,
             TimeSyncConfig::default(),
         )
         .expect("Failed to create test protocol");
         protocol.synchronize().unwrap();
 
-        // Wait for timeout to elapse
-        std::thread::sleep(Duration::from_millis(10));
+        advance_test_clock(&clock, Duration::from_millis(2));
 
         let connect_status = vec![ConnectionStatus::default(); 2];
 
@@ -4316,10 +4338,6 @@ mod tests {
         complete_test_sync(&mut protocol);
         protocol.send_queue.clear();
         (protocol, current)
-    }
-
-    fn advance_test_clock(clock: &Arc<Mutex<Instant>>, duration: Duration) {
-        *clock.lock().unwrap() += duration;
     }
 
     fn queued_inputs(protocol: &UdpProtocol<TestConfig>) -> Vec<&Input> {
@@ -6269,8 +6287,15 @@ mod tests {
 
         // A ghost peer that synchronized against our EARLIEST era, so it holds that
         // era's magic as its learned `remote_magic`.
-        let mut ghost: UdpProtocol<TestConfig> =
-            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let (ghost_config, ghost_clock) = mutable_clock_config();
+        let mut ghost: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ghost_config,
+        );
         ghost.synchronize().unwrap();
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *ghost.sync_random_requests.iter().next().unwrap();
@@ -6306,13 +6331,17 @@ mod tests {
 
         // The filter discriminates rather than blanket-dropping: a packet carrying
         // the magic the ghost actually learned is still accepted.
-        std::thread::sleep(Duration::from_millis(1));
+        let accepted_recv_time = advance_test_clock(&ghost_clock, Duration::from_millis(1));
         ghost.handle_message(&Message {
             header: MessageHeader {
                 magic: early_era_magic,
             },
             body: MessageBody::KeepAlive,
         });
+        assert_eq!(
+            ghost.last_recv_time, accepted_recv_time,
+            "accepted packets refresh the ghost's recv clock to the injected time"
+        );
         assert!(
             ghost.last_recv_time > last_recv_before,
             "ghost still accepts a packet carrying its learned magic"
