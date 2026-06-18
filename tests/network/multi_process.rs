@@ -286,6 +286,16 @@ impl PeerConfig {
     /// sockets under loss" check belongs in the nightly suite
     /// (`.github/workflows/ci-network-nightly.yml`).
     fn adversarial_reason(&self) -> Option<String> {
+        // Reject misconfiguration BEFORE the loss check: a non-finite (NaN /
+        // ±inf) or out-of-[0.0, 1.0] probability is never a valid smoke-tier
+        // scenario. Classifying it adversarial makes `--packet-loss NaN` (and
+        // negative / >1.0 typos) fail fast instead of silently slipping through
+        // the `> 0.0` loss checks below -- `NaN > 0.0` is `false`, so without
+        // this an invalid loss-bearing config would pass the guard and
+        // reintroduce the CI-starvation flake with a confusing diagnostic.
+        if let Some(reason) = self.invalid_probability_reason() {
+            return Some(reason);
+        }
         if self.packet_loss > 0.0 {
             Some(format!("packet_loss={:.2}", self.packet_loss))
         } else if self.burst_loss_prob > 0.0 {
@@ -293,6 +303,42 @@ impl PeerConfig {
         } else {
             None
         }
+    }
+
+    /// Every probability-valued `PeerConfig` field, as `(name, value)` pairs.
+    ///
+    /// Single source of truth for the chaos-probability fields so a new one is
+    /// automatically covered by every check that folds over it (validation,
+    /// smoke-tier classification). Non-probability chaos knobs (`latency_ms`,
+    /// `jitter_ms`, the buffer/length counts) are integers and cannot be
+    /// non-finite, so they are out of scope here.
+    fn probabilities(&self) -> [(&'static str, f64); 4] {
+        [
+            ("packet_loss", self.packet_loss),
+            ("burst_loss_prob", self.burst_loss_prob),
+            ("reorder_rate", self.reorder_rate),
+            ("duplicate_rate", self.duplicate_rate),
+        ]
+    }
+
+    /// Returns `Some(reason)` if any probability field is not a finite value in
+    /// `[0.0, 1.0]`, naming the first offending field.
+    ///
+    /// A non-finite (NaN / ±inf) or out-of-range probability is always a
+    /// misconfiguration -- it is never a valid scenario in any tier and must
+    /// fail fast. The single `RangeInclusive::contains` check covers all of it:
+    /// `contains` is `false` for `NaN`, `±inf`, negatives, and values above
+    /// `1.0`. Enforced in every tier by [`check_smoke_tier`].
+    fn invalid_probability_reason(&self) -> Option<String> {
+        for (name, value) in self.probabilities() {
+            if !(0.0..=1.0).contains(&value) {
+                return Some(format!(
+                    "{name}={value} is not a valid probability \
+                     (expected a finite value in [0.0, 1.0])"
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -1003,18 +1049,22 @@ macro_rules! skip_if_no_peer_binary {
 
 /// Spawns a test peer process
 fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
-    validate_peer_config_sync_preset("spawn_peer", config);
-
-    // Smoke-tier guard. spawn_peer is the single choke point every real-UDP
-    // session flows through -- run_n_peer_test AND the direct-spawn
-    // staggered-startup tests -- so enforcing here makes the per-PR/nightly
-    // split structurally complete: a loss-bearing scenario that forgets
-    // `#[ignore]` fails fast with an actionable message instead of silently
-    // re-introducing CI-starvation flake. The per-config check reports the
-    // offending peer via its port in the diagnostic summary.
+    // Smoke-tier guard FIRST: spawn_peer is the single choke point every
+    // real-UDP session flows through -- run_n_peer_test AND the direct-spawn
+    // staggered-startup tests -- so validating here before any other config use
+    // makes the per-PR/nightly split structurally complete. It rejects an
+    // invalid config (non-finite / out-of-range probability) in every tier and a
+    // loss-bearing scenario that forgets `#[ignore]` in the per-PR tier, both
+    // failing fast with an actionable message instead of silently
+    // re-introducing CI-starvation flake. Running it before
+    // `validate_peer_config_sync_preset` guarantees the downstream cosmetic
+    // sync-preset classifier never folds an invalid probability. The per-config
+    // check reports the offending peer via its port in the diagnostic summary.
     if let Err(message) = check_smoke_tier(std::slice::from_ref(config), smoke_tier_enforced()) {
         panic!("{message}");
     }
+
+    validate_peer_config_sync_preset("spawn_peer", config);
 
     let peer_binary = find_peer_binary().ok_or_else(|| {
         std::io::Error::new(
@@ -1298,6 +1348,20 @@ fn smoke_tier_enforced() -> bool {
 /// Extracted as a pure function (no env reads, no process spawning) so the
 /// invariant is unit-tested deterministically.
 fn check_smoke_tier(configs: &[PeerConfig], enforced: bool) -> Result<(), String> {
+    // Misconfiguration is rejected in EVERY tier (per-PR and nightly alike): a
+    // non-finite / out-of-range probability is never a valid scenario and must
+    // fail fast rather than silently degrade to "no chaos". This runs even when
+    // the smoke tier is not enforced, so a `--packet-loss NaN` typo can never
+    // reach a spawned peer in any suite.
+    for (index, config) in configs.iter().enumerate() {
+        if let Some(reason) = config.invalid_probability_reason() {
+            return Err(format!(
+                "real-UDP peer {index} has an invalid network configuration: {reason}. \
+                 Offending config: {}",
+                config.diagnostic_summary()
+            ));
+        }
+    }
     if !enforced {
         return Ok(());
     }
@@ -1363,6 +1427,120 @@ fn adversarial_reason_allows_pure_timing_conditions() {
         ..Default::default()
     };
     assert_eq!(config.adversarial_reason(), None);
+}
+
+#[test]
+fn invalid_probability_reason_flags_non_finite_and_out_of_range() {
+    // A bare `> 0.0` guard silently accepts NaN (`NaN > 0.0` is false), negative,
+    // and >1.0 values, so a misconfigured loss-bearing scenario could slip past
+    // the smoke-tier guard. Every probability field must reject non-finite /
+    // out-of-[0.0, 1.0] values fast, naming the offending field.
+    let bad: &[(&str, PeerConfig)] = &[
+        (
+            "packet_loss",
+            PeerConfig {
+                packet_loss: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "packet_loss",
+            PeerConfig {
+                packet_loss: -0.5,
+                ..Default::default()
+            },
+        ),
+        (
+            "packet_loss",
+            PeerConfig {
+                packet_loss: 1.5,
+                ..Default::default()
+            },
+        ),
+        (
+            "packet_loss",
+            PeerConfig {
+                packet_loss: f64::INFINITY,
+                ..Default::default()
+            },
+        ),
+        (
+            "burst_loss_prob",
+            PeerConfig {
+                burst_loss_prob: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "reorder_rate",
+            PeerConfig {
+                reorder_rate: 2.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "duplicate_rate",
+            PeerConfig {
+                duplicate_rate: -1.0,
+                ..Default::default()
+            },
+        ),
+    ];
+    for (field, config) in bad {
+        let reason = config
+            .invalid_probability_reason()
+            .unwrap_or_else(|| panic!("{field} invalid value must be rejected"));
+        assert!(reason.contains(field), "reason for {field}: {reason}");
+    }
+}
+
+#[test]
+fn invalid_probability_reason_accepts_valid_boundaries() {
+    let config = PeerConfig {
+        packet_loss: 0.0,
+        burst_loss_prob: 1.0,
+        reorder_rate: 0.5,
+        duplicate_rate: 0.0,
+        ..Default::default()
+    };
+    assert_eq!(config.invalid_probability_reason(), None);
+}
+
+#[test]
+fn adversarial_reason_flags_non_finite_probability() {
+    // NaN must be classified adversarial even though `NaN > 0.0` is false.
+    let config = PeerConfig {
+        packet_loss: f64::NAN,
+        ..Default::default()
+    };
+    let reason = config
+        .adversarial_reason()
+        .expect("NaN packet_loss must be adversarial");
+    assert!(reason.contains("packet_loss"), "reason: {reason}");
+}
+
+#[test]
+fn check_smoke_tier_rejects_invalid_probability_in_every_tier() {
+    // Misconfiguration is never valid -- it must fail fast in BOTH the per-PR
+    // (enforced) and nightly (not enforced) tiers, not silently degrade to
+    // "no chaos".
+    for enforced in [true, false] {
+        let configs = vec![
+            PeerConfig {
+                local_port: 1,
+                ..Default::default()
+            },
+            PeerConfig {
+                local_port: 2,
+                packet_loss: f64::NAN,
+                ..Default::default()
+            },
+        ];
+        let err = check_smoke_tier(&configs, enforced)
+            .expect_err("invalid config must be rejected in every tier");
+        assert!(err.contains("packet_loss"), "missing field: {err}");
+        assert!(err.contains("peer 1"), "missing offending index: {err}");
+    }
 }
 
 #[test]

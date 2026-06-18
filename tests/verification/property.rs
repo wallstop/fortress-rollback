@@ -1883,8 +1883,8 @@ mod p2p_checksum_tests {
 
     // Shared sync helpers/constants from test_utils to avoid duplicating constants.
     // `synchronize_sessions_deterministic` (virtual time, no real sockets/sleep) is
-    // used by `test_checksum_exchange_reaches_in_sync`; the remaining socket-creation
-    // -only tests below still use `bind_socket_with_retry`.
+    // used by `test_checksum_exchange_reaches_in_sync`; the remaining tests below
+    // (which only need socket creation) still use `bind_socket_with_retry`.
     use crate::common::channel_socket::create_channel_pair;
     use crate::common::test_utils::{
         bind_socket_with_retry, synchronize_sessions_deterministic, SyncConfig,
