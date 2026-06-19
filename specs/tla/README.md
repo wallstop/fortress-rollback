@@ -38,7 +38,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 | `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 | `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
-| `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos, the S47 `_AsyncAckStale.cfg`, `_AsyncAckGossip.cfg`, `_AsyncAckTwoPhase.cfg` demos, and the S48 `_AsyncAckSound.cfg` PASS + `_AsyncAckSound_Witness.cfg` non-vacuity demo, and the S49 cold-cache demos `_AsyncAckSound_Cold.cfg` FAIL + `_AsyncAckSoundFresh_Cold.cfg` PASS / `_AsyncAckSoundFresh_Cold_Witness.cfg` non-vacuity / `_AsyncAckSoundFresh_Live.cfg` liveness) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration. POLICY (original 4): residual is real (Baseline → safety violated), dead-survivor tombstone regresses liveness (Tombstone → liveness violated), cache-only no-wire shortcut unsound via corroborate-then-drop (InheritedFloor → safety violated), mesh-acked-floor *policy* sound (MeshAgree → safety+liveness PASS). S47 IMPLEMENTABILITY (3 new): discharging MeshAgree's instantaneous-fresh-ack + synchronized-death idealizations (in-flight ack round + per-observer death) breaks safety for the naive (AsyncAckStale), the passive-gossip-epoch = landed S46 wire epoch (AsyncAckGossip), and the active two-phase (AsyncAckTwoPhase) mechanisms — so the S46 passive drop-epoch is necessary but NOT sufficient on the player side. S48 SOUND (AsyncAckSound → safety+liveness PASS): the AsyncAckStale machinery with the single delta of a **pessimistic queue-min report** is the certified-sound implementable mode — the decisive fold change (no epoch gate needed in the warm-GlobalMin scope; safety also rests on the warmup pessimistic-ack seed + the FreezeNeverBelowGlobalMin floor). The audit's last open potential-desync item (S41 REAL/deferred) |
+| `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos, the S47 `_AsyncAckStale.cfg`, `_AsyncAckGossip.cfg`, `_AsyncAckTwoPhase.cfg` demos, and the S48 `_AsyncAckSound.cfg` PASS + `_AsyncAckSound_Witness.cfg` non-vacuity demo, and the S49 cold-cache demos `_AsyncAckSound_Cold.cfg` FAIL + `_AsyncAckSoundFresh_Cold.cfg` PASS / `_AsyncAckSoundFresh_Cold_Witness.cfg` non-vacuity / `_AsyncAckSoundFresh_Live.cfg` liveness, and the S52 mid-game-drop-reorder demos `_AsyncAckSoundFresh_Reorder.cfg` FAIL + `_AsyncAckSoundEpoch_Reorder.cfg` FAIL (passive-epoch insufficient) + `_AsyncAckSoundRound_Reorder.cfg` PASS / `_AsyncAckSoundRound_Reorder_Witness.cfg` non-vacuity / `_AsyncAckSoundRound_Reorder_Live.cfg` liveness) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration. POLICY (original 4): residual is real (Baseline → safety violated), dead-survivor tombstone regresses liveness (Tombstone → liveness violated), cache-only no-wire shortcut unsound via corroborate-then-drop (InheritedFloor → safety violated), mesh-acked-floor *policy* sound (MeshAgree → safety+liveness PASS). S47 IMPLEMENTABILITY (3 new): discharging MeshAgree's instantaneous-fresh-ack + synchronized-death idealizations (in-flight ack round + per-observer death) breaks safety for the naive (AsyncAckStale), the passive-gossip-epoch = landed S46 wire epoch (AsyncAckGossip), and the active two-phase (AsyncAckTwoPhase) mechanisms — so the S46 passive drop-epoch is necessary but NOT sufficient on the player side. S48 SOUND (AsyncAckSound → safety+liveness PASS): the AsyncAckStale machinery with the single delta of a **pessimistic queue-min report** is the certified-sound implementable mode — the decisive fold change (no epoch gate needed in the warm-GlobalMin scope; safety also rests on the warmup pessimistic-ack seed + the FreezeNeverBelowGlobalMin floor). The audit's last open potential-desync item (S41 REAL/deferred) |
 
 ## Properties Verified
 
@@ -211,10 +211,12 @@ the per-endpoint gossip caches (which can go stale under partition), endpoint de
 (pruning), the prediction window (irreversible discard of confirmed frames below the
 window floor), and the freeze re-roll.
 
-The confirmation rule has **nine** `FIX_MODE` modes — the original four (the
+The confirmation rule has **eleven** `FIX_MODE` modes — the original four (the
 policy-level arbitration), the three **S47** modes that discharge the two
 idealizations the MeshAgree *positive* rested on, the **S48** sound mode
-(`AsyncAckSound`), and the **S49** cold-cache mode (`AsyncAckSoundFresh`) (see below):
+(`AsyncAckSound`), the **S49** cold-cache mode (`AsyncAckSoundFresh`), and the two
+**S52** mid-game-drop-reorder modes (the `AsyncAckSoundEpoch` negative and the
+`AsyncAckSoundRound` positive) (see below):
 
 - **Baseline** (`DoubleFailureRelay_Baseline.cfg`, expected to FAIL): the current
   production fold. TLC reproduces the residual as a **safety** counterexample
@@ -327,12 +329,64 @@ drop-epoch / fresh-round commitment additionally binds. Non-vacuity is checked s
 holding rule). `AsyncAckSound` is the implementable analog of the idealized `MeshAgree`
 positive and the design a production red-green cycle should implement.
 
+**S52 — the MID-GAME-DROP-REORDER ladder (the `COLD_CACHE`/`REORDER` corners S49 named out
+of scope).** S48/S49's positives hold in the **warm-GlobalMin** convention; S49 explicitly
+scoped out the **cold-GOSSIP-cache / mid-game-drop** world, where a relay's *own* cache of
+the low origin is cold and warms via gossip, so its **pessimistic floor genuinely goes
+HIGH-then-LOW mid-game** and a *reordered* stale-HIGH floor packet (a relay's earlier report)
+can clobber a fresh-LOW one. Production's `peer_pessimistic_floor` cache is a **plain
+overwrite** (latest-processed packet wins), so this reorder re-opens the residual. S52 models
+it with an orthogonal `REORDER` constant: it (1) cold-seeds the gossip cache (uniform
+`MAX_FRAME`) so the relay's floor goes high-then-low, and (2) adds the `StaleAck` action (a
+reordered stale-HIGH ack at an OLDER floor-epoch, delivered late), plus a per-source
+`floorEpoch` that bumps on every **floor-lowering** (the S47 requirement — *not* just on a
+connect↔disconnect like S46's `arm_status_epoch`). Two new modes form a negative→positive
+ladder (the reorder analog of S47's `AsyncAckGossip`→`AsyncAckSound`); both carry `floorEpoch`
+on every ack and pair the pessimistic report with the cold-cache hold, differing **only** in
+the freshness mechanism:
+
+- **AsyncAckSoundEpoch** (`_AsyncAckSoundEpoch_Reorder.cfg`, expected to FAIL): the cheap,
+  literal reading of the audit's "epoch as a freshness gate on the cache overwrite" — a
+  **PASSIVE** gate. The overwrite rejects a floor at an older epoch than the cached ack, **and**
+  the advance holds while a cached ack's epoch is below the **gossip-tracked** latest floorEpoch
+  (`cacheEpoch`). It closes the reorder-AFTER-fresh clobber but is **machine-DISPROVEN UNSOUND**
+  via the **stale-first race**: a stale-HIGH ack delivered *before* any fresh ack — and before
+  the floorEpoch-bump gossip raises `cacheEpoch` — passes both gates (cached and gossip epoch
+  both still 0), so the observer locks on the stale high. This is the S47 "epoch-bump gossip
+  **races** the observer's lock" obstruction recurring at the reorder level: **a passive epoch
+  comparison is not enough, even with the pessimistic report.** (The reorder analog of
+  `AsyncAckGossip`.)
+- **AsyncAckSoundRound** (`_AsyncAckSoundRound_Reorder.cfg`, **PASS** — safety; the sound
+  reorder mode): the advance holds for any folded reachable peer whose cached ack epoch is below
+  that peer's **CURRENT** floorEpoch — a completed round-trip returns the peer's state
+  at-or-after the request, so a stale snapshot (an older floorEpoch than the peer now holds)
+  never satisfies it (the S44/S47 "fresh-ack **round** postdating the observer's intent"). Once
+  every folded peer's ack is at its current generation it carries that peer's current pessimistic
+  floor — surfacing the relayed origin's low — so the observer holds at the global min.
+  **HONEST SCOPE (the idealization this carries, exactly as the `MeshAgree` positive does):** the
+  round's freshness is modeled by reading the peer's *current* floorEpoch — the
+  instantaneous-fresh-ack idealization **(a)** — which a CONCRETE sequence-numbered
+  request/response round discharges (the implementable design this informs). The disproven
+  `AsyncAckSoundEpoch` is the concrete *passive-gossip* attempt that does **not** discharge it
+  and is unsound, so the round is genuinely load-bearing. The reorder cfgs pin links all-up (the
+  asymmetry comes from the origin's death, not a partition) and use a uniform cold seed + several
+  behavior-neutral state-space pins (`slotEpoch`/`cacheEpoch` unread in the reorder modes), so the
+  exhaustive safety check stays tractable. Non-vacuity (`_AsyncAckSoundRound_Reorder_Witness.cfg`)
+  and liveness (`_AsyncAckSoundRound_Reorder_Live.cfg`) are checked separately.
+
+**Net S52 finding (machine-backed):** the reorder fix needs more than the audit's literal
+"epoch gate on the overwrite" — that **passive** reading (`AsyncAckSoundEpoch`) loses the
+stale-first race. The sound consumer needs a **fresh-ack round** that does not advance until it
+has a *current-generation* ack from every folded peer (`AsyncAckSoundRound`); the production
+`src/` analog is the S46 `ConnectionStatus.epoch` consumed as a **round-completion** gate (hold
+until a current-epoch pessimistic floor is received), not a passive overwrite comparison.
+
 **Safety:** `NoConfirmedDivergence` (no two alive survivors permanently — both
 window-locked — disagree on the dropped slot's recorded confirmed value);
 `LockedRecordMatchesFreeze` (a mesh-agreed survivor's locked record equals the agreed
 freeze value); plus `FreezeNeverBelowGlobalMin` and `RecordedSourceInRange` sanity
 invariants. **Liveness:** `ConfirmationProgresses` (every alive survivor eventually
-confirms to the living mesh floor; partitions heal monotonically). The nine FIX_MODE
+confirms to the living mesh floor; partitions heal monotonically). The eleven FIX_MODE
 modes together are the machine-checked arbitration. The original four establish the POLICY:
 the residual is real (Baseline), the dead-survivor tombstone regresses liveness
 (Tombstone), the cache-only no-wire shortcut is unsound via the corroborate-then-drop
@@ -351,6 +405,11 @@ of the `MeshAgree` policy positive and the design a production red-green cycle s
 the cold-cache mode (`AsyncAckSoundFresh`, PASS):** the same pessimistic report plus an
 observer-side unreceived-ack HOLD (NULL-seeded `ackFloor`; do not trust a cold cache), which
 closes the cold-cache corner that the report alone (`AsyncAckSound_Cold`, FAIL) reopens.
+**S52 adds the mid-game-drop-reorder ladder:** the cold-GOSSIP / reorder world (a relay's
+pessimistic floor goes high-then-low and a stale-HIGH ack is reordered late) re-opens the
+residual, and the audit's literal *passive* epoch gate (`AsyncAckSoundEpoch`, FAIL via the
+stale-first race) is insufficient; the **fresh-ack ROUND** that holds until a current-generation
+pessimistic ack is received (`AsyncAckSoundRound`, PASS) is the sound consumer.
 
 ### PeerDrop.tla
 
