@@ -381,6 +381,22 @@ has a *current-generation* ack from every folded peer (`AsyncAckSoundRound`); th
 `src/` analog is the S46 `ConnectionStatus.epoch` consumed as a **round-completion** gate (hold
 until a current-epoch pessimistic floor is received), not a passive overwrite comparison.
 
+**S53 `src/` refinement (model-vs-implementation coupling).** When this model's `StaleAck`
+deposits a stale-HIGH floor, it does so **decoupled** from any connect-status (the model's
+`ackFloor` is a variable separate from `cacheLast`). In `src/` the pessimistic floor and the
+peer's connect-status ride the **same `Input` packet**, and the connect-status is merged
+reorder-SAFELY (order-insensitive adopt/min/no-resurrect). So the reorder facet splits in two by
+what the relay reports for the dropped slot: a relay reporting it **disconnected** carries its
+authoritative queue-min freeze in the reorder-safe `last_frame` (`== the true floor`), so folding
+`last_frame` instead of the reorder-broken floor cache closes that **disconnected-relay sub-shape**
+with no wire change — a `src/` coupling this model's floor-only `StaleAck` abstracts away (the same
+model-vs-`src/` distinction the `COLD_CACHE` cold-cache result surfaced, S49/S51). The
+**connected-relay sub-shape** (the relay still reports the slot connected while its disconnect
+gossip is loss-delayed, so the floor is its only impending-freeze signal) has no reorder-safe
+fallback and is exactly what `AsyncAckSoundRound` targets. The S53 `src/` cycle landed the
+disconnected-relay closure; the connected-relay round-gate is the remaining `src/` work this mode
+informs.
+
 **Safety:** `NoConfirmedDivergence` (no two alive survivors permanently — both
 window-locked — disagree on the dropped slot's recorded confirmed value);
 `LockedRecordMatchesFreeze` (a mesh-agreed survivor's locked record equals the agreed

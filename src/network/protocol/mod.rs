@@ -1985,17 +1985,23 @@ impl<T: Config> UdpProtocol<T> {
         // low before any drop, and connected receipts only rise — a pessimistic
         // floor is monotone-non-decreasing, so a reordered packet carries a
         // stale-LOW value (transiently conservative, self-heals on the next
-        // in-order packet). The OUT-OF-SCOPE corner (honestly tracked, NOT closed
-        // here): in a cold-gossip-cache / mid-game-drop world a relay can report
-        // high-then-low for the same slot, so a reordered stale-HIGH floor could
-        // overwrite a fresh low and re-open the residual — that facet needs the
-        // S46 `ConnectionStatus.epoch` as a freshness gate on this overwrite (the
-        // chunk-2 follow-up; see `N-PLAYER-DESYNC-AUDIT.md` and
-        // `specs/tla/DoubleFailureRelay.tla`'s `AsyncAckSoundFresh`/cold-cache
-        // results). We skip the SAME stale DISCONNECTED claims the reactivation
-        // floor rejects (so a stale relay's floor cannot re-stick a reactivated
-        // slot). A missing entry (empty / wrong-length `pessimistic_floor`)
-        // leaves the cache untouched — the fold falls back to `last_frame`.
+        // in-order packet). The mid-game-drop reorder corner — a relay reports
+        // high-then-low for the same slot, so a reordered stale-HIGH floor
+        // overwrites a fresh low here — is defended at the CONSUMER, not by gating
+        // this overwrite: a relay reporting the slot DISCONNECTED has its
+        // reorder-broken floor IGNORED in favor of its reorder-safe connect-status
+        // `last_frame` (see `P2PSession::remote_slot_confirmed_bound`), closing the
+        // disconnected-relay sub-shape. The CONNECTED-relay sub-shape (a relay still
+        // reporting the slot connected while its disconnect gossip is loss-delayed)
+        // remains tracked: it needs the floor-epoch fresh-ack ROUND
+        // (`AsyncAckSoundRound`, S52), NOT a passive `ConnectionStatus.epoch` gate on
+        // this overwrite (`AsyncAckSoundEpoch`, machine-DISPROVEN in S52 via the
+        // stale-first race; see `N-PLAYER-DESYNC-AUDIT.md` and
+        // `specs/tla/DoubleFailureRelay.tla`). We skip the SAME stale DISCONNECTED
+        // claims the reactivation floor rejects (so a stale relay's floor cannot
+        // re-stick a reactivated slot). A missing entry (empty / wrong-length
+        // `pessimistic_floor`) leaves the cache untouched — the fold falls back to
+        // `last_frame`.
         for (slot, cached) in self.peer_pessimistic_floor.iter_mut().enumerate() {
             let Some(remote) = body.peer_connect_status.get(slot) else {
                 break;
@@ -3761,6 +3767,68 @@ mod tests {
                 epoch: 0,
             },
         ]
+    }
+
+    /// MID-GAME-DROP REORDER reachability (S52 `AsyncAckSoundRound`). Proves the
+    /// hazard reaches the cache through the REAL `merge_peer_connect_status` (not a
+    /// test seam): a relay's floor goes HIGH-then-LOW mid-game and the packets
+    /// reorder. After the fresh-LOW {disconnected, 4, floor 4} merges, a reordered
+    /// stale-HIGH {connected, 10, floor 10} packet (the relay's pre-fold gossip)
+    /// arrives. The connect-status is merged ORDER-INSENSITIVELY — it no-resurrects
+    /// (stays {disconnected, 4}) — but the pessimistic floor is a PLAIN OVERWRITE,
+    /// so the cache goes stale-HIGH (10). That divergent cache (authoritative
+    /// freeze 4 in the connect-status, stale 10 in the floor) is exactly what the
+    /// consumer-side `remote_slot_confirmed_bound` must defend against (see
+    /// `remote_slot_confirmed_bound_disconnected_relay_ignores_stale_high_floor`):
+    /// it must fold the reorder-safe connect-status, not the reordered floor.
+    #[test]
+    fn merge_pessimistic_floor_reordered_stale_high_overwrites_while_status_holds() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Fresh-LOW packet: the relay has folded the origin's low and adopted the
+        // disconnect — {disconnected, 4} with a matching floor 4.
+        protocol.merge_peer_connect_status(&Input {
+            peer_connect_status: status_slot2(true, 4),
+            pessimistic_floor: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+            ..Input::default()
+        });
+        assert!(protocol.peer_connect_status(slot2).disconnected);
+        assert_eq!(
+            protocol.peer_connect_status(slot2).last_frame,
+            Frame::new(4)
+        );
+        assert_eq!(protocol.peer_pessimistic_floor(slot2), Frame::new(4));
+
+        // Reordered stale-HIGH packet: the relay's PRE-fold gossip, delivered late
+        // — {connected, 10} with floor 10.
+        protocol.merge_peer_connect_status(&Input {
+            peer_connect_status: status_slot2(false, 10),
+            pessimistic_floor: vec![Frame::new(0), Frame::new(0), Frame::new(10)],
+            ..Input::default()
+        });
+
+        // The connect-status is reorder-SAFE: no-resurrect keeps the converged
+        // freeze {disconnected, 4}.
+        assert!(
+            protocol.peer_connect_status(slot2).disconnected,
+            "a stale connected gossip must not resurrect a converged-disconnected slot"
+        );
+        assert_eq!(
+            protocol.peer_connect_status(slot2).last_frame,
+            Frame::new(4),
+            "the connect-status freeze must stay at the converged 4 (no-resurrect)"
+        );
+        // The pessimistic floor is reorder-BROKEN: the plain overwrite re-raises it
+        // to the stale-HIGH 10 — the exact cache corruption the consumer defends.
+        assert_eq!(
+            protocol.peer_pessimistic_floor(slot2),
+            Frame::new(10),
+            "the plain-overwrite floor cache goes stale-HIGH under reorder (the \
+             reachability of the mid-game-drop reorder facet) — defended at the \
+             consumer, which folds the connect-status freeze (4) for a disconnected \
+             slot, not this reordered floor (10)"
+        );
     }
 
     /// MERGE (double-failure-relay fix): a received `Input.pessimistic_floor` is

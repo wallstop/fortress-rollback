@@ -8167,11 +8167,18 @@ impl<T: Config> P2PSession<T> {
     /// LEFT the fold (a prune), and before the prune the barrier already folds the
     /// running origin's own (non-NULL) low view, pinning confirmation at the global
     /// min. So this closes the cold-cache (NULL-floor) facet *within the relay
-    /// topology*. It does NOT close the sibling **stale-HIGH cache / mid-game-drop
-    /// reorder** facet — where a relay's *non-NULL* floor is reordered high-then-low,
-    /// so the cache holds a stale-HIGH value and the observer can confirm high BEFORE
-    /// the prune — which needs the S46 `ConnectionStatus.epoch` as a freshness gate
-    /// on the cache overwrite (the tracked chunk-2 reorder follow-up).
+    /// topology*. The sibling **stale-HIGH cache / mid-game-drop reorder** facet —
+    /// where a relay's *non-NULL* floor is reordered high-then-low — splits in two:
+    /// its **disconnected-relay** sub-shape is closed in
+    /// [`Self::remote_slot_confirmed_bound`] (fold the reorder-safe connect-status
+    /// `last_frame` for a disconnected relay), but its **connected-relay** sub-shape
+    /// (a relay still reporting the slot connected while its loss-delayed disconnect
+    /// gossip is in flight, so its floor is the only impending-freeze signal and a
+    /// reordered stale-HIGH floor erases it) is NOT closed here. That sub-shape needs
+    /// the floor-epoch fresh-ack ROUND (`AsyncAckSoundRound`, S52 — hold until a
+    /// CURRENT-generation floor is received), NOT a passive `ConnectionStatus.epoch`
+    /// overwrite gate (`AsyncAckSoundEpoch`, machine-DISPROVEN in S52 via the
+    /// stale-first race); see the tracked follow-up in `N-PLAYER-DESYNC-AUDIT.md`.
     fn slot_has_cold_relay(&self, handle: PlayerHandle, relay_topology: bool) -> bool {
         if !relay_topology {
             return false;
@@ -8323,19 +8330,62 @@ impl<T: Config> P2PSession<T> {
             // `peer_pessimistic_floor` and `pessimistic_floors`.
             //
             // **Scope (honest):** this realizes the verified `AsyncAckSound`
-            // (WARM-cache) mode, which consumes the cached in-flight floor with
-            // no reachability hold — safe because in the warm scope a pessimistic
-            // floor is monotone-non-decreasing (a cached value is stale-LOW =
-            // conservative, never stale-HIGH). The cold-cache facet (the observer
-            // never received a relay's pessimistic floor — `AsyncAckSoundFresh`,
-            // S49, needing an observer-side fresh-ack-round HOLD) and the
-            // mid-game-drop reorder facet (needing the S46 epoch as a freshness
-            // gate, see `merge_peer_connect_status`) are NOT closed here — they
-            // are the tracked chunk-2 follow-up. So this NARROWS the N>=4 residual
-            // to those corners (closing the in-order/warm case the in-process
-            // guard reproduces), it does not fully eliminate it.
+            // (WARM-cache) mode for a CONNECTED relay, consuming the cached
+            // in-flight floor with no reachability hold — safe in the warm scope
+            // because a pessimistic floor is monotone-non-decreasing there (a
+            // cached value is stale-LOW = conservative). Two corners remain after
+            // this and the disconnected-reorder closure below: the cold-cache facet
+            // (the observer never received a relay's pessimistic floor —
+            // `AsyncAckSoundFresh`, S49, held by [`Self::confirmed_frame`] via
+            // [`Self::slot_has_cold_relay`]) and the mid-game-drop reorder facet's
+            // CONNECTED-relay sub-shape (a reordered stale-HIGH floor on a relay
+            // still reporting the slot connected). The latter needs the floor-epoch
+            // fresh-ack ROUND (`AsyncAckSoundRound`, S52), NOT a passive S46
+            // `ConnectionStatus.epoch` gate (`AsyncAckSoundEpoch`, machine-DISPROVEN
+            // via the stale-first race) — see the residual note below. So this plus
+            // the disconnected-reorder closure NARROW the N>=4 residual to that one
+            // connected-relay reorder sub-shape; they do not fully eliminate it.
+            //
+            // **Mid-game-drop reorder facet, DISCONNECTED-relay sub-shape — closed
+            // here** (the connected-relay sub-shape is the tracked residual, see
+            // below). Consume the floor ONLY for a relay reporting the slot
+            // **connected** (`!status.disconnected`). A relay reporting it
+            // disconnected folds its connect-status `last_frame` instead — that
+            // term IS its authoritative queue-min freeze (equal to the true floor
+            // for a disconnected slot, since the floor mins over receipts none of
+            // which is below the global-min freeze) AND, unlike the
+            // plain-overwrite `peer_pessimistic_floor` cache, it is merged
+            // REORDER-SAFELY (`merge_peer_connect_status` mins/adopts a disconnect
+            // down and never resurrects). The floor cache, by contrast, can be
+            // reordered stale-HIGH mid-game (a relay reports high-then-low and the
+            // packets invert), which — folded for a *disconnected*-reported slot —
+            // would confirm + discard the contested window above a freeze the relay
+            // has already agreed to. Folding `last_frame` for disconnected relays
+            // makes every disconnected relay contribute its freeze term to this
+            // `min`, so confirmation can never outrun the freeze *via a disconnected
+            // relay* (the freeze is the `min` over exactly those terms). The
+            // reorder-safe connect-status is the `src/` reorder authority the
+            // verified `AsyncAckSoundRound` models abstractly (the floor and its
+            // connect-status ride the same packet, a coupling the spec's floor-only
+            // `StaleAck` decouples — the same model-vs-`src/` distinction S49/S51
+            // surfaced for the cold-cache facet).
+            //
+            // **Residual (NOT closed here — needs the floor-epoch fresh-ack ROUND,
+            // `AsyncAckSoundRound`):** the *connected*-relay sub-shape. While a relay
+            // is cached CONNECTED (its disconnect gossip has not yet reached us — it
+            // is loss-delayed, the same second failure as the relay topology), its
+            // floor is the ONLY signal of an impending low freeze, and a reordered
+            // stale-HIGH floor erases it — the stale-first race the passive epoch
+            // gate cannot win (S52 `AsyncAckSoundEpoch`, machine-disproven). Closing
+            // it requires holding the slot until a CURRENT-generation floor is
+            // received from the relay, which needs a per-slot floor-epoch on the
+            // wire (bumped on every floor-lowering) plus an observer-side fresh-ack
+            // round — the tracked next chunk (see `N-PLAYER-DESYNC-AUDIT.md`).
             let pessimistic = endpoint.peer_pessimistic_floor(handle);
-            let reported = if consume_pessimistic_floor && pessimistic != Frame::NULL {
+            let reported = if consume_pessimistic_floor
+                && !status.disconnected
+                && pessimistic != Frame::NULL
+            {
                 pessimistic
             } else {
                 status.last_frame
@@ -14201,6 +14251,98 @@ mod tests {
         );
     }
 
+    /// MID-GAME-DROP REORDER facet (S52 `AsyncAckSoundRound`; the last open
+    /// double-failure-relay sub-facet). A relay's pessimistic floor goes
+    /// HIGH-then-LOW mid-game (it folds the departed origin's low), and the two
+    /// packets reorder on the wire: the stale-HIGH floor is processed AFTER the
+    /// fresh-LOW one, so `merge_peer_connect_status`'s PLAIN OVERWRITE leaves the
+    /// cache stale-HIGH — while the co-traveling connect-status (merged
+    /// order-insensitively: adopt/min on disconnect, no-resurrect) correctly holds
+    /// the freeze. Here the relay C reports D **disconnected at the converged
+    /// freeze 4** but its cached pessimistic floor is the reordered stale-HIGH 10.
+    /// Pre-fix, `remote_slot_confirmed_bound` consumed the stale floor 10 (it never
+    /// checked `disconnected` before consuming), over-confirming D to 10 and
+    /// discarding the contested `(4, 10]` window the freeze will reclaim — the
+    /// silent cross-survivor confirmed-STATE divergence. The fix folds the
+    /// reorder-safe connect-status `last_frame` (the relay's authoritative
+    /// queue-min freeze, `== the true floor` for a disconnected slot) instead of
+    /// the reorder-broken floor cache, so confirmation can never outrun the freeze.
+    #[test]
+    fn remote_slot_confirmed_bound_disconnected_relay_ignores_stale_high_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // A pruned the origin B (non-running) — the fold-membership asymmetry.
+        // C and D remain running (2 running remotes) -> relay topology engaged.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+
+        // A's own view of D is still high (real inputs through 10): A has not yet
+        // detected D's drop and is about to confirm D with its real inputs.
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // The RELAY C reports D DISCONNECTED at the converged freeze 4 (it folded
+        // the origin's low and adopted the disconnect; this term is reorder-safe —
+        // `merge_peer_connect_status` mins/adopts it down and never resurrects).
+        // Its CACHED pessimistic floor for D, however, is the reordered stale-HIGH
+        // 10 (a pre-fold packet's floor processed after the fresh-low one clobbered
+        // the plain-overwrite cache).
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(10));
+        }
+        // D self-reports connected at 10 (A is still receiving D's real inputs),
+        // with a matching (no-low) floor.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(4)),
+            "a relay reporting the slot DISCONNECTED must fold its connect-status \
+             freeze (4), NOT its reordered stale-HIGH pessimistic floor (10): the \
+             freeze is the relay's authoritative queue-min (== the true floor for a \
+             disconnected slot) and is merged reorder-safely, so confirmation can \
+             never outrun it. Folding the stale floor (10) discards the contested \
+             (4, 10] window before the freeze reclaims it — the mid-game-drop \
+             reorder desync"
+        );
+    }
+
     /// COLD-CACHE detection (`slot_has_cold_relay`): under the relay-topology
     /// gate, a folded running relay reporting the slot **connected** with NO
     /// pessimistic floor (`Frame::NULL` cache) arms the cold-cache fresh-ack hold.
@@ -14441,6 +14583,134 @@ mod tests {
              advance confirmation to its high last_frame (100); confirmed_frame HOLDS at the \
              current confirmed bound (4) until a fresh pessimistic-floor ack arrives \
              (AsyncAckSoundFresh). Pre-fix this returns 100 (the discard-before-convergence bug)."
+        );
+    }
+
+    /// MID-GAME-DROP REORDER, disconnected-relay sub-shape, end-to-end at the
+    /// public [`confirmed_frame`]. The relay-topology gate is engaged (origin B
+    /// pruned, C+D running) and the relay C reports the dropped slot D
+    /// **disconnected at the converged freeze 4**, but its cached pessimistic floor
+    /// for D is a reordered stale-HIGH 10 (a pre-fold packet's floor clobbered the
+    /// plain-overwrite cache). `confirmed_frame()` must fold C's reorder-safe
+    /// connect-status freeze (4), NOT the stale floor (10): a disconnected relay's
+    /// `last_frame` is its authoritative queue-min freeze and is merged
+    /// reorder-safely, so confirmation can never outrun it. RED before the fix
+    /// (`confirmed_frame() == 10`, confirming + discarding the `(4, 10]` window the
+    /// freeze reclaims); GREEN after (`== 4`).
+    #[test]
+    fn confirmed_frame_disconnected_relay_ignores_stale_high_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), SaveMode::EveryFrame);
+
+        // Local A high so it never binds the minimum.
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // Gate ON: A pruned the origin B; C and D remain running (relay topology).
+        // B's own slot is mesh-agreed disconnected (excluded from the minimum).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // A's OWN view of D is still high (it has not learned D dropped).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        // Both running relays report B mesh-agreed-disconnected and C/themselves
+        // connected high with matching (non-cold) floors.
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_pessimistic_floor_for_tests(c, Frame::new(100));
+        }
+        // D self-reports connected high (A is still receiving D's real inputs).
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(100));
+        }
+        // The RELAY C reports D DISCONNECTED at the converged freeze 4, with a
+        // reordered stale-HIGH cached floor (10) for D.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(10));
+        }
+
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(4),
+            "a relay reporting D disconnected must fold its reorder-safe connect-status \
+             freeze (4), not its reordered stale-HIGH pessimistic floor (10); confirmed_frame \
+             must HOLD at 4. Pre-fix this returns 10 (confirming + discarding the contested \
+             (4, 10] window — the mid-game-drop reorder desync, disconnected-relay sub-shape)."
         );
     }
 
