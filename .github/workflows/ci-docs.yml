@@ -65,7 +65,7 @@ jobs:
     continue-on-error: true # Advisory, not blocking initially
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Cache Vale styles
         uses: actions/cache@v5
@@ -193,7 +193,7 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -255,7 +255,7 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -277,7 +277,7 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check for rustdoc-style code fence attributes
         run: |
@@ -323,7 +323,7 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check doc comment accuracy
         run: ./scripts/ci/check-doc-claims.sh
@@ -337,7 +337,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check local file links
         run: python3 scripts/docs/check-links.py
@@ -413,7 +413,7 @@ jobs:
     continue-on-error: true # Advisory initially, may find different issues
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore lychee cache
         uses: actions/cache@v5
@@ -514,7 +514,7 @@ jobs:
     # 3. The complexity of sccache error handling outweighs any benefit for this job
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -573,7 +573,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -633,7 +633,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -690,7 +690,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
