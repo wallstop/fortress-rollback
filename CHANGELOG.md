@@ -172,11 +172,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pessimistic floor — but only while a relay topology actually remains (a remote has been pruned **and** at
   least two remotes still run, so the steady state and 2-survivor post-drop pacing are unchanged) — holding
   its confirmed bound at the mesh minimum instead of confirming and discarding the dropped slot's real
-  inputs above a freeze the relaying survivor will agree to. The cold-cache facet (an observer that never
-  received a relay's pessimistic floor) and the mid-game-drop reorder facet (a relay's floor reported
-  high-then-low and reordered on the wire) are **not** closed by this — they need an observer-side fresh-ack
-  round and the connect-status drop-epoch as a freshness gate respectively, and remain tracked. Byzantine
-  peers are out of scope. The existing defense-in-depth — the prediction-window rollback clamp, the sparse
+  inputs above a freeze the relaying survivor will agree to. The **cold-cache facet** (an observer that
+  never received a relay's pessimistic floor — reachable when a hot-join reactivation seeds a connected
+  status without a floor) is now also closed by an **observer-side fresh-ack hold**: while the relay
+  topology holds, a folded relay reporting a slot connected with no pessimistic floor yet cannot be trusted
+  at its own (higher) receipt, so confirmation HOLDS at the current confirmed frame until a fresh floor
+  arrives (the relay's next input packet) or the slot mesh-agrees — never confirming and discarding past a
+  freeze the relay may still lower. The remaining **mid-game-drop reorder facet** (a relay's floor reported
+  high-then-low and reordered on the wire, leaving a stale-HIGH cached floor) is **not** closed by this — it
+  needs the connect-status drop-epoch as a freshness gate on the cached floor, and remains tracked.
+  Byzantine peers are out of scope. The existing defense-in-depth — the prediction-window rollback clamp, the sparse
   earlier-checkpoint search, and the disconnect-rollback checksum invalidation/deferral — is unchanged and
   now mostly dormant.
 
