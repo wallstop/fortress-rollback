@@ -232,14 +232,28 @@ CONSTANTS
                    \*   COLD-cache-sound mode: pessimistic report + a fresh-ack-ROUND hold that does
                    \*   NOT trust the cold seed; the SINGLE delta from AsyncAckSound that flips cold
                    \*   FAIL -> PASS)
-    EPOCH_MAX,     \* (AsyncAckTwoPhase/Gossip/Stale) max per-slot drop-epoch generation (small, e.g. 2)
-    COLD_CACHE     \* (S49) BOOLEAN: model the COLD-CACHE corner S48 named out-of-scope — an observer
+    EPOCH_MAX,     \* (AsyncAckTwoPhase/Gossip/Stale + S52 floor-epoch) max per-slot drop/floor
+                   \*   generation (small, e.g. 2)
+    COLD_CACHE,    \* (S49) BOOLEAN: model the COLD-CACHE corner S48 named out-of-scope — an observer
                    \*   that NEVER received a pessimistic ack (<= GlobalMin) before the drop. It seeds
                    \*   `ackFloor` at the own-receipt-HIGH value instead of the warm `GlobalMin`,
                    \*   removing the S48 warmup-seed crutch so the in-flight STALE-HIGH facet of
                    \*   idealization (a) is reopened (the warm seed no longer closes it). FALSE in every
                    \*   pre-S49 cfg (the established warm-GlobalMin convention) — orthogonal to FIX_MODE,
                    \*   so the SAME mode can be run warm vs cold to isolate the seed as the variable.
+    REORDER        \* (S52) BOOLEAN: model the MID-GAME-DROP REORDER corner S49 named out-of-scope — the
+                   \*   COLD-GOSSIP-CACHE world. It (1) cold-seeds the gossip cache `cacheLast` at the
+                   \*   observer's OWN receipt (its optimistic "peers are as caught-up as me" assumption)
+                   \*   rather than the warm true-receipt seed, so a relay's PESSIMISTIC floor genuinely
+                   \*   goes HIGH-then-LOW mid-game (high while its cache of the low origin is cold, low
+                   \*   once the origin's disconnect-gossip lands), and (2) enables the StaleAck action,
+                   \*   which re-delivers a relay's earlier HIGH floor snapshot (an OLD floor-epoch) AFTER
+                   \*   a fresh LOW one — the reordered stale-HIGH packet that plain-overwrite caching
+                   \*   (production `merge_peer_connect_status`) cannot reject. FALSE in every pre-S52
+                   \*   cfg (orthogonal to FIX_MODE / COLD_CACHE), so the SAME mode runs in-order vs
+                   \*   reordered to isolate the reorder as the variable. The fix mode AsyncAckSoundEpoch
+                   \*   adds the floor-epoch freshness gate on the overwrite (S46 epoch as a freshness
+                   \*   gate, bumped on every floor-LOWERING per the S47 finding) that rejects the stale.
 
 ASSUME SURVIVORS # {}
 ASSUME MAX_FRAME \in Nat /\ MAX_FRAME > 0
@@ -248,9 +262,11 @@ ASSUME WINDOW \in Nat /\ WINDOW >= 1
 ASSUME RECEIPTS \subseteq (0..MAX_FRAME) /\ RECEIPTS # {}
 ASSUME FIX_MODE \in {"Baseline", "Tombstone", "MeshAgree", "InheritedFloor",
                      "AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase", "AsyncAckSound",
-                     "AsyncAckSoundFresh"}
+                     "AsyncAckSoundFresh", "AsyncAckSoundEpoch", "AsyncAckSoundRound",
+                     "AsyncAckSoundRoundSeq"}
 ASSUME EPOCH_MAX \in Nat
 ASSUME COLD_CACHE \in BOOLEAN
+ASSUME REORDER \in BOOLEAN
 
 \* The S47/S48 modes that discharge the MeshAgree idealizations (a) instantaneous-
 \* fresh-ack and (b) synchronized-death by modeling a CONCRETE in-flight ack round +
@@ -314,7 +330,8 @@ ASSUME COLD_CACHE \in BOOLEAN
 \* NON-async modes (Baseline/Tombstone/MeshAgree/InheritedFloor) stay state-identical (their
 \* async variables stay pinned at Init forever).
 AsyncMode == FIX_MODE \in {"AsyncAckStale", "AsyncAckGossip", "AsyncAckTwoPhase", "AsyncAckSound",
-                           "AsyncAckSoundFresh"}
+                           "AsyncAckSoundFresh", "AsyncAckSoundEpoch", "AsyncAckSoundRound",
+                           "AsyncAckSoundRoundSeq"}
 
 \* The certified-sound implementable mode (S48). Gates the AsyncSoundTarget confirmation rule
 \* (pessimistic acked floor, NO passive epoch gate, NO two-phase commitment). It reuses the
@@ -342,10 +359,83 @@ SoundMode == FIX_MODE = "AsyncAckSound"
 \* freshness gate, out of this model's scope.
 SoundFreshMode == FIX_MODE = "AsyncAckSoundFresh"
 
+\* S52 — the MID-GAME-DROP-REORDER LADDER (one NEGATIVE + one POSITIVE), the reorder analog of the
+\* S47 ladder (AsyncAckGossip negative -> AsyncAckSound positive). Both pair the PESSIMISTIC report
+\* with the cold-cache fresh-ack HOLD (FreshHoldMode) and carry the source's `floorEpoch` on every
+\* ack — a per-source generation that bumps on every PESSIMISTIC-FLOOR LOWERING (the S47 finding:
+\* the gate must bump on a floor-lowering, not just on a connect<->disconnect transition as S46's
+\* `arm_status_epoch` does). They differ ONLY in the freshness mechanism, isolating it as the
+\* load-bearing variable:
+\*
+\*   - AsyncAckSoundEpoch (NEGATIVE, machine-DISPROVEN): the cheap, tempting reading of the audit's
+\*     prescription — a PASSIVE freshness gate. (1) the ack-cache OVERWRITE rejects a packet whose
+\*     floorEpoch is below the cached ack's epoch (the S46 `ConnectionStatus.epoch` gate on the
+\*     legacy floor-gossip cache overwrite, formerly `peer_pessimistic_floor` in
+\*     `merge_peer_connect_status`, both since removed by the S55 floor-round landing), and (2) the advance HOLDS
+\*     while a cached ack's epoch is below the GOSSIP-tracked latest floorEpoch (cacheEpoch). It
+\*     closes the reorder-AFTER-fresh clobber but is UNSOUND via the STALE-FIRST race: a stale-HIGH
+\*     ack delivered BEFORE any fresh ack — and before the floorEpoch-bump GOSSIP arrives to raise
+\*     cacheEpoch — passes both gates (cached epoch and gossip epoch both still 0), so the observer
+\*     locks on the stale high. This is the S47 "epoch-bump gossip RACES the observer's lock"
+\*     obstruction recurring at the reorder level: a PASSIVE epoch comparison is not enough, EVEN
+\*     with the pessimistic report (run DoubleFailureRelay_AsyncAckSoundEpoch_Reorder.cfg — expected
+\*     FAIL via LockedRecordMatchesFreeze).
+\*
+\*   - AsyncAckSoundRound (POSITIVE): the SOUND fresh-ack ROUND. The advance HOLDS for any folded
+\*     reachable peer whose cached ack epoch is below that peer's CURRENT floorEpoch (a completed
+\*     round-trip returns the peer's state at-or-after the request, so a stale snapshot — at an
+\*     older floorEpoch than the peer now holds — never satisfies it; the S44/S47 "fresh-ack round
+\*     postdating the observer's intent"). Once every folded peer's ack is at its current generation
+\*     the ack carries that peer's current PESSIMISTIC floor — surfacing the relayed origin's low —
+\*     so the observer holds at the global min (PASSES safety + liveness;
+\*     DoubleFailureRelay_AsyncAckSoundRound_Reorder.cfg). HONEST SCOPE (the idealization this proof
+\*     carries, exactly as the MeshAgree positive does): the round's freshness is modeled by reading
+\*     the peer's CURRENT floorEpoch — the instantaneous-fresh-ack idealization (a) — which a CONCRETE
+\*     request/response round with a sequence number discharges (the implementable design this proof
+\*     informs). The negative AsyncAckSoundEpoch is the concrete PASSIVE-gossip attempt that does NOT
+\*     discharge it and is unsound, so the round is genuinely load-bearing, not free.
+SoundEpochMode == FIX_MODE = "AsyncAckSoundEpoch"
+SoundRoundMode == FIX_MODE = "AsyncAckSoundRound"
+
+\* S54 — the CONCRETE SEQUENCE-NUMBERED fresh-ack round (the implementable discharge of the
+\* AsyncAckSoundRound idealization S52 left "asserted, not machine-checked"), and a STRICTLY
+\* SIMPLER realization. AsyncAckSoundRound idealizes the round by reading the source's CURRENT
+\* `floorEpoch` (re-rounding on every floor-LOWERING), which needs a per-source FLOOR-epoch on the
+\* wire (bumped on every lowering). AsyncAckSoundRoundSeq instead keys the round's freshness to the
+\* OBSERVER'S PRUNE generation (modeled by the per-(obs,src) boolean `ackFresh`): the observer
+\* trusts a relay's pessimistic floor ONLY from an ack that POSTDATES the observer's most recent
+\* Prune (a `SendAck` after the prune sets `ackFresh`; a `Prune` by the observer resets its whole
+\* row; a reordered `StaleAck` does NOT set it). This is the production-implementable design — a
+\* request/response round the observer (re-)issues each time it prunes a peer (forms the
+\* relay topology), with NO floor-epoch wire field. SOUNDNESS (machine-checked here): a `Prune`
+\* requires `gone[src]`, and a `gone` source cannot `Gossip`, so once the observer has pruned the
+\* dying global-min ORIGIN, the origin can no longer lower any relay's pessimistic floor — the
+\* relay's floor is SETTLED. A post-prune ack therefore captures the relay's settled floor (the
+\* origin's low if the origin relayed it before dying — the residual's precondition — else the
+\* relay's own high, which then never lowers because the origin is gone and stays consistent
+\* mesh-wide). The reordered `StaleAck` cannot satisfy the hold (it never sets `ackFresh`), so the
+\* STALE-FIRST race that machine-DISPROVES the passive `AsyncAckSoundEpoch` cannot fire. The
+\* coarser PRUNE trigger (vs AsyncAckSoundRound's per-lowering FLOOR-epoch trigger) is still sound
+\* because, within the residual's two-failure scope, a relay's floor for the dropped slot lowers
+\* only via the origin's low, which a Prune of the origin settles; a SECOND departing origin is a
+\* SECOND Prune that resets `ackFresh` and forces a re-round. PASSES safety + liveness under
+\* REORDER; the RED control is AsyncAckSoundFresh (trust any received ack) and the disproven
+\* passive gate is AsyncAckSoundEpoch.
+SoundRoundSeqMode == FIX_MODE = "AsyncAckSoundRoundSeq"
+
+\* The modes whose acks carry the FLOOR-epoch (bumped on a floor-lowering) rather than the
+\* drop-epoch: the two S52 reorder modes. Used by SendAck/Gossip to stamp/track the floorEpoch.
+FloorEpochAck == FIX_MODE \in {"AsyncAckSoundEpoch", "AsyncAckSoundRound"}
+
+\* The modes that use the cold-cache observer-side fresh-ack HOLD target (AsyncSoundFreshTarget):
+\* AsyncAckSoundFresh (S49) and the two S52 reorder modes, which add their freshness mechanism on top.
+FreshHoldMode == FIX_MODE \in {"AsyncAckSoundFresh", "AsyncAckSoundEpoch", "AsyncAckSoundRound"}
+
 \* Pessimistic queue-min report (AckReportFloor): the modes whose fresh ack carries the min over
 \* the source's own floor AND every folded source's cache (surfacing a departed origin's low
 \* immediately), rather than the source's own floor. The decisive fold delta.
-PessimisticReport == FIX_MODE \in {"AsyncAckSound", "AsyncAckSoundFresh"}
+PessimisticReport == FIX_MODE \in {"AsyncAckSound", "AsyncAckSoundFresh", "AsyncAckSoundEpoch",
+                                   "AsyncAckSoundRound", "AsyncAckSoundRoundSeq"}
 
 \* The two-phase announce/HOLD-commit mechanism (the `announced` variable + the AnnounceLower
 \* action + the LowerSafe gate on the lowering actions). AsyncAckTwoPhase (own-floor report)
@@ -404,7 +494,7 @@ VARIABLES
     cacheEpoch,    \* [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]: obs's gossip-tracked latest epoch from
                    \*   src (merged monotone-up in Gossip). AsyncAckGossip/Commit count an ack as fresh
                    \*   only when ackEpoch >= cacheEpoch; AsyncAckStale ignores this gate.
-    announced      \* [SURVIVORS -> Frame] (AsyncAckTwoPhase two-phase only): the pending-low frame s has
+    announced,     \* [SURVIVORS -> Frame] (AsyncAckTwoPhase two-phase only): the pending-low frame s has
                    \*   ANNOUNCED it will lower to (NULL = nothing pending). On AnnounceLower s bumps +
                    \*   gossips its drop-epoch and PUBLISHES this pending-low as its reported floor
                    \*   (PeerFloor reads it), so any FRESH re-ack already carries the low — and the
@@ -412,15 +502,60 @@ VARIABLES
                    \*   folding observer has heard the epoch bump or is partitioned/holding), so an
                    \*   observer with a not-yet-refreshed stale-HIGH ack has already gone stale-and-held
                    \*   before s actually lowers. Pinned NULL in every non-AsyncAckTwoPhase mode.
+    staleUsed,     \* BOOLEAN (S52 reorder only): a single reordered stale-HIGH ack has been delivered.
+                   \* StaleAck fires at most ONCE (a FINITE reorder — real packet reordering is
+                   \* bounded), so it cannot perpetually re-stale a freshly-acked cache. Without this
+                   \* bound, an unfair infinite StaleAck stream would spuriously starve confirmation
+                   \* (a model artifact, not a real liveness defect); one stale delivery is sufficient
+                   \* for every reorder violation (the residual needs a single mistimed clobber).
+                   \* Pinned FALSE unless REORDER, so non-reorder cfgs stay byte-identical.
+    floorEpoch,    \* [SURVIVORS -> 0..EPOCH_MAX] (S52 reorder only): s's FLOOR generation, bumped
+                   \*   whenever s's PESSIMISTIC floor LOWERS (a folded source's cached last_frame
+                   \*   dropped in Gossip — the relay learning a departed origin's low). It is the epoch a
+                   \*   fresh ack carries (ackEpoch under SoundEpochMode) and against which the
+                   \*   AsyncAckSoundEpoch overwrite gate rejects a reordered stale-HIGH packet. Unlike
+                   \*   slotEpoch (which bumps on s's OWN connect<->disconnect of D, the S46 semantics),
+                   \*   floorEpoch bumps on the FLOOR-LOWERING that the reorder fix needs (the S47
+                   \*   finding). Pinned 0 unless REORDER (so non-reorder cfgs stay byte-identical).
+    roundFloor,    \* [SURVIVORS -> [SURVIVORS -> Frame]] (S54 SoundRoundSeqMode only): roundFloor[obs][src]
+                   \*   = the pessimistic floor src reported in its last fresh-ROUND REPLY to obs — a
+                   \*   DEDICATED, SEQUENCE-VALIDATED reply channel (the production `UdpProtocol::round_floor`),
+                   \*   SEPARATE from the reorder-prone gossip cache (ackFloor / the now-removed legacy
+                   \*   gossip cache, formerly `peer_pessimistic_floor`). Written ONLY by
+                   \*   SendAck (a current reply) and NEVER by StaleAck/Gossip, so a reordered stale-HIGH
+                   \*   Input-gossip floor (StaleAck) CANNOT corrupt it — the seq on the reply rejects a
+                   \*   reordered stale reply, modeled by SendAck always reading src's CURRENT floor. This
+                   \*   is the decisive S54 delta over the first (UNSOUND) attempt that trusted the shared
+                   \*   gossip cache `ackFloor` under a separate freshness flag: TLC found StaleAck
+                   \*   clobbers `ackFloor` stale-HIGH while the flag stays set, so the observer must read
+                   \*   a channel the reorder cannot touch. NULL-seeded (no reply yet). Pinned NULL in
+                   \*   every non-SoundRoundSeqMode (SendAck gates its write), so all 11 prior modes stay
+                   \*   byte-identical.
+    ackFresh       \* [SURVIVORS -> [SURVIVORS -> BOOLEAN]] (S54 SoundRoundSeqMode only): ackFresh[obs][src]
+                   \*   = obs holds a fresh-round ack from src that POSTDATES obs's most recent Prune. Set
+                   \*   TRUE by SendAck(src, obs) (a completed round-trip), reset to FALSE for obs's WHOLE row
+                   \*   by any Prune(obs, _) (the observer's intent generation advanced — every prior round is
+                   \*   pre-prune/stale), and DELIBERATELY left UNCHANGED by StaleAck (a reordered stale-HIGH
+                   \*   ack is NOT a completed round, so it can never satisfy the hold — defeating the
+                   \*   stale-first race that disproves the passive AsyncAckSoundEpoch). This is the
+                   \*   abstraction of a concrete sequence-numbered request/response round the observer
+                   \*   re-issues each time it prunes a peer. Pinned FALSE in every non-SoundRoundSeqMode
+                   \*   (SendAck/Prune gate their writes on SoundRoundSeqMode), so all 11 prior modes stay
+                   \*   byte-identical.
 
 vars == <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
           link, bound, recSrc, floor, corrob,
-          gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
+          gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced, floorEpoch, staleUsed,
+          roundFloor, ackFresh>>
 
 \* The S47 async variables, as a tuple — left UNCHANGED by every original-mode action
 \* (so the four original modes keep them pinned at their Init values, contributing a
-\* factor of 1 to the state space). The async actions touch them explicitly.
-asyncVars == <<gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
+\* factor of 1 to the state space). The async actions touch them explicitly. floorEpoch (S52)
+\* is included: it is pinned 0 in every non-REORDER cfg, and Gossip (the only action that bumps
+\* it) lists variables individually rather than via asyncVars, so its membership here only keeps
+\* it UNCHANGED in the actions that DO use asyncVars (Unblock / AdvanceConfirm / ReleaseFloor).
+asyncVars == <<gone, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced, floorEpoch, staleUsed,
+               roundFloor, ackFresh>>
 
 (***************************************************************************)
 (* Min over a non-empty set of integers. CHOOSE ranges over integer frame    *)
@@ -716,6 +851,54 @@ AsyncSoundTarget(s) ==
     ELSE Min2(BaselineTarget(s), AsyncSoundAckedFloor(s))
 
 (***************************************************************************)
+(* S54 — the CONCRETE-SEQUENCE-NUMBERED ROUND target (AsyncAckSoundRoundSeq). The         *)
+(* implementable discharge of AsyncAckSoundRound, verified here to need TWO ingredients,   *)
+(* BOTH machine-forced (each, removed, reproduces LockedRecordMatchesFreeze):              *)
+(*                                                                                          *)
+(*  1. A DEDICATED, REORDER-IMMUNE REPLY CHANNEL (roundFloor): the observer folds the floor *)
+(*     a relay reported in its last fresh ROUND REPLY (SendAck), NOT the reorder-prone      *)
+(*     gossip cache ackFloor. A reordered stale-HIGH Input-gossip floor (StaleAck) clobbers  *)
+(*     ackFloor but NEVER roundFloor, so it cannot corrupt the value the observer trusts —    *)
+(*     the seq on a request/response reply rejects a reordered stale reply (modeled by         *)
+(*     SendAck always reading the source's CURRENT floor; there is no stale-REPLY action). The *)
+(*     first S54 attempt trusted the shared ackFloor under a freshness FLAG, and TLC found     *)
+(*     StaleAck clobbers ackFloor stale-HIGH while the flag stays set -> the channel, not just  *)
+(*     a flag, must be reorder-immune.                                                          *)
+(*                                                                                              *)
+(*  2. POST-PRUNE FRESHNESS (ackFresh): the observer trusts a reply only once it POSTDATES the  *)
+(*     observer's most recent Prune. A Prune requires gone[origin] and a gone origin cannot      *)
+(*     Gossip, so a post-prune reply captures the relay's SETTLED floor (the relayed origin's    *)
+(*     low if it relayed before dying, else a high the origin can no longer lower — consistent   *)
+(*     mesh-wide). Without it the observer could trust a PRE-fold reply (relay's floor still     *)
+(*     high) and lock above the freeze the relay later converges to.                            *)
+(*                                                                                              *)
+(* This is the production `src/` design: a sequence-numbered FloorRequest/FloorReply round the   *)
+(* observer re-issues each time it prunes a peer, the reply stored in a dedicated cache           *)
+(* (`UdpProtocol::round_floor`) distinct from the now-removed legacy gossip cache, formerly       *)
+(* `peer_pessimistic_floor` (removed). NO floor-epoch wire field is needed (the seq + dedicated   *)
+(* channel replace the floorEpoch AsyncAckSoundRound idealizes) — a strictly simpler implementable *)
+(* design than the audit's floor-epoch blueprint. WF SendAck delivers the held observer a          *)
+(* post-prune reply (liveness); prunes are finite, so the post-prune hold resolves.                *)
+(***************************************************************************)
+\* The floor s may advance to under the concrete-seq round: the min over s's OWN current pessimistic
+\* floor and every folded reachable peer's last ROUND-REPLY floor (roundFloor, the dedicated
+\* reorder-immune channel — NOT ackFloor).
+AsyncSoundRoundSeqAckedFloor(s) ==
+    MinI({PessimisticFloor(s)} \union {roundFloor[s][o] : o \in AsyncReachableFolded(s)})
+
+AsyncSoundRoundSeqTarget(s) ==
+    \* No-partition-hold: cannot complete a round with an unreachable folded peer -> HOLD.
+    IF ~AsyncAllFoldedReachable(s) THEN CurBound(s)
+    \* Post-prune fresh-round hold: HOLD until every folded reachable peer has DELIVERED a reply that
+    \* postdates s's most recent Prune (ackFresh). A Prune resets the whole row (re-round per departed
+    \* origin); a reordered StaleAck never sets it AND never writes roundFloor.
+    ELSE IF \E o \in AsyncReachableFolded(s) : ~ackFresh[s][o] THEN CurBound(s)
+    \* Mesh-agreed AND the local freeze has fully converged to the acked floor: advance to MAX.
+    ELSE IF SlotMeshAgreed(s) /\ localFrame[s] = AsyncSoundRoundSeqAckedFloor(s) THEN MAX_FRAME
+    \* Otherwise cap by the round-reply acked floor (all now post-prune-fresh), as AsyncSoundTarget.
+    ELSE Min2(BaselineTarget(s), AsyncSoundRoundSeqAckedFloor(s))
+
+(***************************************************************************)
 (* S49 — the COLD-CACHE-SOUND target (AsyncAckSoundFresh). Identical to AsyncSoundTarget  *)
 (* EXCEPT for one decisive added gate: an UNRECEIVED-ACK HOLD. The cold residual is that   *)
 (* the observer TRUSTS its cold ackFloor seed (the relay's own high receipt) and advances   *)
@@ -734,6 +917,26 @@ AsyncSoundFreshTarget(s) ==
     \* Unreceived-ack hold (the decisive cold delta): do NOT trust the cold seed. HOLD until
     \* every folded reachable peer has DELIVERED a genuine ack (ackFloor # NULL).
     ELSE IF \E o \in AsyncReachableFolded(s) : ackFloor[s][o] = NULL_FRAME THEN CurBound(s)
+    \* S52 STALE-ACK hold (the reorder delta, SoundEpochMode only — vacuous in plain
+    \* AsyncAckSoundFresh, where floorEpoch/cacheEpoch stay 0): do NOT advance on a STALE ack —
+    \* a cached floor-epoch strictly BELOW the GOSSIP-tracked latest floor-epoch (cacheEpoch)
+    \* means the source has since LOWERED its pessimistic floor and a fresher ack is in flight, so
+    \* a reordered stale-HIGH snapshot (delivered by StaleAck before any fresh ack, or one the
+    \* overwrite gate could not catch) must not be trusted. This is the "fresh-ack ROUND postdating
+    \* the observer's intent" (S44/S47): complete the round (receive a CURRENT-epoch ack) before
+    \* advancing. WF Gossip delivers the source's latest floor-epoch and WF SendAck a current ack,
+    \* so the hold resolves (liveness).
+    ELSE IF SoundEpochMode /\ \E o \in AsyncReachableFolded(s) : ackEpoch[s][o] < cacheEpoch[s][o]
+         THEN CurBound(s)
+    \* S52 SOUND round-freshness hold (AsyncAckSoundRound). Identical in spirit to the Epoch hold
+    \* above but reads the peer's CURRENT floorEpoch (a completed round-trip postdating the
+    \* observer's intent) instead of the GOSSIP-tracked cacheEpoch (which races the lock). A stale
+    \* snapshot carries an OLDER floorEpoch than the peer now holds, so it never completes the round;
+    \* the observer holds until a current-generation ack lands, which — being pessimistic — carries
+    \* the relayed origin's low. This is the idealized fresh-ack round a concrete sequence-numbered
+    \* request/response discharges (the MeshAgree-class instantaneous-fresh-ack idealization).
+    ELSE IF SoundRoundMode /\ \E o \in AsyncReachableFolded(s) : ackEpoch[s][o] < floorEpoch[o]
+         THEN CurBound(s)
     \* Mesh-agreed AND converged: excluded, advance to MAX.
     ELSE IF SlotMeshAgreed(s) /\ localFrame[s] = AsyncSoundAckedFloor(s) THEN MAX_FRAME
     \* Otherwise cap by the pessimistic acked floor (now all received), as AsyncSoundTarget.
@@ -779,7 +982,12 @@ BoundTarget(s) ==
     CASE FIX_MODE = "MeshAgree"      -> MeshAgreeTarget(s)
       [] FIX_MODE = "InheritedFloor" -> InheritedFloorTarget(s)
       [] SoundMode                   -> AsyncSoundTarget(s)   \* S48 — checked before AsyncMode
-      [] SoundFreshMode              -> AsyncSoundFreshTarget(s)  \* S49 cold-sound — before AsyncMode
+      \* S54 concrete-seq round — dedicated reorder-immune reply channel + post-prune freshness.
+      \* Checked before FreshHoldMode/AsyncMode (it reads roundFloor, not ackFloor).
+      [] SoundRoundSeqMode           -> AsyncSoundRoundSeqTarget(s)
+      \* S49 cold-sound AND S52 reorder-sound share the unreceived-ack HOLD target; the S52 delta
+      \* is purely the floor-epoch gate on the ack OVERWRITE (SendAck/StaleAck), not the target.
+      [] FreshHoldMode               -> AsyncSoundFreshTarget(s)
       [] AsyncMode                   -> AsyncAckTarget(s)
       [] OTHER                       -> BaselineTarget(s)
 
@@ -813,6 +1021,10 @@ TypeInvariant ==
     /\ ackEpoch \in [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]
     /\ cacheEpoch \in [SURVIVORS -> [SURVIVORS -> 0..EPOCH_MAX]]
     /\ announced \in [SURVIVORS -> Frame]
+    /\ floorEpoch \in [SURVIVORS -> 0..EPOCH_MAX]
+    /\ staleUsed \in BOOLEAN
+    /\ roundFloor \in [SURVIVORS -> [SURVIVORS -> Frame]]
+    /\ ackFresh \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
 
 (***************************************************************************)
 (* Initial state. The warmup phase (repro Phase 1: all links open, all survivors *)
@@ -832,12 +1044,31 @@ Init ==
     /\ localDisc = [s \in SURVIVORS |-> FALSE]
     /\ localFrame = [s \in SURVIVORS |-> recvThrough[s]]
     /\ cacheDisc = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
-    /\ cacheLast = [o \in SURVIVORS |-> [s \in SURVIVORS |-> recvThrough[s]]]
+    \* WARM (default): each observer's cache holds the source's TRUE receipt (a completed warmup
+    \* round). S52 COLD-GOSSIP (REORDER): each observer cold-seeds its cache of every source at the
+    \* uniform MAX_FRAME — its optimistic "everyone is fully caught up" assumption — so it has NOT
+    \* yet heard a low origin's true value. A relay therefore folds the origin's low only once the
+    \* origin's DISCONNECT gossip lands (connected reports max-merge and never lower it), making the
+    \* relay's PESSIMISTIC floor go HIGH-then-LOW mid-game — the trajectory the reorder exploits.
+    \* MAX_FRAME >= every receipt, so a freeze mined over these caches still respects
+    \* FreezeNeverBelowGlobalMin; the UNIFORM seed (vs the per-observer recvThrough[o]) is a faithful
+    \* cold-cache model that drastically reduces cache-convergence diversity, keeping the exhaustive
+    \* check tractable.
+    /\ cacheLast = [o \in SURVIVORS |-> [s \in SURVIVORS |->
+                     IF REORDER THEN MAX_FRAME ELSE recvThrough[s]]]
     \* Links: any post-warmup partition (the FilterBus severs of the in-process repro),
     \* with the irrelevant self-links pinned up to avoid spurious initial states.
     \* Links only heal from here (Unblock), so the network monotonically stabilizes.
-    /\ link \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
-    /\ \A s \in SURVIVORS : link[s][s]
+    \* S52 REORDER: the reorder facet's fold-membership asymmetry comes from the global-min ORIGIN's
+    \* DEATH (the relay survives and carries its low), NOT from a network partition, and the wire
+    \* reorder is modeled explicitly by StaleAck — so links are pinned ALL-UP under REORDER. This is
+    \* faithful (it isolates the reorder mechanism from partition-hold effects) and collapses the
+    \* 2^(N^2) link-Init breadth + the Unblock action, keeping the larger reorder/floor-epoch state
+    \* space tractable for an exhaustive safety check.
+    /\ IF REORDER
+       THEN link = [s \in SURVIVORS |-> [o \in SURVIVORS |-> TRUE]]
+       ELSE /\ link \in [SURVIVORS -> [SURVIVORS -> BOOLEAN]]
+            /\ \A s \in SURVIVORS : link[s][s]
     /\ bound = [s \in SURVIVORS |-> NULL_FRAME]
     /\ recSrc = [s \in SURVIVORS |-> [g \in 0..MAX_FRAME |-> NULL_FRAME]]
     /\ floor = [s \in SURVIVORS |-> NULL_FRAME]
@@ -864,16 +1095,30 @@ Init ==
     \* stale-in-flight facet. AsyncAckSound then FAILS cold (the report alone is not enough — it
     \* trusts the cold seed); AsyncAckSoundFresh PASSES cold (it NULL-seeds and never trusts a
     \* cold seed — see below).
-    \* S49 AsyncAckSoundFresh: NULL-seed every ack ("no fresh ack received yet"), independent of
-    \* COLD_CACHE — the mode's whole premise is that it NEVER trusts a pre-existing/cold seed and
-    \* HOLDS until a genuine ack arrives. (The other modes keep the warm/cold value seed.)
+    \* S49 AsyncAckSoundFresh / S52 AsyncAckSoundEpoch (FreshHoldMode): NULL-seed every ack ("no
+    \* fresh ack received yet"), independent of COLD_CACHE/REORDER — the mode's whole premise is
+    \* that it NEVER trusts a pre-existing/cold seed and HOLDS until a genuine ack arrives. (The
+    \* other modes keep the warm/cold value seed.)
     /\ ackFloor = [o \in SURVIVORS |-> [s \in SURVIVORS |->
-                     IF SoundFreshMode THEN NULL_FRAME
+                     IF FreshHoldMode THEN NULL_FRAME
                      ELSE IF PessimisticReport /\ ~COLD_CACHE THEN GlobalMin
                      ELSE recvThrough[s]]]
     /\ ackEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
     /\ cacheEpoch = [o \in SURVIVORS |-> [s \in SURVIVORS |-> 0]]
     /\ announced = [s \in SURVIVORS |-> NULL_FRAME]
+    \* S52 floor generation: 0 at warmup (no floor-lowering yet). Pinned 0 forever unless REORDER
+    \* (only Gossip bumps it, and only under REORDER), so every non-reorder cfg is byte-identical.
+    /\ floorEpoch = [s \in SURVIVORS |-> 0]
+    \* S52: no stale reorder delivered yet. Pinned FALSE unless REORDER (StaleAck is the only setter).
+    /\ staleUsed = FALSE
+    \* S54: no round reply received yet (NULL-seeded dedicated reply channel — never trust a
+    \* pre-existing/cold seed). Pinned NULL forever unless SoundRoundSeqMode (SendAck is the only setter).
+    /\ roundFloor = [o \in SURVIVORS |-> [s \in SURVIVORS |-> NULL_FRAME]]
+    \* S54: no fresh round completed yet — every observer must COMPLETE a post-prune round before it
+    \* trusts any relay's reply floor (the SoundRoundSeqMode hold). Deterministic FALSE in every mode;
+    \* pinned FALSE forever unless SoundRoundSeqMode (SendAck/Prune gate their writes), so all 11 prior
+    \* modes stay byte-identical.
+    /\ ackFresh = [o \in SURVIVORS |-> [s \in SURVIVORS |-> FALSE]]
 
 (***************************************************************************)
 (* Action: src gossips its CURRENT local view of the dropped slot to obs        *)
@@ -911,15 +1156,31 @@ Gossip(src, obs) ==
                           /\ newLast > floor[obs]
                        THEN [corrob EXCEPT ![obs][src] = TRUE]
                        ELSE corrob
-          \* Async: gossip also carries src's CURRENT drop-epoch, merged monotone-UP into
-          \* obs's epoch tracker (obs learns the latest generation src has reached). This is
-          \* the gossip-delivered epoch the AsyncAckTwoPhase freshness gate compares against —
-          \* the floor of what the observer knows about src's commitment generation.
-          /\ cacheEpoch' = IF AsyncMode
-                           THEN [cacheEpoch EXCEPT ![obs][src] = Max2(cacheEpoch[obs][src], slotEpoch[src])]
+          \* Async: gossip also carries src's CURRENT epoch, merged monotone-UP into obs's epoch
+          \* tracker (obs learns the latest generation src has reached). For AsyncAckTwoPhase/Gossip
+          \* this is the drop-epoch (slotEpoch); for S52 SoundEpochMode it is the FLOOR-epoch
+          \* (floorEpoch — the gate that bumps on a floor-lowering, the S47 requirement), which the
+          \* AsyncSoundFreshTarget stale-ack hold compares against. Either way it is the floor of
+          \* what the observer knows about src's current generation.
+          \* SoundRoundMode reads the peer's CURRENT floorEpoch directly (the idealized round), never
+          \* the gossip-tracked cacheEpoch, so cacheEpoch is unread there — pin it (a sound state-space
+          \* reduction). The Epoch NEGATIVE and the S47 ladder DO consume cacheEpoch, so it stays live.
+          /\ cacheEpoch' = IF AsyncMode /\ ~SoundRoundMode
+                           THEN [cacheEpoch EXCEPT ![obs][src] = Max2(cacheEpoch[obs][src],
+                                    IF FloorEpochAck THEN floorEpoch[src] ELSE slotEpoch[src])]
                            ELSE cacheEpoch
+          \* S52 floor generation: if this delivery LOWERS obs's cache of src (a first-learn
+          \* disconnect-adopt or a both-disconnected min — connected reports max-merge and never
+          \* lower), obs's PESSIMISTIC floor for D lowered, so obs BUMPS its floorEpoch. A fresh ack
+          \* obs later sends therefore carries a strictly-higher epoch than any pre-lowering ack —
+          \* exactly the staleness signal the AsyncAckSoundEpoch overwrite gate uses to reject a
+          \* reordered stale-HIGH packet. (Bumping on the cache-lowering, not only on src's own
+          \* connect<->disconnect, is the S47 floor-lowering requirement. Pinned in non-REORDER.)
+          /\ floorEpoch' = IF REORDER /\ newLast < cf
+                           THEN [floorEpoch EXCEPT ![obs] = Min2(floorEpoch[obs] + 1, EPOCH_MAX)]
+                           ELSE floorEpoch
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, link, bound, recSrc, floor,
-                   gone, pruned, slotEpoch, ackFloor, ackEpoch, announced>>
+                   gone, pruned, slotEpoch, ackFloor, ackEpoch, announced, staleUsed, roundFloor, ackFresh>>
 
 (***************************************************************************)
 (* Action: src directly concludes the dropped slot disconnected (an explicit    *)
@@ -990,7 +1251,7 @@ AnnounceLower(s) ==
     /\ slotEpoch' = [slotEpoch EXCEPT ![s] = slotEpoch[s] + 1]
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc, floor, corrob,
-                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch, floorEpoch, staleUsed, roundFloor, ackFresh>>
 
 DetectDrop(s) ==
     /\ alive[s]
@@ -1012,13 +1273,16 @@ DetectDrop(s) ==
     \* In AsyncAckStale/Gossip the bump is here (single-phase). In AsyncAckTwoPhase the bump
     \* already happened in AnnounceLower (phase 1), so it is NOT repeated here. (In the four
     \* original modes slotEpoch stays pinned.)
-    /\ slotEpoch' = IF AsyncMode /\ ~TwoPhase
+    \* S52: the reorder modes (FloorEpochAck) never READ slotEpoch (they key acks/freshness on
+    \* floorEpoch), so pinning it 0 there is behavior-neutral and removes a (EPOCH_MAX+1)^|SURVIVORS|
+    \* factor from the reorder state space — a sound model-checking optimization, not a logic change.
+    /\ slotEpoch' = IF AsyncMode /\ ~TwoPhase /\ ~FloorEpochAck
                     THEN [slotEpoch EXCEPT ![s] = Min2(slotEpoch[s] + 1, EPOCH_MAX)]
                     ELSE slotEpoch
     \* AsyncAckTwoPhase: clear the consumed pending-low announcement.
     /\ announced' = IF TwoPhase THEN [announced EXCEPT ![s] = NULL_FRAME] ELSE announced
     /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound, recSrc,
-                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch, floorEpoch, staleUsed, roundFloor, ackFresh>>
 
 (***************************************************************************)
 (* Action: a survivor dies / is pruned (explicit remove_player by a peer, or a  *)
@@ -1061,7 +1325,7 @@ Die(s) ==
     /\ gone' = IF AsyncMode THEN [gone EXCEPT ![s] = TRUE] ELSE gone
     /\ UNCHANGED <<recvThrough, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc, pruned, slotEpoch, ackFloor, ackEpoch, cacheEpoch,
-                   announced>>
+                   announced, floorEpoch, staleUsed, roundFloor, ackFresh>>
 
 (***************************************************************************)
 (* Action: a partitioned (directed) link HEALS. Partitions are modeled as          *)
@@ -1137,7 +1401,7 @@ UpdateDisconnects(s) ==
                           ELSE slotEpoch
           /\ announced' = IF TwoPhase THEN [announced EXCEPT ![s] = NULL_FRAME] ELSE announced
     /\ UNCHANGED <<recvThrough, alive, cacheDisc, cacheLast, link, bound,
-                   gone, pruned, ackFloor, ackEpoch, cacheEpoch>>
+                   gone, pruned, ackFloor, ackEpoch, cacheEpoch, floorEpoch, staleUsed, roundFloor, ackFresh>>
 
 (***************************************************************************)
 (* Action: AdvanceConfirm — confirm the dropped slot up to the freeze-barrier    *)
@@ -1197,9 +1461,16 @@ Prune(obs, src) ==
     /\ gone[src]
     /\ ~pruned[obs][src]
     /\ pruned' = [pruned EXCEPT ![obs][src] = TRUE]
+    \* S54: a prune advances obs's intent generation — every prior round is now pre-prune/stale, so
+    \* reset obs's WHOLE row. obs must COMPLETE a fresh post-prune round (SendAck) before it trusts any
+    \* relay's pessimistic floor again. SoundRoundSeqMode only; pinned in every other mode.
+    /\ ackFresh' = IF SoundRoundSeqMode
+                   THEN [ackFresh EXCEPT ![obs] = [x \in SURVIVORS |-> FALSE]]
+                   ELSE ackFresh
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc, floor, corrob,
-                   gone, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced>>
+                   gone, slotEpoch, ackFloor, ackEpoch, cacheEpoch, announced, floorEpoch, staleUsed,
+                   roundFloor>>
 
 (***************************************************************************)
 (* Action (async modes only): SEND-ACK — src answers obs's fresh floor-request     *)
@@ -1218,11 +1489,70 @@ SendAck(src, obs) ==
     /\ ~gone[src]
     /\ ~pruned[obs][src]
     /\ link[src][obs]
+    \* A FRESH ack always carries src's CURRENT report (postdating any prior snapshot), so it never
+    \* needs the overwrite gate (its epoch is the current high-water, >= any cached epoch). Under
+    \* SoundEpochMode the carried epoch is the FLOOR-epoch (bumps on a floor-lowering); otherwise the
+    \* drop-epoch. The reordered STALE delivery is the separate StaleAck action.
     /\ ackFloor' = [ackFloor EXCEPT ![obs][src] = AckReportFloor(src)]
-    /\ ackEpoch' = [ackEpoch EXCEPT ![obs][src] = slotEpoch[src]]
+    /\ ackEpoch' = [ackEpoch EXCEPT ![obs][src] =
+           IF FloorEpochAck THEN floorEpoch[src] ELSE slotEpoch[src]]
+    \* S54: a completed round-trip postdating obs's most recent Prune deposits src's CURRENT
+    \* pessimistic floor into the DEDICATED reply channel (roundFloor) and marks the round fresh
+    \* (ackFresh). SoundRoundSeqMode reads BOTH; pinned (UNCHANGED) in every other mode so they stay
+    \* byte-identical. (roundFloor mirrors ackFloor's value but lives in a channel StaleAck never
+    \* touches — the reorder-immune reply.)
+    /\ roundFloor' = IF SoundRoundSeqMode
+                     THEN [roundFloor EXCEPT ![obs][src] = AckReportFloor(src)]
+                     ELSE roundFloor
+    /\ ackFresh' = IF SoundRoundSeqMode
+                   THEN [ackFresh EXCEPT ![obs][src] = TRUE]
+                   ELSE ackFresh
     /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
                    link, bound, recSrc, floor, corrob,
-                   gone, pruned, slotEpoch, cacheEpoch, announced>>
+                   gone, pruned, slotEpoch, cacheEpoch, announced, floorEpoch, staleUsed>>
+
+(***************************************************************************)
+(* Action (S52 REORDER only): STALE-ACK — a reordered stale-HIGH ack packet from src   *)
+(* arriving LATE at obs. It models the production hazard that S49 named out of scope: a *)
+(* relay's pessimistic floor goes HIGH-then-LOW mid-game (its cache of the low origin    *)
+(* warms via gossip), and the cache overwrite in `merge_peer_connect_status` is a PLAIN  *)
+(* OVERWRITE (latest-PROCESSED packet wins), so a stale-HIGH packet delivered after a     *)
+(* fresh-LOW one re-raises the cached floor. The stale snapshot is src's EARLIER floor     *)
+(* (its own receipt recvThrough[src], the value it reported BEFORE folding the origin's    *)
+(* low) at the OLD floor-epoch 0 (before the lowering bump). Enabled only once src HAS      *)
+(* lowered since (floorEpoch[src] > 0) and the stale value is genuinely HIGHER than src's   *)
+(* current floor — i.e. there really is a high-then-low to reorder.                         *)
+(*                                                                                          *)
+(* WITHOUT the gate (every async mode EXCEPT SoundEpochMode — in particular the RED demo    *)
+(* AsyncAckSoundFresh) the overwrite is UNCONDITIONAL: it clobbers a fresh-low cache, the    *)
+(* residual. UNDER SoundEpochMode the FLOOR-EPOCH GATE rejects it: the stale epoch (0) is     *)
+(* below the cached fresh ack's epoch, so the overwrite is dropped (the cache keeps the low). *)
+(* A stale packet that lands BEFORE any fresh ack (cache still epoch 0) is admitted by the    *)
+(* gate but then caught by the AsyncSoundFreshTarget STALE-ACK HOLD once gossip delivers       *)
+(* src's higher floor-epoch — the fresh-ack-round requirement.                                 *)
+(***************************************************************************)
+StaleAck(src, obs) ==
+    /\ REORDER
+    /\ AsyncMode
+    /\ ~staleUsed                              \* at most ONE stale reorder ever (a FINITE reorder)
+    /\ src # obs
+    /\ ~gone[src]                              \* the stale packet was in flight while src was alive
+    /\ ~pruned[obs][src]                       \* obs still folds src (a pruned src's packets are dropped)
+    /\ link[src][obs]
+    /\ floorEpoch[src] > 0                      \* src HAS lowered since the snapshot (genuinely stale)
+    /\ recvThrough[src] > AckReportFloor(src)   \* the snapshot is strictly HIGHER than src's current floor
+    \* The floor-epoch overwrite gate (the fix): SoundEpochMode admits the stale snapshot ONLY when
+    \* the cached ack is not already fresher (epoch 0 >= the cached epoch). Every other async mode
+    \* (incl. the RED AsyncAckSoundFresh) admits it unconditionally — the production plain overwrite.
+    /\ (SoundEpochMode => 0 >= ackEpoch[obs][src])
+    /\ ackFloor' = [ackFloor EXCEPT ![obs][src] = recvThrough[src]]
+    /\ ackEpoch' = [ackEpoch EXCEPT ![obs][src] = 0]
+    /\ staleUsed' = TRUE
+    \* S54: a reordered stale-HIGH ack is NOT a completed round — leave `ackFresh` UNCHANGED so it can
+    \* never satisfy the SoundRoundSeqMode hold (this is what defeats the stale-first race here).
+    /\ UNCHANGED <<recvThrough, alive, localDisc, localFrame, cacheDisc, cacheLast,
+                   link, bound, recSrc, floor, corrob,
+                   gone, pruned, slotEpoch, cacheEpoch, announced, floorEpoch, roundFloor, ackFresh>>
 
 Next ==
     \/ \E src, obs \in SURVIVORS : Gossip(src, obs)
@@ -1237,6 +1567,8 @@ Next ==
     \/ \E obs, src \in SURVIVORS : Prune(obs, src)
     \/ \E src, obs \in SURVIVORS : SendAck(src, obs)
     \/ \E s \in SURVIVORS : AnnounceLower(s)
+    \* S52 reorder-only (guarded by REORDER, so disabled — zero new states — in every pre-S52 cfg).
+    \/ \E src, obs \in SURVIVORS : StaleAck(src, obs)
 
 (***************************************************************************)
 (* Fairness for the liveness property. WEAK fairness suffices because partitions    *)

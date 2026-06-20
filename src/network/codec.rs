@@ -42,8 +42,8 @@ use std::fmt;
 use std::io::{self, Write};
 
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
-    QualityReply, QualityReport, SyncReply, SyncRequest,
+    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
+    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -329,8 +329,8 @@ fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<Con
 const CONNECTION_STATUS_WIRE_LEN: usize = 7;
 
 /// The fixed wire footprint, in bytes, of one encoded [`Frame`] (a fixed-int
-/// `i32`). Used to bound length-prefixed `Vec<Frame>` decodes (e.g. an
-/// `Input`'s `pessimistic_floor`).
+/// `i32`). Used to bound length-prefixed `Vec<Frame>` decodes (e.g. a
+/// [`FloorReply`]'s `floors`).
 const FRAME_WIRE_LEN: usize = 4;
 
 /// Rejects a length prefix that cannot possibly fit in the unread input bytes,
@@ -403,45 +403,45 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     })?;
     input_bytes.extend_from_slice(byte_slice);
 
-    // Per-slot pessimistic confirmed floors (double-failure-relay fix). A
-    // length-prefixed `Vec<Frame>` (each `Frame` a fixed 4-byte `i32`), bounded
-    // like `peer_connect_status` so a hostile/garbled length cannot
-    // over-reserve. The field is advisory: a receiver that finds the wrong
-    // length (e.g. an empty vector) falls back to `last_frame`, so we decode it
-    // faithfully here and let the session layer apply the length policy.
-    let floor_len = read_usize(bytes, cursor, "input.pessimistic_floor.len")?;
-    ensure_length_within_remaining(
-        bytes,
-        *cursor,
-        floor_len,
-        FRAME_WIRE_LEN,
-        "input.pessimistic_floor",
-    )?;
-    let mut pessimistic_floor = Vec::new();
-    pessimistic_floor
-        .try_reserve_exact(floor_len)
-        .map_err(|_err| {
-            decode_message_error(format!(
-                "failed to reserve {} pessimistic floor entries",
-                floor_len
-            ))
-        })?;
-    for _ in 0..floor_len {
-        pessimistic_floor.push(Frame::new(read_i32(
-            bytes,
-            cursor,
-            "input.pessimistic_floor",
-        )?));
-    }
-
     Ok(Input {
         peer_connect_status,
         disconnect_requested,
         start_frame,
         ack_frame,
         bytes: input_bytes,
-        pessimistic_floor,
     })
+}
+
+/// Decodes a [`FloorReply`] body: a `u32` `round_seq` followed by a
+/// length-prefixed `Vec<Frame>` of per-slot pessimistic floors (the
+/// double-failure-relay connected-relay reorder fix). The floor vector is
+/// bounded like the message's other length-prefixed vectors — the length prefix
+/// is validated against the remaining packet bytes (`FRAME_WIRE_LEN` per
+/// element) before `try_reserve_exact`, so a hostile/garbled length cannot
+/// over-reserve.
+/// The field is advisory: a receiver reads it via `.get(slot)` and falls back
+/// to `last_frame` for a missing/`Frame::NULL` slot.
+fn decode_floor_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<FloorReply> {
+    let round_seq = read_u32(bytes, cursor, "floor_reply.round_seq")?;
+    let floor_len = read_usize(bytes, cursor, "floor_reply.floors.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        floor_len,
+        FRAME_WIRE_LEN,
+        "floor_reply.floors",
+    )?;
+    let mut floors = Vec::new();
+    floors.try_reserve_exact(floor_len).map_err(|_err| {
+        decode_message_error(format!(
+            "failed to reserve {} floor reply entries",
+            floor_len
+        ))
+    })?;
+    for _ in 0..floor_len {
+        floors.push(Frame::new(read_i32(bytes, cursor, "floor_reply.floors")?));
+    }
+    Ok(FloorReply { round_seq, floors })
 }
 
 /// Reads a bincode `Option<u128>` encoded under fixed-int config: a one-byte
@@ -712,33 +712,41 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
             frame: Frame::new(read_i32(bytes, &mut cursor, "checksum_report.frame")?),
         }),
         7 => MessageBody::KeepAlive,
+        // Floor-round variants (double-failure-relay connected-relay reorder fix,
+        // S55), appended after the original core block — see the `MessageBody`
+        // enum comment. The `#[cfg(feature = "hot-join")]` variants below them are
+        // therefore at discriminants 10..=16 (each shifted +2 from the original).
+        8 => MessageBody::FloorRequest(FloorRequest {
+            round_seq: read_u32(bytes, &mut cursor, "floor_request.round_seq")?,
+        }),
+        9 => MessageBody::FloorReply(decode_floor_reply(bytes, &mut cursor)?),
         #[cfg(feature = "hot-join")]
-        8 => MessageBody::JoinRequest(JoinRequest {
+        10 => MessageBody::JoinRequest(JoinRequest {
             player_handle: read_usize(bytes, &mut cursor, "join_request.player_handle")?,
         }),
         #[cfg(feature = "hot-join")]
-        9 => MessageBody::StateSnapshot(decode_state_snapshot(bytes, &mut cursor)?),
+        11 => MessageBody::StateSnapshot(decode_state_snapshot(bytes, &mut cursor)?),
         #[cfg(feature = "hot-join")]
-        10 => MessageBody::StateSnapshotAck(StateSnapshotAck {
+        12 => MessageBody::StateSnapshotAck(StateSnapshotAck {
             frame: Frame::new(read_i32(bytes, &mut cursor, "state_snapshot_ack.frame")?),
         }),
         #[cfg(feature = "hot-join")]
-        11 => MessageBody::ReactivateSlot(ReactivateSlot {
+        13 => MessageBody::ReactivateSlot(ReactivateSlot {
             handle: read_usize(bytes, &mut cursor, "reactivate_slot.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "reactivate_slot.frame")?),
         }),
         #[cfg(feature = "hot-join")]
-        12 => MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+        14 => MessageBody::ReactivateSlotAck(ReactivateSlotAck {
             handle: read_usize(bytes, &mut cursor, "reactivate_slot_ack.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "reactivate_slot_ack.frame")?),
         }),
         #[cfg(feature = "hot-join")]
-        13 => MessageBody::JoinCommitted(JoinCommitted {
+        15 => MessageBody::JoinCommitted(JoinCommitted {
             handle: read_usize(bytes, &mut cursor, "join_committed.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "join_committed.frame")?),
         }),
         #[cfg(feature = "hot-join")]
-        14 => MessageBody::JoinAborted(JoinAborted {
+        16 => MessageBody::JoinAborted(JoinAborted {
             handle: read_usize(bytes, &mut cursor, "join_aborted.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "join_aborted.frame")?),
         }),
@@ -926,8 +934,8 @@ fn bounded_decode_config() -> impl bincode::config::Config {
 mod tests {
     use super::*;
     use crate::network::messages::{
-        ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
-        QualityReply, QualityReport, SyncReply, SyncRequest,
+        ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
+        MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
     };
 
     #[test]
@@ -1030,7 +1038,6 @@ mod tests {
                     start_frame: Frame::new(100),
                     ack_frame: Frame::new(50),
                     bytes: vec![1, 2, 3, 4, 5],
-                    pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
                 }),
             },
             Message {
@@ -1060,6 +1067,17 @@ mod tests {
             Message {
                 header: MessageHeader { magic: 0xABCD },
                 body: MessageBody::KeepAlive,
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::FloorRequest(FloorRequest { round_seq: 42 }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::FloorReply(FloorReply {
+                    round_seq: 42,
+                    floors: vec![Frame::new(4), Frame::new(-1), Frame::new(10)],
+                }),
             },
         ];
 
@@ -1095,7 +1113,6 @@ mod tests {
                 start_frame: Frame::new(100),
                 ack_frame: Frame::new(50),
                 bytes: vec![1, 2, 3, 4, 5],
-                pessimistic_floor: vec![Frame::new(7), Frame::new(-1)],
             }),
         };
         let bytes = encode(&original).unwrap();
@@ -1435,7 +1452,7 @@ mod hot_join_tests {
     fn decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // state_bytes len (absurd)
@@ -1451,7 +1468,7 @@ mod hot_join_tests {
     fn decode_message_rejects_state_bytes_length_larger_than_remaining() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&100_u64.to_le_bytes()); // state_bytes len
@@ -1467,7 +1484,7 @@ mod hot_join_tests {
     fn decode_message_rejects_invalid_checksum_option_tag() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1489,7 +1506,7 @@ mod hot_join_tests {
     fn decode_message_rejects_bridge_inputs_length_that_exceeds_packet_bytes() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1507,7 +1524,7 @@ mod hot_join_tests {
     fn decode_message_rejects_bridge_inputs_length_larger_than_remaining() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1525,7 +1542,7 @@ mod hot_join_tests {
     fn decode_message_rejects_snapshot_truncated_before_bridge_inputs() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1545,7 +1562,7 @@ mod hot_join_tests {
     fn decode_message_rejects_bridge_statuses_length_that_exceeds_packet_bytes() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1564,7 +1581,7 @@ mod hot_join_tests {
     fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1583,7 +1600,7 @@ mod hot_join_tests {
     fn decode_message_rejects_snapshot_truncated_before_bridge_statuses() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1604,7 +1621,7 @@ mod hot_join_tests {
     fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&9_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1668,7 +1685,7 @@ mod hot_join_tests {
     fn decode_message_rejects_truncated_reactivate_slot() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::ReactivateSlot
+        bytes.extend_from_slice(&13_u32.to_le_bytes()); // MessageBody::ReactivateSlot
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -1682,7 +1699,7 @@ mod hot_join_tests {
     fn decode_message_rejects_truncated_reactivate_slot_ack() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&12_u32.to_le_bytes()); // MessageBody::ReactivateSlotAck
+        bytes.extend_from_slice(&14_u32.to_le_bytes()); // MessageBody::ReactivateSlotAck
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -1758,7 +1775,7 @@ mod hot_join_tests {
     fn decode_message_rejects_truncated_join_committed() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&13_u32.to_le_bytes()); // MessageBody::JoinCommitted
+        bytes.extend_from_slice(&15_u32.to_le_bytes()); // MessageBody::JoinCommitted
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -1772,7 +1789,7 @@ mod hot_join_tests {
     fn decode_message_rejects_truncated_join_aborted() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&14_u32.to_le_bytes()); // MessageBody::JoinAborted
+        bytes.extend_from_slice(&16_u32.to_le_bytes()); // MessageBody::JoinAborted
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 

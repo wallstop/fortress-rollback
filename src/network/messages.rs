@@ -89,34 +89,6 @@ pub(crate) struct Input {
     pub start_frame: Frame,
     pub ack_frame: Frame,
     pub bytes: Vec<u8>,
-    /// Per-slot **pessimistic confirmed floor** the sender reports for the
-    /// double-failure-relay fix (audit follow-up; verified-sound mode
-    /// `AsyncAckSound`/`AsyncAckSoundFresh` in
-    /// `specs/tla/DoubleFailureRelay.tla`). Index = player handle; value = the
-    /// lowest frame the sender could *still* freeze that slot to given
-    /// everything it currently folds — the `min` over the sender's own
-    /// `local_connect_status[slot].last_frame` AND every running, non-reserved
-    /// remote endpoint's cached `peer_connect_status(slot).last_frame`,
-    /// **skipping remote caches that are `Frame::NULL`** (no-info, so a peer
-    /// that has not yet gossiped a receipt does not poison the floor). The
-    /// sender computes it in `P2PSession::pessimistic_floors`, the canonical
-    /// fold — see there for the exact membership.
-    ///
-    /// Unlike `last_frame` (the sender's *own* receipt/freeze), this surfaces a
-    /// **departed origin's low** the sender still folds, so an observer that has
-    /// pruned that origin from its own fold can still hold its confirmation at
-    /// the mesh minimum instead of confirming + discarding the dropped slot's
-    /// real inputs above a freeze a relay will later agree to (the N>=4
-    /// double-failure-relay desync).
-    ///
-    /// Advisory and always `<= last_frame`, so consuming it never confirms
-    /// *higher* than the legacy `last_frame` fold (no safety regression): a
-    /// receiver that finds this empty / the wrong length / `Frame::NULL` for a
-    /// slot simply falls back to `last_frame` (the pre-fix barrier). Carried on
-    /// every `Input` packet alongside `peer_connect_status`; see
-    /// [`super::protocol`]'s `peer_pessimistic_floor` cache.
-    #[serde(default)]
-    pub pessimistic_floor: Vec<Frame>,
 }
 
 impl Default for Input {
@@ -127,7 +99,6 @@ impl Default for Input {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: Vec::new(),
-            pessimistic_floor: Vec::new(),
         }
     }
 }
@@ -141,7 +112,6 @@ impl std::fmt::Debug for Input {
             start_frame,
             ack_frame,
             bytes,
-            pessimistic_floor,
         } = self;
 
         f.debug_struct("Input")
@@ -150,7 +120,6 @@ impl std::fmt::Debug for Input {
             .field("start_frame", start_frame)
             .field("ack_frame", ack_frame)
             .field("bytes", &BytesDebug(bytes))
-            .field("pessimistic_floor", pessimistic_floor)
             .finish()
     }
 }
@@ -206,6 +175,64 @@ pub(crate) struct QualityReply {
 pub(crate) struct ChecksumReport {
     pub checksum: u128,
     pub frame: Frame,
+}
+
+/// Observer → relay: a **floor-round request** for the double-failure-relay
+/// connected-relay reorder fix (the audit's last open player-vs-player desync
+/// sub-shape; verified-sound mode `AsyncAckSoundRoundSeq` in
+/// `specs/tla/DoubleFailureRelay.tla`, S54).
+///
+/// While an observer is in the N≥4 relay topology (it has pruned a remote and
+/// ≥2 remotes still run), a connected relay's connect-status receipt is its own
+/// (possibly high) `last_frame`, not a freeze, so it can hide a departed
+/// origin's low the relay still folds — and piggybacking the relay's pessimistic
+/// floor on out-of-order `Input` gossip would let a reordered stale-HIGH packet
+/// erase a fresh-low one. Instead the observer solicits the relay's CURRENT
+/// pessimistic floor through this dedicated request/response round whose
+/// [`round_seq`](Self::round_seq) makes the reply reorder-immune.
+///
+/// [`round_seq`](Self::round_seq) is a monotonic **per-request sequence
+/// number** the observer bumps on every outgoing `FloorRequest`. The relay
+/// echoes it verbatim in its [`FloorReply`], so the observer can drop a
+/// reordered stale (or duplicate) reply — accepting only a `round_seq` strictly
+/// newer than the latest accepted, and never one exceeding the latest request
+/// it actually issued (an unsolicited/forged seq). Post-prune **freshness** is
+/// tracked separately, observer-local: the reply must answer a request issued
+/// AFTER the observer's most recent prune. No floor-epoch wire field is needed
+/// (S54 machine-shows the seq + dedicated channel replace it).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct FloorRequest {
+    /// The requesting observer's monotonic per-request sequence number, echoed
+    /// verbatim in [`FloorReply`] (see the struct docs).
+    pub round_seq: u32,
+}
+
+/// Relay → observer: a **floor-round reply** answering a [`FloorRequest`] with
+/// the relay's current per-slot pessimistic floors (the double-failure-relay
+/// connected-relay reorder fix; see [`FloorRequest`]).
+///
+/// [`round_seq`](Self::round_seq) echoes the request's value verbatim so the
+/// observer can drop reordered stale / duplicate / unsolicited replies (accept
+/// only a `round_seq` strictly newer than the latest accepted and not exceeding
+/// the latest request issued) and, separately, decide whether the reply
+/// postdates its most recent prune (an observer-local freshness check).
+/// [`floors`](Self::floors) is the relay's `P2PSession::pessimistic_floors`
+/// snapshot at reply time — per slot, the `min` over the relay's own
+/// receipt/freeze and the committed DISCONNECTED freezes it still folds (a
+/// departed global-min origin's low the observer has already pruned from its own
+/// fold). Index = player handle, length `num_players` (the relay always reports
+/// every slot). The observer accepts a reply ONLY when `floors` covers every
+/// slot; a short vector is malformed and dropped, so an accepted reply fully
+/// (re)defines the observer's cached floors with no slot left reading a stale
+/// prior round (excess trailing entries are ignored). A reported `Frame::NULL`
+/// slot is read as "fall back to `last_frame`" and never confirms higher than
+/// the legacy fold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct FloorReply {
+    /// The originating [`FloorRequest::round_seq`], echoed verbatim.
+    pub round_seq: u32,
+    /// The relay's per-slot pessimistic floors at reply time (handle-indexed).
+    pub floors: Vec<Frame>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -334,6 +361,13 @@ pub(crate) enum MessageBody {
     QualityReply(QualityReply),
     ChecksumReport(ChecksumReport),
     KeepAlive,
+    // Floor-round messages (double-failure-relay connected-relay reorder fix,
+    // S55) are appended AFTER the original core variants so the existing core
+    // discriminants (0..=7) stay stable; the `#[cfg(feature = "hot-join")]`
+    // variants below them are positional and shift accordingly (the
+    // hand-written `codec::decode_message` mirrors this numbering).
+    FloorRequest(FloorRequest),
+    FloorReply(FloorReply),
     #[cfg(feature = "hot-join")]
     JoinRequest(JoinRequest),
     #[cfg(feature = "hot-join")]
@@ -450,7 +484,6 @@ mod tests {
             start_frame: Frame::new(10),
             ack_frame: Frame::new(5),
             bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
-            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("Input"));
@@ -516,8 +549,56 @@ mod tests {
         let checksum_report = MessageBody::ChecksumReport(ChecksumReport::default());
         assert!(matches!(checksum_report, MessageBody::ChecksumReport(_)));
 
+        let floor_request = MessageBody::FloorRequest(FloorRequest { round_seq: 7 });
+        assert!(matches!(floor_request, MessageBody::FloorRequest(_)));
+
+        let floor_reply = MessageBody::FloorReply(FloorReply {
+            round_seq: 7,
+            floors: vec![Frame::new(4), Frame::NULL],
+        });
+        assert!(matches!(floor_reply, MessageBody::FloorReply(_)));
+
         let keep_alive = MessageBody::KeepAlive;
         assert!(matches!(keep_alive, MessageBody::KeepAlive));
+    }
+
+    #[test]
+    fn test_floor_request_default() {
+        let req = FloorRequest::default();
+        assert_eq!(req.round_seq, 0);
+    }
+
+    #[test]
+    fn test_floor_reply_default() {
+        let reply = FloorReply::default();
+        assert_eq!(reply.round_seq, 0);
+        assert!(reply.floors.is_empty());
+    }
+
+    #[test]
+    fn test_floor_round_serialization() {
+        use crate::network::codec;
+
+        let request = Message {
+            header: MessageHeader { magic: 0x1234 },
+            body: MessageBody::FloorRequest(FloorRequest { round_seq: 9 }),
+        };
+        let serialized = codec::encode(&request).expect("serialization should succeed");
+        let (deserialized, _): (Message, _) =
+            codec::decode(&serialized).expect("deserialization should succeed");
+        assert_eq!(request, deserialized);
+
+        let reply = Message {
+            header: MessageHeader { magic: 0x1234 },
+            body: MessageBody::FloorReply(FloorReply {
+                round_seq: 9,
+                floors: vec![Frame::new(4), Frame::new(10), Frame::NULL, Frame::new(0)],
+            }),
+        };
+        let serialized = codec::encode(&reply).expect("serialization should succeed");
+        let (deserialized, _): (Message, _) =
+            codec::decode(&serialized).expect("deserialization should succeed");
+        assert_eq!(reply, deserialized);
     }
 
     #[test]
@@ -570,7 +651,6 @@ mod tests {
             start_frame: Frame::new(100),
             ack_frame: Frame::new(50),
             bytes: vec![1, 2, 3, 4, 5],
-            pessimistic_floor: Vec::new(),
         };
 
         let serialized = codec::encode(&input).expect("serialization should succeed");
@@ -587,7 +667,6 @@ mod tests {
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: vec![],
-            pessimistic_floor: Vec::new(),
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("0x")); // Empty bytes should still show "0x" prefix

@@ -42,6 +42,83 @@ print_usage() {
     echo "Checks doc comments and test names for misleading semantic claims."
 }
 
+# Guard against reintroducing removed floor-gossip identifiers as CURRENT-production
+# claims in docs/comments. The floor-round work (S55) removed two identifiers from
+# production: `UdpProtocol::peer_pessimistic_floor` (replaced by `round_floor`) and the
+# `Input::pessimistic_floor` wire field (replaced by `FloorReply::floors`). Any tracked
+# `*.md`/`*.tla`/`*.cfg`/`*.rs` line that names one of them MUST carry a same-line
+# historical qualifier (legacy/formerly/removed/pre-S55/old/S50-54-era); otherwise it is
+# read as a false current-production claim and fails the check. POSIX ERE only (no
+# \b/\s/\w): token boundaries use [^[:alnum:]_]; the qualifier match is case-insensitive.
+check_removed_floor_identifiers() {
+    local project_root="$1"
+
+    # The two removed identifiers, as POSIX-ERE token patterns:
+    #   - the removed peer_pessimistic_floor   (NOT followed by an identifier char, e.g. no "...floors")
+    #   - Input.pessimistic_floor / Input::pessimistic_floor   (the old per-Input wire field;
+    #     deliberately excludes the CURRENT `P2PSession::pessimistic_floors` plural and the
+    #     `pessimistic_floor_relay_topology` / `send_floor_reply` helpers).
+    local removed_pattern='(^|[^[:alnum:]_])(peer_pessimistic_floor|Input(\.|::)pessimistic_floor)([^[:alnum:]_]|$)'
+
+    # Same-line historical qualifiers that mark a mention as legitimate narrative.
+    # `replace` also covers `replaced`/`replaces` ("X (replaced by Y)" is a qualified
+    # historical mention) and keeps this file's own descriptive comments in the clear
+    # were `*.sh` ever brought into scope.
+    local qualifier_pattern='(pre-s55|legacy|formerly|former|removed|remove|replace|no-longer|no longer|old|s5[0-4]|historic)'
+
+    # Scan TRACKED docs/comments only. Gitignored working notes (e.g. the audit and
+    # `progress/` session logs) legitimately narrate the full development history,
+    # including the removed identifiers, so they are out of scope. Prefer `git ls-files`;
+    # fall back to `find` only when not inside a git work tree (e.g. test fixtures).
+    local file_list
+    if git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        file_list=$(git -C "$project_root" ls-files -- '*.md' '*.tla' '*.cfg' '*.rs' 2>/dev/null \
+            | sed "s#^#$project_root/#" | sort)
+    else
+        file_list=$(find "$project_root" \
+            \( -path "$project_root/target" -o -path "$project_root/.git" -o -path "$project_root/.tla-tools" \) -prune -o \
+            \( -name '*.md' -o -name '*.tla' -o -name '*.cfg' -o -name '*.rs' \) -type f -print 2>/dev/null \
+            | sort)
+    fi
+
+    local found=0
+    local rel_path
+    local file
+    while IFS= read -r file; do
+        [[ -z "$file" ]] && continue
+        [[ -f "$file" ]] || continue
+        rel_path="${file#"$project_root/"}"
+
+        local hits
+        hits=$(grep -nE "$removed_pattern" "$file" 2>/dev/null || true)
+        [[ -z "$hits" ]] && continue
+
+        local hit_line
+        while IFS= read -r hit_line; do
+            [[ -z "$hit_line" ]] && continue
+            # Strip the leading "<lineno>:" to test the source text for a qualifier.
+            local hit_text="${hit_line#*:}"
+            if printf '%s' "$hit_text" | grep -qiE "$qualifier_pattern"; then
+                continue
+            fi
+            if [[ "$found" -eq 0 ]]; then
+                echo ""
+                echo -e "${RED}ERROR${NC}: removed floor identifier(s) claimed as current production"
+            fi
+            found=$((found + 1))
+            echo -e "  ${YELLOW}$rel_path:${hit_line}${NC}"
+            echo -e "    ${BLUE}Removed:${NC} peer_pessimistic_floor -> UdpProtocol::round_floor; Input::pessimistic_floor -> FloorReply::floors"
+            echo -e "    ${BLUE}Fix:${NC} use the current identifier, or qualify the mention as historical (legacy/formerly/removed/pre-S55)."
+        done <<< "$hits"
+    done <<< "$file_list"
+
+    if [[ "$found" -gt 0 ]]; then
+        return 1
+    fi
+    echo -e "${GREEN}OK${NC}: no removed floor identifiers claimed as current production."
+    return 0
+}
+
 main() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -224,6 +301,12 @@ main() {
     done < <(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/tests" "$PROJECT_ROOT/examples" "$PROJECT_ROOT/benches" \
         -name '*.rs' -print 2>/dev/null \
         | sort)
+
+    echo ""
+
+    if ! check_removed_floor_identifiers "$PROJECT_ROOT"; then
+        issues=$((issues + 1))
+    fi
 
     echo ""
 

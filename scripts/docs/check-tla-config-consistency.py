@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-"""Keep the TLA+ ``FIX_MODE`` set, its ``.cfg`` files, and the prose in sync.
+"""Keep every TLA+ ``FIX_MODE`` set, its ``.cfg`` files, and the prose in sync.
 
-The ``DoubleFailureRelay`` spec enumerates its confirmation-rule variants in a
-single ``ASSUME FIX_MODE \\in {...}`` clause. That clause is the one source of
-truth; everything else must agree with it:
+A spec enumerates its confirmation-rule variants in a single
+``ASSUME FIX_MODE \\in {...}`` clause. That clause is the one source of truth for
+*that* spec; everything else must agree with it. The checker **discovers** every
+spec in ``specs/tla`` that declares such a clause (``DoubleFailureRelay.tla``,
+``SpectatorReactivationEpoch.tla``, ...) and validates each against its own set,
+so adding a second FIX_MODE spec needs no edit here. For each discovered spec:
 
-* every ``.cfg`` that sets ``FIX_MODE`` must name a value the spec defines
-  (no orphaned config referencing a deleted/renamed mode);
-* every defined mode must be exercised by at least one ``.cfg``
-  (no mode added to the spec but never model-checked);
-* every defined mode must be named somewhere in ``README.md``
+* every ``.cfg`` that sets ``FIX_MODE`` must name a value *its own spec* defines
+  (no orphaned config, and no config validated against the wrong spec);
+* every defined mode must be exercised by at least one of that spec's ``.cfg``
+  files (no mode added to the spec but never model-checked);
+* every defined mode (across all specs) must be named somewhere in ``README.md``
   (no mode landed without a prose description);
-* any prose count of the modes ("nine FIX_MODE modes", "9 modes") must equal
-  the number the spec defines (the drift this check was written to catch).
+* any prose count of the modes ("nine FIX_MODE modes", "9 modes") must equal the
+  number some FIX_MODE spec defines (the drift this check was written to catch).
 
-This is deliberately narrow: it derives the canonical set from the spec and
+A ``.cfg`` is paired with its spec by filename: the owning module is the longest
+``*.tla`` stem that equals the cfg stem or precedes a ``_`` in it, so
+``DoubleFailureRelay_AsyncAckSound_Cold.cfg`` pairs with ``DoubleFailureRelay``
+and ``SpectatorReactivationEpoch_EpochBlind.cfg`` with
+``SpectatorReactivationEpoch`` -- the same pairing TLC uses for
+``tlc -config <Spec>_<variant>.cfg <Spec>.tla``.
+
+This is deliberately narrow: it derives each canonical set from its spec and
 compares, rather than guessing intent from English. Run it from anywhere; it
 locates the repo relative to its own path.
 
@@ -23,7 +33,7 @@ Usage:
     python scripts/docs/check-tla-config-consistency.py --verbose
 
 Exit codes:
-    0 - spec, configs, and prose agree
+    0 - specs, configs, and prose agree
     1 - a drift was detected (details printed)
 """
 
@@ -32,13 +42,13 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The spec whose FIX_MODE set is the source of truth, and the directory whose
-# *.cfg files and README.md must agree with it. Both are relative to the TLA
-# spec directory resolved in `tla_dir()`.
-SPEC_FILENAME = "DoubleFailureRelay.tla"
+# The directory's README.md must name every discovered mode. The FIX_MODE specs
+# themselves are discovered (any *.tla with an `ASSUME FIX_MODE \in {...}`),
+# never hardcoded -- see `discover_fix_mode_specs`.
 README_FILENAME = "README.md"
 
 # `ASSUME FIX_MODE \in { "Baseline", "Tombstone", ... }` — possibly spanning
@@ -86,19 +96,22 @@ NUMBER_WORDS = {
 }
 _NUMBER_WORD_ALT = "|".join(NUMBER_WORDS)
 # A count claim: a number (word or 1-2 digits) directly modifying the phrase
-# "FIX_MODE mode(s)/value(s)/config(s)". Requiring FIX_MODE *inside* the matched
-# phrase is the whole robustness story: there is no proximity heuristic to
-# misfire on a nearby-but-unrelated "12 configs" in a table cell, and no
-# sub-count ("four original configs", "three S47 modes") matches because none of
-# them name FIX_MODE between the number and the noun. The authoring convention
-# is therefore simple: write a mode count as "<N> FIX_MODE modes". Optional
+# "FIX_MODE mode(s)/value(s)". Requiring FIX_MODE *inside* the matched phrase is
+# the whole robustness story: there is no proximity heuristic to misfire on a
+# nearby-but-unrelated "12 configs" in a table cell, and no sub-count ("four
+# original configs", "three S47 modes") matches because none of them name
+# FIX_MODE between the number and the noun. The noun is deliberately NOT
+# "config": one mode is exercised by several `.cfg` files (default + witness +
+# cold + ...), so a "<N> FIX_MODE configs" claim counts FILES, not modes, and
+# must not be checked against the mode count. The authoring convention is
+# therefore simple: write a mode count as "<N> FIX_MODE modes". Optional
 # `**bold**` markers, backticks around FIX_MODE, and a hyphen separator
 # ("nine-mode") are tolerated.
 COUNT_CLAIM_RE = re.compile(
     rf"(?P<num>\b(?:{_NUMBER_WORD_ALT})\b|\b\d{{1,2}}\b)"
     r"[\s-]*(?:\*\*)?[\s-]*"
     r"`?FIX_MODE`?[\s-]+"
-    r"(?P<noun>config|mode|value)s?\b",
+    r"(?P<noun>mode|value)s?\b",
     re.IGNORECASE,
 )
 
@@ -161,22 +174,59 @@ def canonical_modes(spec_text: str) -> set[str]:
     return set(QUOTED_NAME_RE.findall(match.group("body")))
 
 
-def cfg_modes(cfg_dir: Path) -> dict[str, set[str]]:
-    """Map each configured FIX_MODE to the set of ``.cfg`` files that use it."""
-    by_mode: dict[str, set[str]] = {}
-    for cfg in sorted(cfg_dir.glob("*.cfg")):
-        text = strip_tla_comments(cfg.read_text(encoding="utf-8"))
-        for mode in CFG_FIX_MODE_RE.findall(text):
-            by_mode.setdefault(mode, set()).add(cfg.name)
-    return by_mode
+def discover_fix_mode_specs(cfg_dir: Path) -> dict[str, set[str]]:
+    """Map each spec module that declares a FIX_MODE set to that set.
+
+    Every ``*.tla`` whose body contains an ``ASSUME FIX_MODE \\in {...}`` clause
+    is the source of truth for its own variants; specs without such a clause are
+    not FIX_MODE specs and are skipped. Discovering them -- rather than hardcoding
+    a single spec -- is what lets a second FIX_MODE spec be added (with its own
+    ``.cfg`` files) without editing this checker.
+
+    A spec whose clause is present but *empty* (``{}``) is still returned, mapped
+    to an empty set, so an accidentally-emptied set surfaces as an explicit error
+    in `check` instead of the spec silently vanishing from every check.
+    """
+    specs: dict[str, set[str]] = {}
+    for tla in sorted(cfg_dir.glob("*.tla")):
+        raw = tla.read_text(encoding="utf-8")
+        if ASSUME_SET_RE.search(strip_tla_comments(raw)) is None:
+            continue  # no FIX_MODE clause -> not a FIX_MODE spec
+        specs[tla.stem] = canonical_modes(raw)
+    return specs
+
+
+def cfg_fix_modes(cfg_path: Path) -> set[str]:
+    """Return the FIX_MODE values a single ``.cfg`` sets (comments stripped)."""
+    text = strip_tla_comments(cfg_path.read_text(encoding="utf-8"))
+    return set(CFG_FIX_MODE_RE.findall(text))
+
+
+def spec_for_cfg(cfg_stem: str, spec_stems: Iterable[str]) -> str | None:
+    """Return the spec module a ``.cfg`` filename pairs with, or ``None``.
+
+    The owning spec is the longest module name that equals ``cfg_stem`` or is a
+    prefix of it at a ``_`` boundary, so ``DoubleFailureRelay_AsyncAckSound_Cold``
+    pairs with ``DoubleFailureRelay`` and never with a shorter, unrelated stem.
+    Matching the longest stem means a future ``DoubleFailureRelay_Async`` spec
+    would correctly claim its own variants away from ``DoubleFailureRelay``.
+    """
+    best: str | None = None
+    for stem in spec_stems:
+        if (cfg_stem == stem or cfg_stem.startswith(f"{stem}_")) and (
+            best is None or len(stem) > len(best)
+        ):
+            best = stem
+    return best
 
 
 def find_count_claims(readme_text: str) -> list[tuple[int, str, int]]:
     """Return ``(value, snippet, line)`` for each FIX_MODE-count claim in prose.
 
-    Only "<N> FIX_MODE mode(s)/value(s)/config(s)" phrases match (FIX_MODE is
-    part of the matched phrase), so unrelated "two players"/"three rounds" prose
-    and nearby-but-unrelated table numbers are ignored.
+    Only "<N> FIX_MODE mode(s)/value(s)" phrases match (FIX_MODE is part of the
+    matched phrase), so unrelated "two players"/"three rounds" prose, a "<N>
+    FIX_MODE configs" *file* count, and nearby-but-unrelated table numbers are
+    all ignored.
     """
     claims: list[tuple[int, str, int]] = []
     for match in COUNT_CLAIM_RE.finditer(readme_text):
@@ -193,70 +243,115 @@ def find_count_claims(readme_text: str) -> list[tuple[int, str, int]]:
 
 def check(cfg_dir: Path, report: Report) -> None:
     """Run every consistency check, recording findings in ``report``."""
-    spec_path = cfg_dir / SPEC_FILENAME
     readme_path = cfg_dir / README_FILENAME
-
-    if not spec_path.is_file():
-        report.error(f"spec not found: {spec_path}")
-        return
     if not readme_path.is_file():
         report.error(f"README not found: {readme_path}")
         return
-
-    spec_text = spec_path.read_text(encoding="utf-8")
     readme_text = readme_path.read_text(encoding="utf-8")
 
-    modes = canonical_modes(spec_text)
-    if not modes:
+    specs = discover_fix_mode_specs(cfg_dir)
+    if not specs:
         report.error(
-            f"could not parse `ASSUME FIX_MODE \\in {{...}}` from {spec_path.name}; "
+            f"no spec in {cfg_dir} declares `ASSUME FIX_MODE \\in {{...}}`; "
             "the FIX_MODE set is the source of truth this check needs"
         )
         return
-    report.note(f"spec defines {len(modes)} FIX_MODE mode(s): {', '.join(sorted(modes))}")
-
-    configured = cfg_modes(cfg_dir)
-
-    # 1. Every configured mode must be a defined mode.
-    for mode in sorted(configured):
-        if mode not in modes:
-            files = ", ".join(sorted(configured[mode]))
+    # A spec whose ASSUME clause is present but empty is reported explicitly: it
+    # is kept in `specs` (so its cfgs still resolve to it and read "not in {}"
+    # rather than the misleading "no ASSUME set") but must never pass silently.
+    for stem in sorted(specs):
+        if not specs[stem]:
             report.error(
-                f"{files}: FIX_MODE = \"{mode}\" is not in {spec_path.name}'s "
-                f"ASSUME set {{{', '.join(sorted(modes))}}}. "
-                "Add the mode to the spec or fix the config."
-            )
-
-    # 2. Every defined mode must be exercised by at least one config.
-    for mode in sorted(modes):
-        if mode not in configured:
-            report.error(
-                f"FIX_MODE mode \"{mode}\" is defined in {spec_path.name} but no "
-                f"{cfg_dir.name}/*.cfg sets it. Add a config that exercises it "
-                "(or remove it from the ASSUME set)."
-            )
-
-    # 3. Every defined mode must be named in the README prose.
-    for mode in sorted(modes):
-        if not re.search(rf"\b{re.escape(mode)}\b", readme_text):
-            report.error(
-                f"FIX_MODE mode \"{mode}\" is defined in {spec_path.name} but never "
-                f"mentioned in {readme_path.name}. Document it so the prose stays "
-                "complete."
-            )
-
-    # 4. Every prose count of the modes must equal the defined count.
-    expected = len(modes)
-    claims = find_count_claims(readme_text)
-    for value, snippet, line in claims:
-        if value != expected:
-            report.error(
-                f"{readme_path.name}:{line}: prose says \"{snippet}\" but "
-                f"{spec_path.name} defines {expected} FIX_MODE mode(s). "
-                "Update the count to match the spec."
+                f"{stem}.tla declares `ASSUME FIX_MODE \\in {{...}}` but the set is "
+                "empty. Add its modes (or remove the clause)."
             )
         else:
-            report.note(f"{readme_path.name}:{line}: count claim \"{snippet}\" == {expected} (ok)")
+            report.note(
+                f"{stem}.tla defines {len(specs[stem])} FIX_MODE mode(s): "
+                f"{', '.join(sorted(specs[stem]))}"
+            )
+
+    # Every `.tla` stem is a candidate owner -- not only FIX_MODE specs -- so a
+    # cfg that sets FIX_MODE while pairing with a non-FIX_MODE spec is reported
+    # precisely instead of being wrongly attributed to an unrelated spec.
+    tla_stems = {tla.stem for tla in cfg_dir.glob("*.tla")}
+
+    # 1. Every configured mode must be defined by the cfg's OWN spec.
+    exercised: dict[str, set[str]] = {stem: set() for stem in specs}
+    for cfg in sorted(cfg_dir.glob("*.cfg")):
+        modes = cfg_fix_modes(cfg)
+        if not modes:
+            continue
+        owner = spec_for_cfg(cfg.stem, tla_stems)
+        if owner is None:
+            report.error(
+                f"{cfg.name}: sets FIX_MODE but no spec .tla pairs with its name. "
+                "Name it <Spec>.cfg or <Spec>_<variant>.cfg so it pairs with its "
+                "spec."
+            )
+            continue
+        if owner not in specs:
+            report.error(
+                f"{cfg.name}: sets FIX_MODE but its spec {owner}.tla declares no "
+                "`ASSUME FIX_MODE \\in {...}` set. Add the set to the spec or "
+                "remove FIX_MODE from the config."
+            )
+            continue
+        for mode in sorted(modes):
+            if mode in specs[owner]:
+                exercised[owner].add(mode)
+            else:
+                report.error(
+                    f"{cfg.name}: FIX_MODE = \"{mode}\" is not in {owner}.tla's "
+                    f"ASSUME set {{{', '.join(sorted(specs[owner]))}}}. "
+                    "Add the mode to the spec or fix the config."
+                )
+
+    # 2. Every defined mode must be exercised by at least one of its spec's cfgs.
+    for stem in sorted(specs):
+        for mode in sorted(specs[stem] - exercised[stem]):
+            report.error(
+                f"FIX_MODE mode \"{mode}\" is defined in {stem}.tla but no "
+                f"{cfg_dir.name}/{stem}*.cfg sets it. Add a config that exercises "
+                "it (or remove it from the ASSUME set)."
+            )
+
+    # 3. Every defined mode (across all specs) must be named in the README prose.
+    mode_owner: dict[str, str] = {}
+    for stem in sorted(specs):
+        for mode in sorted(specs[stem]):
+            mode_owner.setdefault(mode, stem)
+    for mode in sorted(mode_owner):
+        if not re.search(rf"\b{re.escape(mode)}\b", readme_text):
+            report.error(
+                f"FIX_MODE mode \"{mode}\" is defined in {mode_owner[mode]}.tla but "
+                f"never mentioned in {readme_path.name}. Document it so the prose "
+                "stays complete."
+            )
+
+    # 4. Every prose count of the modes must equal SOME FIX_MODE spec's count.
+    # With more than one spec a bare "<N> FIX_MODE modes" is spec-agnostic (the
+    # checker deliberately reads no proximity to guess which spec a sentence is
+    # about), so a claim is accepted when it matches any spec and flagged only
+    # when it matches none. This still catches the stale-count drift this check
+    # targets. Accepted limitation: if two specs share a mode count, a claim
+    # stale for one is masked by the other -- rare, prose-only, and the safer
+    # trade than a fragile "which spec is this sentence about" heuristic.
+    counts = {stem: len(modes) for stem, modes in specs.items() if modes}
+    valid_counts = set(counts.values())
+    summary = ", ".join(f"{stem}={counts[stem]}" for stem in sorted(counts)) or "none"
+    for value, snippet, line in find_count_claims(readme_text):
+        if value in valid_counts:
+            report.note(
+                f"{readme_path.name}:{line}: count claim \"{snippet}\" matches a "
+                f"spec ({value}) (ok)"
+            )
+        else:
+            report.error(
+                f"{readme_path.name}:{line}: prose says \"{snippet}\" but no "
+                f"FIX_MODE spec defines that many modes ({summary}). "
+                "Update the count to match a spec."
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

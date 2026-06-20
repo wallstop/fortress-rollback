@@ -16,8 +16,8 @@ use crate::frame_info::PlayerInput;
 use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, Input, InputAck, Message, MessageBody, MessageHeader,
-    QualityReply, QualityReport, SyncReply, SyncRequest,
+    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
+    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -155,24 +155,77 @@ where
     peer_addr: T::Address,
     remote_magic: u16,
     peer_connect_status: Vec<ConnectionStatus>,
-    /// This endpoint's cache of the peer's per-slot **pessimistic confirmed
-    /// floor** (the double-failure-relay fix; see [`Input::pessimistic_floor`]).
-    /// Parallel to [`Self::peer_connect_status`] (index = player handle,
-    /// length `num_players`) and written in [`Self::merge_peer_connect_status`].
+
+    // ---- floor-round (double-failure-relay connected-relay reorder fix, S55) ----
+    // A relay reports its per-slot pessimistic floor (the `min` over its own
+    // receipt/freeze and every source it still folds, surfacing a departed
+    // global-min origin's low) through a sequence-numbered request/response round
+    // (`FloorRequest`/`FloorReply`) the observer re-issues periodically while in
+    // the relay topology — NOT via the `Input`-gossip cache an out-of-order
+    // packet could clobber stale-HIGH (verified-sound mode `AsyncAckSoundRoundSeq`
+    // in `specs/tla/DoubleFailureRelay.tla`).
+    /// This endpoint's cache of the peer's per-slot pessimistic floors as
+    /// reported in its latest ACCEPTED [`FloorReply`] — the **dedicated,
+    /// reorder-immune reply channel** (`roundFloor`). Parallel to
+    /// [`Self::peer_connect_status`] (index = handle, length `num_players`),
+    /// `Frame::NULL`-seeded. Written ONLY by [`Self::on_floor_reply`] for an
+    /// ACCEPTED reply — one whose `round_seq` is STRICTLY NEWER than the latest
+    /// accepted ([`Self::floor_reply_seq`]), does NOT exceed the latest request
+    /// issued ([`Self::floor_request_seq`]), and reports a floor for EVERY slot.
+    /// A reordered stale reply (older/equal `round_seq`), an unsolicited one
+    /// (`round_seq` beyond any issued request), or a short/incomplete `floors`
+    /// vector is dropped — which is what keeps this cache reorder-immune and
+    /// prevents a partial reply from leaving a slot reading a stale prior round.
+    /// An accepted reply (its length checked first) fully rewrites every slot.
+    round_floor: Vec<Frame>,
+    /// Monotonic per-request sequence number, bumped on every outgoing
+    /// [`FloorRequest`] ([`Self::send_floor_request`]) and stamped on it. Lets the
+    /// observer order this relay's replies and drop reordered stale ones (accept
+    /// only a strictly-newer `round_seq`) as well as unsolicited/forged ones (a
+    /// reply must not echo a `round_seq` beyond this latest issued request).
     ///
-    /// [`Self::merge_peer_connect_status`] OVERWRITES a slot with the latest
-    /// reported floor (in-flight snapshot semantics), but only when the packet
-    /// actually carries one: a packet whose `pessimistic_floor` is empty or
-    /// shorter than the slot index (a retransmit / flush / nudge, which
-    /// deliberately omit the floor to avoid clobbering the receiver's last
-    /// report) leaves the cached slot **UNCHANGED** — it keeps the value the
-    /// last fresh report delivered, rather than reverting to no-info. A slot is
-    /// therefore [`Frame::NULL`] only from the initializer (before the first
-    /// report) or because a report explicitly carried `Frame::NULL`. A
-    /// [`Frame::NULL`] slot means "no pessimistic report", and the session's
-    /// `remote_slot_confirmed_bound` fold falls back to that slot's `last_frame`
-    /// — the legacy (pre-fix) barrier value.
-    peer_pessimistic_floor: Vec<Frame>,
+    /// Wraps at [`u32::MAX`] (`wrapping_add`); past the wrap a low post-wrap seq
+    /// would fail the strictly-newer test against the high pre-wrap
+    /// [`Self::floor_reply_seq`] and stall this endpoint's round. Unreachable in
+    /// practice: the round only re-issues inside the relay topology, at most once
+    /// per keepalive interval, so a wrap needs ~2³² re-issues (years of continuous
+    /// post-drop traffic) — the same astronomically-rare framing as the protocol
+    /// packet-filter `magic` era counter and the connect-status `epoch`.
+    floor_request_seq: u32,
+    /// The `round_seq` of the latest ACCEPTED [`FloorReply`] (`0` = none yet).
+    /// `round_floor` always holds the floors of this reply.
+    floor_reply_seq: u32,
+    /// The [`Self::floor_request_seq`] value snapshotted at the most recent
+    /// prune ([`Self::reset_floor_freshness`]). A reply counts as **post-prune
+    /// fresh** only when `floor_reply_seq > floor_prune_seq` — i.e. it answers a
+    /// request issued AFTER the prune, so it captures the relay's SETTLED floor
+    /// (the spec's `ackFresh`, reset on every `Prune`). [`Self::floor_round_is_fresh`].
+    floor_prune_seq: u32,
+    /// Set every poll by [`Self::set_floor_request_needed`]: `true` when the
+    /// session is in the relay topology and this endpoint is a folded relay. While set,
+    /// `poll` (re)issues a [`FloorRequest`] on the keepalive cadence — issued
+    /// CONTINUOUSLY (not stopped once fresh) so the cached floor tracks the
+    /// relay's advancing pessimistic floor for live slots rather than freezing at
+    /// the first post-prune reply (which would pin live-slot confirmation in a
+    /// capped mesh).
+    floor_request_needed: bool,
+    /// Last time a [`FloorRequest`] was sent; gates re-issue on the keepalive
+    /// cadence (a dedicated timer so quality reports / keepalives do not starve
+    /// it).
+    last_floor_request_time: Instant,
+    /// A received [`FloorRequest`]'s `round_seq`, recorded by
+    /// [`Self::on_floor_request`] and drained by the session (which computes
+    /// `pessimistic_floors` and answers via [`Self::send_floor_reply`]).
+    /// Highest-seq-wins: a newer request supersedes an undrained older one
+    /// regardless of arrival order, so a reordered stale `FloorRequest` cannot
+    /// clobber a higher pending one.
+    pending_floor_request: Option<u32>,
+    /// Whether this endpoint was [`is_running`](Self::is_running) at the previous
+    /// [`detect_prune_transition`](Self::detect_prune_transition) poll. The
+    /// session reads a `true → false` flip as a prune (running→pruned) and resets
+    /// every endpoint's floor freshness. Seeded `false` (endpoints start
+    /// non-running).
+    floor_round_was_running: bool,
 
     // input compression
     pending_output: VecDeque<InputBytes>,
@@ -427,7 +480,6 @@ pub fn fuzz_protocol_input_packet(
         start_frame: Frame::new(start_frame),
         ack_frame: Frame::new(ack_frame),
         bytes: packet_bytes,
-        pessimistic_floor: Vec::new(),
     };
     protocol.on_input(&body);
 
@@ -612,15 +664,17 @@ impl<T: Config> UdpProtocol<T> {
             peer_connect_status.push(ConnectionStatus::default());
         }
 
-        // peer pessimistic confirmed floors (double-failure-relay fix), parallel
-        // to `peer_connect_status`. Seeded to `Frame::NULL` ("no report yet"),
-        // which the session fold reads as "fall back to last_frame".
-        let mut peer_pessimistic_floor = Vec::new();
-        peer_pessimistic_floor
+        // floor-round reply cache (double-failure-relay connected-relay reorder
+        // fix), parallel to `peer_connect_status`. Seeded to `Frame::NULL` ("no
+        // reply yet"), which the session fold reads as "no floor known"; the
+        // hold keeps confirmation at the current confirmed frame until a fresh
+        // reply lands.
+        let mut round_floor = Vec::new();
+        round_floor
             .try_reserve_exact(num_players)
-            .map_err(|_err| allocation_failed("protocol.peer_pessimistic_floor", num_players))?;
+            .map_err(|_err| allocation_failed("protocol.round_floor", num_players))?;
         for _ in 0..num_players {
-            peer_pessimistic_floor.push(Frame::NULL);
+            round_floor.push(Frame::NULL);
         }
 
         // received input history - may fail if serialization is broken
@@ -675,7 +729,16 @@ impl<T: Config> UdpProtocol<T> {
             peer_addr,
             remote_magic: 0,
             peer_connect_status,
-            peer_pessimistic_floor,
+
+            // floor-round (double-failure-relay connected-relay reorder fix)
+            round_floor,
+            floor_request_seq: 0,
+            floor_reply_seq: 0,
+            floor_prune_seq: 0,
+            floor_request_needed: false,
+            last_floor_request_time: now,
+            pending_floor_request: None,
+            floor_round_was_running: false,
 
             // input compression
             pending_output: VecDeque::new(),
@@ -877,21 +940,31 @@ impl<T: Config> UdpProtocol<T> {
         }
     }
 
-    /// Test-only companion to [`set_peer_connect_status_for_tests`] for the
-    /// per-slot **pessimistic confirmed floor** cache (double-failure-relay fix).
-    /// In production this cache is written only by `merge_peer_connect_status`
-    /// from a received `Input`'s `pessimistic_floor`; this lets session-level
-    /// tests pin a known relay floor without replaying a packet exchange.
-    /// Out-of-range handles are ignored.
+    /// Test-only: seeds this endpoint's [`round_floor`](Self::round_floor) reply
+    /// cache for a slot AND marks the round **post-prune fresh** (a reply seq
+    /// strictly above the prune threshold), as if a fresh post-prune `FloorReply`
+    /// had been accepted. Lets session-level tests pin a known post-prune round
+    /// outcome without driving a request/response exchange. Out-of-range handles
+    /// ignored.
+    ///
+    /// Keeps the request seq consistent: a reply can only be accepted for a
+    /// request actually issued, so `floor_request_seq` is bumped to at least the
+    /// new `floor_reply_seq`. Without this the helper would leave the impossible
+    /// `floor_reply_seq > floor_request_seq` state, which POISONS the endpoint —
+    /// every subsequent real [`on_floor_reply`](Self::on_floor_reply) is dropped
+    /// because the solicitation guard becomes unsatisfiable (a valid reply seq
+    /// must be both `> floor_reply_seq` and `<= floor_request_seq`).
     #[cfg(test)]
-    pub(crate) fn set_peer_pessimistic_floor_for_tests(
-        &mut self,
-        handle: PlayerHandle,
-        floor: Frame,
-    ) {
-        if let Some(slot) = self.peer_pessimistic_floor.get_mut(handle.as_usize()) {
+    pub(crate) fn set_round_floor_for_tests(&mut self, handle: PlayerHandle, floor: Frame) {
+        if let Some(slot) = self.round_floor.get_mut(handle.as_usize()) {
             *slot = floor;
         }
+        // Mark fresh: a reply seq strictly above the prune threshold.
+        self.floor_reply_seq = self.floor_prune_seq.wrapping_add(1);
+        // A reply is only accepted for an issued request, so keep the request
+        // seq at least as high as the accepted reply seq (no poisoned endpoint).
+        self.floor_request_seq = self.floor_request_seq.max(self.floor_reply_seq);
+        self.debug_assert_floor_round_invariants();
     }
 
     /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
@@ -911,20 +984,6 @@ impl<T: Config> UdpProtocol<T> {
             .get(handle.as_usize())
             .copied()
             .unwrap_or_default()
-    }
-
-    /// This endpoint's cached view of the peer's **pessimistic confirmed floor**
-    /// for `handle` (the double-failure-relay fix; see
-    /// [`Input::pessimistic_floor`] and [`Self::peer_pessimistic_floor`]). Returns
-    /// [`Frame::NULL`] when the peer has not reported one (an out-of-range handle,
-    /// a default cache, or a packet whose `pessimistic_floor` was empty / the
-    /// wrong length); the session fold reads `NULL` as "fall back to
-    /// `last_frame`".
-    pub(crate) fn peer_pessimistic_floor(&self, handle: PlayerHandle) -> Frame {
-        self.peer_pessimistic_floor
-            .get(handle.as_usize())
-            .copied()
-            .unwrap_or(Frame::NULL)
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -1086,9 +1145,7 @@ impl<T: Config> UdpProtocol<T> {
                 // receiving NEW inputs (progress-free duplicates and connect-status
                 // nudges do not refresh the pacer — see the gate in `on_input`)
                 if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
-                    // Retransmit path: empty `pessimistic_floor` (no receiver
-                    // cache clobber — the floor rides fresh `send_input`s).
-                    self.send_pending_output(connect_status, &[]);
+                    self.send_pending_output(connect_status);
                     self.running_last_input_recv = now;
                 }
 
@@ -1122,6 +1179,23 @@ impl<T: Config> UdpProtocol<T> {
                     && self.send_connect_status_nudge(connect_status)
                 {
                     self.last_nudge_time = now;
+                }
+
+                // Floor-round request (double-failure-relay connected-relay
+                // reorder fix): while the session marks this endpoint a folded
+                // relay (`floor_request_needed`, set by `set_floor_request_needed`),
+                // re-issue a sequence-numbered `FloorRequest` on the keepalive
+                // cadence. Issued CONTINUOUSLY (not stopped once a reply lands) so
+                // the cached floor tracks the relay's advancing pessimistic floor
+                // for live slots — freezing it at the first post-prune reply would
+                // pin live-slot confirmation at the stale value in a capped mesh.
+                // A dedicated timer keeps quality reports / keepalives from
+                // starving it.
+                if self.floor_request_needed
+                    && self.last_floor_request_time + self.sync_config.keepalive_interval < now
+                {
+                    self.send_floor_request();
+                    self.last_floor_request_time = now;
                 }
 
                 // periodically send a quality report
@@ -1264,7 +1338,6 @@ impl<T: Config> UdpProtocol<T> {
         &mut self,
         inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
         connect_status: &[ConnectionStatus],
-        pessimistic_floor: &[Frame],
     ) {
         if self.state != ProtocolState::Running {
             return;
@@ -1303,7 +1376,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.pending_output.push_back(endpoint_data);
 
-        self.send_pending_output(connect_status, pessimistic_floor);
+        self.send_pending_output(connect_status);
     }
 
     /// Pushes a replicated input frame onto `pending_output` without advancing
@@ -1418,8 +1491,7 @@ impl<T: Config> UdpProtocol<T> {
         if self.state != ProtocolState::Running {
             return;
         }
-        // Flush path: empty `pessimistic_floor` (no receiver cache clobber).
-        self.send_pending_output(connect_status, &[]);
+        self.send_pending_output(connect_status);
     }
 
     fn pending_output_batch_len_with_cap(&self, decoded_byte_cap: usize) -> Option<usize> {
@@ -1431,21 +1503,10 @@ impl<T: Config> UdpProtocol<T> {
         )
     }
 
-    /// Re-sends the pending-output batch. `pessimistic_floor` carries this
-    /// peer's per-slot pessimistic confirmed floors (double-failure-relay fix)
-    /// when the caller is the fresh-input path ([`Self::send_input`]); the
-    /// retransmit/flush/nudge paths pass an empty slice, which leaves the body's
-    /// `pessimistic_floor` empty so the receiver's
-    /// [`Self::peer_pessimistic_floor`] cache retains its last reported value
-    /// (the merge only updates a slot it receives a value for — no clobber).
-    fn send_pending_output(
-        &mut self,
-        connect_status: &[ConnectionStatus],
-        pessimistic_floor: &[Frame],
-    ) {
+    /// Re-sends the pending-output batch.
+    fn send_pending_output(&mut self, connect_status: &[ConnectionStatus]) {
         self.send_pending_output_with_decoded_byte_cap(
             connect_status,
-            pessimistic_floor,
             rle::DEFAULT_MAX_DECODED_LEN,
         );
     }
@@ -1453,7 +1514,6 @@ impl<T: Config> UdpProtocol<T> {
     fn send_pending_output_with_decoded_byte_cap(
         &mut self,
         connect_status: &[ConnectionStatus],
-        pessimistic_floor: &[Frame],
         decoded_byte_cap: usize,
     ) {
         let mut body = Input::default();
@@ -1538,12 +1598,6 @@ impl<T: Config> UdpProtocol<T> {
             body.ack_frame = self.last_recv_frame();
             body.disconnect_requested = self.state == ProtocolState::Disconnected;
             connect_status.clone_into(&mut body.peer_connect_status);
-            // Per-slot pessimistic confirmed floors (double-failure-relay fix).
-            // Empty on the retransmit/flush/nudge paths (no cache clobber on the
-            // receiver); otherwise the session's per-slot pessimistic queue-min,
-            // computed in `P2PSession::pessimistic_floors` (the canonical fold:
-            // min over the own receipt and non-NULL folded peers' `last_frame`).
-            pessimistic_floor.clone_into(&mut body.pessimistic_floor);
 
             self.queue_message(MessageBody::Input(body));
             // Real input traffic went out: the connect-status nudge (an
@@ -1673,12 +1727,6 @@ impl<T: Config> UdpProtocol<T> {
             start_frame: self.last_acked_input.frame,
             ack_frame: self.last_recv_frame(),
             bytes,
-            // The connect-status nudge intentionally carries NO pessimistic-floor
-            // gossip (double-failure-relay fix): the floor rides fresh
-            // `send_input` packets, and an empty vector leaves each receiver's
-            // `peer_pessimistic_floor` cache at its last reported value (no
-            // clobber). Input-idle floor propagation is a tracked follow-up.
-            pessimistic_floor: Vec::new(),
         };
         connect_status.clone_into(&mut body.peer_connect_status);
         self.queue_message(MessageBody::Input(body));
@@ -1816,6 +1864,8 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::QualityReport(body) => self.on_quality_report(body),
             MessageBody::QualityReply(body) => self.on_quality_reply(body),
             MessageBody::ChecksumReport(body) => self.on_checksum_report(body),
+            MessageBody::FloorRequest(body) => self.on_floor_request(body),
+            MessageBody::FloorReply(body) => self.on_floor_reply(body),
             MessageBody::KeepAlive => (),
             #[cfg(feature = "hot-join")]
             MessageBody::JoinRequest(body) => self.on_join_request(body),
@@ -1971,48 +2021,6 @@ impl<T: Config> UdpProtocol<T> {
             } else {
                 // Both connected: monotone forward progress.
                 local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
-            }
-        }
-
-        // Cache the peer's per-slot pessimistic confirmed floor (double-failure
-        // -relay fix), parallel to the connect-status merge above. Separate loop
-        // so `peer_pessimistic_floor` (mut) and `peer_connect_status` /
-        // `reactivation_floor` (read) are disjoint field borrows. We OVERWRITE
-        // with the latest reported floor rather than `min`/`max`-merging: it is
-        // an in-flight SNAPSHOT of the peer's current pessimism (the
-        // `AsyncAckSound` `ackFloor` semantics). In the WARM-cache scope this
-        // chunk targets — every relay has already folded the global-min origin's
-        // low before any drop, and connected receipts only rise — a pessimistic
-        // floor is monotone-non-decreasing, so a reordered packet carries a
-        // stale-LOW value (transiently conservative, self-heals on the next
-        // in-order packet). The OUT-OF-SCOPE corner (honestly tracked, NOT closed
-        // here): in a cold-gossip-cache / mid-game-drop world a relay can report
-        // high-then-low for the same slot, so a reordered stale-HIGH floor could
-        // overwrite a fresh low and re-open the residual — that facet needs the
-        // S46 `ConnectionStatus.epoch` as a freshness gate on this overwrite (the
-        // chunk-2 follow-up; see `N-PLAYER-DESYNC-AUDIT.md` and
-        // `specs/tla/DoubleFailureRelay.tla`'s `AsyncAckSoundFresh`/cold-cache
-        // results). We skip the SAME stale DISCONNECTED claims the reactivation
-        // floor rejects (so a stale relay's floor cannot re-stick a reactivated
-        // slot). A missing entry (empty / wrong-length `pessimistic_floor`)
-        // leaves the cache untouched — the fold falls back to `last_frame`.
-        for (slot, cached) in self.peer_pessimistic_floor.iter_mut().enumerate() {
-            let Some(remote) = body.peer_connect_status.get(slot) else {
-                break;
-            };
-            #[cfg(feature = "hot-join")]
-            if remote.disconnected
-                && self
-                    .reactivation_floor
-                    .get(slot)
-                    .is_some_and(|floor| !floor.is_null() && remote.last_frame < *floor)
-            {
-                continue;
-            }
-            #[cfg(not(feature = "hot-join"))]
-            let _ = remote;
-            if let Some(&floor) = body.pessimistic_floor.get(slot) {
-                *cached = floor;
             }
         }
     }
@@ -2275,6 +2283,217 @@ impl<T: Config> UdpProtocol<T> {
         // may have drifted between the ping and pong (e.g., NTP adjustments).
         // A 0 RTT is harmless - it will be corrected on the next quality report.
         self.round_trip_time = millis.saturating_sub(body.pong);
+    }
+
+    // ---- floor-round (double-failure-relay connected-relay reorder fix) ----
+
+    /// Pushed by the session every poll: `request_needed` is `true` when this
+    /// endpoint is a folded relay in the relay topology (so `poll` keeps
+    /// re-issuing `FloorRequest`s on the keepalive cadence). Allocation-free.
+    pub(crate) fn set_floor_request_needed(&mut self, request_needed: bool) {
+        self.floor_request_needed = request_needed;
+    }
+
+    /// Records this endpoint's current [`is_running`](Self::is_running) state and
+    /// returns `true` iff it just transitioned running→pruned since the last
+    /// call — the running→pruned **prune** the session counts to reset every
+    /// endpoint's floor freshness ([`Self::reset_floor_freshness`]). Centralizing
+    /// detection here (rather than at every `disconnect()` call site) catches
+    /// every prune, including disconnect timeouts. Called once per endpoint per
+    /// `poll_remote_clients`.
+    pub(crate) fn detect_prune_transition(&mut self) -> bool {
+        let running = self.is_running();
+        let pruned = self.floor_round_was_running && !running;
+        self.floor_round_was_running = running;
+        pruned
+    }
+
+    /// Bumps the monotonic per-request sequence number and queues a
+    /// [`FloorRequest`] stamped with it.
+    fn send_floor_request(&mut self) {
+        self.floor_request_seq = self.floor_request_seq.wrapping_add(1);
+        self.queue_message(MessageBody::FloorRequest(FloorRequest {
+            round_seq: self.floor_request_seq,
+        }));
+        self.debug_assert_floor_round_invariants();
+    }
+
+    /// On receiving a [`FloorRequest`] (we are a relay for the requester): record
+    /// the request's `round_seq` for the session to answer (it computes
+    /// `pessimistic_floors` and replies via [`Self::send_floor_reply`]).
+    ///
+    /// Highest-seq-wins — a newer request supersedes an undrained older one,
+    /// regardless of arrival order. Under packet reorder an OLDER `round_seq`
+    /// must NOT clobber a higher undrained pending one (which would answer the
+    /// stale round and skip the newer one), so the incoming seq is stored only
+    /// when it is strictly greater than the currently-pending one (or none is
+    /// pending yet).
+    fn on_floor_request(&mut self, body: &FloorRequest) {
+        if self
+            .pending_floor_request
+            .is_none_or(|pending| body.round_seq > pending)
+        {
+            self.pending_floor_request = Some(body.round_seq);
+        }
+    }
+
+    /// Whether a [`FloorRequest`] is awaiting a reply (peek without draining).
+    pub(crate) fn has_pending_floor_request(&self) -> bool {
+        self.pending_floor_request.is_some()
+    }
+
+    /// Drains a pending [`FloorRequest`]'s `round_seq` for the session to answer.
+    pub(crate) fn take_pending_floor_request(&mut self) -> Option<u32> {
+        self.pending_floor_request.take()
+    }
+
+    /// Queues a [`FloorReply`] echoing `round_seq` and carrying the session's
+    /// current per-slot pessimistic `floors`.
+    pub(crate) fn send_floor_reply(&mut self, round_seq: u32, floors: &[Frame]) {
+        self.queue_message(MessageBody::FloorReply(FloorReply {
+            round_seq,
+            floors: floors.to_vec(),
+        }));
+    }
+
+    /// On receiving a [`FloorReply`], accept it ONLY when all three guards pass;
+    /// any failure DROPS the reply, leaving every floor-round field untouched
+    /// (the conservative `slot_round_incomplete` hold then keeps capping the
+    /// slot — never advancing on an unvalidated relay floor):
+    ///
+    /// 1. **Reorder/duplicate.** Its echoed `round_seq` must be STRICTLY NEWER
+    ///    than the latest accepted ([`Self::floor_reply_seq`]). An older/equal
+    ///    seq is a reordered stale (or duplicate) reply — dropping it is what
+    ///    makes [`Self::round_floor`] reorder-immune (a plain `Input`-gossip
+    ///    floor cache could not survive a reordered stale-HIGH packet).
+    /// 2. **Solicitation.** Its `round_seq` must NOT exceed the latest request
+    ///    this endpoint actually issued ([`Self::floor_request_seq`]). A reply
+    ///    echoing a never-issued seq is forged or corrupt; accepting it would
+    ///    advance `floor_reply_seq` past every legitimate future reply (a
+    ///    permanent round stall) and spuriously flip
+    ///    [`Self::floor_round_is_fresh`] — handing peer-controlled state into the
+    ///    floor cache (mirrors the request-tracking gate in
+    ///    [`Self::on_sync_reply`]).
+    /// 3. **Completeness.** Its `floors` must cover EVERY slot
+    ///    (`len >= num_players`). Accepting a reply RELEASES the
+    ///    `slot_round_incomplete` hold for this relay, so a short vector would
+    ///    leave the omitted slots reading a stale prior round while the hold is
+    ///    down — re-opening the connected-relay over-confirmation the round
+    ///    exists to prevent. The honest relay always reports every slot
+    ///    (`P2PSession::pessimistic_floors` is `num_players` long), so this
+    ///    rejects only malformed replies.
+    ///
+    /// An accepted reply OVERWRITES the reply cache with the relay's reported
+    /// floors (the spec's `roundFloor' = AckReportFloor`) — every slot, since the
+    /// length is checked first, so no slot survives from a prior round — and
+    /// advances `floor_reply_seq`. Whether it counts as POST-PRUNE fresh
+    /// ([`Self::floor_round_is_fresh`]) then depends on whether its seq exceeds
+    /// the prune threshold ([`Self::floor_prune_seq`]). Excess entries beyond
+    /// `num_players` are ignored; a reported `Frame::NULL` slot makes the session
+    /// fold fall back to `last_frame`.
+    fn on_floor_reply(&mut self, body: &FloorReply) {
+        if body.round_seq <= self.floor_reply_seq {
+            trace!(
+                "Dropping stale/duplicate FloorReply round_seq {} (latest accepted {})",
+                body.round_seq,
+                self.floor_reply_seq
+            );
+            return;
+        }
+        if body.round_seq > self.floor_request_seq {
+            trace!(
+                "Dropping unsolicited FloorReply round_seq {} (latest request {})",
+                body.round_seq,
+                self.floor_request_seq
+            );
+            return;
+        }
+        if body.floors.len() < self.round_floor.len() {
+            trace!(
+                "Dropping incomplete FloorReply: {} floors for {} slots",
+                body.floors.len(),
+                self.round_floor.len()
+            );
+            return;
+        }
+        for (slot, cached) in self.round_floor.iter_mut().enumerate() {
+            if let Some(&floor) = body.floors.get(slot) {
+                *cached = floor;
+            }
+        }
+        self.floor_reply_seq = body.round_seq;
+        self.debug_assert_floor_round_invariants();
+    }
+
+    /// This endpoint's cached per-slot pessimistic floor from its latest accepted
+    /// [`FloorReply`] (`Frame::NULL` if none for the slot — the session fold
+    /// then falls back to `last_frame`).
+    pub(crate) fn round_floor(&self, handle: PlayerHandle) -> Frame {
+        self.round_floor
+            .get(handle.as_usize())
+            .copied()
+            .unwrap_or(Frame::NULL)
+    }
+
+    /// `true` when this endpoint has accepted a [`FloorReply`] that POSTDATES the
+    /// most recent prune (`floor_reply_seq > floor_prune_seq`) — i.e. a fresh
+    /// post-prune round has completed and [`Self::round_floor`] may be trusted.
+    /// A never-replied relay (`floor_reply_seq == 0`, `floor_prune_seq == 0`) is
+    /// never fresh, so its slot holds.
+    pub(crate) fn floor_round_is_fresh(&self) -> bool {
+        self.floor_reply_seq > self.floor_prune_seq
+    }
+
+    /// Resets this endpoint's floor freshness on a prune: snapshots the current
+    /// request sequence as the threshold, so only a reply to a request issued
+    /// AFTER this prune counts as fresh again (the spec's `ackFresh` reset). The
+    /// session calls this on EVERY endpoint whenever ANY remote is pruned.
+    pub(crate) fn reset_floor_freshness(&mut self) {
+        self.floor_prune_seq = self.floor_request_seq;
+        self.debug_assert_floor_round_invariants();
+    }
+
+    /// Debug-only floor-round state invariants, asserted at the end of every
+    /// method that mutates floor-round state. Follows the same
+    /// `debug_assert!`-gated invariant-check convention as
+    /// [`SyncLayer`](crate::__internal::SyncLayer) (which wraps a fallible
+    /// `check_invariants`; these relations are simple enough to assert inline).
+    /// The relations:
+    ///
+    /// 1. `floor_reply_seq <= floor_request_seq` — a reply is only accepted for a
+    ///    request actually issued, so the latest accepted reply seq can never
+    ///    exceed the latest request seq.
+    /// 2. `floor_prune_seq <= floor_request_seq` — a prune snapshots the current
+    ///    request seq ([`Self::reset_floor_freshness`]), so the threshold can
+    ///    never exceed the latest request seq.
+    /// 3. `round_floor.len() == peer_connect_status.len()` — both are seeded to
+    ///    `num_players` at construction and neither is ever resized, so the
+    ///    per-slot floor cache must stay parallel to the connect-status cache.
+    ///
+    /// The body compiles out entirely in release builds (the `debug_assert!`s
+    /// vanish), so the unconditional callers leave an empty call that optimizes
+    /// away — no dead-code or unused-method warning in any build mode. The
+    /// release-with-debug-assertions CI gate still exercises it.
+    fn debug_assert_floor_round_invariants(&self) {
+        debug_assert!(
+            self.floor_reply_seq <= self.floor_request_seq,
+            "floor invariant: reply seq {} must not exceed request seq {}",
+            self.floor_reply_seq,
+            self.floor_request_seq
+        );
+        debug_assert!(
+            self.floor_prune_seq <= self.floor_request_seq,
+            "floor invariant: prune seq {} must not exceed request seq {}",
+            self.floor_prune_seq,
+            self.floor_request_seq
+        );
+        debug_assert_eq!(
+            self.round_floor.len(),
+            self.peer_connect_status.len(),
+            "floor invariant: round_floor length {} must match peer_connect_status length {}",
+            self.round_floor.len(),
+            self.peer_connect_status.len()
+        );
     }
 
     /// Upon receiving a `ChecksumReport`, add it to the checksum history
@@ -3145,7 +3364,6 @@ mod tests {
                     start_frame: Frame::new(0),
                     ack_frame: Frame::new(0),
                     bytes: vec![1, 2, 3],
-                    pessimistic_floor: Vec::new(),
                 }),
             },
             Message {
@@ -3348,7 +3566,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         });
 
         assert!(protocol.recv_inputs.contains_key(&Frame::new(0)));
@@ -3388,7 +3605,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: true,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         });
 
         let events: Vec<_> = protocol.event_queue.drain(..).collect();
@@ -3433,7 +3649,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         });
         protocol.event_queue.clear();
         protocol
@@ -3469,7 +3684,6 @@ mod tests {
                     epoch: 0,
                 },
             ],
-            pessimistic_floor: Vec::new(),
         });
     }
 
@@ -3750,6 +3964,439 @@ mod tests {
         crate::network::compression::encode(reference_bytes, std::iter::once(&test_bytes))
     }
 
+    // ---- floor-round (double-failure-relay connected-relay reorder fix) ----
+
+    /// FLOOR-ROUND acceptance: a `FloorReply` whose `round_seq` is strictly newer
+    /// than the latest accepted lands in the reorder-immune `round_floor` cache.
+    /// After a prune, a reply must POSTDATE the prune threshold to count as fresh.
+    #[test]
+    fn on_floor_reply_newer_seq_is_accepted_and_postdates_prune_to_be_fresh() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+        assert!(
+            !protocol.floor_round_is_fresh(),
+            "no reply yet -> not fresh"
+        );
+        assert_eq!(protocol.round_floor(slot2), Frame::NULL);
+
+        // The observer issues a request (seq 1), then a prune snapshots the
+        // threshold at 1 — a reply to request 1 is now PRE-prune (not fresh).
+        protocol.send_floor_request(); // floor_request_seq = 1
+        protocol.reset_floor_freshness(); // floor_prune_seq = 1
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(9)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(9),
+            "the reply's floors are cached (latest-wins)"
+        );
+        assert!(
+            !protocol.floor_round_is_fresh(),
+            "a reply to a PRE-prune request (seq == threshold) is not post-prune fresh"
+        );
+
+        // The observer re-issues post-prune (seq 2); its reply IS fresh.
+        protocol.send_floor_request(); // floor_request_seq = 2
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert!(
+            protocol.floor_round_is_fresh(),
+            "a reply to a POST-prune request (seq > threshold) marks the round fresh"
+        );
+        assert_eq!(protocol.round_floor(slot2), Frame::new(4));
+    }
+
+    /// FLOOR-ROUND reorder rejection: a `FloorReply` whose `round_seq` is older
+    /// than (or equal to) the latest accepted is DROPPED — it neither overwrites
+    /// `round_floor` nor regresses the reply seq. This is what makes the reply
+    /// channel reorder-immune (the stale-first race the gossip cache could not
+    /// survive).
+    #[test]
+    fn on_floor_reply_stale_or_duplicate_seq_is_dropped() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Issue five requests so replies up to seq 5 are solicited.
+        for _ in 0..5 {
+            protocol.send_floor_request();
+        }
+
+        // A fresh-LOW reply at seq 5 lands first (floor 4).
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 5,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert_eq!(protocol.round_floor(slot2), Frame::new(4));
+
+        // A REORDERED stale-HIGH reply at an OLDER seq (3) must be dropped.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 3,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(99)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "an older-seq reply must NOT overwrite the round cache (reorder-immune)"
+        );
+        // A DUPLICATE at the same seq (5) is also dropped (no re-clobber).
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 5,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(77)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "a duplicate-seq reply must NOT overwrite the round cache"
+        );
+    }
+
+    /// FLOOR-ROUND solicitation guard: a `FloorReply` echoing a `round_seq` the
+    /// observer never issued (beyond `floor_request_seq`) is DROPPED. Without the
+    /// guard a forged/corrupt high seq would advance `floor_reply_seq` past every
+    /// legitimate future reply (a permanent round stall) AND spuriously flip the
+    /// round fresh — handing peer-controlled state into the floor cache.
+    #[test]
+    fn on_floor_reply_unsolicited_seq_is_dropped() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // The observer has issued exactly one request (seq 1).
+        protocol.send_floor_request(); // floor_request_seq = 1
+
+        // A reply echoing a never-issued seq (2 > 1) is forged/corrupt: drop it.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(9)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::NULL,
+            "an unsolicited reply must NOT write the floor cache"
+        );
+        assert!(
+            !protocol.floor_round_is_fresh(),
+            "an unsolicited reply must NOT advance the reply seq / flip freshness"
+        );
+
+        // A legitimate reply to the request we DID issue (seq 1) still lands,
+        // proving the unsolicited reply did not poison `floor_reply_seq`.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "the solicited reply lands after the unsolicited one was dropped"
+        );
+    }
+
+    /// FLOOR-ROUND completeness guard: a `FloorReply` whose `floors` omits a slot
+    /// is DROPPED whole. Accepting it would RELEASE the `slot_round_incomplete`
+    /// hold (flip the round fresh) while the omitted slot kept reading a stale
+    /// prior round — re-opening the connected-relay over-confirmation the round
+    /// exists to prevent. A short reply must leave the cache and seq untouched.
+    #[test]
+    fn on_floor_reply_incomplete_floors_is_dropped() {
+        let mut protocol = running_protocol_three_slots();
+        let slot1 = PlayerHandle::new(1);
+        let slot2 = PlayerHandle::new(2);
+
+        // A complete reply (seq 1) seeds the cache for every slot.
+        protocol.send_floor_request(); // floor_request_seq = 1
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(7), Frame::new(9)],
+        });
+        assert_eq!(protocol.round_floor(slot1), Frame::new(7));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(9));
+        let seq_before = protocol.floor_reply_seq;
+
+        // A newer, solicited, but SHORT reply (only 2 of 3 slots) is malformed.
+        protocol.send_floor_request(); // floor_request_seq = 2
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(1), Frame::new(2)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot1),
+            Frame::new(7),
+            "a short reply must NOT partially overwrite the cache"
+        );
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(9),
+            "the omitted slot must NOT be left reading a stale prior round"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, seq_before,
+            "a short reply must NOT advance the reply seq (no spurious freshness)"
+        );
+
+        // A complete reply at the same newer seq is accepted in full.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(1), Frame::new(2), Frame::new(3)],
+        });
+        assert_eq!(protocol.round_floor(slot1), Frame::new(2));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(3));
+    }
+
+    /// FLOOR-ROUND excess-entries tolerance: a complete-but-LONGER `floors` vector
+    /// (more entries than slots) is ACCEPTED, with only the first `num_players`
+    /// consumed and trailing entries ignored — the documented contract that keeps
+    /// the guard lenient on benign trailing data while strict on missing coverage.
+    #[test]
+    fn on_floor_reply_excess_floors_are_accepted_and_trailing_ignored() {
+        let mut protocol = running_protocol_three_slots();
+        let slot0 = PlayerHandle::new(0);
+        let slot1 = PlayerHandle::new(1);
+        let slot2 = PlayerHandle::new(2);
+
+        protocol.send_floor_request(); // floor_request_seq = 1
+                                       // Four entries for a three-slot protocol: the fourth is trailing junk.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(1), Frame::new(2), Frame::new(3), Frame::new(999)],
+        });
+        assert_eq!(protocol.round_floor(slot0), Frame::new(1));
+        assert_eq!(protocol.round_floor(slot1), Frame::new(2));
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(3),
+            "the trailing fourth entry must be ignored, not consumed into a slot"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, 1,
+            "an excess-but-complete reply is accepted (advances the reply seq)"
+        );
+    }
+
+    /// FLOOR-ROUND request/reply plumbing: a received `FloorRequest` is recorded
+    /// (peek + drain), and answering with `send_floor_reply` queues a `FloorReply`
+    /// echoing the request's `round_seq` with the supplied floors.
+    #[test]
+    fn floor_request_is_recorded_and_answered_with_echoed_seq() {
+        let mut protocol = running_protocol_three_slots();
+        assert!(!protocol.has_pending_floor_request());
+
+        protocol.on_floor_request(&FloorRequest { round_seq: 7 });
+        assert!(protocol.has_pending_floor_request());
+        assert_eq!(protocol.take_pending_floor_request(), Some(7));
+        assert!(
+            !protocol.has_pending_floor_request(),
+            "draining clears the pending request"
+        );
+
+        protocol.send_queue.clear();
+        protocol.send_floor_reply(7, &[Frame::new(0), Frame::new(0), Frame::new(4)]);
+        let queued = protocol
+            .send_queue
+            .iter()
+            .find_map(|msg| match &msg.body {
+                MessageBody::FloorReply(reply) => Some(reply.clone()),
+                _ => None,
+            })
+            .expect("a FloorReply must be queued");
+        assert_eq!(
+            queued.round_seq, 7,
+            "the reply echoes the request's round_seq"
+        );
+        assert_eq!(
+            queued.floors,
+            vec![Frame::new(0), Frame::new(0), Frame::new(4)]
+        );
+    }
+
+    /// FLOOR-ROUND highest-seq-wins: a reordered OLDER `FloorRequest` must NOT
+    /// clobber a higher undrained pending one (answering the stale round and
+    /// skipping the newer one), a newer seq DOES supersede an older pending one,
+    /// and a request into an empty pending slot is stored. Highest-seq-wins is
+    /// independent of arrival order.
+    #[test]
+    fn on_floor_request_older_round_seq_does_not_clobber_newer_pending() {
+        let mut protocol = running_protocol_three_slots();
+        assert!(!protocol.has_pending_floor_request());
+
+        // A request into an EMPTY pending slot is stored.
+        protocol.on_floor_request(&FloorRequest { round_seq: 5 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "a request into an empty pending slot is stored"
+        );
+
+        // A REORDERED older seq (3 < 5) must NOT clobber the higher pending one.
+        protocol.on_floor_request(&FloorRequest { round_seq: 3 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "an older-seq request must NOT clobber a higher undrained pending one"
+        );
+
+        // An EQUAL seq is also not newer, so it leaves the pending one untouched.
+        protocol.on_floor_request(&FloorRequest { round_seq: 5 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "an equal-seq request must NOT re-clobber the pending one"
+        );
+
+        // A strictly NEWER seq (8 > 5) DOES supersede the older pending one.
+        protocol.on_floor_request(&FloorRequest { round_seq: 8 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(8),
+            "a newer-seq request supersedes an undrained older pending one"
+        );
+    }
+
+    /// FLOOR-ROUND test-helper consistency: `set_round_floor_for_tests` must
+    /// leave the request seq consistent with the marked-fresh reply seq (it
+    /// bumps `floor_request_seq` to at least `floor_reply_seq`), so the endpoint
+    /// is NOT poisoned — a SUBSEQUENT real `on_floor_reply` to a freshly-issued
+    /// request can still be accepted. Before the fix the helper set
+    /// `floor_reply_seq = 1` while leaving `floor_request_seq = 0`, making the
+    /// solicitation guard (`> floor_reply_seq` AND `<= floor_request_seq`)
+    /// permanently unsatisfiable.
+    #[test]
+    fn set_round_floor_for_tests_leaves_request_seq_consistent_for_later_reply() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Seed a known post-prune-fresh round via the helper.
+        protocol.set_round_floor_for_tests(slot2, Frame::new(9));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(9));
+        assert!(
+            protocol.floor_round_is_fresh(),
+            "the helper marks the round post-prune fresh"
+        );
+        // The headline post-condition: request seq is not left below reply seq.
+        assert!(
+            protocol.floor_reply_seq <= protocol.floor_request_seq,
+            "helper must not leave reply seq {} above request seq {} (poisoned endpoint)",
+            protocol.floor_reply_seq,
+            protocol.floor_request_seq
+        );
+
+        // Now drive a REAL request/reply: a fresh request bumps the request seq
+        // strictly above the reply seq, and a reply at that new seq is accepted.
+        protocol.send_floor_request();
+        let new_seq = protocol.floor_request_seq;
+        assert!(
+            new_seq > protocol.floor_reply_seq,
+            "a freshly-issued request seq must exceed the prior reply seq"
+        );
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: new_seq,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "a later real reply is still accepted: the endpoint was not poisoned"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, new_seq,
+            "the later real reply advanced the reply seq (it was not dropped)"
+        );
+    }
+
+    /// FLOOR-ROUND seq invariant holds across a mixed send/reply/prune sequence:
+    /// `floor_reply_seq <= floor_request_seq` and `floor_prune_seq <=
+    /// floor_request_seq` must hold after every step. Exercises the invariant
+    /// the `debug_assert_floor_round_invariants` guard protects against a real
+    /// operation mix rather than a single mutation. Unlike the two tests above
+    /// this is a forward-looking regression guard (it passes against the
+    /// pre-fix code too); its job is to catch any FUTURE change that lets the
+    /// monotonic seq relations drift on the send/reply/prune paths.
+    #[test]
+    fn floor_round_seq_invariant_holds_across_send_reply_prune_sequence() {
+        let mut protocol = running_protocol_three_slots();
+
+        #[track_caller]
+        fn assert_seq_invariant(protocol: &UdpProtocol<TestConfig>, step: &str) {
+            assert!(
+                protocol.floor_reply_seq <= protocol.floor_request_seq,
+                "{step}: reply seq {} must not exceed request seq {}",
+                protocol.floor_reply_seq,
+                protocol.floor_request_seq
+            );
+            assert!(
+                protocol.floor_prune_seq <= protocol.floor_request_seq,
+                "{step}: prune seq {} must not exceed request seq {}",
+                protocol.floor_prune_seq,
+                protocol.floor_request_seq
+            );
+        }
+
+        assert_seq_invariant(&protocol, "initial");
+
+        // Issue two requests, prune (snapshots request seq), then accept replies
+        // for both an in-window and the latest seq, interleaving another prune.
+        protocol.send_floor_request(); // request_seq = 1
+        assert_seq_invariant(&protocol, "after first request");
+        protocol.send_floor_request(); // request_seq = 2
+        assert_seq_invariant(&protocol, "after second request");
+        protocol.reset_floor_freshness(); // prune_seq = 2
+        assert_seq_invariant(&protocol, "after prune");
+
+        protocol.send_floor_request(); // request_seq = 3
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 3,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(7)],
+        });
+        assert_seq_invariant(&protocol, "after accepted reply");
+
+        // A dropped (unsolicited) reply must not perturb the invariant either.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 99,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(1)],
+        });
+        assert_seq_invariant(&protocol, "after dropped unsolicited reply");
+
+        protocol.reset_floor_freshness(); // prune_seq = 3
+        assert_seq_invariant(&protocol, "after second prune");
+        assert_eq!(
+            protocol.round_floor(PlayerHandle::new(2)),
+            Frame::new(7),
+            "the only accepted reply's floor is cached"
+        );
+    }
+
+    /// FLOOR-ROUND prune detection: `detect_prune_transition` returns `true`
+    /// exactly on the running→pruned edge (and only once per edge), the signal
+    /// the session counts to bump its prune generation.
+    #[test]
+    fn detect_prune_transition_fires_once_on_running_to_pruned_edge() {
+        let mut protocol = running_protocol_three_slots();
+        assert!(protocol.is_running());
+
+        // First call records "was running" (no prior state) -> no edge yet.
+        assert!(
+            !protocol.detect_prune_transition(),
+            "still running: no prune"
+        );
+        assert!(
+            !protocol.detect_prune_transition(),
+            "still running: no prune"
+        );
+
+        protocol.disconnect();
+        assert!(
+            protocol.detect_prune_transition(),
+            "running -> pruned edge fires once"
+        );
+        assert!(
+            !protocol.detect_prune_transition(),
+            "the edge does not re-fire while it stays pruned"
+        );
+    }
+
     /// Connect-status vector for [slot0 connected, slot1 connected, slot2 X].
     fn status_slot2(disconnected: bool, last_frame: i32) -> Vec<ConnectionStatus> {
         vec![
@@ -3761,52 +4408,6 @@ mod tests {
                 epoch: 0,
             },
         ]
-    }
-
-    /// MERGE (double-failure-relay fix): a received `Input.pessimistic_floor` is
-    /// cached per-slot in `peer_pessimistic_floor`, OVERWRITING with the latest
-    /// report (in-flight snapshot semantics); an EMPTY floor (a retransmit / flush
-    /// / nudge) leaves the cache untouched so it retains the value the last fresh
-    /// `send_input` delivered — no clobber.
-    #[test]
-    fn merge_peer_connect_status_caches_pessimistic_floor_and_skips_empty() {
-        let mut protocol = running_protocol_three_slots();
-        let slot2 = PlayerHandle::new(2);
-
-        // Nothing reported yet -> NULL (the fold falls back to last_frame).
-        assert_eq!(protocol.peer_pessimistic_floor(slot2), Frame::NULL);
-
-        // A packet carrying a pessimistic floor for slot 2 caches it.
-        let mut body = Input {
-            peer_connect_status: status_slot2(false, 9),
-            pessimistic_floor: vec![Frame::new(7), Frame::new(8), Frame::new(4)],
-            ..Input::default()
-        };
-        protocol.merge_peer_connect_status(&body);
-        assert_eq!(
-            protocol.peer_pessimistic_floor(slot2),
-            Frame::new(4),
-            "the merge must cache the received pessimistic floor for slot 2"
-        );
-
-        // A later packet with an EMPTY pessimistic_floor (retransmit/nudge) must
-        // NOT clobber the cache.
-        body.pessimistic_floor = Vec::new();
-        protocol.merge_peer_connect_status(&body);
-        assert_eq!(
-            protocol.peer_pessimistic_floor(slot2),
-            Frame::new(4),
-            "an empty pessimistic_floor (retransmit/nudge) must not clobber the cached value"
-        );
-
-        // A fresh packet with a new floor overwrites (latest-snapshot semantics).
-        body.pessimistic_floor = vec![Frame::new(7), Frame::new(8), Frame::new(6)];
-        protocol.merge_peer_connect_status(&body);
-        assert_eq!(
-            protocol.peer_pessimistic_floor(slot2),
-            Frame::new(6),
-            "a fresh pessimistic_floor overwrites the cache (latest-snapshot semantics)"
-        );
     }
 
     // (a) REACHABILITY: a FRESH gossip packet whose `start_frame` is too far AHEAD
@@ -3845,7 +4446,6 @@ mod tests {
             bytes: encode_one_frame(&bytes, 99),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 5),
-            pessimistic_floor: Vec::new(),
         });
 
         // POST-HOIST: slot 2's drop gossip is applied even though the packet's
@@ -3902,7 +4502,6 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 49),
-            pessimistic_floor: Vec::new(),
         };
         let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
         protocol.on_input(&stale);
@@ -3953,7 +4552,6 @@ mod tests {
             bytes: encode_one_frame(&bytes, 42),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
-            pessimistic_floor: Vec::new(),
         });
 
         let status = protocol.peer_connect_status(PlayerHandle::new(2));
@@ -3990,7 +4588,6 @@ mod tests {
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
-            pessimistic_floor: Vec::new(),
         });
         assert_eq!(
             protocol
@@ -4014,7 +4611,6 @@ mod tests {
             bytes: encode_one_frame(&bytes, 2),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 8),
-            pessimistic_floor: Vec::new(),
         });
 
         // The stale higher freeze must NOT un-converge us: min(4, 8) == 4.
@@ -4036,7 +4632,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status, &[]);
+        protocol.send_input(&inputs, &connect_status);
 
         // Should not queue any messages
         assert!(protocol.send_queue.is_empty());
@@ -4750,7 +5346,6 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&dup_reference, std::iter::once(&dup_reference))
                 .expect("duplicate encode succeeds"),
-            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&dup_body);
         assert_eq!(
@@ -4775,7 +5370,6 @@ mod tests {
             ack_frame: Frame::NULL,
             bytes: try_encode(&fresh_reference, std::iter::once(&fresh_bytes))
                 .expect("fresh encode succeeds"),
-            pessimistic_floor: Vec::new(),
         };
         receiver.on_input(&fresh_body);
         assert_eq!(
@@ -5055,7 +5649,6 @@ mod tests {
             bytes: vec![1, 2, 3, 4],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
 
         // Clear event queue and record input count before
@@ -5124,7 +5717,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -5197,7 +5789,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
 
         protocol.event_queue.clear();
@@ -5250,7 +5841,6 @@ mod tests {
             bytes: encoded,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -5305,7 +5895,6 @@ mod tests {
             bytes: vec![1, 2, 3],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5354,7 +5943,6 @@ mod tests {
             bytes: bomb,
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
 
@@ -5382,7 +5970,6 @@ mod tests {
             bytes: vec![0],
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default()],
-            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5446,7 +6033,6 @@ mod tests {
             ),
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
         let inputs_before = protocol.recv_inputs.len();
         let pending_before = protocol.pending_output.len();
@@ -5494,7 +6080,6 @@ mod tests {
             bytes: vec![1, 2, 3, 4], // Won't be decoded anyway
             disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
-            pessimistic_floor: Vec::new(),
         };
 
         let inputs_before = protocol.recv_inputs.len();
@@ -6587,7 +7172,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status, &[]);
+        protocol.send_input(&inputs, &connect_status);
 
         assert_eq!(protocol.pending_output.len(), small_limit);
         assert!(protocol.send_queue.is_empty());
@@ -6631,7 +7216,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output(&connect_status, &[]);
+        protocol.send_pending_output(&connect_status);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6688,7 +7273,7 @@ mod tests {
             .collect();
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, &[], decoded_byte_cap);
+        protocol.send_pending_output_with_decoded_byte_cap(&connect_status, decoded_byte_cap);
 
         assert_eq!(protocol.send_queue.len(), 1);
         let body = queued_input_body(&protocol);
@@ -6764,7 +7349,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status, &[]);
+        protocol.send_input(&inputs, &connect_status);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -6808,7 +7393,7 @@ mod tests {
         );
         let connect_status = vec![ConnectionStatus::default(); 2];
 
-        protocol.send_input(&inputs, &connect_status, &[]);
+        protocol.send_input(&inputs, &connect_status);
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
@@ -8276,7 +8861,6 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
-                pessimistic_floor: Vec::new(),
             };
 
             // Process the input
@@ -8332,7 +8916,7 @@ mod property_tests {
             let initial_send_queue_len = protocol.send_queue.len();
 
             // Call send_pending_output - should detect violation and not queue message
-            protocol.send_pending_output(&connect_status, &[]);
+            protocol.send_pending_output(&connect_status);
 
             // The violation path should return early without queueing a message
             // (The actual violation is reported, but we can verify no message was sent
@@ -8500,7 +9084,6 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); num_players],
-                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8592,7 +9175,6 @@ mod property_tests {
                 bytes: vec![1, 2, 3, 4], // Won't be decoded
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
-                pessimistic_floor: Vec::new(),
             };
 
             let inputs_before = protocol.recv_inputs.len();
@@ -8679,7 +9261,6 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
-                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();
@@ -8752,7 +9333,6 @@ mod property_tests {
                 bytes: encoded,
                 disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
-                pessimistic_floor: Vec::new(),
             };
 
             protocol.event_queue.clear();

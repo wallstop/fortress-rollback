@@ -108,9 +108,9 @@ def is_changelog_file(path: str) -> bool:
 def is_tla_consistency_surface_file(path: str) -> bool:
     """Return True for files that can affect the TLA FIX_MODE consistency check.
 
-    The check derives the FIX_MODE set from the spec and compares it against the
-    ``.cfg`` files and ``README.md`` in ``specs/tla/``, so any of those (or the
-    checker itself) can change its result.
+    The check discovers every FIX_MODE spec in ``specs/tla/`` and compares each
+    against its own ``.cfg`` files and the shared ``README.md``, so any ``.tla``,
+    ``.cfg``, the README (or the checker itself) can change its result.
     """
     if path == "scripts/docs/check-tla-config-consistency.py":
         return True

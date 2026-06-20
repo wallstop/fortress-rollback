@@ -1172,17 +1172,8 @@ impl<T: Config> P2PSession<T> {
 
         // if the local inputs have not been dropped by the sync layer, send to all remote clients
         if !self.local_inputs.values().any(|&i| i.frame == Frame::NULL) {
-            // Per-slot pessimistic confirmed floors to gossip on this packet
-            // (double-failure-relay fix). Computed once from the current caches
-            // and shared by every remote endpoint — this peer's pessimism is the
-            // same regardless of recipient.
-            let pessimistic_floor = self.pessimistic_floors();
             for endpoint in self.player_reg.remotes.values_mut() {
-                endpoint.send_input(
-                    &self.local_inputs,
-                    &self.local_connect_status,
-                    &pessimistic_floor,
-                );
+                endpoint.send_input(&self.local_inputs, &self.local_connect_status);
                 endpoint.send_all_messages(&mut self.socket);
             }
         }
@@ -1280,6 +1271,14 @@ impl<T: Config> P2PSession<T> {
         for remote_endpoint in self.player_reg.remotes.values_mut() {
             remote_endpoint.set_connect_status_nudge(nudge_needed);
         }
+
+        // Floor-round driving (double-failure-relay connected-relay reorder
+        // fix): detect prunes (bump the generation), answer received
+        // `FloorRequest`s with our current pessimistic floors, and push each
+        // endpoint the generation + whether it must (re)issue a `FloorRequest`.
+        // Runs before the endpoint poll below so a just-set request flag is
+        // honored on this same poll.
+        self.drive_floor_round();
 
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
         let mut events = VecDeque::new();
@@ -5675,6 +5674,11 @@ impl<T: Config> P2PSession<T> {
     pub fn confirmed_frame(&self) -> Frame {
         let mut confirmed_frame = Frame::new(i32::MAX);
 
+        // The double-failure-relay fold-membership-asymmetry gate is
+        // slot-independent — compute it once and reuse it for the floor-round
+        // hold check (`slot_round_incomplete`) below.
+        let relay_topology = self.pessimistic_floor_relay_topology();
+
         for (idx, con_stat) in self.local_connect_status.iter().enumerate() {
             let handle = PlayerHandle::new(idx);
             if self.player_reg.is_local_player(handle) {
@@ -5683,7 +5687,32 @@ impl<T: Config> P2PSession<T> {
                 // slot always contributes its own last added frame.
                 confirmed_frame = std::cmp::min(confirmed_frame, con_stat.last_frame);
             } else if let Some(bound) = self.remote_slot_confirmed_bound(handle, con_stat) {
-                confirmed_frame = std::cmp::min(confirmed_frame, bound);
+                // Post-prune fresh-ack HOLD (the double-failure-relay floor round,
+                // `AsyncAckSoundRoundSeq`, S55 — closing the connected-relay
+                // reorder facet and subsuming the S49 cold-cache facet). When a
+                // folded relay reports this slot CONNECTED but has not yet
+                // delivered a `FloorReply` for the current prune generation
+                // (`slot_round_incomplete`), its connect-status `last_frame` is its
+                // own (possibly high) receipt — NOT a freeze — so it may hide a
+                // departed origin's low the relay still folds, so confirming past
+                // it could discard the contested window irreversibly. HOLD at the
+                // current confirmed frame — the
+                // value held while the origin was still in our fold (the model's
+                // `CurBound`) — until every folded connected relay has answered the
+                // round (`remote_slot_confirmed_bound` then folds the reorder-immune
+                // `round_floor`) or the slot mesh-agrees (excluded). Capping with
+                // `min` PRESERVES a genuine lowering (a fresh relay's relayed
+                // converge-down below the current confirmed flows through, so freeze
+                // convergence still follows down); it only blocks an ADVANCE past
+                // the held frame. Zero cost outside the relay topology —
+                // `slot_round_incomplete` cannot fire there (its rustdoc explains
+                // why).
+                let capped = if self.slot_round_incomplete(handle, relay_topology) {
+                    std::cmp::min(bound, self.sync_layer.last_confirmed_frame())
+                } else {
+                    bound
+                };
+                confirmed_frame = std::cmp::min(confirmed_frame, capped);
             }
             // `None`: the slot's disconnect is mesh-agreed — excluded from the
             // minimum; the frozen input value carries the slot from here on.
@@ -7767,12 +7796,10 @@ impl<T: Config> P2PSession<T> {
                 input_map.insert(PlayerHandle::new(handle), *input);
             }
 
-            // send it to all spectators. Spectators do not participate in the
-            // player-mesh confirmed-bound fold, so they need no pessimistic-floor
-            // gossip (empty slice — double-failure-relay fix).
+            // send it to all spectators.
             for endpoint in self.player_reg.spectators.values_mut() {
                 if endpoint.is_running() {
-                    endpoint.send_input(&input_map, &self.local_connect_status, &[]);
+                    endpoint.send_input(&input_map, &self.local_connect_status);
                 }
             }
 
@@ -8049,6 +8076,185 @@ impl<T: Config> P2PSession<T> {
     /// reserved endpoints coexist with multi-survivor folds): without it, a
     /// reserved endpoint's default `{connected, NULL}` cache would both block
     /// mesh agreement and mine convergence overrides down to `NULL` there.
+    /// The **fold-membership-asymmetry gate** (Session 41's unifying invariant)
+    /// for the double-failure-relay fix — slot-independent, so it is computed
+    /// once and shared by [`Self::remote_slot_confirmed_bound`] (which consumes a
+    /// relay's fresh round floor) and [`Self::slot_round_incomplete`] (which arms
+    /// the post-prune fresh-ack hold).
+    ///
+    /// The residual — and hence any need to consume a relay's PESSIMISTIC floor
+    /// instead of its own `last_frame` — can arise ONLY when a low-value origin
+    /// has LEFT this session's fold, i.e. this session has PRUNED a remote
+    /// endpoint (an explicit `remove_player` or a disconnect timeout drove it
+    /// non-running) AND a separate RELAY peer is still running to surface that
+    /// pruned origin's low. Two conditions, both required:
+    ///
+    ///  1. `observer_pruned_a_peer`: at least one non-running, non-reserved
+    ///     remote — the origin that left the fold. With every remote still
+    ///     running, the one-hop fold folds each live peer's view directly (a
+    ///     still-running endpoint's stale-low is the S41 *stale-echo* NOTABUG,
+    ///     caught unconditionally).
+    ///  2. `>= 2` running, non-reserved remotes — the residual is an N>=4
+    ///     phenomenon (observer + pruned origin + a distinct RELAY + the dropped
+    ///     slot). A 2-survivor mesh (one running remote after a drop) has no
+    ///     relay, so the S32 barrier already converges it; consuming the
+    ///     pessimistic floor there only adds a two-hop circular lag that
+    ///     needlessly pins confirmation.
+    ///
+    /// Gating on both keeps steady-state AND N<=3 post-drop pacing at the one-hop
+    /// minimum (ZERO added cost / no liveness pin) while still closing the
+    /// residual the instant the N>=4 relay topology forms. **Soundness:**
+    /// `specs/tla/DoubleFailureRelay.tla`'s `Baseline` (no pessimistic floor)
+    /// violates `NoConfirmedDivergence` ONLY when an origin is pruned
+    /// (`gone`/per-observer `pruned`) in the relay topology; outside it the
+    /// one-hop fold is sound, so restricting the floor's consumption to that
+    /// window is a sound strict subset of the model-verified unconditional
+    /// `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
+    /// joiner) are neither a prune nor a relay, so they are excluded from both.
+    /// Drives the floor-round protocol every
+    /// [`poll_remote_clients`](Self::poll_remote_clients) (the
+    /// double-failure-relay connected-relay reorder fix; verified-sound mode
+    /// `AsyncAckSoundRoundSeq` in `specs/tla/DoubleFailureRelay.tla`, S55).
+    ///
+    /// Three steps, in order:
+    /// 1. **Detect prunes → reset freshness.** Every running→pruned
+    ///    remote-endpoint transition resets EVERY endpoint's floor freshness
+    ///    ([`UdpProtocol::reset_floor_freshness`]), so a fresh prune invalidates
+    ///    every prior round reply and forces the observer to re-complete the round
+    ///    before trusting a connected relay's floor (the
+    ///    spec's `Prune` resetting the whole `ackFresh` row, so the observer must
+    ///    complete a fresh POST-prune round before it again trusts any relay's
+    ///    floor).
+    /// 2. **Answer received requests.** Any endpoint holding a `FloorRequest`
+    ///    (we are a relay for that peer) is answered with this session's CURRENT
+    ///    [`Self::pessimistic_floors`] (computed once), echoing the request's
+    ///    `round_seq` (the spec's `SendAck` depositing the source's CURRENT
+    ///    floor). Drained AFTER the prune handling so the reply is freshest.
+    /// 3. **Push the request-needed flag.** Each folded (running, non-reserved)
+    ///    relay in the relay topology is flagged so its `poll` keeps re-issuing
+    ///    `FloorRequest`s on the keepalive cadence — issued CONTINUOUSLY (not
+    ///    stopped once a reply lands) so the cached floor tracks the relay's
+    ///    advancing pessimistic floor for live slots.
+    fn drive_floor_round(&mut self) {
+        // 1. Prune detection: a running→pruned transition of ANY remote resets
+        //    EVERY endpoint's floor freshness (the spec's whole-row `ackFresh`
+        //    reset), so the observer re-completes a post-prune round before
+        //    trusting any relay's floor again.
+        let mut pruned_any = false;
+        for endpoint in self.player_reg.remotes.values_mut() {
+            if endpoint.detect_prune_transition() {
+                pruned_any = true;
+            }
+        }
+        if pruned_any {
+            for endpoint in self.player_reg.remotes.values_mut() {
+                endpoint.reset_floor_freshness();
+            }
+        }
+
+        // 2. Answer pending FloorRequests with our current pessimistic floors.
+        if self
+            .player_reg
+            .remotes
+            .values()
+            .any(UdpProtocol::has_pending_floor_request)
+        {
+            let floors = self.pessimistic_floors();
+            for endpoint in self.player_reg.remotes.values_mut() {
+                if let Some(round_seq) = endpoint.take_pending_floor_request() {
+                    // A request is only recorded while Running (state-gated in
+                    // `handle_message`); guard the reply on `is_running` anyway so
+                    // a since-disconnected endpoint does not emit a stale reply.
+                    if endpoint.is_running() {
+                        endpoint.send_floor_reply(round_seq, &floors);
+                    }
+                }
+            }
+        }
+
+        // 3. Flag each folded relay so it keeps re-issuing FloorRequests.
+        let relay_topology = self.pessimistic_floor_relay_topology();
+        for endpoint in self.player_reg.remotes.values_mut() {
+            #[cfg(feature = "hot-join")]
+            let reserved = self.hot_join.endpoint_is_reserved(endpoint);
+            #[cfg(not(feature = "hot-join"))]
+            let reserved = false;
+            let request_needed = relay_topology && endpoint.is_running() && !reserved;
+            endpoint.set_floor_request_needed(request_needed);
+        }
+    }
+
+    fn pessimistic_floor_relay_topology(&self) -> bool {
+        let mut observer_pruned_a_peer = false;
+        let mut running_remote_count = 0_usize;
+        for endpoint in self.player_reg.remotes.values() {
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            if endpoint.is_running() {
+                running_remote_count += 1;
+            } else {
+                observer_pruned_a_peer = true;
+            }
+        }
+        observer_pruned_a_peer && running_remote_count >= 2
+    }
+
+    /// Returns `true` when slot `handle` must take the **post-prune fresh-ack
+    /// HOLD** of the double-failure-relay floor round (the verified-sound mode
+    /// `AsyncAckSoundRoundSeq` in `specs/tla/DoubleFailureRelay.tla`, S55 — the
+    /// connected-relay reorder facet; this subsumes the S49 cold-cache facet
+    /// `AsyncAckSoundFresh`): the relay-topology gate
+    /// ([`Self::pessimistic_floor_relay_topology`]) is engaged AND some folded
+    /// running, non-reserved remote reports `handle` **connected** but has NOT
+    /// yet delivered a `FloorReply` for the current prune generation
+    /// ([`UdpProtocol::floor_round_is_fresh`] is `false`).
+    ///
+    /// Such a connected relay's connect-status `last_frame` cannot be trusted as
+    /// its floor: it is its own (possibly high) receipt, NOT a freeze, so it can
+    /// hide a departed origin's low the relay still folds. We must complete a
+    /// fresh post-prune **round** — issue a `FloorRequest`, await the relay's
+    /// reorder-immune `FloorReply` — before trusting its floor. While the round
+    /// is incomplete,
+    /// [`Self::confirmed_frame`] caps such a slot's contribution at the current
+    /// confirmed frame (the spec's `CurBound` hold), holding until every folded
+    /// connected relay replies at the current generation or the slot mesh-agrees.
+    /// (A relay reporting `handle` **disconnected** is excluded: its `last_frame`
+    /// IS its authoritative queue-min freeze — merged reorder-safely by
+    /// `merge_peer_connect_status` — so [`Self::remote_slot_confirmed_bound`]
+    /// folds it directly with no round, the S53 disconnected-relay closure.)
+    ///
+    /// This is the **observer-side fresh-ack ROUND**: a `Prune` resets freshness
+    /// for every relay ([`UdpProtocol::reset_floor_freshness`]), so a fresh prune
+    /// re-arms the hold until the round completes again — exactly the
+    /// spec's "complete a post-prune round before trusting any relay's floor."
+    /// It defeats the **stale-first race** the passive `ConnectionStatus.epoch`
+    /// gate could not (`AsyncAckSoundEpoch`, machine-DISPROVEN in S52): a
+    /// reordered stale-HIGH gossip floor never lands in the round's dedicated
+    /// reply cache ([`UdpProtocol::round_floor`]) and never marks the round fresh.
+    ///
+    /// **ZERO COST OUTSIDE THE RELAY TOPOLOGY:** `relay_topology` requires this
+    /// session to have pruned a remote AND ≥2 remotes still running (the N≥4
+    /// double-failure shape), so in 2-/3-peer sessions and the steady state this
+    /// always returns `false` and confirmation paces at the one-hop minimum.
+    fn slot_round_incomplete(&self, handle: PlayerHandle, relay_topology: bool) -> bool {
+        if !relay_topology {
+            return false;
+        }
+        self.player_reg.remotes.values().any(|endpoint| {
+            if !endpoint.is_running() {
+                return false;
+            }
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                return false;
+            }
+            let status = endpoint.peer_connect_status(handle);
+            !status.disconnected && !endpoint.floor_round_is_fresh()
+        })
+    }
+
     fn remote_slot_confirmed_bound(
         &self,
         handle: PlayerHandle,
@@ -8147,52 +8353,14 @@ impl<T: Config> P2PSession<T> {
                     "P2PSession::remote_slot_confirmed_bound pending clamp"
                 )
             });
-        // Fold-membership-asymmetry gate (Session 41's unifying invariant): the
-        // double-failure-relay residual — and hence any need to consume a relay's
-        // PESSIMISTIC floor instead of its own `last_frame` — can arise ONLY when
-        // a low-value origin has LEFT this session's fold, i.e. this session has
-        // PRUNED a remote endpoint (an explicit `remove_player` or a disconnect
-        // timeout drove it non-running) AND a separate RELAY peer is still running
-        // to surface that pruned origin's low. Two conditions, both required:
-        //
-        //  1. `observer_pruned_a_peer`: at least one non-running, non-reserved
-        //     remote — the origin that left the fold. With every remote still
-        //     running, the one-hop fold below already folds each live peer's view
-        //     directly (a still-running endpoint's stale-low is the S41
-        //     *stale-echo* NOTABUG, caught here unconditionally).
-        //  2. `>= 2` running, non-reserved remotes — the residual is an N>=4
-        //     phenomenon (observer + pruned origin + a distinct RELAY + the
-        //     dropped slot), so after the prune the observer must still see at
-        //     least a relay AND the dropped slot running. A 2-survivor mesh (one
-        //     running remote after a drop) has no relay, so the S32 barrier
-        //     already converges it; consuming the pessimistic floor there only
-        //     adds a two-hop circular lag (each survivor bounded by the other's
-        //     stale view of it) that needlessly pins confirmation.
-        //
-        // Gating on both keeps steady-state AND N<=3 post-drop pacing at the
-        // one-hop minimum (ZERO added cost / no liveness pin) while still closing
-        // the residual the instant the N>=4 relay topology forms. **Soundness:**
-        // `specs/tla/DoubleFailureRelay.tla`'s `Baseline` (no pessimistic floor)
-        // violates `NoConfirmedDivergence` ONLY when an origin is pruned
-        // (`gone`/per-observer `pruned`) in the relay topology; outside it the
-        // one-hop fold is sound, so restricting the floor's consumption to that
-        // window is a sound strict subset of the model-verified unconditional
-        // `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
-        // joiner) are neither a prune nor a relay, so they are excluded from both.
-        let mut observer_pruned_a_peer = false;
-        let mut running_remote_count = 0_usize;
-        for endpoint in self.player_reg.remotes.values() {
-            #[cfg(feature = "hot-join")]
-            if self.hot_join.endpoint_is_reserved(endpoint) {
-                continue;
-            }
-            if endpoint.is_running() {
-                running_remote_count += 1;
-            } else {
-                observer_pruned_a_peer = true;
-            }
-        }
-        let consume_pessimistic_floor = observer_pruned_a_peer && running_remote_count >= 2;
+        // Fold-membership-asymmetry gate (Session 41's unifying invariant) — see
+        // [`Self::pessimistic_floor_relay_topology`] for the full rationale. The
+        // double-failure-relay residual (and hence any need to consume a relay's
+        // PESSIMISTIC floor instead of its own `last_frame`) can arise ONLY in the
+        // N>=4 relay topology: this session has PRUNED a remote AND >= 2 remotes
+        // still run. Outside it, the one-hop fold below is sound (S41 *stale-echo*
+        // NOTABUG), and consuming the floor only adds needless pacing lag.
+        let consume_round_floor = self.pessimistic_floor_relay_topology();
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
         for endpoint in self.player_reg.remotes.values() {
@@ -8205,36 +8373,59 @@ impl<T: Config> P2PSession<T> {
             }
             let status = endpoint.peer_connect_status(handle);
             // Double-failure-relay fix (audit follow-up; verified-sound mode
-            // `AsyncAckSound` in `specs/tla/DoubleFailureRelay.tla`): fold this
-            // peer's PESSIMISTIC confirmed floor — the `min` over its own
-            // receipt/freeze AND every source IT folds — when it has reported
-            // one, instead of its own `last_frame`. That surfaces a departed
-            // global-min origin's low that THIS session has already pruned from
-            // its own fold, so we hold confirmation at the mesh minimum instead
-            // of confirming + discarding the dropped slot's real inputs above a
-            // freeze the relaying survivor will agree to (the N>=4
-            // discard-before-convergence residual). The pessimistic floor is
-            // always `<= last_frame`, so this never confirms HIGHER than the
-            // legacy fold (no safety regression); a slot the peer has not
-            // reported a floor for (`Frame::NULL` — a cold/un-upgraded cache)
-            // falls back to `last_frame` (the pre-fix barrier value). See
-            // `peer_pessimistic_floor` and `pessimistic_floors`.
+            // `AsyncAckSoundRoundSeq` in `specs/tla/DoubleFailureRelay.tla`, S55):
+            // for a CONNECTED relay in the N>=4 relay topology, fold its
+            // PESSIMISTIC confirmed floor — the `min` over its own receipt/freeze
+            // AND every source IT folds — surfacing a departed global-min origin's
+            // low that THIS session has already pruned from its own fold, so we
+            // hold confirmation at the mesh minimum instead of confirming +
+            // discarding the dropped slot's real inputs above a freeze the
+            // relaying survivor will agree to (the N>=4 discard-before-convergence
+            // residual). The pessimistic floor is always `<= last_frame`, so this
+            // never confirms HIGHER than the legacy fold (no safety regression).
             //
-            // **Scope (honest):** this realizes the verified `AsyncAckSound`
-            // (WARM-cache) mode, which consumes the cached in-flight floor with
-            // no reachability hold — safe because in the warm scope a pessimistic
-            // floor is monotone-non-decreasing (a cached value is stale-LOW =
-            // conservative, never stale-HIGH). The cold-cache facet (the observer
-            // never received a relay's pessimistic floor — `AsyncAckSoundFresh`,
-            // S49, needing an observer-side fresh-ack-round HOLD) and the
-            // mid-game-drop reorder facet (needing the S46 epoch as a freshness
-            // gate, see `merge_peer_connect_status`) are NOT closed here — they
-            // are the tracked chunk-2 follow-up. So this NARROWS the N>=4 residual
-            // to those corners (closing the in-order/warm case the in-process
-            // guard reproduces), it does not fully eliminate it.
-            let pessimistic = endpoint.peer_pessimistic_floor(handle);
-            let reported = if consume_pessimistic_floor && pessimistic != Frame::NULL {
-                pessimistic
+            // The floor is read from the **reorder-immune round-reply cache**
+            // ([`UdpProtocol::round_floor`]): `round_floor` is written ONLY by a
+            // `FloorReply` whose `round_seq` is strictly newer than the latest
+            // accepted, does not exceed any request actually issued, and reports
+            // every slot — so a reordered stale, unsolicited, or incomplete reply
+            // is rejected (the connected-relay reorder hazard a plain
+            // `Input`-gossip floor cache could not survive). We fold
+            // it ONLY when the round is FRESH for
+            // this generation (`floor_round_is_fresh`); while it is not fresh the
+            // relay contributes its (high) `last_frame` here and
+            // [`Self::confirmed_frame`]'s `slot_round_incomplete` HOLD caps the
+            // slot at the current confirmed frame — never advancing on an
+            // unconfirmed connected-relay floor. A relay that has replied but with
+            // `Frame::NULL` for this slot (it reports no floor) folds `last_frame`
+            // alone. This is the spec's `min(PessimisticFloor, roundFloor)` with
+            // the post-prune `ackFresh` hold; it closes the connected-relay reorder
+            // sub-shape (the last open player-vs-player desync) and subsumes the
+            // S50 warm gossip-floor consume and the S49/S51 cold-cache hold.
+            //
+            // **Fold the MIN of `last_frame` AND the round floor** (not the round
+            // floor alone): `PessimisticFloor` in the spec already folds every
+            // folded peer's reorder-safe `last_frame`, and a relay's round reply
+            // can go STALE if the relay lowers its OWN view of the slot AFTER
+            // replying but BEFORE the observer's next prune re-issues the round
+            // (the relay does not re-reply unsolicited). `last_frame`, merged
+            // REORDER-SAFELY by `merge_peer_connect_status` (it converges a
+            // disconnect down and never resurrects), then carries the relay's
+            // freshly-lowered view; the round floor adds the departed origin's low
+            // the observer can no longer see directly. The min folds both.
+            //
+            // **Mid-game-drop reorder facet, DISCONNECTED-relay sub-shape (S53).**
+            // A relay reporting the slot **disconnected** folds its connect-status
+            // `last_frame` ONLY (no round floor) — that term IS its authoritative
+            // queue-min freeze (equal to the true floor for a disconnected slot),
+            // reorder-safe, so confirmation can never outrun the freeze via a
+            // disconnected relay.
+            let reported = if consume_round_floor
+                && !status.disconnected
+                && endpoint.floor_round_is_fresh()
+                && endpoint.round_floor(handle) != Frame::NULL
+            {
+                std::cmp::min(status.last_frame, endpoint.round_floor(handle))
             } else {
                 status.last_frame
             };
@@ -8277,48 +8468,66 @@ impl<T: Config> P2PSession<T> {
         }
     }
 
-    /// Computes this peer's per-slot **pessimistic confirmed floor** vector to
-    /// gossip on outgoing `Input` packets — the double-failure-relay fix's
-    /// pessimistic queue-min report (verified-sound mode `AsyncAckSound` in
+    /// Computes this peer's per-slot **pessimistic confirmed floor** vector — the
+    /// double-failure-relay fix's pessimistic queue-min report, delivered in a
+    /// [`FloorReply`](crate::network::messages::FloorReply) when this peer is a
+    /// relay answering an observer's floor-round request (verified-sound mode
+    /// `AsyncAckSoundRoundSeq` in
     /// [`specs/tla/DoubleFailureRelay.tla`](https://github.com/wallstop/fortress-rollback)).
     ///
-    /// This is the **canonical** definition of the floor's fold; the cache
-    /// (`peer_pessimistic_floor`), the wire field
-    /// ([`Input::pessimistic_floor`](crate::network::messages::Input::pessimistic_floor)),
-    /// and the consumer ([`Self::remote_slot_confirmed_bound`]) all describe
-    /// themselves by deferring here, so the one fact lives in one place.
+    /// This is the **canonical** definition of the floor's fold; the observer's
+    /// reply cache ([`UdpProtocol::round_floor`]) and the consumer
+    /// ([`Self::remote_slot_confirmed_bound`]) both describe themselves by
+    /// deferring here, so the one fact lives in one place.
     ///
-    /// For each slot, the value is the lowest frame this peer could *still*
-    /// freeze that slot to given everything it currently folds:
-    /// `min(local_connect_status[slot].last_frame, min over running,
-    /// non-reserved remote endpoints of peer_connect_status(slot).last_frame)`,
-    /// **skipping any remote endpoint whose cached view is `Frame::NULL`**
-    /// (no-info — e.g. a freshly `Running` peer that has not gossiped a receipt
-    /// yet): folding such a cache would `min` the whole reported floor down to
-    /// `Frame::NULL` and poison every observer that consumes it.
+    /// [`UdpProtocol::round_floor`]: crate::network::protocol::UdpProtocol
+    ///
+    /// For each slot, the value is `min` over (a) this peer's own
+    /// `local_connect_status[slot].last_frame` (its own receipt/freeze) and (b)
+    /// every running, non-reserved remote endpoint that reports the slot
+    /// **DISCONNECTED** — its `peer_connect_status(slot).last_frame`, a committed
+    /// FREEZE. A remote that reports the slot **connected** (a live RECEIPT) is
+    /// NOT folded, and a `Frame::NULL` disconnected view (no info) is skipped.
+    ///
+    /// **Why only disconnected views?** The residual's low is always a departed
+    /// origin's *committed freeze* — a slot the origin reports DISCONNECTED at
+    /// frame `F`. Surfacing that is the round's whole purpose: an observer that
+    /// has pruned the origin from its own fold can still hold its confirmation at
+    /// `F` (the observer consumes a relay's reply in
+    /// [`Self::remote_slot_confirmed_bound`]), instead of confirming + discarding
+    /// the dropped slot's real inputs above the freeze the mesh will later agree
+    /// to. A *connected* receipt, by contrast, is a live value the observer
+    /// already folds directly one-hop; folding a relay's (possibly stale, lagging,
+    /// or dropping-but-not-yet-pruned) connected receipt of a LIVE slot as a
+    /// two-hop low would circularly pin live-slot confirmation in a capped mesh.
+    ///
+    /// **Deviation from the spec, and why it stays sound.** The verified
+    /// `AsyncAckSoundRoundSeq` mode's `PessimisticFloor` folds EVERY non-pruned
+    /// folded source's `cacheLast` regardless of its connected/disconnected state;
+    /// this `src/` fold is a STRICT SUBSET (disconnected sources only). It is sound
+    /// because the residual's binding safety low — a frame the observer would
+    /// wrongly confirm + discard above — is always a committed FREEZE (a
+    /// disconnected term, `>=` the mesh global-min). The omitted *connected*
+    /// `cacheLast` terms are real RECEIPTS (`>=` the sender's own receipt `>=` the
+    /// global-min), never a freeze below it, so dropping them cannot raise the
+    /// floor above any freeze the mesh will agree to. The spec keeps those
+    /// connected terms only as conservative liveness lag (the same term the
+    /// *unsound* `Tombstone` candidate over-retained); the subset removes that lag
+    /// — required here because the `src/` model, unlike the one-slot spec, has LIVE
+    /// slots whose connected receipts would otherwise circularly pin.
     ///
     /// The endpoint-set membership mirrors [`Self::remote_slot_confirmed_bound`]
-    /// (skip non-running and reserved hot-join endpoints) so the value a peer
-    /// *reports* is folded over the same endpoint set the mesh barrier *consumes*
-    /// — what makes the report a faithful pessimistic floor. The `Frame::NULL`
-    /// remote-cache skip above is the one refinement on top of that shared
-    /// membership; the consumer applies the mirror-image fallback (a reported
-    /// `Frame::NULL` is read as "use `last_frame`").
+    /// (skip non-running and reserved hot-join endpoints). The consumer applies
+    /// the mirror-image fallback (a reported `Frame::NULL` is read as "use
+    /// `last_frame`").
     ///
-    /// Unlike a peer's own `last_frame` (its receipt/freeze of the slot), this
-    /// surfaces a **departed origin's low** the peer still folds. An observer
-    /// that has pruned that origin from its own fold can therefore still hold its
-    /// confirmation at the mesh minimum (the receiver consumes this in
-    /// `remote_slot_confirmed_bound`), instead of confirming + discarding the
-    /// dropped slot's real inputs above a freeze the mesh will later agree to.
-    ///
-    /// Because remote no-info caches are skipped (above), this yields
+    /// Because remote connected/no-info views are not folded, this yields
     /// `Frame::NULL` for a slot ONLY when this peer's OWN receipt
-    /// (`local_connect_status[slot].last_frame`) is `Frame::NULL` — i.e. this
-    /// peer is itself cold for the slot (the cold-cache corner, out of the
-    /// warm-cache scope this chunk targets). A receiver reads that `Frame::NULL`
-    /// as "fall back to `last_frame`" — see [`Self::remote_slot_confirmed_bound`],
-    /// which folds `last_frame` whenever the reported floor is `Frame::NULL`.
+    /// (`local_connect_status[slot].last_frame`) is `Frame::NULL` and no remote
+    /// reports a lower freeze — i.e. this peer is itself cold for the slot. A
+    /// receiver reads that `Frame::NULL` as "fall back to `last_frame`" — see
+    /// [`Self::remote_slot_confirmed_bound`], which folds `last_frame` whenever
+    /// the reported floor is `Frame::NULL`.
     fn pessimistic_floors(&self) -> Vec<Frame> {
         // alloc-bound: `num_players` is validated at session construction (mirrors `local_connect_status`).
         let mut floors = Vec::with_capacity(self.num_players);
@@ -8336,21 +8545,19 @@ impl<T: Config> P2PSession<T> {
                 if self.hot_join.endpoint_is_reserved(endpoint) {
                     continue;
                 }
-                // Skip a no-info (`Frame::NULL` = -1) source. A single freshly
-                // `Running` endpoint that has not yet gossiped its receipt would
-                // otherwise `min` the whole slot's reported floor down to NULL —
-                // poisoning a relay's floor so its observer falls back to the
-                // relay's own (high) `last_frame` and the fix silently
-                // disengages even when a real low is known from another source.
-                // Skipping no-info sources reports the min over the sources we
-                // ACTUALLY fold (matching the residual's "the low a relay still
-                // folds"). A NULL *own* receipt (this peer is itself cold for the
-                // slot) still yields NULL — the cold-cache corner, out of the
-                // warm scope this chunk targets (see `remote_slot_confirmed_bound`
-                // and the tracked cold-cache / reorder follow-up).
-                let cached = endpoint.peer_connect_status(handle).last_frame;
-                if cached != Frame::NULL {
-                    floor = std::cmp::min(floor, cached);
+                // Fold a remote source's view of this slot ONLY when that source
+                // reports the slot **DISCONNECTED** — i.e. a committed FREEZE. The
+                // residual's low is always a departed origin's committed freeze (a
+                // disconnected view at frame `F`); surfacing it is the round's whole
+                // purpose. A CONNECTED view is a live RECEIPT — a value the observer
+                // already folds directly one-hop — and folding it here would surface
+                // a stale/lagging (or dropping-but-not-yet-pruned) peer's receipt of
+                // a LIVE slot as a two-hop low, circularly pinning live-slot
+                // confirmation in a capped mesh. (A `Frame::NULL` disconnected view
+                // is no-info and skipped, matching the original no-info skip.)
+                let cached = endpoint.peer_connect_status(handle);
+                if cached.disconnected && cached.last_frame != Frame::NULL {
+                    floor = std::cmp::min(floor, cached.last_frame);
                 }
             }
             floors.push(floor);
@@ -12440,6 +12647,32 @@ mod tests {
         (session, addr_b, addr_c, addr_d)
     }
 
+    /// Marks every running remote endpoint's floor round **post-prune fresh**,
+    /// with each slot's
+    /// [`round_floor`](crate::network::protocol::UdpProtocol::round_floor) seeded
+    /// to its reported `last_frame` — the realistic **post-round** default for a
+    /// relay that folds no source lower than its own receipt (the floor is always
+    /// `<= last_frame`, and equal is the no-departed-low case). The unit harness
+    /// (`build_abcd_live_session`) leaves every endpoint's round un-replied, which
+    /// once a peer is pruned spuriously arms the post-prune fresh-ack hold
+    /// ([`P2PSession::slot_round_incomplete`]) for every connected slot. Tests
+    /// that exercise the freeze barrier / disconnect convergence (NOT the round
+    /// hold) call this after wiring their connect statuses, to model a completed
+    /// round.
+    fn seed_floor_round_fresh(session: &mut P2PSession<TestConfig>) {
+        let num = session.num_players;
+        for endpoint in session.player_reg.remotes.values_mut() {
+            if !endpoint.is_running() {
+                continue;
+            }
+            for idx in 0..num {
+                let handle = PlayerHandle::new(idx);
+                let last_frame = endpoint.peer_connect_status(handle).last_frame;
+                endpoint.set_round_floor_for_tests(handle, last_frame);
+            }
+        }
+    }
+
     /// Faithful model: dropped peer C is non-running the production way (its
     /// endpoint already disconnected); survivor B is non-running the ONLY
     /// production Running->non-running survivor way — a hot-join rearm, which
@@ -12833,6 +13066,9 @@ mod tests {
             .get_mut(&addr_d)
             .expect("D endpoint")
             .disconnect();
+        // Realistic non-cold floors (B/C report a floor with every connect status):
+        // the stale-echo is a running endpoint's stale-low term, NOT the cold corner.
+        seed_floor_round_fresh(&mut session);
 
         // STEP 1 — confirmation BEFORE the flip. The barrier folds B's stale-low
         // connected cache of D (3) into the bound, so the confirmed frame is
@@ -12963,6 +13199,7 @@ mod tests {
                 .get_mut(&addr_d)
                 .expect("D endpoint")
                 .disconnect();
+            seed_floor_round_fresh(&mut session);
 
             let cf_before = session.confirmed_frame();
 
@@ -13106,6 +13343,7 @@ mod tests {
             .get_mut(&addr_d)
             .expect("D endpoint")
             .disconnect();
+        seed_floor_round_fresh(&mut session);
 
         // The disconnected stale-low term (3) still pins the bound at 3, NOT the
         // slot being excluded. A connected slot bounded by a disconnected
@@ -13677,30 +13915,37 @@ mod tests {
     }
 
     // ========================================================================
-    // Double-failure-relay fix (Session 50): the pessimistic queue-min report
-    // (`pessimistic_floors`) + its gated consumption in
-    // `remote_slot_confirmed_bound`. The integration guard
-    // `p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors`
+    // Double-failure-relay fix (Session 55): the pessimistic queue-min
+    // (`pessimistic_floors`, delivered in a `FloorReply`) + its gated consumption
+    // (the fresh round floor) in `remote_slot_confirmed_bound`. The integration
+    // guard `p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors`
     // exercises the end-to-end mesh path; these pin the mechanism in isolation.
     // ========================================================================
 
-    /// COMPUTATION: the per-slot pessimistic floor a peer GOSSIPS is the `min`
-    /// over its own receipt AND every running, non-reserved endpoint's cached
-    /// view — surfacing a folded source's low so a relay observer that pruned
-    /// that source can still hold its bound there.
+    /// COMPUTATION: the per-slot pessimistic floor a relay REPORTS folds the `min`
+    /// over its own receipt AND every running, non-reserved endpoint that reports
+    /// the slot **DISCONNECTED** (a committed FREEZE — the departed origin's low
+    /// the residual is about). A CONNECTED endpoint's view (a live RECEIPT) is NOT
+    /// folded — the observer folds live receipts directly one-hop, and folding a
+    /// stale/lagging connected receipt as a two-hop low would circularly pin
+    /// live-slot confirmation.
     #[test]
-    fn pessimistic_floors_reports_min_over_own_and_running_endpoints() {
+    fn pessimistic_floors_folds_disconnected_freeze_not_connected_receipt() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
-        // Our own receipt of D is 9; B's cached view is low (4), C's is 7, D
-        // self-claims 9. The floor we report for D is min(9, 4, 7, 9) = 4.
+        // Our own receipt of D is 9. B reports D DISCONNECTED at the freeze 4 (a
+        // departed origin's committed low — folded). C reports D CONNECTED at a
+        // LOW receipt 2 (a live receipt — NOT folded, else a two-hop pin). D
+        // self-claims connected at 9. The floor is min(9, B's freeze 4) = 4.
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(9),
             epoch: 0,
         };
-        for (addr, frame) in [(addr_b, 4), (addr_c, 7), (addr_d, 9)] {
+        for (addr, disconnected, frame) in
+            [(addr_b, true, 4), (addr_c, false, 2), (addr_d, false, 9)]
+        {
             session
                 .player_reg
                 .remotes
@@ -13709,7 +13954,7 @@ mod tests {
                 .set_peer_connect_status_for_tests(
                     d,
                     ConnectionStatus {
-                        disconnected: false,
+                        disconnected,
                         last_frame: Frame::new(frame),
                         epoch: 0,
                     },
@@ -13719,14 +13964,16 @@ mod tests {
         assert_eq!(
             session.pessimistic_floors().get(d.as_usize()).copied(),
             Some(Frame::new(4)),
-            "the gossiped pessimistic floor for D must be the min over our receipt and all \
-             running endpoints' views (min(9, 4, 7, 9) = 4)"
+            "the gossiped floor for D folds B's DISCONNECTED freeze (4) and our receipt (9), but \
+             NOT C's CONNECTED receipt (2): min(9, 4) = 4 (a fold of C's connected 2 would \
+             wrongly report 2 — the circular live-slot pin)"
         );
     }
 
     /// COMPUTATION: a non-running (pruned) endpoint's view is excluded from the
     /// gossiped pessimistic floor, exactly as the confirmed-bound fold excludes
-    /// it — so a peer reports the min over the sources it STILL folds.
+    /// it — so a peer reports the min over the (disconnected) sources it STILL
+    /// folds.
     #[test]
     fn pessimistic_floors_skips_non_running_endpoints() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
@@ -13737,7 +13984,8 @@ mod tests {
             last_frame: Frame::new(9),
             epoch: 0,
         };
-        for (addr, frame) in [(addr_b, 2), (addr_c, 7), (addr_d, 9)] {
+        // B and C both report D DISCONNECTED (freezes); D self-claims connected.
+        for (addr, frame) in [(addr_b, 2), (addr_c, 7)] {
             session
                 .player_reg
                 .remotes
@@ -13746,13 +13994,26 @@ mod tests {
                 .set_peer_connect_status_for_tests(
                     d,
                     ConnectionStatus {
-                        disconnected: false,
+                        disconnected: true,
                         last_frame: Frame::new(frame),
                         epoch: 0,
                     },
                 );
         }
-        // B holds the lowest view (2) but is pruned -> excluded.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(9),
+                    epoch: 0,
+                },
+            );
+        // B holds the lowest freeze (2) but is pruned -> excluded.
         session
             .player_reg
             .remotes
@@ -13764,33 +14025,31 @@ mod tests {
             session.pessimistic_floors().get(d.as_usize()).copied(),
             Some(Frame::new(7)),
             "a non-running endpoint's view is excluded from the gossiped pessimistic floor \
-             (min over our 9 and the RUNNING C 7, D 9 = 7), not the pruned B's 2"
+             (min over our 9 and the RUNNING C's freeze 7 = 7), not the pruned B's 2"
         );
     }
 
-    /// COMPUTATION (no-info skip): a RUNNING remote endpoint whose cached view
-    /// is `Frame::NULL` (a freshly `Running` peer that has not yet gossiped a
-    /// receipt) is SKIPPED from the fold, NOT folded — folding it would `min`
-    /// the whole reported floor down to `Frame::NULL` and poison every observer.
-    /// This pins the canonical-fold rustdoc claim ("skipping any remote endpoint
-    /// whose cached view is `Frame::NULL`"). Mutation-proof: a fold that did not
-    /// skip would report `Frame::NULL` instead of the real low (4).
+    /// COMPUTATION (no-info skip): a RUNNING remote endpoint whose disconnected
+    /// view is `Frame::NULL` (no info) is SKIPPED from the fold, NOT folded —
+    /// folding it would `min` the whole reported floor down to `Frame::NULL` and
+    /// poison every observer. Mutation-proof: a fold that did not skip would
+    /// report `Frame::NULL` instead of the real freeze (4).
     #[test]
     fn pessimistic_floors_skips_null_no_info_remote_caches() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
-        // Our own receipt of D is 9; B holds the real low (4); C is freshly
-        // running and has NOT gossiped a receipt for D yet (NULL = no info).
+        // Our own receipt of D is 9; B reports the real freeze (disconnected, 4);
+        // C reports disconnected with NO frame yet (NULL = no info); D connected.
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(9),
             epoch: 0,
         };
-        for (addr, frame) in [
-            (addr_b, Frame::new(4)),
-            (addr_c, Frame::NULL),
-            (addr_d, Frame::new(9)),
+        for (addr, disconnected, frame) in [
+            (addr_b, true, Frame::new(4)),
+            (addr_c, true, Frame::NULL),
+            (addr_d, false, Frame::new(9)),
         ] {
             session
                 .player_reg
@@ -13800,7 +14059,7 @@ mod tests {
                 .set_peer_connect_status_for_tests(
                     d,
                     ConnectionStatus {
-                        disconnected: false,
+                        disconnected,
                         last_frame: frame,
                         epoch: 0,
                     },
@@ -13811,7 +14070,7 @@ mod tests {
             session.pessimistic_floors().get(d.as_usize()).copied(),
             Some(Frame::new(4)),
             "a remote endpoint cached at Frame::NULL (no info) must be SKIPPED, not folded: \
-             the floor is min over our 9 and B's real low 4 = 4, never poisoned to NULL by C"
+             the floor is min over our 9 and B's real freeze 4 = 4, never poisoned to NULL by C"
         );
     }
 
@@ -13857,16 +14116,18 @@ mod tests {
 
     /// CONSUMPTION (gate ON): with the origin B pruned and a relay C plus the
     /// dropped slot D both running (the N>=4 relay topology), the relay's
-    /// PESSIMISTIC floor is folded instead of its own `last_frame` — the
-    /// double-failure-relay fix. Mutation-proof: the pre-fix one-hop fold would
-    /// return 10 (C's own receipt), discarding the contested window.
+    /// PESSIMISTIC floor — delivered in a FRESH post-prune `FloorReply` — is
+    /// folded instead of its own `last_frame` (the double-failure-relay fix).
+    /// Mutation-proof: the pre-fix one-hop fold would return 10 (C's own
+    /// receipt), discarding the contested window.
     #[test]
-    fn remote_slot_confirmed_bound_consumes_relay_pessimistic_floor_after_prune() {
+    fn remote_slot_confirmed_bound_consumes_relay_floor_round_after_prune() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
         // A pruned the origin B (its endpoint is non-running) — the
         // fold-membership asymmetry. C and D remain running (2 running remotes).
+        // The prune advanced the round generation (modeled directly here).
         session
             .player_reg
             .remotes
@@ -13880,8 +14141,8 @@ mod tests {
             last_frame: Frame::new(10),
             epoch: 0,
         };
-        // The RELAY C reports D connected at its own receipt 10, but its
-        // pessimistic floor for D is 4 — it still folds the pruned origin B's low.
+        // The RELAY C reports D connected at its own receipt 10, but its FRESH
+        // floor-round reply for D is 4 — it still folds the pruned origin B's low.
         {
             let c_endpoint = session
                 .player_reg
@@ -13896,9 +14157,9 @@ mod tests {
                     epoch: 0,
                 },
             );
-            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
         }
-        // D self-reports connected at 10 with a matching (no-low) pessimistic floor.
+        // D self-reports connected at 10 with a matching (no-low) fresh reply.
         {
             let d_endpoint = session
                 .player_reg
@@ -13913,23 +14174,24 @@ mod tests {
                     epoch: 0,
                 },
             );
-            d_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(10));
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(10));
         }
 
         let status = session.local_connect_status[d.as_usize()];
         assert_eq!(
             session.remote_slot_confirmed_bound(d, &status),
             Some(Frame::new(4)),
-            "with B pruned and C+D running, the relay C's pessimistic floor (4) must bound \
+            "with B pruned and C+D running, the relay C's fresh round floor (4) must bound \
              confirmation — folding its own last_frame (10) would discard the contested window"
         );
     }
 
     /// CONSUMPTION (gate OFF, no prune): with every remote running the one-hop
-    /// fold is complete, so a relay's pessimistic floor must be IGNORED — the
-    /// steady-state pacing must not pay the relay's extra hop of staleness.
+    /// fold is complete, so a relay's round floor must be IGNORED — the
+    /// steady-state pacing must not pay the relay's extra hop of staleness (and
+    /// no round even runs without a prune).
     #[test]
-    fn remote_slot_confirmed_bound_ignores_pessimistic_floor_without_prune() {
+    fn remote_slot_confirmed_bound_ignores_relay_floor_round_without_prune() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
@@ -13953,30 +14215,31 @@ mod tests {
                     },
                 );
         }
-        // C carries a low pessimistic floor — but with no prune it must be ignored.
+        // C carries a low fresh round floor — but with no prune the relay
+        // topology is off, so it must be ignored.
         session
             .player_reg
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+            .set_round_floor_for_tests(d, Frame::new(4));
 
         let status = session.local_connect_status[d.as_usize()];
         assert_eq!(
             session.remote_slot_confirmed_bound(d, &status),
             Some(Frame::new(10)),
             "with every remote running (no prune), the one-hop fold is complete and the \
-             relay's pessimistic floor (4) must be ignored (no steady-state pacing cost)"
+             relay's round floor (4) must be ignored (no steady-state pacing cost)"
         );
     }
 
     /// CONSUMPTION (gate OFF, single running remote): a prune occurred but fewer
     /// than two remotes remain running — there is no N>=4 relay topology (a
-    /// 2-survivor mesh), so the pessimistic floor must be ignored. Consuming it
-    /// here pins a 2-survivor post-drop mesh via a two-hop circular lag (the N0
+    /// 2-survivor mesh), so the round floor must be ignored. Consuming it here
+    /// pins a 2-survivor post-drop mesh via a two-hop circular lag (the N0
     /// liveness guard, `p2p_n0_clean_equal_receipt_timeout_drop_*`).
     #[test]
-    fn remote_slot_confirmed_bound_ignores_pessimistic_floor_with_single_running_remote() {
+    fn remote_slot_confirmed_bound_ignores_relay_floor_round_with_single_running_remote() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
@@ -14008,7 +14271,7 @@ mod tests {
                     epoch: 0,
                 },
             );
-            c_endpoint.set_peer_pessimistic_floor_for_tests(d, Frame::new(4));
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
         }
 
         let status = session.local_connect_status[d.as_usize()];
@@ -14020,12 +14283,13 @@ mod tests {
         );
     }
 
-    /// CONSUMPTION (gate ON, NULL floor): even with the relay topology engaged,
-    /// a relay that has reported NO pessimistic floor (`Frame::NULL` — a cold or
-    /// un-upgraded cache) falls back to its own `last_frame`, never a spurious
-    /// NULL-driven hold.
+    /// CONSUMPTION (gate ON, fresh reply but NULL floor): even with the relay
+    /// topology engaged, a relay whose FRESH `FloorReply` reports `Frame::NULL`
+    /// for the slot (it folds no source lower than its own receipt, or is itself
+    /// cold) falls back to its own `last_frame` — the `round_floor != NULL`
+    /// fallback clause, never a spurious NULL-driven dip.
     #[test]
-    fn remote_slot_confirmed_bound_pessimistic_null_falls_back_to_last_frame() {
+    fn remote_slot_confirmed_bound_round_null_falls_back_to_last_frame() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
         let d = PlayerHandle::new(3);
 
@@ -14040,29 +14304,602 @@ mod tests {
             last_frame: Frame::new(10),
             epoch: 0,
         };
-        // C and D report last_frame 8 with NO pessimistic floor (default NULL).
+        // C and D report last_frame 8 with a FRESH round reply of NULL for D.
         for addr in [addr_c, addr_d] {
-            session
+            let endpoint = session
                 .player_reg
                 .remotes
                 .get_mut(&addr)
-                .expect("endpoint must exist")
-                .set_peer_connect_status_for_tests(
-                    d,
-                    ConnectionStatus {
-                        disconnected: false,
-                        last_frame: Frame::new(8),
-                        epoch: 0,
-                    },
-                );
+                .expect("endpoint must exist");
+            endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(8),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_round_floor_for_tests(d, Frame::NULL);
         }
 
         let status = session.local_connect_status[d.as_usize()];
         assert_eq!(
             session.remote_slot_confirmed_bound(d, &status),
             Some(Frame::new(8)),
-            "a NULL pessimistic floor (cold/un-upgraded cache) must fall back to last_frame \
-             (8) even with the gate engaged — never a spurious NULL-driven hold"
+            "a fresh round reply of NULL (relay folds no lower source) must fall back to \
+             last_frame (8) even with the gate engaged — never a spurious NULL-driven dip"
+        );
+    }
+
+    /// MID-GAME-DROP REORDER facet, DISCONNECTED-relay sub-shape (S53). A relay
+    /// reporting the slot **disconnected** folds its connect-status `last_frame`
+    /// (its authoritative, reorder-safe queue-min freeze), NOT its round floor —
+    /// the round is consulted only for CONNECTED relays. Here the relay C reports
+    /// D **disconnected at the converged freeze 4** but its (fresh) round floor
+    /// for D is a stale-HIGH 10; the consumer must fold the freeze (4), so
+    /// confirmation can never outrun the freeze via a disconnected relay.
+    #[test]
+    fn remote_slot_confirmed_bound_disconnected_relay_ignores_stale_high_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // A pruned the origin B (non-running) — the fold-membership asymmetry.
+        // C and D remain running (2 running remotes) -> relay topology engaged.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+
+        // A's own view of D is still high (real inputs through 10): A has not yet
+        // detected D's drop and is about to confirm D with its real inputs.
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // The RELAY C reports D DISCONNECTED at the converged freeze 4 (it folded
+        // the origin's low and adopted the disconnect; this term is reorder-safe —
+        // `merge_peer_connect_status` mins/adopts it down and never resurrects).
+        // Its round floor for D, however, is a stale-HIGH 10 (which the consumer
+        // must NOT fold for a disconnected relay).
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+        // D self-reports connected at 10 (A is still receiving D's real inputs),
+        // with a matching (no-low) fresh round floor.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(4)),
+            "a relay reporting the slot DISCONNECTED must fold its connect-status \
+             freeze (4), NOT its stale-HIGH round floor (10): the freeze is the \
+             relay's authoritative queue-min (== the true floor for a disconnected \
+             slot) and is merged reorder-safely, so confirmation can never outrun \
+             it. Folding the stale floor (10) discards the contested (4, 10] window \
+             before the freeze reclaims it — the mid-game-drop reorder desync"
+        );
+    }
+
+    /// ROUND-INCOMPLETE detection (`slot_round_incomplete`): under the
+    /// relay-topology gate, a folded running relay reporting the slot
+    /// **connected** that has NOT delivered a `FloorReply` for the current prune
+    /// generation arms the post-prune fresh-ack hold. A DISCONNECTED report is
+    /// excluded (its `last_frame` is an authoritative freeze), and a FRESH reply
+    /// is excluded (the round completed). This is the detector for the verified
+    /// `AsyncAckSoundRoundSeq` hold (S55; it subsumes the S49 cold-cache facet).
+    #[test]
+    fn slot_round_incomplete_connected_unreplied_under_gate_is_true() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Gate ON: A pruned origin B (non-running); C and D still run (2 remotes).
+        // The prune advanced the round generation (modeled directly here).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        let gate = session.pessimistic_floor_relay_topology();
+        assert!(
+            gate,
+            "gate setup: pruned origin + 2 running remotes is the relay topology"
+        );
+
+        // The OTHER running remote (D's endpoint) is NON-incomplete for D
+        // throughout: it reports D connected WITH a fresh round reply, so it never
+        // arms the hold and C is the only variable under test.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        // RELAY C reports D CONNECTED but has NOT replied to the round since the
+        // prune (`floor_reply_seq` stays at the `0` seed, not above the prune
+        // threshold) — the incomplete-round corner.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+        assert!(
+            session.slot_round_incomplete(d, gate),
+            "a folded relay reporting D connected with no fresh round reply arms the hold"
+        );
+
+        // Control 1: a fresh reply (the round completed) clears the hold.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_round_floor_for_tests(d, Frame::new(4));
+        assert!(
+            !session.slot_round_incomplete(d, gate),
+            "a relay with a fresh round reply at the current generation is complete — no hold"
+        );
+
+        // Control 2: a DISCONNECTED report (authoritative freeze) clears the hold
+        // regardless of round freshness — a disconnected relay is excluded from
+        // the round entirely (the consumer folds its reorder-safe `last_frame`).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(5),
+                    epoch: 0,
+                },
+            );
+        assert!(
+            !session.slot_round_incomplete(d, gate),
+            "a DISCONNECTED report's last_frame IS the relay's freeze — sound to fold, no hold"
+        );
+    }
+
+    /// ROUND-INCOMPLETE detection (gate OFF): with no prune (every remote
+    /// running) the one-hop fold is complete and no round runs, so even a
+    /// connected un-replied relay must NOT arm the hold — the steady-state path
+    /// pays no round-hold cost.
+    #[test]
+    fn slot_round_incomplete_without_prune_is_false() {
+        let (mut session, _addr_b, addr_c, _addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // No prune: every remote running -> gate OFF.
+        assert!(!session.pessimistic_floor_relay_topology());
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+        let gate = session.pessimistic_floor_relay_topology();
+        assert!(
+            !session.slot_round_incomplete(d, gate),
+            "without the relay topology the round hold must never arm (no steady-state cost)"
+        );
+    }
+
+    /// POST-PRUNE fresh-ack HOLD end-to-end (`AsyncAckSoundRoundSeq`, S55). With
+    /// the relay-topology gate engaged and a folded relay reporting the dropped
+    /// slot **connected** that has not yet delivered a `FloorReply` for the
+    /// current prune generation, [`confirmed_frame`] must HOLD at the current
+    /// confirmed frame (4 — the value held while the origin was still folded,
+    /// pre-prune) rather than advance to the relay's high `last_frame` (100) and
+    /// risk confirming + discarding the contested window. RED before the fix
+    /// (`confirmed_frame() == 100`, the discard-before-convergence bug); GREEN
+    /// after (`== 4`, held).
+    #[test]
+    fn confirmed_frame_post_prune_unreplied_relay_holds_at_last_confirmed() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        // Establish a confirmed bound of 4 — the value A held at while the origin B
+        // was still folded (its low pinned the freeze barrier), pre-prune.
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(4), SaveMode::EveryFrame);
+        assert_eq!(session.sync_layer.last_confirmed_frame(), Frame::new(4));
+
+        // Local slot A is high so it does not bind the minimum.
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        // Gate ON: A pruned the origin B (its endpoint is non-running); C and D
+        // remain running (2 running remotes) — the N>=4 relay topology. B's own
+        // slot is mesh-agreed-disconnected so it is excluded from the minimum.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+
+        // Slot C: live relay reporting itself high — not the binding minimum.
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // Slot D: A's own view still high (A has NOT learned D dropped).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        // The prune advanced the round generation (modeled directly).
+        // Both running remotes report slots C and D connected high and mesh-agree
+        // B (excluded). The OTHER running remote (D's endpoint) has delivered a
+        // FRESH round reply, so it never arms the hold — slot D's hold will come
+        // solely from C, which has NOT replied (below).
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            // Mesh-agree B's slot across the running remotes (excluded).
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            for slot in [c, d] {
+                endpoint.set_peer_connect_status_for_tests(
+                    slot,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(100),
+                        epoch: 0,
+                    },
+                );
+            }
+        }
+        // The OTHER running remote (D's endpoint) is FRESH for the current
+        // generation, so it never arms the hold.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            for slot in [c, d] {
+                d_endpoint.set_round_floor_for_tests(slot, Frame::new(100));
+            }
+        }
+        // RELAY C has NOT replied to the round since the prune (its
+        // `floor_reply_seq` stays at the `0` seed, not above the prune threshold).
+        // Reporting D connected high while un-replied arms the post-prune hold for
+        // slot D.
+
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(4),
+            "a folded relay reporting D connected that has not completed the post-prune floor \
+             round must NOT advance confirmation to its high last_frame (100); confirmed_frame \
+             HOLDS at the current confirmed bound (4) until a fresh FloorReply arrives \
+             (AsyncAckSoundRoundSeq). Pre-fix this returns 100 (the discard-before-convergence bug)."
+        );
+    }
+
+    /// MID-GAME-DROP REORDER, disconnected-relay sub-shape, end-to-end at the
+    /// public [`confirmed_frame`]. The relay-topology gate is engaged (origin B
+    /// pruned, C+D running) and the relay C reports the dropped slot D
+    /// **disconnected at the converged freeze 4**, but its cached pessimistic floor
+    /// for D is a reordered stale-HIGH 10 (a pre-fold packet's floor clobbered the
+    /// plain-overwrite cache). `confirmed_frame()` must fold C's reorder-safe
+    /// connect-status freeze (4), NOT the stale floor (10): a disconnected relay's
+    /// `last_frame` is its authoritative queue-min freeze and is merged
+    /// reorder-safely, so confirmation can never outrun it. RED before the fix
+    /// (`confirmed_frame() == 10`, confirming + discarding the `(4, 10]` window the
+    /// freeze reclaims); GREEN after (`== 4`).
+    #[test]
+    fn confirmed_frame_disconnected_relay_ignores_stale_high_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), SaveMode::EveryFrame);
+
+        // Local A high so it never binds the minimum.
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // Gate ON: A pruned the origin B; C and D remain running (relay topology).
+        // B's own slot is mesh-agreed disconnected (excluded from the minimum).
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // A's OWN view of D is still high (it has not learned D dropped).
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        // Both running relays report B mesh-agreed-disconnected and C/themselves
+        // connected high, with FRESH round replies for the connected slots (so the
+        // round hold never fires for slot C — slot D's behavior is C's disconnected
+        // fold below).
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_round_floor_for_tests(c, Frame::new(100));
+        }
+        // D self-reports connected high (A is still receiving D's real inputs),
+        // with a fresh round floor.
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(100));
+        }
+        // The RELAY C reports D DISCONNECTED at the converged freeze 4, with a
+        // stale-HIGH round floor (10) for D (which the consumer must NOT fold for a
+        // disconnected relay).
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(4),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(4),
+            "a relay reporting D disconnected must fold its reorder-safe connect-status \
+             freeze (4), not its stale-HIGH round floor (10); confirmed_frame must HOLD at 4. \
+             Pre-fix this returns 10 (confirming + discarding the contested (4, 10] window — \
+             the mid-game-drop reorder desync, disconnected-relay sub-shape)."
+        );
+    }
+
+    /// POST-PRUNE round hold preserves a genuine lowering (the `min` cap, not a
+    /// clamp): a relayed converge-DOWN below the current confirmed flows through
+    /// so freeze convergence still follows down — the hold only blocks an ADVANCE.
+    #[test]
+    fn confirmed_frame_round_hold_preserves_lowering_dip() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(8), SaveMode::EveryFrame);
+
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        // A has LOCALLY detected D dropped but is still FROZEN HIGH (100); the
+        // converged-down freeze (3) arrives only via a gossiped term below.
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        for addr in [addr_c, addr_d] {
+            let endpoint = session.player_reg.remotes.get_mut(&addr).expect("endpoint");
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+        }
+        // RELAY C is UN-REPLIED: reports D connected high (100) with no fresh round
+        // reply (the slot arms the hold). The OTHER running remote (D's endpoint)
+        // relays a LOWERING: it reports D disconnected at the converged freeze 3 —
+        // a gossiped term BELOW the held 8.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(3),
+                    epoch: 0,
+                },
+            );
+
+        // D's slot is locally disconnected with a running remote (C) still
+        // reporting connected -> the (true, true) gossip-only arm folds
+        // min(C's un-replied 100, D-endpoint's relayed-low 3) = 3. C is un-replied
+        // so the slot arms the hold, but the `min(bound, 8)` cap keeps the genuine
+        // lowering (3) rather than pinning at 8 (a clamp would wrongly pin at 8).
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(3),
+            "a relayed lowering (gossiped freeze 3, below the held 8) must flow THROUGH the \
+             post-prune round-hold cap (min, not clamp) so freeze convergence still follows down"
         );
     }
 
@@ -14445,6 +15282,8 @@ mod tests {
                 MessageBody::QualityReport(_) => "QualityReport",
                 MessageBody::QualityReply(_) => "QualityReply",
                 MessageBody::ChecksumReport(_) => "ChecksumReport",
+                MessageBody::FloorRequest(_) => "FloorRequest",
+                MessageBody::FloorReply(_) => "FloorReply",
                 MessageBody::KeepAlive => "KeepAlive",
                 MessageBody::JoinRequest(_) => "JoinRequest",
                 MessageBody::StateSnapshot(_) => "StateSnapshot",
@@ -14857,7 +15696,7 @@ mod tests {
                 inputs.insert(PlayerHandle::new(2), PlayerInput::new(frame, value));
                 let status = self.status.clone();
                 for proto in self.protos.values_mut() {
-                    proto.send_input(&inputs, &status, &[]);
+                    proto.send_input(&inputs, &status);
                     proto.send_all_messages(&mut self.socket);
                 }
             }
