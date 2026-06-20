@@ -3170,13 +3170,17 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // origin B is pruned from A's fold (its low view never reaches A directly) AND
 // C->A is delayed past A's record+discard of the high frames.
 //
-// NARROWED in Session 50 by the `AsyncAckSound` pessimistic queue-min report
-// (every peer gossips, per slot, the `min` over its own and its folded sources'
-// `last_frame`): C reports the pessimistic floor `F` while it still folds B's low
-// view, so A — caching that floor before the C->A sever (the WARM / in-order
-// facet) — holds its confirmed bound for D at `F` and never discards the
-// contested window. The cold-cache (`AsyncAckSoundFresh`, S49) and mid-game-drop
-// reorder (S46 epoch freshness gate) facets are the tracked chunk-2 follow-up.
+// CLOSED in Session 55 by the sequence-numbered floor-round (the verified-sound
+// `AsyncAckSoundRoundSeq` mode). With B pruned and >=2 remotes still running, A is
+// in the relay topology, so it solicits each folded relay's CURRENT pessimistic
+// floor via `FloorRequest`/`FloorReply` (a relay's floor is the `min` over its own
+// freeze and the committed freezes it folds disconnected). While the round to C is
+// incomplete (C unreachable during the sever), A HOLDS its confirmed bound for D
+// at the current confirmed frame and never discards the contested window; on re-
+// open C answers with `F` over a reorder-immune reply channel and A converges.
+// Because the reply rides a dedicated seq-validated channel (not the input
+// gossip), this closes the warm, cold-cache, AND mid-game-drop reorder facets in
+// one mechanism.
 //
 // Oracle (F4 byte pattern): over the shared confirmed-frame range, A's and C's
 // recorded confirmed StateStub must be byte-equal; an EMPTY divergence list is the
@@ -3187,23 +3191,26 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // state. The assertions pin the post-fix convergence as a CI-safe guard.
 
 /// Double-failure-relay arbitration (VERDICT: REAL, S41) — now a positive
-/// CONVERGENCE guard after the Session-50 production fix closed the **warm /
-/// in-order facet** of the residual (the case this in-process repro exercises:
-/// the relay's pessimistic floor is delivered to A *before* the C->A sever). The
-/// cold-cache and mid-game-drop reorder facets remain the tracked chunk-2
-/// follow-up, so the N>=4 residual is NARROWED here, not fully eliminated.
-/// Builds a D-receipt gradient (B low = `F`, A/C high = `M`), then prunes the
-/// origin B from A's fold via `A.remove_player(B)` while A's direct link to C is
-/// severed and B has already relayed its low freeze to C. Pre-fix, A would record
-/// D's slot above `F` with real inputs and DISCARD those frames before C's relayed
-/// `{disconnected, F}` reached A, leaving A and C with divergent confirmed state.
+/// CONVERGENCE guard after the Session-55 production fix (the sequence-numbered
+/// `FloorRequest`/`FloorReply` round, verified-sound mode `AsyncAckSoundRoundSeq`)
+/// closed the residual. While A's direct link to C is severed, A's CACHE of C's
+/// D-term is stale-`{connected, M}` — the **connected-relay** shape — so A cannot
+/// see C's freeze `F` from its own fold; the round solicits C's CURRENT pessimistic
+/// floor `F` over a reorder-immune reply channel instead. Builds a D-receipt
+/// gradient (B low = `F`, A/C high = `M`), then prunes the origin B from A's fold
+/// via `A.remove_player(B)` while A's direct link to C is severed and B has already
+/// relayed its low freeze to C. Pre-fix, A would record D's slot above `F` with
+/// real inputs and DISCARD those frames before C's relayed `{disconnected, F}`
+/// reached A, leaving A and C with divergent confirmed state.
 ///
-/// The fix (the `AsyncAckSound` pessimistic queue-min report — every peer gossips,
-/// per slot, the `min` over its own and its folded sources' `last_frame`) makes C's
-/// gossip carry the **pessimistic floor `F`** while it still folds B's low view, so
-/// A — having cached that pessimistic floor before the C->A sever — HOLDS its
-/// confirmed bound for D at `F` and never discards the contested window. When the
-/// late relay lands, A re-simulates the still-in-window frames with D frozen at `F`
+/// The fix: with B pruned and ≥2 remotes still running, A is in the relay topology,
+/// so it issues `FloorRequest`s to its folded relays. While the round to C is
+/// incomplete (C unreachable during the sever — `slot_round_incomplete`), A HOLDS
+/// its confirmed bound for D at the current confirmed frame and never discards the
+/// contested window. When the C->A link re-opens, C answers the round with its
+/// CURRENT floor `F` (the `min` over its own freeze and its folded sources, carried
+/// on the reorder-immune reply channel — a stale gossip packet can never corrupt
+/// it); A folds `F`, re-simulates the still-in-window frames with D frozen at `F`,
 /// and converges; D then mesh-excludes and confirmation advances. This test pins
 /// that the full double-failure choreography still runs (A learns D's drop only via
 /// the late relay, A stays live via the S20 clamp) yet A's and C's recorded
@@ -3515,22 +3522,23 @@ fn p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors() -> Resu
          {a_stall_error:?} (bound={confirmed_bound})"
     );
 
-    // POSITIVE CONVERGENCE GUARD (Session 50) — the "double-failure relay"
+    // POSITIVE CONVERGENCE GUARD (Session 55) — the "double-failure relay"
     // residual (documented REAL in `remote_slot_confirmed_bound`'s rustdoc, the
     // genuine N>=4 instance of the discard-before-convergence residual the S32
-    // barrier narrowed but did not close) is now FIXED by the `AsyncAckSound`
-    // pessimistic queue-min report. Across the SAME double-failure choreography
-    // the asserts above pin (A learns D's drop ONLY via the late relay, A stays
-    // live via the S20 clamp), A's and C's recorded confirmed StateStub is now
-    // byte-identical: C's gossip carried the pessimistic floor `F` while it still
-    // folded B's low view, so A held its confirmed bound for D at `F` and never
-    // discarded the contested window — when the late relay landed, A re-simulated
-    // the still-in-window frames with D frozen at `F` and converged.
+    // barrier narrowed but did not close) is now FIXED by the sequence-numbered
+    // floor-round. Across the SAME double-failure choreography the asserts above
+    // pin (A learns D's drop ONLY via the late relay, A stays live via the S20
+    // clamp), A's and C's recorded confirmed StateStub is now byte-identical:
+    // while the round to C is incomplete during the sever, A held its confirmed
+    // bound for D at the current confirmed frame and never discarded the contested
+    // window — on re-open, C answered the round with its current floor `F` (over a
+    // reorder-immune reply channel), so A re-simulated the still-in-window frames
+    // with D frozen at `F` and converged.
     //
     // This is the converse of the pre-fix characterization guard: an EMPTY
     // `divergences` is now the GREEN signal. A regression (the fix reverted /
-    // the pessimistic report no longer folded / consumed) would re-populate
-    // `divergences` and flip this assert RED.
+    // the round hold or fold neutralized) would re-populate `divergences` and flip
+    // this assert RED.
     assert!(
         divergences.is_empty(),
         "double-failure-relay REGRESSED: confirmed state diverged across survivors \

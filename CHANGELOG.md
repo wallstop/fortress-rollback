@@ -162,28 +162,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim) was arbitrated **not a bug** — a still-running endpoint's stale-low term is folded into the
   confirmed bound and the freeze override identically, so confirmation is pinned at the freeze and never
   overruns it. The **double-failure-relay corner** (an origin survivor dying mid-relay, leaving a window
-  where the bound exceeds the later-relayed override) is **narrowed**: its warm / in-order facet is now
-  closed by a **pessimistic queue-min report**. Each peer additionally gossips, per slot, the minimum over
-  its own and its still-folded peers' last-received frames — a fixed-width `pessimistic_floor` vector
-  carried on every input packet alongside the existing connect-status vector. **This is a wire-format
-  addition, so all peers in a session must run a wire-compatible build** (mixed builds across this change
-  cannot exchange input packets; the field rides the same unversioned framing as the connect-status
-  vector). A survivor that has pruned the global-min origin from its own fold then consumes a relay's
-  pessimistic floor — but only while a relay topology actually remains (a remote has been pruned **and** at
-  least two remotes still run, so the steady state and 2-survivor post-drop pacing are unchanged) — holding
-  its confirmed bound at the mesh minimum instead of confirming and discarding the dropped slot's real
-  inputs above a freeze the relaying survivor will agree to. The **cold-cache facet** (an observer that
-  never received a relay's pessimistic floor — reachable when a hot-join reactivation seeds a connected
-  status without a floor) is now also closed by an **observer-side fresh-ack hold**: while the relay
-  topology holds, a folded relay reporting a slot connected with no pessimistic floor yet cannot be trusted
-  at its own (higher) receipt, so confirmation HOLDS at the current confirmed frame until a fresh floor
-  arrives (the relay's next input packet) or the slot mesh-agrees — never confirming and discarding past a
-  freeze the relay may still lower. The remaining **mid-game-drop reorder facet** (a relay's floor reported
-  high-then-low and reordered on the wire, leaving a stale-HIGH cached floor) is **not** closed by this — it
-  needs the connect-status drop-epoch as a freshness gate on the cached floor, and remains tracked.
-  Byzantine peers are out of scope. The existing defense-in-depth — the prediction-window rollback clamp, the sparse
-  earlier-checkpoint search, and the disconnect-rollback checksum invalidation/deferral — is unchanged and
-  now mostly dormant.
+  where the bound exceeds the later-relayed override) is now **closed** by a sequence-numbered
+  **floor-round** (two new wire messages, `FloorRequest`/`FloorReply`). When a relay topology forms — a
+  survivor has pruned a remote **and** at least two remotes still run — the survivor issues `FloorRequest`s
+  to its folded relays; each relay answers with its current per-slot **pessimistic floor** (the `min` over
+  its own freeze/receipt and the committed freezes of the peers it folds disconnected — a departed origin's
+  relayed low), and the survivor holds its confirmed bound for a connected relay's slot at the current
+  confirmed frame until a reply that postdates its most recent prune has landed from every folded relay,
+  then folds the replied floors — never confirming and discarding the dropped slot's real inputs above a
+  freeze the relaying survivor will agree to. The reply rides a **dedicated, reorder-immune channel** (a
+  per-request sequence number drops a reordered/stale reply), so it closes not only the warm / in-order
+  case but also the cold-cache case (a relay whose floor the observer never gossiped — reachable under
+  hot-join reactivation) and the mid-game-drop **reorder** case (a stale-high floor reordered on the wire),
+  which a floor gossiped on the input packet could not. The round runs only inside the relay topology, so
+  the steady state and 2-/3-peer post-drop pacing are unchanged. **This is a wire-format addition (the
+  `FloorRequest`/`FloorReply` message variants), so all peers in a session must run a wire-compatible
+  build** (mixed builds across this change cannot exchange these messages; they ride the same unversioned
+  framing as the existing protocol messages). Byzantine peers are out of scope. The existing
+  defense-in-depth — the prediction-window rollback clamp, the sparse earlier-checkpoint search, and the
+  disconnect-rollback checksum invalidation/deferral — is unchanged and now mostly dormant.
 
 ## [0.9.0] - 2026-06-04
 
