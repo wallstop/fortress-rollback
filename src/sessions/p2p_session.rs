@@ -8386,9 +8386,11 @@ impl<T: Config> P2PSession<T> {
             //
             // The floor is read from the **reorder-immune round-reply cache**
             // ([`UdpProtocol::round_floor`]): `round_floor` is written ONLY by a
-            // `FloorReply` whose `round_seq` matches the current prune generation,
-            // so a reordered stale reply is rejected (the connected-relay reorder
-            // hazard a plain `Input`-gossip floor cache could not survive). We fold
+            // `FloorReply` whose `round_seq` is strictly newer than the latest
+            // accepted, does not exceed any request actually issued, and reports
+            // every slot — so a reordered stale, unsolicited, or incomplete reply
+            // is rejected (the connected-relay reorder hazard a plain
+            // `Input`-gossip floor cache could not survive). We fold
             // it ONLY when the round is FRESH for
             // this generation (`floor_round_is_fresh`); while it is not fresh the
             // relay contributes its (high) `last_frame` here and

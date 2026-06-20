@@ -171,7 +171,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed frame until a reply that postdates its most recent prune has landed from every folded relay,
   then folds the replied floors — never confirming and discarding the dropped slot's real inputs above a
   freeze the relaying survivor will agree to. The reply rides a **dedicated, reorder-immune channel** (a
-  per-request sequence number drops a reordered/stale reply), so it closes not only the warm / in-order
+  per-request sequence number drops a reordered/stale reply; the observer also drops a reply echoing a
+  sequence it never issued, and any reply that omits a slot, so an accepted reply always fully and freshly
+  defines the cached floors), so it closes not only the warm / in-order
   case but also the cold-cache case (a relay whose floor the observer never gossiped — reachable under
   hot-join reactivation) and the mid-game-drop **reorder** case (a stale-high floor reordered on the wire),
   which a floor gossiped on the input packet could not. The round runs only inside the relay topology, so

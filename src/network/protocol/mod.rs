@@ -168,15 +168,21 @@ where
     /// reported in its latest ACCEPTED [`FloorReply`] — the **dedicated,
     /// reorder-immune reply channel** (`roundFloor`). Parallel to
     /// [`Self::peer_connect_status`] (index = handle, length `num_players`),
-    /// `Frame::NULL`-seeded. Written ONLY by [`Self::on_floor_reply`] for a reply
-    /// whose `round_seq` is STRICTLY NEWER than the latest accepted
-    /// ([`Self::floor_reply_seq`]); a reordered stale reply (an older/equal
-    /// `round_seq`) is dropped, which is what makes this cache reorder-immune.
+    /// `Frame::NULL`-seeded. Written ONLY by [`Self::on_floor_reply`] for an
+    /// ACCEPTED reply — one whose `round_seq` is STRICTLY NEWER than the latest
+    /// accepted ([`Self::floor_reply_seq`]), does NOT exceed the latest request
+    /// issued ([`Self::floor_request_seq`]), and reports a floor for EVERY slot.
+    /// A reordered stale reply (older/equal `round_seq`), an unsolicited one
+    /// (`round_seq` beyond any issued request), or a short/incomplete `floors`
+    /// vector is dropped — which is what keeps this cache reorder-immune and
+    /// prevents a partial reply from leaving a slot reading a stale prior round.
+    /// An accepted reply (its length checked first) fully rewrites every slot.
     round_floor: Vec<Frame>,
     /// Monotonic per-request sequence number, bumped on every outgoing
     /// [`FloorRequest`] ([`Self::send_floor_request`]) and stamped on it. Lets the
     /// observer order this relay's replies and drop reordered stale ones (accept
-    /// only a strictly-newer `round_seq`).
+    /// only a strictly-newer `round_seq`) as well as unsolicited/forged ones (a
+    /// reply must not echo a `round_seq` beyond this latest issued request).
     ///
     /// Wraps at [`u32::MAX`] (`wrapping_add`); past the wrap a low post-wrap seq
     /// would fail the strictly-newer test against the high pre-wrap
@@ -2324,24 +2330,63 @@ impl<T: Config> UdpProtocol<T> {
         }));
     }
 
-    /// On receiving a [`FloorReply`]: accept it ONLY when its echoed `round_seq`
-    /// is STRICTLY NEWER than the latest accepted ([`Self::floor_reply_seq`]) — an
-    /// older/equal `round_seq` is a reordered stale (or duplicate) reply and is
-    /// DROPPED, which is what makes [`Self::round_floor`] reorder-immune (a plain
-    /// `Input`-gossip floor cache could not survive a reordered stale-HIGH
-    /// packet). An accepted reply OVERWRITES the reply cache with the relay's
-    /// reported floors (the spec's `roundFloor' = AckReportFloor`) and advances
-    /// `floor_reply_seq`. Whether it counts as POST-PRUNE fresh
+    /// On receiving a [`FloorReply`], accept it ONLY when all three guards pass;
+    /// any failure DROPS the reply, leaving every floor-round field untouched
+    /// (the conservative `slot_round_incomplete` hold then keeps capping the
+    /// slot — never advancing on an unvalidated relay floor):
+    ///
+    /// 1. **Reorder/duplicate.** Its echoed `round_seq` must be STRICTLY NEWER
+    ///    than the latest accepted ([`Self::floor_reply_seq`]). An older/equal
+    ///    seq is a reordered stale (or duplicate) reply — dropping it is what
+    ///    makes [`Self::round_floor`] reorder-immune (a plain `Input`-gossip
+    ///    floor cache could not survive a reordered stale-HIGH packet).
+    /// 2. **Solicitation.** Its `round_seq` must NOT exceed the latest request
+    ///    this endpoint actually issued ([`Self::floor_request_seq`]). A reply
+    ///    echoing a never-issued seq is forged or corrupt; accepting it would
+    ///    advance `floor_reply_seq` past every legitimate future reply (a
+    ///    permanent round stall) and spuriously flip
+    ///    [`Self::floor_round_is_fresh`] — handing peer-controlled state into the
+    ///    floor cache (mirrors the request-tracking gate in
+    ///    [`Self::on_sync_reply`]).
+    /// 3. **Completeness.** Its `floors` must cover EVERY slot
+    ///    (`len >= num_players`). Accepting a reply RELEASES the
+    ///    `slot_round_incomplete` hold for this relay, so a short vector would
+    ///    leave the omitted slots reading a stale prior round while the hold is
+    ///    down — re-opening the connected-relay over-confirmation the round
+    ///    exists to prevent. The honest relay always reports every slot
+    ///    (`P2PSession::pessimistic_floors` is `num_players` long), so this
+    ///    rejects only malformed replies.
+    ///
+    /// An accepted reply OVERWRITES the reply cache with the relay's reported
+    /// floors (the spec's `roundFloor' = AckReportFloor`) — every slot, since the
+    /// length is checked first, so no slot survives from a prior round — and
+    /// advances `floor_reply_seq`. Whether it counts as POST-PRUNE fresh
     /// ([`Self::floor_round_is_fresh`]) then depends on whether its seq exceeds
-    /// the prune threshold ([`Self::floor_prune_seq`]). A missing slot is left as
-    /// reported (the session fold falls back to `last_frame`); excess entries
-    /// beyond `num_players` are ignored.
+    /// the prune threshold ([`Self::floor_prune_seq`]). Excess entries beyond
+    /// `num_players` are ignored; a reported `Frame::NULL` slot makes the session
+    /// fold fall back to `last_frame`.
     fn on_floor_reply(&mut self, body: &FloorReply) {
         if body.round_seq <= self.floor_reply_seq {
             trace!(
                 "Dropping stale/duplicate FloorReply round_seq {} (latest accepted {})",
                 body.round_seq,
                 self.floor_reply_seq
+            );
+            return;
+        }
+        if body.round_seq > self.floor_request_seq {
+            trace!(
+                "Dropping unsolicited FloorReply round_seq {} (latest request {})",
+                body.round_seq,
+                self.floor_request_seq
+            );
+            return;
+        }
+        if body.floors.len() < self.round_floor.len() {
+            trace!(
+                "Dropping incomplete FloorReply: {} floors for {} slots",
+                body.floors.len(),
+                self.round_floor.len()
             );
             return;
         }
@@ -3904,6 +3949,11 @@ mod tests {
         let mut protocol = running_protocol_three_slots();
         let slot2 = PlayerHandle::new(2);
 
+        // Issue five requests so replies up to seq 5 are solicited.
+        for _ in 0..5 {
+            protocol.send_floor_request();
+        }
+
         // A fresh-LOW reply at seq 5 lands first (floor 4).
         protocol.on_floor_reply(&FloorReply {
             round_seq: 5,
@@ -3930,6 +3980,128 @@ mod tests {
             protocol.round_floor(slot2),
             Frame::new(4),
             "a duplicate-seq reply must NOT overwrite the round cache"
+        );
+    }
+
+    /// FLOOR-ROUND solicitation guard: a `FloorReply` echoing a `round_seq` the
+    /// observer never issued (beyond `floor_request_seq`) is DROPPED. Without the
+    /// guard a forged/corrupt high seq would advance `floor_reply_seq` past every
+    /// legitimate future reply (a permanent round stall) AND spuriously flip the
+    /// round fresh — handing peer-controlled state into the floor cache.
+    #[test]
+    fn on_floor_reply_unsolicited_seq_is_dropped() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // The observer has issued exactly one request (seq 1).
+        protocol.send_floor_request(); // floor_request_seq = 1
+
+        // A reply echoing a never-issued seq (2 > 1) is forged/corrupt: drop it.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(9)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::NULL,
+            "an unsolicited reply must NOT write the floor cache"
+        );
+        assert!(
+            !protocol.floor_round_is_fresh(),
+            "an unsolicited reply must NOT advance the reply seq / flip freshness"
+        );
+
+        // A legitimate reply to the request we DID issue (seq 1) still lands,
+        // proving the unsolicited reply did not poison `floor_reply_seq`.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "the solicited reply lands after the unsolicited one was dropped"
+        );
+    }
+
+    /// FLOOR-ROUND completeness guard: a `FloorReply` whose `floors` omits a slot
+    /// is DROPPED whole. Accepting it would RELEASE the `slot_round_incomplete`
+    /// hold (flip the round fresh) while the omitted slot kept reading a stale
+    /// prior round — re-opening the connected-relay over-confirmation the round
+    /// exists to prevent. A short reply must leave the cache and seq untouched.
+    #[test]
+    fn on_floor_reply_incomplete_floors_is_dropped() {
+        let mut protocol = running_protocol_three_slots();
+        let slot1 = PlayerHandle::new(1);
+        let slot2 = PlayerHandle::new(2);
+
+        // A complete reply (seq 1) seeds the cache for every slot.
+        protocol.send_floor_request(); // floor_request_seq = 1
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(7), Frame::new(9)],
+        });
+        assert_eq!(protocol.round_floor(slot1), Frame::new(7));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(9));
+        let seq_before = protocol.floor_reply_seq;
+
+        // A newer, solicited, but SHORT reply (only 2 of 3 slots) is malformed.
+        protocol.send_floor_request(); // floor_request_seq = 2
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(1), Frame::new(2)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot1),
+            Frame::new(7),
+            "a short reply must NOT partially overwrite the cache"
+        );
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(9),
+            "the omitted slot must NOT be left reading a stale prior round"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, seq_before,
+            "a short reply must NOT advance the reply seq (no spurious freshness)"
+        );
+
+        // A complete reply at the same newer seq is accepted in full.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 2,
+            floors: vec![Frame::new(1), Frame::new(2), Frame::new(3)],
+        });
+        assert_eq!(protocol.round_floor(slot1), Frame::new(2));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(3));
+    }
+
+    /// FLOOR-ROUND excess-entries tolerance: a complete-but-LONGER `floors` vector
+    /// (more entries than slots) is ACCEPTED, with only the first `num_players`
+    /// consumed and trailing entries ignored — the documented contract that keeps
+    /// the guard lenient on benign trailing data while strict on missing coverage.
+    #[test]
+    fn on_floor_reply_excess_floors_are_accepted_and_trailing_ignored() {
+        let mut protocol = running_protocol_three_slots();
+        let slot0 = PlayerHandle::new(0);
+        let slot1 = PlayerHandle::new(1);
+        let slot2 = PlayerHandle::new(2);
+
+        protocol.send_floor_request(); // floor_request_seq = 1
+                                       // Four entries for a three-slot protocol: the fourth is trailing junk.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(1), Frame::new(2), Frame::new(3), Frame::new(999)],
+        });
+        assert_eq!(protocol.round_floor(slot0), Frame::new(1));
+        assert_eq!(protocol.round_floor(slot1), Frame::new(2));
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(3),
+            "the trailing fourth entry must be ignored, not consumed into a slot"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, 1,
+            "an excess-but-complete reply is accepted (advances the reply seq)"
         );
     }
 

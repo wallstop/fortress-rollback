@@ -191,17 +191,19 @@ pub(crate) struct ChecksumReport {
 /// pessimistic floor through this dedicated request/response round whose
 /// [`round_seq`](Self::round_seq) makes the reply reorder-immune.
 ///
-/// [`round_seq`](Self::round_seq) is the observer's **prune generation**: a
-/// monotonic counter the observer bumps on every running→pruned remote
-/// transition. The relay echoes it verbatim in its [`FloorReply`], so the
-/// observer accepts a reply only when its `round_seq` matches the observer's
-/// current generation — rejecting both a reordered stale reply (a strictly
-/// older generation) and a pre-prune reply (the freshness postdates the most
-/// recent prune). No floor-epoch wire field is needed (S54 machine-shows the
-/// seq + dedicated channel replace it).
+/// [`round_seq`](Self::round_seq) is a monotonic **per-request sequence
+/// number** the observer bumps on every outgoing `FloorRequest`. The relay
+/// echoes it verbatim in its [`FloorReply`], so the observer can drop a
+/// reordered stale (or duplicate) reply — accepting only a `round_seq` strictly
+/// newer than the latest accepted, and never one exceeding the latest request
+/// it actually issued (an unsolicited/forged seq). Post-prune **freshness** is
+/// tracked separately, observer-local: the reply must answer a request issued
+/// AFTER the observer's most recent prune. No floor-epoch wire field is needed
+/// (S54 machine-shows the seq + dedicated channel replace it).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct FloorRequest {
-    /// The requesting observer's current prune generation (see the struct docs).
+    /// The requesting observer's monotonic per-request sequence number, echoed
+    /// verbatim in [`FloorReply`] (see the struct docs).
     pub round_seq: u32,
 }
 
@@ -210,15 +212,21 @@ pub(crate) struct FloorRequest {
 /// connected-relay reorder fix; see [`FloorRequest`]).
 ///
 /// [`round_seq`](Self::round_seq) echoes the request's value verbatim so the
-/// observer can validate freshness (accept only when it equals the observer's
-/// current prune generation). [`floors`](Self::floors) is the relay's
-/// `P2PSession::pessimistic_floors` snapshot at reply time — the `min`, per
-/// slot, over the relay's own receipt/freeze and every running, non-reserved
-/// peer it still folds — surfacing a departed global-min origin's low the
-/// observer has already pruned from its own fold. Index = player handle; an
-/// observer reads it via `.get(slot)` and falls back to `last_frame` for a
-/// missing / `Frame::NULL` slot, so a length mismatch is tolerated (never
-/// indexed) and never confirms higher than the legacy fold.
+/// observer can drop reordered stale / duplicate / unsolicited replies (accept
+/// only a `round_seq` strictly newer than the latest accepted and not exceeding
+/// the latest request issued) and, separately, decide whether the reply
+/// postdates its most recent prune (an observer-local freshness check).
+/// [`floors`](Self::floors) is the relay's `P2PSession::pessimistic_floors`
+/// snapshot at reply time — per slot, the `min` over the relay's own
+/// receipt/freeze and the committed DISCONNECTED freezes it still folds (a
+/// departed global-min origin's low the observer has already pruned from its own
+/// fold). Index = player handle, length `num_players` (the relay always reports
+/// every slot). The observer accepts a reply ONLY when `floors` covers every
+/// slot; a short vector is malformed and dropped, so an accepted reply fully
+/// (re)defines the observer's cached floors with no slot left reading a stale
+/// prior round (excess trailing entries are ignored). A reported `Frame::NULL`
+/// slot is read as "fall back to `last_frame`" and never confirms higher than
+/// the legacy fold.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct FloorReply {
     /// The originating [`FloorRequest::round_seq`], echoed verbatim.
