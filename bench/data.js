@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781931248466,
+  "lastUpdate": 1781997264997,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "028eadff890aca63453cb3454b4871670c70df3c",
-          "message": "Documentation Accuracy + Fmt impls (#74)\n\n## Description\n\n- Hopefully clarify documentation\n- Add various additional impls like `std::fmt` to various public types\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-01-31T13:46:57-08:00",
-          "tree_id": "0b13a5f8a7f91e4e926d532c305ef770be196f65",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/028eadff890aca63453cb3454b4871670c70df3c"
-        },
-        "date": 1769896284054,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 149,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 516,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 744,
-            "range": "± 59",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1108,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103971,
-            "range": "± 706",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27593,
-            "range": "± 1214",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 79",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1557,
             "range": "± 102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "87196ccbfb60f3863723b179d49480a2f8c05e06",
+          "message": "feat: Fix Multiple Distributed Systems Problems on Multi-Peer Sessions for Connect/Reconnect (#182)\n\n## Description\n\nThis PR closes critical gaps in multi-peer disconnect/drop convergence,\nadds a sequence-numbered floor-round to prevent divergence in relay\ntopologies, and hardens codec/protocol handling against stale signals.\nThe biggest practical impact is in sessions with 3+ peers.\n\n### User-Facing Changes\n\n- **Fixes divergence after peer drop**: Survivors no longer confirm past\nan agreed freeze point in staggered-detection and relay scenarios.\n- **Closes double-failure-relay corner**: Introduces\n`FloorRequest`/`FloorReply` messages to establish a pessimistic per-slot\nfloor from relay peers, preventing silent divergence when an origin\nsurvivor dies mid-relay.\n- **Wire-format change**: All peers in a session must run a compatible\nbuild. Mixed old/new builds cannot exchange the new floor-round\nmessages.\n- **Prevents mesh agreement stalls**: Idle endpoints now emit periodic\nconnect-status nudges while a drop awaits mesh agreement, fixing a\ndeadlock at 3+ players.\n- **Expanded TLA+ validation**: Multiple new specifications and\nconfigurations validate safety properties under double-failure relay,\nasync ack, and reorder scenarios.\n\n### Technical Details\n\n- Prediction queue now always begins at the first missing frame, fixing\nsilent divergence when re-simulation requests land above missing\nwindows.\n- Connect-status gossip now carries the fold of local-received and\nremote-gossiped views, matching GGPO semantics for freeze barriers.\n- Codec and message decoding hardened against denial-of-service from\nhostile length prefixes.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/peer_drop.rs` (peer-drop convergence scenarios)\n\n**Manual testing performed:**\n\n- TLA+ spec/config scenario expansion under\n`specs/tla/DoubleFailureRelay*`\n- (No additional manual runtime testing documented in this draft)\n\n## Related Issues\n\n- (None linked)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Medium Risk**\n> Changes are mostly docs, TLA+, and CI, but they encode a wire-format\nand API narrative (floor-round vs legacy gossip) that must stay aligned\nwith production; mis-synced docs or TLA pairing could hide real protocol\ndrift.\n> \n> **Overview**\n> Aligns **user-facing and internal docs** with the S55 floor-round\ndesign: **CHANGELOG** now describes the double-failure-relay fix as\nclosed by **`FloorRequest`/`FloorReply`** (replacing per-`Input`\npessimistic-floor gossip), and **doc-code-sync** points canonical\nreferences at **`FloorReply::floors`**, **`UdpProtocol::round_floor`**,\nand **`P2PSession::pessimistic_floors`**.\n> \n> Adds **CI guards** so removed identifiers (`peer_pessimistic_floor`,\n`Input::pessimistic_floor`) cannot reappear in tracked docs as current\nproduction without historical qualifiers (`check-doc-claims.sh` +\ntests). **TLA FIX_MODE consistency** is generalized:\n**`check-tla-config-consistency.py`** discovers every spec with an\n`ASSUME FIX_MODE` set, pairs `.cfg` files by filename stem, and\nvalidates README counts against any spec’s mode count (not only\n`DoubleFailureRelay`).\n> \n> **Formal verification** expands materially:\n**`DoubleFailureRelay.tla`** gains the S52 **`REORDER`** corner and\nthree new modes (**`AsyncAckSoundEpoch`**, **`AsyncAckSoundRound`**,\n**`AsyncAckSoundRoundSeq`**) with matching demo/live/witness `.cfg`\nfiles; **`SpectatorReactivationEpoch`** is registered in\n**`verify-tla.sh`** with a default `.cfg` and a large\n**`specs/tla/README.md`** write-up. Existing DoubleFailureRelay configs\npick up **`CONSTANT REORDER = FALSE`** for backward-compatible runs.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nffb856bf1e4989b971ed1f2c11caf09eacad4ccd. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-20T16:09:57-07:00",
+          "tree_id": "79e7a6ecb02e914ab9104d5bb9ce2c1934f13256",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/87196ccbfb60f3863723b179d49480a2f8c05e06"
+        },
+        "date": 1781997264561,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 108,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 448,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 696,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1014,
+            "range": "± 31",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 132447,
+            "range": "± 1020",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45601,
+            "range": "± 426",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 96",
             "unit": "ns/iter"
           },
           {
