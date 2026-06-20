@@ -38,6 +38,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 | `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 | `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
+| `SpectatorReactivationEpoch.tla` | `SpectatorReactivationEpoch.cfg` (+ `_EpochProvOnly.cfg` mode-isolation PASS, `_EpochBlind.cfg` demo-FAIL — both manual, not auto-run) | ✓ CI | Host→spectator reactivation-EPOCH gate (Session 46), the reordering-aware **multi-cycle** companion to `SpectatorFailover.tla`: drops the single-cycle + in-order-staging scope so the WITHIN-CYCLE reordered-pre-drop-snapshot fail-open becomes reachable, and machine-checks the per-slot `ConnectionStatus.epoch` provenance clause closes it (EpochBlind → `NoFalseResurrection` violated; Epoch PASS). FIX_MODE ladder mirrors `DoubleFailureRelay.tla`. Host failover + the cross-cycle high-water gate are honestly scoped out (need a frame buffer; see the spec SCOPE header) |
 | `DoubleFailureRelay.tla` | `DoubleFailureRelay.cfg` (+ `_Baseline.cfg`, `_Tombstone.cfg`, `_InheritedFloor.cfg` demos, the S47 `_AsyncAckStale.cfg`, `_AsyncAckGossip.cfg`, `_AsyncAckTwoPhase.cfg` demos, and the S48 `_AsyncAckSound.cfg` PASS + `_AsyncAckSound_Witness.cfg` non-vacuity demo, and the S49 cold-cache demos `_AsyncAckSound_Cold.cfg` FAIL + `_AsyncAckSoundFresh_Cold.cfg` PASS / `_AsyncAckSoundFresh_Cold_Witness.cfg` non-vacuity / `_AsyncAckSoundFresh_Live.cfg` liveness, and the S52 mid-game-drop-reorder demos `_AsyncAckSoundFresh_Reorder.cfg` FAIL + `_AsyncAckSoundEpoch_Reorder.cfg` FAIL (passive-epoch insufficient) + `_AsyncAckSoundRound_Reorder.cfg` PASS / `_AsyncAckSoundRound_Reorder_Witness.cfg` non-vacuity / `_AsyncAckSoundRound_Reorder_Live.cfg` liveness, and the S54 concrete-seq round demos `_AsyncAckSoundRoundSeq_Reorder.cfg` PASS / `_AsyncAckSoundRoundSeq_Reorder_Witness.cfg` non-vacuity / `_AsyncAckSoundRoundSeq_Reorder_Live.cfg` liveness) | ✓ CI | N≥4 "double-failure relay" freeze-barrier residual arbitration. POLICY (original 4): residual is real (Baseline → safety violated), dead-survivor tombstone regresses liveness (Tombstone → liveness violated), cache-only no-wire shortcut unsound via corroborate-then-drop (InheritedFloor → safety violated), mesh-acked-floor *policy* sound (MeshAgree → safety+liveness PASS). S47 IMPLEMENTABILITY (3 new): discharging MeshAgree's instantaneous-fresh-ack + synchronized-death idealizations (in-flight ack round + per-observer death) breaks safety for the naive (AsyncAckStale), the passive-gossip-epoch = landed S46 wire epoch (AsyncAckGossip), and the active two-phase (AsyncAckTwoPhase) mechanisms — so the S46 passive drop-epoch is necessary but NOT sufficient on the player side. S48 SOUND (AsyncAckSound → safety+liveness PASS): the AsyncAckStale machinery with the single delta of a **pessimistic queue-min report** is the certified-sound implementable mode — the decisive fold change (no epoch gate needed in the warm-GlobalMin scope; safety also rests on the warmup pessimistic-ack seed + the FreezeNeverBelowGlobalMin floor). The audit's last open potential-desync item (S41 REAL/deferred) |
 
 ## Properties Verified
@@ -154,8 +155,10 @@ reactivation-safe latched view from the hosts' disagreeing (asymmetric-loss)
 streams. One droppable player (the merge loops players independently), one drop
 cycle with an optional genuine rejoin (the regime in which the provenance gate
 is sound), in-order per-host delivery — see the `.tla` header for the scope and
-the cross-cycle residuals (which need the future-work host→spectator epoch wire
-signal) left out of model.
+the cross-cycle/within-cycle residuals left out of model. The Session-46 epoch
+that closes those reordered-staging residuals is modeled in the companion
+`SpectatorReactivationEpoch.tla` (which drops the in-order-staging + single-cycle
+scope).
 
 **Safety:**
 
@@ -170,9 +173,11 @@ signal) left out of model.
   latch stays disconnected until the player **genuinely** rejoins — a stale
   lagging host that becomes canonical via failover but never witnessed the drop
   cannot re-open the slot (the `host_drop_witness` provenance gate). This is the
-  stale-lagging-canonical (failover) guarantee; the within-cycle reordered-staging
-  transient resurrection is a documented single-cycle production fail-open the
-  in-order-staging model deliberately excludes (see the `.tla` SCOPE header).
+  stale-lagging-canonical (failover) guarantee; the within-cycle/cross-cycle
+  reordered-staging fail-opens are documented production residuals the
+  in-order-staging model deliberately excludes (see the `.tla` SCOPE header) and
+  are modeled — with the Session-46 epoch that closes them — in the companion
+  `SpectatorReactivationEpoch.tla`.
 - `GateAcceptsBoundaryWitness` (the availability dual): a genuine current-drop
   witness at **exactly** the converged freeze is classified Witnessed (the
   load-bearing `>=`, not `>`, in `reactivation_provenance`), so a real hot-join
@@ -196,6 +201,77 @@ host-failover stale-resurrection trace; tightening the gate `>=` to `>` breaks
 Reachability probes confirm the interesting states (converge-down, genuine
 follow, failover-while-disconnected, latch-disconnected, gate boundary) are
 non-vacuously reached.
+
+### SpectatorReactivationEpoch.tla
+
+The reordering-aware, **multi-cycle** companion to `SpectatorFailover.tla`
+(Session 46). `SpectatorFailover.tla` proves the converge-down + provenance gate
+but only under a deliberately stronger-than-production scope (**one** drop cycle,
+**in-order** staging), so its own header lists the two production fail-OPEN
+residuals it cannot see: the **within-cycle** (a genuine current-drop witness's
+own reordered PRE-drop connected snapshot resurrects the slot) and the
+**cross-cycle** (a reordered earlier-cycle drop re-arms consumed provenance). The
+Session-46 fix adds cycle identity — a per-slot `ConnectionStatus.epoch`
+generation, tracked as a per-(host,player) high-water (`host_status_epoch`) and
+stamped on each witnessed drop (`DropWitness{freeze, epoch}`). This spec drops
+both scope assumptions (generation-counter multi-cycle + reordered staging) and
+machine-checks the epoch gates.
+
+Lifecycle is a **generation counter** (`truGen ∈ 0..MAXGEN`; odd = a drop, even =
+a connect/rejoin), so a report at generation `g` carries epoch `g` — faithful to
+`arm_status_epoch` bumping on every connected↔disconnected transition. A monotone
+commit cursor (`specGen`) models the spectator's frame-ordered `last_recv_frame`
+(a forward generation SKIP is impossible). `FIX_MODE` ladder (mirrors
+`DoubleFailureRelay.tla`):
+
+- `Epoch` (default, CI): both gates on → **PASS** (~11k distinct, ~3s).
+- `EpochProvOnly` (manual): provenance epoch clause on, high-water stale-reject
+  off → **PASS** — isolates the provenance clause as the gate binding at this
+  bound, confirming the high-water gate is modeled faithfully but not load-bearing
+  here (its cross-cycle re-arm needs host failover; see SCOPE).
+- `EpochBlind` (manual demo-FAIL): both gates off (the pre-S46 freeze-only
+  witness) → `NoFalseResurrection` **VIOLATED**, reproducing the within-cycle
+  fail-open — proves the provenance clause load-bearing.
+
+**Safety (FIX_MODE = Epoch):** `NoFalseResurrection` (the latch never shows
+connected while a host observes a strictly-newer drop the spectator committed
+past — the spectator-vs-host desync), `LatchAtOrBelowLiveMin` (F4 converge-down
+preserved), `GateAcceptsBoundaryWitness` (the `>=`-not-`>` availability boundary
+of the **freeze** comparison), `FreezeNeverRaised`. Each is mutation-pinned:
+`EpochBlind` (drop the provenance clause) breaks `NoFalseResurrection`; tightening
+the gate's **freeze** `>=`→`>` breaks `GateAcceptsBoundaryWitness`; a `min→max`
+re-commit breaks `FreezeNeverRaised`; neutralizing the `ConvergedFreeze` fold
+breaks `LatchAtOrBelowLiveMin`. (The gate's **epoch** `>=` reduces to `>` at this
+bound — connected reports carry even generations, drop witnesses odd ones, so the
+`==` boundary is unreachable here; the legacy uniform-epoch `==` case is covered
+by the production unit test
+`within_cycle_pre_drop_epoch_blocks_follow_post_drop_epoch_follows`.)
+Reachability probes confirm the latch actually disconnects and a genuine
+reactivation is reached (the gate is non-vacuous).
+
+**Scope (honest):** host failover / canonical oscillation is **out of scope**
+here (owned by `SpectatorFailover.tla`, single-cycle): all hosts stay present, the
+canonical is the fixed `Min(HOSTS)`. This is deliberate but **not** because
+failover corners are impossible — adding a `Failover` action to this latch-only
+model *does* surface an Epoch-mode `NoFalseResurrection` counterexample (a
+cross-cycle shape: a second host that in-order-witnessed an earlier drop+rejoin
+becomes canonical after the first host — holding a later drop — leaves, and its
+stale connected report follows). It is deferred rather than claimed as a defect
+because this abstraction **cannot adjudicate** it: the model collapses a host's
+per-frame *committed input values* (from the canonical's frame-indexed snapshots,
+which track the live survivor) and the latch connect-*status* (which can
+transiently lag and self-corrects on the survivor's next gossip) into one `latch`
+variable, so the latch-only over-approximation flags the status lag as a
+"resurrection" without deciding whether it is a genuine committed-state desync or
+a self-correcting transient. (The in-scope within-cycle corner is reachable for
+the *same* reason — production connect-status is send-time first-writer-wins
+gossip, **not** frame-monotone in generation — so the two corners are not
+asymmetric; only their adjudicability here differs.) Deciding the failover case
+needs a frame-buffer-level spec or a dedicated `src/` arbitration (future work);
+the cross-cycle high-water stale-reject that guards the out-of-order variant is
+exercised at the unit level by the production test
+`cross_cycle_stale_drop_epoch_blocks_resurrect_after_consume`. Liveness is also
+out of scope (owned by `SpectatorFailover.tla`'s `DropEventuallyLatched`).
 
 ### DoubleFailureRelay.tla
 
@@ -623,6 +699,7 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
 | `FrameAdvantageAggregation.cfg` | NUM_ENDPOINTS=3, MAX_ADVANTAGE=4, MULTI_HANDLE_COUNT=2, MIN_RECOMMENDATION=3 (no symmetry) | ~26,200 distinct states (~901,000 generated) |
 | `SpectatorFailover.cfg` | HOSTS={1,2,3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — canonical=min(live), liveness) | ~96,800 distinct states (~446,000 generated), ~6s single worker |
+| `SpectatorReactivationEpoch.cfg` | HOSTS={1,2}, MAX_FRAME=2, NULL_FRAME=999, MAXGEN=3, FIX_MODE="Epoch" (no symmetry — canonical=min(HOSTS)) | ~10,900 distinct states (~92,700 generated), ~3s single worker |
 | `DoubleFailureRelay.cfg` | SURVIVORS={a,b,c}, MAX_FRAME=3, WINDOW=1, RECEIPTS={0,3}, FIX_MODE="MeshAgree" (no symmetry — liveness; links monotone-heal, weak fairness) | ~865,600 distinct states (~3.88M generated), ~2min single worker |
 | `DoubleFailureRelay_InheritedFloor.cfg` (demo, expected FAIL — safety) | same constants, FIX_MODE="InheritedFloor" (cache-only no-wire shortcut) | `NoConfirmedDivergence` violated in ~2min (corroborate-then-drop race) |
 | `DoubleFailureRelay_AsyncAckStale.cfg` (S47 demo, expected FAIL — safety) | same constants + EPOCH_MAX=2, FIX_MODE="AsyncAckStale" (in-flight ack, no epoch gate) | safety violated (`LockedRecordMatchesFreeze`) — the no-gate control |
@@ -732,6 +809,7 @@ These specifications model the key algorithms from:
 | `TimeSync` | `src/time_sync.rs` (TimeSync; `advance_frame`, `average_frame_advantage`) |
 | `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
 | `SpectatorFailover` | `src/sessions/p2p_spectator_session.rs` (`merge_connection_status`, `converged_drop_status`, `converge_latched_drop_status`, `reactivation_provenance`, `witness_host_drop_reports`, `consume_drop_witnesses`, `witness_adopted_drop`, `commit_canonical_snapshot`, `host_drop_witness`, `host_connect_status`) |
+| `SpectatorReactivationEpoch` | `src/sessions/p2p_spectator_session.rs` (`witness_host_status_reports`, `reactivation_provenance` epoch clause, `host_status_epoch`, `DropWitness{freeze,epoch}`, `consume_drop_witnesses`, `witness_adopted_drop`), `src/network/messages.rs` (`ConnectionStatus.epoch`), `src/sessions/p2p_session.rs` (`arm_status_epoch`) |
 | `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`); models the N≥4 residual whose **warm / in-order facet is now FIXED in `src/` (Session 50)**: the `AsyncAckSound` pessimistic queue-min report (`Input.pessimistic_floor` gossiped per slot + a fold-membership-asymmetry-gated consume in `remote_slot_confirmed_bound`), with the in-process guard `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors` flipped RED→GREEN; the cold-cache + reorder facets remain the chunk-2 follow-up. The MeshAgree fix is the idealized *policy* (mesh-acked-floor / per-slot ack-epoch); the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary; the S47 ladder (AsyncAckStale/Gossip/TwoPhase) proves the landed S46 passive gossip-epoch is *not sufficient* to consume in `remote_slot_confirmed_bound`; the S48 `AsyncAckSound` mode is the certified-sound implementable design the `src/` fix should follow — `remote_slot_confirmed_bound` / the ack a survivor sends must report each peer's **pessimistic queue-min** (the min over the peer's own freeze/receipt AND every folded source's `last_frame`, surfacing a departed origin's low), gated by a fresh-ack round (no partition-hold). In the warm-GlobalMin model the pessimistic report is the decisive fold change with no epoch-gate consumption needed (safety also rests on the warmup pessimistic-ack propagation + the no-freeze-below-GlobalMin floor). **S49 discharged the cold-cache corner** (`COLD_CACHE` constant): the report ALONE fails cold (`AsyncAckSound_Cold` FAIL — the observer trusts its cold-high cached relay ack); the cold-sound mechanism is the **observer-side fresh-ack ROUND** — the observer must HOLD until it has *received* a pessimistic ack from each reachable folded peer, not trust the cold cache (`AsyncAckSoundFresh_Cold` PASS, the single delta). So the `src/` cold-corner rule is: pessimistic report + complete a fresh-ack round (no trusting the cold cache) + the S46 drop-epoch as a freshness gate for the mid-game-drop facet |
 
 ## Extending the Specifications

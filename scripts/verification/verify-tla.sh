@@ -69,6 +69,7 @@ SPECS=(
     "TimeSync"
     "SpectatorSession"
     "SpectatorFailover"
+    "SpectatorReactivationEpoch"
     "PeerDrop"
     "NPeerReactivation"
     "FreezeConvergence"
