@@ -50,7 +50,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Validate Kani proof coverage
         run: ./scripts/verification/check-kani-coverage.sh
@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -100,7 +100,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -131,7 +131,7 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -215,7 +215,7 @@ jobs:
         part: [1, 2, 3, 4, 5, 6]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -298,7 +298,7 @@ jobs:
         part: [1, 2, 3, 4, 5]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -379,7 +379,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
