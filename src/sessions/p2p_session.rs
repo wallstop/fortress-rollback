@@ -8111,7 +8111,8 @@ impl<T: Config> P2PSession<T> {
     /// window is a sound strict subset of the model-verified unconditional
     /// `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
     /// joiner) are neither a prune nor a relay, so they are excluded from both.
-    /// Drives the floor-round protocol every [`poll_remote_clients`] (the
+    /// Drives the floor-round protocol every
+    /// [`poll_remote_clients`](Self::poll_remote_clients) (the
     /// double-failure-relay connected-relay reorder fix; verified-sound mode
     /// `AsyncAckSoundRoundSeq` in `specs/tla/DoubleFailureRelay.tla`, S55).
     ///

@@ -229,13 +229,15 @@ of preference:
    all point there instead of re-describing the `Frame::NULL`-skip fold.
 2. **Derive machine-checkable counts from the source of truth.** For an
    enumerable set with a single definition site, add a checker that reads the
-   definition and compares. The TLA `FIX_MODE` set lives in one
-   `ASSUME FIX_MODE \in {...}` clause in `specs/tla/DoubleFailureRelay.tla`;
-   `scripts/docs/check-tla-config-consistency.py` derives it (after stripping TLA
-   comments) and enforces that every `.cfg` names a defined mode, every defined
-   mode has a `.cfg` and a README mention, and every prose mode-count equals the
-   defined size. Run it via agent preflight (`tla-config-consistency`) or the
-   `ci-docs` workflow. Tests: `scripts/tests/test_check_tla_config_consistency.py`.
+   definition and compares. Each TLA `FIX_MODE` set lives in one
+   `ASSUME FIX_MODE \in {...}` clause in its own spec (e.g.
+   `DoubleFailureRelay.tla`, `SpectatorReactivationEpoch.tla`);
+   `scripts/docs/check-tla-config-consistency.py` *discovers* every such spec (a
+   new FIX_MODE spec needs no edit), pairs each `.cfg` to its spec by filename,
+   and enforces that every `.cfg` names a mode *its own* spec defines, every
+   defined mode has a `.cfg` and a README mention, and every prose mode-count
+   matches some spec's size. Run it via agent preflight (`tla-config-consistency`)
+   or the `ci-docs` workflow. Tests: `scripts/tests/test_check_tla_config_consistency.py`.
 
 The checker only reads a count claim written in the form `<N> FIX_MODE modes`
 (FIX_MODE inside the counted phrase) — so author mode counts that way. There is

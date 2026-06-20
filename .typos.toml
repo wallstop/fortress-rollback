@@ -36,6 +36,14 @@ nextest = "nextest"
 # Intentional typos in documentation examples (demonstrating bad practices)
 conected = "conected"  # Used in .llm/skills/rust-language/type-driven-design.md to show string-state issues
 
+[default.extend-identifiers]
+# TLA+ spec identifiers (specs/tla/SpectatorReactivationEpoch.tla + README.md).
+# `truGen` is the mesh's "true generation" counter; `AdvanceTruGen` its action.
+# Allowlisted as whole identifiers so the `tru` abbreviation is accepted only in
+# these names, never as a bare word elsewhere.
+truGen = "truGen"
+AdvanceTruGen = "AdvanceTruGen"
+
 [files]
 extend-exclude = [
     "target/",

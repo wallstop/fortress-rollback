@@ -1144,10 +1144,14 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
 /// parent-side scheduling around a peer's own timeout.
 const PROCESS_TIMEOUT_OVERHEAD_SECS: u64 = 30;
 
-/// Maximum peer timeout allowed in the per-PR smoke tier.
+/// Peer-timeout ceiling the per-PR smoke-tier nextest budget is sized for.
 ///
-/// The nextest per-test budget for `network::multi_process` must stay above this
-/// value after platform scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`].
+/// This is a budget-sizing input, not a per-test runtime guard: the nextest
+/// per-test budget for `network::multi_process` must stay above this value after
+/// platform scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`]. A per-PR test whose
+/// `timeout_secs` exceeds this belongs in the nightly suite (`#[ignore]`d); what
+/// keeps real-UDP flakiness out of the smoke tier is the loss check in
+/// [`check_smoke_tier`], since loss -- not a long timeout -- is the flake driver.
 const PER_PR_MAX_PEER_TIMEOUT_SECS: u64 = 90;
 
 /// Maximum peer timeout used by the ignored nightly real-UDP suite.

@@ -189,7 +189,7 @@ pub(crate) struct ChecksumReport {
 /// floor on out-of-order `Input` gossip would let a reordered stale-HIGH packet
 /// erase a fresh-low one. Instead the observer solicits the relay's CURRENT
 /// pessimistic floor through this dedicated request/response round whose
-/// [`round_seq`] makes the reply reorder-immune.
+/// [`round_seq`](Self::round_seq) makes the reply reorder-immune.
 ///
 /// [`round_seq`](Self::round_seq) is the observer's **prune generation**: a
 /// monotonic counter the observer bumps on every running→pruned remote
