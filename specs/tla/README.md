@@ -412,8 +412,9 @@ of scope).** S48/S49's positives hold in the **warm-GlobalMin** convention; S49 
 scoped out the **cold-GOSSIP-cache / mid-game-drop** world, where a relay's *own* cache of
 the low origin is cold and warms via gossip, so its **pessimistic floor genuinely goes
 HIGH-then-LOW mid-game** and a *reordered* stale-HIGH floor packet (a relay's earlier report)
-can clobber a fresh-LOW one. Production's `peer_pessimistic_floor` cache is a **plain
-overwrite** (latest-processed packet wins), so this reorder re-opens the residual. S52 models
+can clobber a fresh-LOW one. The pre-S55 (legacy) production floor-gossip cache (formerly
+`peer_pessimistic_floor`, removed by the S55 floor-round landing) was a **plain
+overwrite** (latest-processed packet wins), so this reorder re-opened the residual. S52 models
 it with an orthogonal `REORDER` constant: it (1) cold-seeds the gossip cache (uniform
 `MAX_FRAME`) so the relay's floor goes high-then-low, and (2) adds the `StaleAck` action (a
 reordered stale-HIGH ack at an OLDER floor-epoch, delivered late), plus a per-source
@@ -457,16 +458,18 @@ the freshness mechanism:
   floorEpoch" with the production-realizable mechanism — a **concrete sequence-numbered
   request/response round** — and machine-verifies it needs **two** ingredients (each, removed,
   reproduces `LockedRecordMatchesFreeze`): **(1) a dedicated, reorder-immune reply channel**
-  (`roundFloor`): the observer folds the floor a relay reported in its last **round reply**
-  (`SendAck`), **not** the reorder-prone gossip cache (`ackFloor` / the production
-  `peer_pessimistic_floor`); a reordered stale-HIGH Input-gossip floor (`StaleAck`) clobbers
+  (`roundFloor`, the production `UdpProtocol::round_floor`): the observer folds the floor a relay
+  reported in its last **round reply** (`SendAck`), **not** the reorder-prone gossip cache
+  (`ackFloor` / the now-removed legacy gossip cache, formerly `peer_pessimistic_floor`); a
+  reordered stale-HIGH Input-gossip floor (`StaleAck`) clobbers
   `ackFloor` but **never** `roundFloor`, because the seq on the reply rejects a reordered stale
   reply. **(2) post-prune freshness** (`ackFresh`): the observer trusts a reply only once it
   **postdates its most recent `Prune`** — and since a `Prune` requires `gone[origin]` and a gone
   origin cannot `Gossip`, a post-prune reply captures the relay's **settled** floor. This is **strictly
   simpler than the audit's floor-epoch blueprint** — **no floor-epoch wire field is needed**, only a
-  seq-validated `FloorRequest`/`FloorReply` round the observer re-issues per prune, stored separately
-  from `peer_pessimistic_floor`. The **first S54 attempt** trusted the shared `ackFloor` cache under a
+  seq-validated `FloorRequest`/`FloorReply` round the observer re-issues per prune, cached in
+  `UdpProtocol::round_floor` (separate from the now-removed legacy gossip cache, formerly
+  `peer_pessimistic_floor`). The **first S54 attempt** trusted the shared `ackFloor` cache under a
   freshness *flag* alone, and TLC **disproved** it (`StaleAck` clobbers the value stale-HIGH while the
   flag stays set) — the negative that forced the dedicated channel. The RED control is
   `AsyncAckSoundFresh` under reorder (trust any received ack → residual reproduces). Non-vacuity
@@ -495,8 +498,8 @@ model-vs-`src/` distinction the `COLD_CACHE` cold-cache result surfaced, S49/S51
 **connected-relay sub-shape** (the relay still reports the slot connected while its disconnect
 gossip is loss-delayed, so the floor is its only impending-freeze signal) has no reorder-safe
 fallback and is exactly what `AsyncAckSoundRound` targets. The S53 `src/` cycle landed the
-disconnected-relay closure; the connected-relay round-gate is the remaining `src/` work this mode
-informs.
+disconnected-relay closure; the connected-relay round-gate — the `src/` work this mode informs —
+was subsequently closed by the S55 floor-round (`FloorRequest`/`FloorReply` → `UdpProtocol::round_floor`).
 
 **Safety:** `NoConfirmedDivergence` (no two alive survivors permanently — both
 window-locked — disagree on the dropped slot's recorded confirmed value);
@@ -810,7 +813,7 @@ These specifications model the key algorithms from:
 | `FrameAdvantageAggregation` | `src/sessions/p2p_session.rs` (`max_frame_advantage`, `check_wait_recommendation`, `frames_ahead`), `src/network/protocol/mod.rs` (`average_frame_advantage`, `handles`), `src/lib.rs` (`FortressEvent::WaitRecommendation`) |
 | `SpectatorFailover` | `src/sessions/p2p_spectator_session.rs` (`merge_connection_status`, `converged_drop_status`, `converge_latched_drop_status`, `reactivation_provenance`, `witness_host_drop_reports`, `consume_drop_witnesses`, `witness_adopted_drop`, `commit_canonical_snapshot`, `host_drop_witness`, `host_connect_status`) |
 | `SpectatorReactivationEpoch` | `src/sessions/p2p_spectator_session.rs` (`witness_host_status_reports`, `reactivation_provenance` epoch clause, `host_status_epoch`, `DropWitness{freeze,epoch}`, `consume_drop_witnesses`, `witness_adopted_drop`), `src/network/messages.rs` (`ConnectionStatus.epoch`), `src/sessions/p2p_session.rs` (`arm_status_epoch`) |
-| `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`); models the N≥4 residual whose **warm / in-order facet is now FIXED in `src/` (Session 50)**: the `AsyncAckSound` pessimistic queue-min report (`Input.pessimistic_floor` gossiped per slot + a fold-membership-asymmetry-gated consume in `remote_slot_confirmed_bound`), with the in-process guard `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors` flipped RED→GREEN; the cold-cache + reorder facets remain the chunk-2 follow-up. The MeshAgree fix is the idealized *policy* (mesh-acked-floor / per-slot ack-epoch); the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary; the S47 ladder (AsyncAckStale/Gossip/TwoPhase) proves the landed S46 passive gossip-epoch is *not sufficient* to consume in `remote_slot_confirmed_bound`; the S48 `AsyncAckSound` mode is the certified-sound implementable design the `src/` fix should follow — `remote_slot_confirmed_bound` / the ack a survivor sends must report each peer's **pessimistic queue-min** (the min over the peer's own freeze/receipt AND every folded source's `last_frame`, surfacing a departed origin's low), gated by a fresh-ack round (no partition-hold). In the warm-GlobalMin model the pessimistic report is the decisive fold change with no epoch-gate consumption needed (safety also rests on the warmup pessimistic-ack propagation + the no-freeze-below-GlobalMin floor). **S49 discharged the cold-cache corner** (`COLD_CACHE` constant): the report ALONE fails cold (`AsyncAckSound_Cold` FAIL — the observer trusts its cold-high cached relay ack); the cold-sound mechanism is the **observer-side fresh-ack ROUND** — the observer must HOLD until it has *received* a pessimistic ack from each reachable folded peer, not trust the cold cache (`AsyncAckSoundFresh_Cold` PASS, the single delta). So the `src/` cold-corner rule is: pessimistic report + complete a fresh-ack round (no trusting the cold cache) + the S46 drop-epoch as a freshness gate for the mid-game-drop facet |
+| `DoubleFailureRelay` | `src/sessions/p2p_session.rs` (`remote_slot_confirmed_bound`, `update_player_disconnects`, `confirmed_frame`, the freeze-barrier fold and `!endpoint.is_running()` skip), `src/network/protocol/mod.rs` (`merge_peer_connect_status`, `is_running`, `round_floor`, `send_floor_reply`), `src/network/messages.rs` (`FloorRequest`, `FloorReply`); models the N≥4 residual that is now **CLOSED in `src/` (warm/in-order + cold-cache + reorder facets all landed, S55)**: the pessimistic queue-min floor (`P2PSession::pessimistic_floors`) is delivered via the **sequence-numbered `FloorRequest`/`FloorReply` round** (cached reorder-immunely in `UdpProtocol::round_floor`, replacing the removed legacy per-slot Input gossip) and consumed via a fold-membership-asymmetry-gated read in `remote_slot_confirmed_bound`, with the in-process guard `tests/sessions/peer_drop.rs::p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors` flipped RED→GREEN; the cold-cache + reorder facets are CLOSED (S54/S55), not pending. The MeshAgree fix is the idealized *policy* (mesh-acked-floor / per-slot ack-epoch); the InheritedFloor result proves the cheaper cache-only / no-wire variant is unsound, so the wire ack-epoch is necessary; the S47 ladder (AsyncAckStale/Gossip/TwoPhase) proves the landed S46 passive gossip-epoch is *not sufficient* to consume in `remote_slot_confirmed_bound`; the S48 `AsyncAckSound` mode is the certified-sound implementable design the `src/` fix should follow — `remote_slot_confirmed_bound` / the ack a survivor sends must report each peer's **pessimistic queue-min** (the min over the peer's own freeze/receipt AND every folded source's `last_frame`, surfacing a departed origin's low), gated by a fresh-ack round (no partition-hold). In the warm-GlobalMin model the pessimistic report is the decisive fold change with no epoch-gate consumption needed (safety also rests on the warmup pessimistic-ack propagation + the no-freeze-below-GlobalMin floor). **S49 discharged the cold-cache corner** (`COLD_CACHE` constant): the report ALONE fails cold (`AsyncAckSound_Cold` FAIL — the observer trusts its cold-high cached relay ack); the cold-sound mechanism is the **observer-side fresh-ack ROUND** — the observer must HOLD until it has *received* a pessimistic ack from each reachable folded peer, not trust the cold cache (`AsyncAckSoundFresh_Cold` PASS, the single delta). So the `src/` cold-corner rule is: pessimistic report + complete a fresh-ack round (no trusting the cold cache) + the S46 drop-epoch as a freshness gate for the mid-game-drop facet |
 
 ## Extending the Specifications
 

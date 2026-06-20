@@ -223,10 +223,10 @@ of preference:
 1. **State the fact once; link, don't restate.** When the same invariant lives in
    N doc comments, fixing one leaves N-1 stale. Make one site canonical and have
    the others defer to it. Example: the double-failure-relay pessimistic floor is
-   defined once on `P2PSession::pessimistic_floors`; the cache field
-   (`UdpProtocol::peer_pessimistic_floor`), the wire field
-   (`Input::pessimistic_floor`), and the consumer (`remote_slot_confirmed_bound`)
-   all point there instead of re-describing the `Frame::NULL`-skip fold.
+   defined once on `P2PSession::pessimistic_floors`; the wire field
+   (`FloorReply::floors`) defers to that definition directly, and the relay-reply
+   cache (`UdpProtocol::round_floor`) and the consumer (`remote_slot_confirmed_bound`)
+   defer via the reply — none re-describe the `Frame::NULL`-skip fold.
 2. **Derive machine-checkable counts from the source of truth.** For an
    enumerable set with a single definition site, add a checker that reads the
    definition and compares. Each TLA `FIX_MODE` set lives in one
@@ -259,3 +259,11 @@ rg 'FortressError::\w+' src/ --type rust -o | sort | uniq  # Used
 rg 'will.*panic|cause.*panic' src/ --type rust
 rg '# Panics' src/ --type rust
 ```
+
+A *removed* `pub(crate)`/private identifier still named in docs is the same drift in
+reverse (a doc claiming code that no longer exists). `scripts/ci/check-doc-claims.sh`
+(`check_removed_floor_identifiers`) enforces that any tracked doc/comment naming a
+known-removed identifier carries a same-line historical qualifier
+(`legacy`/`formerly`/`removed`/`pre-S55`); when you delete a referenced item, add a
+tombstone entry there (and re-point live references at the replacement). Tests:
+`scripts/tests/test_check_doc_claims_floor_ids.py`. Runs in agent preflight (`doc-claims`).

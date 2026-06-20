@@ -216,7 +216,9 @@ where
     /// A received [`FloorRequest`]'s `round_seq`, recorded by
     /// [`Self::on_floor_request`] and drained by the session (which computes
     /// `pessimistic_floors` and answers via [`Self::send_floor_reply`]).
-    /// Last-writer-wins (a newer request supersedes an undrained older one).
+    /// Highest-seq-wins: a newer request supersedes an undrained older one
+    /// regardless of arrival order, so a reordered stale `FloorRequest` cannot
+    /// clobber a higher pending one.
     pending_floor_request: Option<u32>,
     /// Whether this endpoint was [`is_running`](Self::is_running) at the previous
     /// [`detect_prune_transition`](Self::detect_prune_transition) poll. The
@@ -944,6 +946,14 @@ impl<T: Config> UdpProtocol<T> {
     /// had been accepted. Lets session-level tests pin a known post-prune round
     /// outcome without driving a request/response exchange. Out-of-range handles
     /// ignored.
+    ///
+    /// Keeps the request seq consistent: a reply can only be accepted for a
+    /// request actually issued, so `floor_request_seq` is bumped to at least the
+    /// new `floor_reply_seq`. Without this the helper would leave the impossible
+    /// `floor_reply_seq > floor_request_seq` state, which POISONS the endpoint —
+    /// every subsequent real [`on_floor_reply`](Self::on_floor_reply) is dropped
+    /// because the solicitation guard becomes unsatisfiable (a valid reply seq
+    /// must be both `> floor_reply_seq` and `<= floor_request_seq`).
     #[cfg(test)]
     pub(crate) fn set_round_floor_for_tests(&mut self, handle: PlayerHandle, floor: Frame) {
         if let Some(slot) = self.round_floor.get_mut(handle.as_usize()) {
@@ -951,6 +961,10 @@ impl<T: Config> UdpProtocol<T> {
         }
         // Mark fresh: a reply seq strictly above the prune threshold.
         self.floor_reply_seq = self.floor_prune_seq.wrapping_add(1);
+        // A reply is only accepted for an issued request, so keep the request
+        // seq at least as high as the accepted reply seq (no poisoned endpoint).
+        self.floor_request_seq = self.floor_request_seq.max(self.floor_reply_seq);
+        self.debug_assert_floor_round_invariants();
     }
 
     /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
@@ -2301,14 +2315,26 @@ impl<T: Config> UdpProtocol<T> {
         self.queue_message(MessageBody::FloorRequest(FloorRequest {
             round_seq: self.floor_request_seq,
         }));
+        self.debug_assert_floor_round_invariants();
     }
 
     /// On receiving a [`FloorRequest`] (we are a relay for the requester): record
     /// the request's `round_seq` for the session to answer (it computes
     /// `pessimistic_floors` and replies via [`Self::send_floor_reply`]).
-    /// Last-writer-wins — a newer request supersedes an undrained older one.
+    ///
+    /// Highest-seq-wins — a newer request supersedes an undrained older one,
+    /// regardless of arrival order. Under packet reorder an OLDER `round_seq`
+    /// must NOT clobber a higher undrained pending one (which would answer the
+    /// stale round and skip the newer one), so the incoming seq is stored only
+    /// when it is strictly greater than the currently-pending one (or none is
+    /// pending yet).
     fn on_floor_request(&mut self, body: &FloorRequest) {
-        self.pending_floor_request = Some(body.round_seq);
+        if self
+            .pending_floor_request
+            .is_none_or(|pending| body.round_seq > pending)
+        {
+            self.pending_floor_request = Some(body.round_seq);
+        }
     }
 
     /// Whether a [`FloorRequest`] is awaiting a reply (peek without draining).
@@ -2396,6 +2422,7 @@ impl<T: Config> UdpProtocol<T> {
             }
         }
         self.floor_reply_seq = body.round_seq;
+        self.debug_assert_floor_round_invariants();
     }
 
     /// This endpoint's cached per-slot pessimistic floor from its latest accepted
@@ -2423,6 +2450,50 @@ impl<T: Config> UdpProtocol<T> {
     /// session calls this on EVERY endpoint whenever ANY remote is pruned.
     pub(crate) fn reset_floor_freshness(&mut self) {
         self.floor_prune_seq = self.floor_request_seq;
+        self.debug_assert_floor_round_invariants();
+    }
+
+    /// Debug-only floor-round state invariants, asserted at the end of every
+    /// method that mutates floor-round state. Follows the same
+    /// `debug_assert!`-gated invariant-check convention as
+    /// [`SyncLayer`](crate::__internal::SyncLayer) (which wraps a fallible
+    /// `check_invariants`; these relations are simple enough to assert inline).
+    /// The relations:
+    ///
+    /// 1. `floor_reply_seq <= floor_request_seq` — a reply is only accepted for a
+    ///    request actually issued, so the latest accepted reply seq can never
+    ///    exceed the latest request seq.
+    /// 2. `floor_prune_seq <= floor_request_seq` — a prune snapshots the current
+    ///    request seq ([`Self::reset_floor_freshness`]), so the threshold can
+    ///    never exceed the latest request seq.
+    /// 3. `round_floor.len() == peer_connect_status.len()` — both are seeded to
+    ///    `num_players` at construction and neither is ever resized, so the
+    ///    per-slot floor cache must stay parallel to the connect-status cache.
+    ///
+    /// The body compiles out entirely in release builds (the `debug_assert!`s
+    /// vanish), so the unconditional callers leave an empty call that optimizes
+    /// away — no dead-code or unused-method warning in any build mode. The
+    /// release-with-debug-assertions CI gate still exercises it.
+    fn debug_assert_floor_round_invariants(&self) {
+        debug_assert!(
+            self.floor_reply_seq <= self.floor_request_seq,
+            "floor invariant: reply seq {} must not exceed request seq {}",
+            self.floor_reply_seq,
+            self.floor_request_seq
+        );
+        debug_assert!(
+            self.floor_prune_seq <= self.floor_request_seq,
+            "floor invariant: prune seq {} must not exceed request seq {}",
+            self.floor_prune_seq,
+            self.floor_request_seq
+        );
+        debug_assert_eq!(
+            self.round_floor.len(),
+            self.peer_connect_status.len(),
+            "floor invariant: round_floor length {} must match peer_connect_status length {}",
+            self.round_floor.len(),
+            self.peer_connect_status.len()
+        );
     }
 
     /// Upon receiving a `ChecksumReport`, add it to the checksum history
@@ -4138,6 +4209,162 @@ mod tests {
         assert_eq!(
             queued.floors,
             vec![Frame::new(0), Frame::new(0), Frame::new(4)]
+        );
+    }
+
+    /// FLOOR-ROUND highest-seq-wins: a reordered OLDER `FloorRequest` must NOT
+    /// clobber a higher undrained pending one (answering the stale round and
+    /// skipping the newer one), a newer seq DOES supersede an older pending one,
+    /// and a request into an empty pending slot is stored. Highest-seq-wins is
+    /// independent of arrival order.
+    #[test]
+    fn on_floor_request_older_round_seq_does_not_clobber_newer_pending() {
+        let mut protocol = running_protocol_three_slots();
+        assert!(!protocol.has_pending_floor_request());
+
+        // A request into an EMPTY pending slot is stored.
+        protocol.on_floor_request(&FloorRequest { round_seq: 5 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "a request into an empty pending slot is stored"
+        );
+
+        // A REORDERED older seq (3 < 5) must NOT clobber the higher pending one.
+        protocol.on_floor_request(&FloorRequest { round_seq: 3 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "an older-seq request must NOT clobber a higher undrained pending one"
+        );
+
+        // An EQUAL seq is also not newer, so it leaves the pending one untouched.
+        protocol.on_floor_request(&FloorRequest { round_seq: 5 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(5),
+            "an equal-seq request must NOT re-clobber the pending one"
+        );
+
+        // A strictly NEWER seq (8 > 5) DOES supersede the older pending one.
+        protocol.on_floor_request(&FloorRequest { round_seq: 8 });
+        assert_eq!(
+            protocol.pending_floor_request,
+            Some(8),
+            "a newer-seq request supersedes an undrained older pending one"
+        );
+    }
+
+    /// FLOOR-ROUND test-helper consistency: `set_round_floor_for_tests` must
+    /// leave the request seq consistent with the marked-fresh reply seq (it
+    /// bumps `floor_request_seq` to at least `floor_reply_seq`), so the endpoint
+    /// is NOT poisoned — a SUBSEQUENT real `on_floor_reply` to a freshly-issued
+    /// request can still be accepted. Before the fix the helper set
+    /// `floor_reply_seq = 1` while leaving `floor_request_seq = 0`, making the
+    /// solicitation guard (`> floor_reply_seq` AND `<= floor_request_seq`)
+    /// permanently unsatisfiable.
+    #[test]
+    fn set_round_floor_for_tests_leaves_request_seq_consistent_for_later_reply() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+
+        // Seed a known post-prune-fresh round via the helper.
+        protocol.set_round_floor_for_tests(slot2, Frame::new(9));
+        assert_eq!(protocol.round_floor(slot2), Frame::new(9));
+        assert!(
+            protocol.floor_round_is_fresh(),
+            "the helper marks the round post-prune fresh"
+        );
+        // The headline post-condition: request seq is not left below reply seq.
+        assert!(
+            protocol.floor_reply_seq <= protocol.floor_request_seq,
+            "helper must not leave reply seq {} above request seq {} (poisoned endpoint)",
+            protocol.floor_reply_seq,
+            protocol.floor_request_seq
+        );
+
+        // Now drive a REAL request/reply: a fresh request bumps the request seq
+        // strictly above the reply seq, and a reply at that new seq is accepted.
+        protocol.send_floor_request();
+        let new_seq = protocol.floor_request_seq;
+        assert!(
+            new_seq > protocol.floor_reply_seq,
+            "a freshly-issued request seq must exceed the prior reply seq"
+        );
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: new_seq,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "a later real reply is still accepted: the endpoint was not poisoned"
+        );
+        assert_eq!(
+            protocol.floor_reply_seq, new_seq,
+            "the later real reply advanced the reply seq (it was not dropped)"
+        );
+    }
+
+    /// FLOOR-ROUND seq invariant holds across a mixed send/reply/prune sequence:
+    /// `floor_reply_seq <= floor_request_seq` and `floor_prune_seq <=
+    /// floor_request_seq` must hold after every step. Exercises the invariant
+    /// the `debug_assert_floor_round_invariants` guard protects against a real
+    /// operation mix rather than a single mutation. Unlike the two tests above
+    /// this is a forward-looking regression guard (it passes against the
+    /// pre-fix code too); its job is to catch any FUTURE change that lets the
+    /// monotonic seq relations drift on the send/reply/prune paths.
+    #[test]
+    fn floor_round_seq_invariant_holds_across_send_reply_prune_sequence() {
+        let mut protocol = running_protocol_three_slots();
+
+        #[track_caller]
+        fn assert_seq_invariant(protocol: &UdpProtocol<TestConfig>, step: &str) {
+            assert!(
+                protocol.floor_reply_seq <= protocol.floor_request_seq,
+                "{step}: reply seq {} must not exceed request seq {}",
+                protocol.floor_reply_seq,
+                protocol.floor_request_seq
+            );
+            assert!(
+                protocol.floor_prune_seq <= protocol.floor_request_seq,
+                "{step}: prune seq {} must not exceed request seq {}",
+                protocol.floor_prune_seq,
+                protocol.floor_request_seq
+            );
+        }
+
+        assert_seq_invariant(&protocol, "initial");
+
+        // Issue two requests, prune (snapshots request seq), then accept replies
+        // for both an in-window and the latest seq, interleaving another prune.
+        protocol.send_floor_request(); // request_seq = 1
+        assert_seq_invariant(&protocol, "after first request");
+        protocol.send_floor_request(); // request_seq = 2
+        assert_seq_invariant(&protocol, "after second request");
+        protocol.reset_floor_freshness(); // prune_seq = 2
+        assert_seq_invariant(&protocol, "after prune");
+
+        protocol.send_floor_request(); // request_seq = 3
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 3,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(7)],
+        });
+        assert_seq_invariant(&protocol, "after accepted reply");
+
+        // A dropped (unsolicited) reply must not perturb the invariant either.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 99,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(1)],
+        });
+        assert_seq_invariant(&protocol, "after dropped unsolicited reply");
+
+        protocol.reset_floor_freshness(); // prune_seq = 3
+        assert_seq_invariant(&protocol, "after second prune");
+        assert_eq!(
+            protocol.round_floor(PlayerHandle::new(2)),
+            Frame::new(7),
+            "the only accepted reply's floor is cached"
         );
     }
 

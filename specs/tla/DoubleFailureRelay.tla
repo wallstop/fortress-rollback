@@ -370,7 +370,8 @@ SoundFreshMode == FIX_MODE = "AsyncAckSoundFresh"
 \*   - AsyncAckSoundEpoch (NEGATIVE, machine-DISPROVEN): the cheap, tempting reading of the audit's
 \*     prescription — a PASSIVE freshness gate. (1) the ack-cache OVERWRITE rejects a packet whose
 \*     floorEpoch is below the cached ack's epoch (the S46 `ConnectionStatus.epoch` gate on the
-\*     `peer_pessimistic_floor` overwrite in `merge_peer_connect_status`), and (2) the advance HOLDS
+\*     legacy floor-gossip cache overwrite, formerly `peer_pessimistic_floor` in
+\*     `merge_peer_connect_status`, both since removed by the S55 floor-round landing), and (2) the advance HOLDS
 \*     while a cached ack's epoch is below the GOSSIP-tracked latest floorEpoch (cacheEpoch). It
 \*     closes the reorder-AFTER-fresh clobber but is UNSOUND via the STALE-FIRST race: a stale-HIGH
 \*     ack delivered BEFORE any fresh ack — and before the floorEpoch-bump GOSSIP arrives to raise
@@ -518,8 +519,9 @@ VARIABLES
                    \*   finding). Pinned 0 unless REORDER (so non-reorder cfgs stay byte-identical).
     roundFloor,    \* [SURVIVORS -> [SURVIVORS -> Frame]] (S54 SoundRoundSeqMode only): roundFloor[obs][src]
                    \*   = the pessimistic floor src reported in its last fresh-ROUND REPLY to obs — a
-                   \*   DEDICATED, SEQUENCE-VALIDATED reply channel, SEPARATE from the reorder-prone
-                   \*   gossip cache (ackFloor / the production `peer_pessimistic_floor`). Written ONLY by
+                   \*   DEDICATED, SEQUENCE-VALIDATED reply channel (the production `UdpProtocol::round_floor`),
+                   \*   SEPARATE from the reorder-prone gossip cache (ackFloor / the now-removed legacy
+                   \*   gossip cache, formerly `peer_pessimistic_floor`). Written ONLY by
                    \*   SendAck (a current reply) and NEVER by StaleAck/Gossip, so a reordered stale-HIGH
                    \*   Input-gossip floor (StaleAck) CANNOT corrupt it — the seq on the reply rejects a
                    \*   reordered stale reply, modeled by SendAck always reading src's CURRENT floor. This
@@ -871,8 +873,9 @@ AsyncSoundTarget(s) ==
 (*     high) and lock above the freeze the relay later converges to.                            *)
 (*                                                                                              *)
 (* This is the production `src/` design: a sequence-numbered FloorRequest/FloorReply round the   *)
-(* observer re-issues each time it prunes a peer, the reply stored in a dedicated cache distinct  *)
-(* from `peer_pessimistic_floor`. NO floor-epoch wire field is needed (the seq + dedicated        *)
+(* observer re-issues each time it prunes a peer, the reply stored in a dedicated cache           *)
+(* (`UdpProtocol::round_floor`) distinct from the now-removed legacy gossip cache, formerly       *)
+(* `peer_pessimistic_floor` (removed). NO floor-epoch wire field is needed (the seq + dedicated   *)
 (* channel replace the floorEpoch AsyncAckSoundRound idealizes) — a strictly simpler implementable *)
 (* design than the audit's floor-epoch blueprint. WF SendAck delivers the held observer a          *)
 (* post-prune reply (liveness); prunes are finite, so the post-prune hold resolves.                *)
