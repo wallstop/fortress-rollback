@@ -14,7 +14,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
-- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, and `InternalErrorKind` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
+- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
 
@@ -194,6 +194,8 @@ The `sync-send` feature flag remains compatible. Fortress Rollback adds several 
 | `loom`               | Concurrency testing                    | ✅               |
 | `z3-verification`    | Formal verification tests              | ✅               |
 | `graphical-examples` | Interactive demos                      | ✅               |
+| `hot-join`           | Peers can join/rejoin a running session via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`) | ✅               |
+| `z3-verification-bundled` | `z3-verification` with a bundled Z3 build (no system Z3 needed) | ✅               |
 
 > **Note:** The `json` feature enables `to_json()` and `to_json_pretty()` methods on telemetry types.
 > Without this feature, the `serde_json` dependency is not included, reducing the default dependency count.

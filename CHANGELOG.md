@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `push_violation_observer(observer)` installs `observer` as the current thread's violation observer for as
   long as the returned guard lives; while installed, the `report_violation!` macro routes to it (installs
   nest; the innermost wins; the guard restores the previous observer on drop). This is the mechanism that
-  makes `with_violation_observer` work for `P2PSession`/`SyncTestSession` (see *Fixed*), and is also usable
+  makes `with_violation_observer` work for `P2PSession`/`SyncTestSession`/`SpectatorSession` (see *Fixed*), and is also usable
   directly to scope violation routing around arbitrary code. `report_to_current_observer` is the macro's
   dispatch target (it falls back to the `tracing` observer when none is installed).
 - **`P2PSession::peer_checksum_mismatch_count(handle)` and an advisory per-peer checksum trust-downgrade
@@ -101,17 +101,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Pre-existing:** `SessionBuilder::with_violation_observer` now works for `P2PSession` and
-  `SyncTestSession`, not only `SpectatorSession`. Previously those two session types emitted every
-  specification violation through the global `tracing`-backed observer only, so a `ViolationObserver`
-  (e.g. `CollectingObserver`) attached via `with_violation_observer` never received them — the released
-  API promise was silently false for the two most common session types. Each session now installs its
+- **Pre-existing:** `SessionBuilder::with_violation_observer` now routes specification violations to the
+  configured observer for **every** session type — `P2PSession`, `SyncTestSession`, and `SpectatorSession`.
+  Previously `P2PSession` and `SyncTestSession` emitted every specification violation through the global
+  `tracing`-backed observer only, so a `ViolationObserver` (e.g. `CollectingObserver`) attached via
+  `with_violation_observer` never received them — the released API promise was silently false for the two
+  most common session types. `SpectatorSession` already routed the violations raised on its direct paths,
+  but a residual set of `report_violation!` sites (the `frames_behind_host`, `inputs_at_frame`, and
+  host-input validation guards) bypassed the per-session observer too. Each session now installs its
   configured observer as a thread-local scope for the duration of every public, state-driving entry point
-  (`advance_frame`, `poll_remote_clients`, `add_local_input`, `disconnect_player`, `remove_player`,
-  `set_input_delay`) and during construction, so all `report_violation!` calls beneath — including those
-  raised by the low-level input-queue, sync-layer, and protocol components — route to the per-session
-  observer. When no observer is configured, violations fall back to the `tracing` observer exactly as
-  before, so there is no behavior change for sessions that do not opt in.
+  and during construction (`P2PSession`: `advance_frame`, `poll_remote_clients`, `add_local_input`,
+  `disconnect_player`, `remove_player`, `set_input_delay`; `SpectatorSession`: `advance_frame`,
+  `poll_remote_clients`, `seek_to_frame`, `frames_behind_host`), so all `report_violation!` calls beneath —
+  including those raised by the low-level input-queue, sync-layer, and protocol components — route to the
+  per-session observer. When no observer is configured, violations fall back to the `tracing` observer
+  exactly as before, so there is no behavior change for sessions that do not opt in.
 - **Pre-existing:** A prediction episode in the input queue now always begins at the queue's **first
   missing frame** rather than at the frame the simulation happened to request. Previously, a rollback re-simulation
   whose first input request landed **above** a remote queue's missing window — ordinary cross-endpoint

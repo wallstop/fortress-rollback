@@ -107,9 +107,9 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidRequest("Player handle already in use")` - handle duplicate
-- `InvalidRequest("...handle should be between 0 and num_players")` - invalid player handle
-- `InvalidRequest("...handle should be num_players or higher")` - invalid spectator handle
+- `InvalidRequestStructured { kind: PlayerHandleInUse { handle } }` - handle duplicate
+- `InvalidRequestStructured { kind: InvalidLocalPlayerHandle { handle, num_players } }` / `InvalidRequestStructured { kind: InvalidRemotePlayerHandle { handle, num_players } }` - invalid Local/Remote handle (`handle.0 >= num_players`)
+- `InvalidRequestStructured { kind: InvalidSpectatorHandle { handle, num_players } }` - invalid spectator handle (`handle.0 < num_players`)
 
 **Panics:** Never
 
@@ -164,7 +164,7 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidRequest("FPS should be higher than 0")` - if `fps = 0`
+- `InvalidRequestStructured { kind: ZeroFps }` - if `fps = 0`
 
 **Panics:** Never
 
@@ -246,7 +246,7 @@ Each API is documented with:
 
 ---
 
-### `start_p2p_session(self, socket: impl NonBlockingSocket<T::Address>) -> Result<P2PSession<T>, FortressError>`
+### `start_p2p_session(self, socket: impl NonBlockingSocket<T::Address> + 'static) -> Result<P2PSession<T>, FortressError>`
 
 ```rust
 /// Consume builder and create a P2P session.
@@ -265,7 +265,7 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidRequest("Not enough players have been added...")` - missing players
+- `InvalidRequestStructured { kind: NotEnoughPlayers { expected, actual } }` - not all player handles `0..num_players` have been registered
 
 **Panics:** Never
 
@@ -277,7 +277,7 @@ Each API is documented with:
 
 ---
 
-### `start_spectator_session(self, host_addr: T::Address, socket: impl NonBlockingSocket<T::Address>) -> Option<SpectatorSession<T>>`
+### `start_spectator_session(self, host_addr: T::Address, socket: impl NonBlockingSocket<T::Address> + 'static) -> Option<SpectatorSession<T>>`
 
 ```rust
 /// Create a spectator session connected to a host.
@@ -321,7 +321,7 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidRequest("Check distance too big")` - if `check_distance >= max_prediction`
+- `InvalidRequestStructured { kind: CheckDistanceTooLarge { check_dist, max_prediction } }` - if `check_distance >= max_prediction`
 
 **Panics:** Never
 
@@ -406,8 +406,7 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidPlayerHandle` - handle not registered or not local
-- `InvalidRequest("Prediction threshold reached")` - too far ahead
+- `InvalidRequestStructured { kind: NotLocalPlayer { handle } }` - handle is not a registered local player
 
 **Panics:** Never
 
@@ -504,13 +503,13 @@ Each API is documented with:
 /// Get network statistics for a remote player.
 ```
 
-**Pre:** `handle` is a remote player
+**Pre:** `handle` is a remote player or spectator
 
 **Post:** Returns stats (ping, bandwidth, etc.)
 
 **Errors:**
 
-- `InvalidPlayerHandle` - not a remote player
+- `InvalidRequestStructured { kind: NotRemotePlayerOrSpectator { handle } }` - handle is neither a remote player nor a spectator
 - `NotSynchronized` - stats not yet available
 
 **Panics:** Never
@@ -571,7 +570,7 @@ Each API is documented with:
 - `InvalidRequestStructured { kind: DisconnectInvalidHandle { handle } }` - handle not registered, or refers to a spectator
 - `InvalidRequestStructured { kind: DisconnectLocalPlayer { handle } }` - handle refers to a local player
 - `InvalidRequestStructured { kind: PlayerAlreadyRemoved { handle } }` - handle is already marked disconnected (either via a prior `remove_player` call, via auto-removal under `DisconnectBehavior::ContinueWithout`, or via a previous explicit `disconnect_player` call)
-- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } | IndexOutOfBounds { .. } }` - internal-invariant violation (a registered handle has no corresponding input queue or connection-status entry); should not occur in correct code, treat as a library bug
+- `InternalErrorStructured { kind: DisconnectStatusNotFound { handle } | IndexOutOfBounds(..) }` - internal-invariant violation (a registered handle has no corresponding input queue or connection-status entry); should not occur in correct code, treat as a library bug
 
 **Panics:** Never
 
@@ -717,7 +716,8 @@ Each API is documented with:
 
 **Errors:**
 
-- `InvalidRequest` on checksum mismatch (desync detected)
+- `MismatchedChecksum { current_frame, mismatched_frames }` on checksum mismatch (desync detected during resimulation)
+- `InvalidRequestStructured { kind: MissingLocalInput }` - not all players provided input
 
 **Panics:** Never
 

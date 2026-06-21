@@ -1076,21 +1076,16 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Sets a custom observer for specification violations.
     ///
-    /// **Current routing (varies by session type):**
-    ///
-    /// - [`SpectatorSession`]: violations during
-    ///   session operation (e.g. frame sync issues, input anomalies) are
-    ///   reported to this observer, enabling programmatic monitoring, custom
-    ///   logging, or test assertions. With no observer set they are logged
-    ///   via the `tracing` crate ([`TracingObserver`]).
-    /// - [`P2PSession`] and [`SyncTestSession`]:
-    ///   violation reporting currently goes to the `tracing`-backed default
-    ///   observer ([`TracingObserver`] — `warn!`/`error!` events)
-    ///   regardless of this setting; the per-session observer is carried
-    ///   and exposed through the session's `violation_observer()` accessor,
-    ///   but the violation paths of these session types do not invoke it
-    ///   yet. Routing their violations to the per-session observer is
-    ///   tracked future work.
+    /// **Routing:** When set, violations raised during session operation
+    /// (frame-sync issues, input anomalies, internal invariant checks) are
+    /// routed to this observer, enabling programmatic monitoring, custom
+    /// logging, or test assertions. [`P2PSession`], [`SyncTestSession`], and
+    /// [`SpectatorSession`] each install the configured observer as a
+    /// thread-local scope at their public entry points (e.g. `advance_frame`,
+    /// `poll_remote_clients`), so violations emitted beneath them — including
+    /// those raised by lower-level components (`input_queue`, `sync_layer`,
+    /// `protocol`) — are captured. With no observer set, violations fall back
+    /// to the `tracing` crate ([`TracingObserver`]).
     ///
     /// [`TracingObserver`]: crate::telemetry::TracingObserver
     ///

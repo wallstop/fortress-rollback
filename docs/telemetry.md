@@ -302,8 +302,11 @@ sequenceDiagram
         Session->>Telemetry: on_frame_advance(frame)
     end
 
-    Game->>Session: network_stats(player)
-    Session->>Telemetry: on_network_stats(player, stats)
+    Game->>Session: poll_remote_clients()
+    loop For each running remote endpoint
+        Session->>Telemetry: on_network_stats(player, stats)
+    end
+    Note over Session: The public network_stats(player) getter<br/>returns stats to the caller and does not<br/>invoke the telemetry observer.
 ```
 
 ---

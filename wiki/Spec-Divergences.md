@@ -32,9 +32,9 @@ This document lists intentional divergences between formal specifications and pr
 
 | Constant             | Kani Value | Production Value | Justification                                                                                                                                        |
 | -------------------- | ---------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INPUT_QUEUE_LENGTH` | 8          | 128              | Kani's symbolic execution is exponential in array size. 8 elements is sufficient to prove circular buffer invariants (wrap-around, bounds checking). |
+| `INPUT_QUEUE_LENGTH` | 7          | 128              | Kani's symbolic execution is exponential in array size. 7 elements is sufficient to prove circular buffer invariants (wrap-around, bounds checking). |
 
-**Verification Strategy:** The invariants are size-independent; proving them for 8 elements implies they hold for 128.
+**Verification Strategy:** The invariants are size-independent; proving them for 7 elements implies they hold for 128.
 
 ### 3. Z3 SMT Constants
 
@@ -166,7 +166,7 @@ The invariants proven in TLA+, Kani, and Z3 are **size-independent**:
 1. **TLA+**: Uses small constants (e.g., `QUEUE_LENGTH=3`) for model checking tractability.
    The invariants (INV-4: length bounded, INV-5: valid indices) hold for ANY `QUEUE_LENGTH >= 2`.
 
-2. **Kani**: Uses `INPUT_QUEUE_LENGTH=8` for symbolic execution tractability.
+2. **Kani**: Uses `INPUT_QUEUE_LENGTH=7` for symbolic execution tractability.
    Circular buffer arithmetic and bounds checking are independent of actual size.
 
 3. **Z3**: Uses default values (128) but proves properties that hold for any valid size.

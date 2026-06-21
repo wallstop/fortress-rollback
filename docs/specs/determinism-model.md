@@ -131,7 +131,7 @@ fn spawn_enemy(state: &mut GameState, rng: &mut SeededRng) {
 
 **Implementation:**
 
-- ✅ `bincode` with default configuration (little-endian, fixed-size integers)
+- ✅ `bincode` configured with `standard().with_little_endian().with_fixed_int_encoding()` (fixed-size integers are an explicit override of bincode's variable-int default, ensuring identical serialized bytes across platforms)
 - ✅ Input types require `Serialize + Deserialize`
 - ✅ No platform-specific serialization
 
@@ -154,7 +154,7 @@ pub trait Config: 'static {
 
 - ✅ `#![forbid(unsafe_code)]` prevents uninitialized memory access
 - ✅ All arrays initialized with default values
-- ✅ Input queues initialized with `BLANK_INPUT`
+- ✅ Input queues initialized with blank inputs via `PlayerInput::blank_input(Frame::NULL)`
 
 ### DETER-6: Integer Arithmetic Consistency
 

@@ -188,7 +188,7 @@ You can use the Arrow Keys in addition to WASD in order to move the second playe
 
 ### Launching ExGame SyncTest
 
-ExGame SyncTest is launched by a single command-line argument:
+ExGame SyncTest is launched by the following command-line arguments:
 
 - `--num-players / -n`: number of players that will participate in the game
 - `--check-distance / -d`: number of frames that will be rolled back and resimulated each frame

@@ -134,6 +134,8 @@ pub enum PlayerType<A> {
 pub enum SessionState {
     Synchronizing, // Establishing connection with remotes
     Running,       // Synchronized and accepting input
+    #[cfg(feature = "hot-join")]
+    HotJoining,    // Applying a state snapshot to (re)join a running session
 }
 ```
 
@@ -638,7 +640,7 @@ Before dropping a session, verify:
 
 **Important:** There are two distinct state types in Fortress Rollback:
 
-- **`SessionState`** (2 states): The high-level session state visible to users
+- **`SessionState`** (2 states by default; a third `HotJoining` state exists with the `hot-join` feature): The high-level session state visible to users
   - `Synchronizing` — Establishing connection with remotes
   - `Running` — Synchronized and accepting input
 
@@ -742,6 +744,9 @@ graph TD
     QUALITY["QualityReport<br/>(Frame advantage)"]
     QREPLY["QualityReply<br/>(Response to report)"]
     CHECKSUM["ChecksumReport<br/>(Desync detection)"]
+    FLOORREQ["FloorRequest<br/>(N&ge;4 relay floor round)"]
+    FLOORREP["FloorReply<br/>(Per-slot pessimistic floors)"]
+    KEEPALIVE["KeepAlive<br/>(Idle connection upkeep)"]
 
     MSG --> HEADER
     MSG --> BODY
@@ -751,7 +756,12 @@ graph TD
     BODY --> QUALITY
     BODY --> QREPLY
     BODY --> CHECKSUM
+    BODY --> FLOORREQ
+    BODY --> FLOORREP
+    BODY --> KEEPALIVE
 ```
+
+Hot-join builds (the `hot-join` feature) additionally carry join-lifecycle bodies (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`, `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`).
 
 ### Time Synchronization
 
@@ -863,6 +873,7 @@ use fortress_rollback::Frame;
 pub struct ConnectionStatus {
     pub disconnected: bool,  // Is the player disconnected?
     pub last_frame: Frame,   // Last frame we received input for
+    pub epoch: u16,          // Per-slot generation; bumped on each connect<->disconnect transition
 }
 ```
 
@@ -982,8 +993,8 @@ The protocol is UDP-based (unreliable) but handles:
 
 Regular packets maintain connection:
 
-- `running_retry_interval` (configurable, default 200ms): interval for resending inputs and quality reports
-- `QualityReport` sent every `running_retry_interval`
+- `running_retry_interval` (configurable, default 200ms): interval for resending unacknowledged inputs
+- `QualityReport` sent every `quality_report_interval` (configurable, default 200ms)
 - Disconnect after `disconnect_timeout` (configurable, default 2000ms)
 
 ---

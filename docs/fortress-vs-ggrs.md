@@ -116,7 +116,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 **Fix:**
 
 - Created new `fortress_rollback::hash` module with FNV-1a deterministic hashing
-- Window-based checksum computation using last 64 frames ensures frames are always available for both peers
+- Checksums are tracked per frame in a bounded history (`max_checksum_history`, default 32) and compared at the desync-detection interval (default `interval: 60`), so the compared frame is available on both peers
 
 ---
 
@@ -133,7 +133,7 @@ InvalidFrame { frame: Frame(0), reason: "must load frame in the past" }
 ```rust
 // Explicit spectator validation
 impl PlayerHandle {
-    pub fn is_spectator_for(&self, num_players: usize) -> bool {
+    pub const fn is_spectator_for(self, num_players: usize) -> bool {
         self.0 >= num_players
     }
 }
@@ -280,13 +280,15 @@ let range_value: u32 = rng.gen_range(1..100);
 
 ```rust
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
+use std::hash::Hasher; // brings write()/finish() into scope
 
 // Hash any hashable data deterministically
 let checksum = fnv1a_hash(&game_state);
 
 // Or use the hasher directly
+let data: &[u8] = b"some bytes";
 let mut hasher = DeterministicHasher::new();
-hasher.write(&data);
+hasher.write(data);
 let hash = hasher.finish();
 ```
 
@@ -470,9 +472,9 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Formal Verification
 
-- **7 TLA+ specifications** covering core protocols (Rollback, InputQueue, NetworkProtocol, TimeSync, ChecksumExchange, SpectatorSession, Concurrency)
-- **115 Kani proofs** for bounded model checking
-- **54 Z3 SMT proofs** for algorithmic correctness
+- **15 TLA+ specifications** covering core protocols (Rollback, InputQueue, NetworkProtocol, TimeSync, ChecksumExchange, SpectatorSession, Concurrency) as well as N-peer/freeze/failover protocols (DoubleFailureRelay, FrameAdvantageAggregation, FreezeConvergence, NPeerReactivation, NPeerServeFreezeConvergence, PeerDrop, SpectatorFailover, SpectatorReactivationEpoch)
+- **130 Kani proofs** for bounded model checking
+- **65 Z3 SMT proofs** for algorithmic correctness
 
 ### Testing
 
