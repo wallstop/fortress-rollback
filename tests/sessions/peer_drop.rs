@@ -7377,26 +7377,36 @@ fn p2p_n0_nudge_does_not_starve_pending_retransmission_after_blackout() -> Resul
 // of the corner), proven via the PUBLIC per-slot `InputStatus` threaded into
 // each `AdvanceFrame` request (`local_connect_status` is private).
 //
-// WHAT REMAINS OPEN (the fold-below-`S` violation TRIGGER, not landed here): a
-// genuine wire delivery of a below-`f_carried` freeze to the committed joiner.
-// Roles for the intended N>=5 double-failure relay (num_players=5): A=h0
-// coordinator/HOST holding the dead slot HIGH and serving; B=h1 RELAY holding
-// it LOW and reachable to the joiner; C=h2 the joiner's re-filled slot; D=h3
-// the carried-dead slot (dies asymmetrically A-high/B-low); E=h4 a second
-// survivor. The obstruction (empirically demonstrated — see `progress/
-// session-58-…`): any RUNNING relay reporting the dead slot LOW is folded by
-// the coordinator, and the S32 freeze barrier / S55 floor-round then HOLD the
-// coordinator's `confirmed_frame()` at that low — which is exactly what stops
-// the coordinator from reaching `confirmed_frame() >= S` to SERVE the joiner at
-// `S` (the delayed-adoption staging wedges the coordinator below `S`, joiner
-// stuck `HotJoining`). Excluding the relay from the coordinator's fold (so it
-// can serve) means removing/reserving it — but then the snapshot carries that
-// slot reserved, contradicting "a live remote still delivering the low to the
-// joiner." Reconciling "excluded from the coordinator's roster" with "live
-// deliverer on the joiner" is the open roster-accounting problem; whether the
-// seam-injected bytes are reachable over a genuine wire to a committed joiner
-// is, at present, an OPEN question (the unit guard is sound defense-in-depth
-// either way).
+// WHY THE VIOLATION TRIGGER IS STRUCTURALLY UNREACHABLE OVER A GENUINE WIRE
+// (Session 60 — the resolution of S58's "open question / roster tension"). The
+// strongest natural attacker is an N>=5 double-failure relay aimed at the fresh
+// joiner: A=h0 coordinator/HOST holding the dead slot HIGH and serving; B=h1
+// RELAY; C=h2 the joiner's re-filled slot; D=h3 the carried-dead slot (dies
+// asymmetrically); E=h4 the low-origin (the only peer to freeze D at the low
+// receipt `g`). It cannot reach the violation, for three composing code reasons:
+//   1. The coordinator serves at `S` only when `confirmed_frame() >= S` AND
+//      `npeer_owed_freeze_readjust_at_or_below(S) == false` — and that gate folds
+//      EVERY running non-reserved endpoint's claims, so the serve DEFERS (pre-
+//      capture) / ABORTS (post-capture) while ANY folded endpoint reports a slot
+//      freeze that would re-sim at/below `S`. So A never serves D@f_carried while
+//      any folded peer (origin OR relay) holds D@`g` (`g < S`).
+//   2. To carry D@f_carried > `g`, A must EXCLUDE the low-origin from its fold
+//      (a connected remote reporting D@low also bounds A's confirmed low via
+//      `remote_slot_confirmed_bound`), and the only exclusion that does not stall
+//      A is to PRUNE it. Pruning gossips `origin@disconnected` to A's survivors.
+//   3. A Disconnected protocol endpoint drops all `Input`
+//      (`message_allowed_in_current_state` admits only `SyncRequest`), so any
+//      survivor that folds `origin@disconnected` disconnects its origin endpoint
+//      and can never adopt `g`. The relay that delivers `g` to the joiner MUST be
+//      a coordinator-directed survivor (only a survivor reactivating the joiner's
+//      slot gets a live endpoint to it) — hence A-folded, hence cascaded.
+// So the joiner commits carrying D below `S` and STAYS Running: no wire ordering
+// delivers a sub-baseline freeze. This is exercised end-to-end (over the wire,
+// strongest-attacker staging) by
+// `npeer_hot_join_fold_below_s_trigger_unreachable_over_wire` below, and the
+// seam-injected `src/` unit guard proves the bytes WOULD fail closed if delivered
+// — so that guard is the authoritative (and only-possible) coverage. Full
+// argument + adversarial-review consensus: `progress/session-60-…`.
 #[cfg(feature = "hot-join")]
 mod npeer_hot_join_joiner_integration {
     use super::{protocol_config, FilterBusSocket};
@@ -7985,6 +7995,213 @@ mod npeer_hot_join_joiner_integration {
             joiner.session.current_frame(),
             joiner.session.confirmed_frame(),
         );
+        Ok(())
+    }
+
+    /// The fold-below-`S` VIOLATION TRIGGER is **structurally unreachable over a
+    /// genuine wire** — the resolution of Session 58's "open question / roster
+    /// tension." This test drives the *strongest natural attacker construction* (a
+    /// genuine N≥5 double-failure relay aimed at a freshly-committed joiner) and
+    /// demonstrates the obstruction end-to-end over the `FilterBusSocket` mesh.
+    ///
+    /// **Roles:** A=h0 coordinator, B=h1 relay-survivor, C=h2 joiner-slot,
+    /// D=h3 dropped slot, E=h4 low-origin (the only peer to freeze D at the low
+    /// receipt `g`; its gossip to A/B/C is cut so `g` lives ONLY on E).
+    ///
+    /// **The obstruction (verified-code-grounded; the body exercises every step):**
+    /// 1. The serve gate is `confirmed_frame() >= S` AND
+    ///    `npeer_owed_freeze_readjust_at_or_below(S) == false` (the serve poll
+    ///    defers pre-capture / aborts post-capture otherwise). The owed-readjust
+    ///    dry-run folds EVERY running non-reserved endpoint, so A will not serve
+    ///    while ANY folded peer reports a slot freeze that re-sims at/below `S`.
+    ///    Separately, for A's confirmed to even climb to `S` above D's freeze, D
+    ///    must be **mesh-agreed disconnected** on A — `remote_slot_confirmed_bound`
+    ///    excludes a slot (`None`) ONLY in the `(true, false, _)` arm: locally
+    ///    disconnected AND no running remote reports it connected. A running remote
+    ///    reporting D at a low receipt instead bounds A low → A stalls below `S`.
+    /// 2. The low `g` is a FREEZE: its holder (E) reports D disconnected@`g`. If E is
+    ///    in A's fold, A's sticky-min merge adopts `g` → A captures D@`g`, the joiner
+    ///    inherits `g`, and there is no later lowering (the benign converged case, no
+    ///    violation). So to carry D@f_carried > `g`, A must EXCLUDE E — and the only
+    ///    exclusion that doesn't stall A's confirmed on E is to **prune** E.
+    /// 3. Pruning E gossips `E@disconnected` to B (the relay). A **Disconnected**
+    ///    protocol endpoint drops all `Input` (`message_allowed_in_current_state`
+    ///    admits only `SyncRequest`), so once B folds `E@disconnected` it disconnects
+    ///    its E endpoint (asserted here via B's `PeerDropped{E}`) and can **never**
+    ///    adopt `g` from E — even after the E→B link is re-opened post-commit.
+    /// 4. The relay MUST be a coordinator-directed survivor: only a survivor that
+    ///    reactivates the joiner's slot has a live endpoint to deliver `Input` to the
+    ///    joiner. A directed survivor is A-running, so if it held `g` A would have
+    ///    learned it (step 2). The same-poll fold-order race is unwinnable because A
+    ///    prunes E *pre-serve* (necessary to make D mesh-agreed), so B has long since
+    ///    disconnected E before any post-commit delivery window.
+    ///
+    /// So the joiner commits carrying D frozen strictly below `S` (the S58
+    /// foundational leg), the relay link is opened, B→joiner is a live gossip path
+    /// (the joiner confirms past `S` via its live remotes incl. B) — and yet the
+    /// joiner STAYS Running: no genuine-wire ordering delivers a sub-baseline freeze.
+    /// The seam-injected `src/` unit guard
+    /// `npeer_quad_committed_joiner_fold_below_snapshot_baseline_fails_closed_for_rejoin`
+    /// proves the violation MECHANISM fires on those exact bytes; this test proves the
+    /// bytes have no wire preimage, so that guard is the authoritative (and
+    /// only-possible) coverage. See `progress/session-60-*` for the full argument.
+    ///
+    /// **Scope:** unreachability for the committed N-peer JOINER specifically (no
+    /// history below `S` → fails closed). A *survivor* CAN see a below-its-history
+    /// lowering — that is the double-failure relay, which the S55 floor-round
+    /// CONVERGES (not fail-closes). The joiner is unique because its only inbound
+    /// relays are coordinator-directed survivors the coordinator necessarily folds.
+    #[test]
+    fn npeer_hot_join_fold_below_s_trigger_unreachable_over_wire() -> Result<(), FortressError> {
+        let mut mesh = build_mesh5()?;
+        let [a_addr, b_addr, _c_addr, _d_addr, e_addr] = mesh.addrs;
+
+        // Phase 1: warmup, all links open.
+        for i in 0..6_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(i);
+        }
+
+        // Phase 2: make E the low-origin. Cut E's gossip to A, B, C so E's low
+        // D-view never reaches them (`g` lives ONLY on E), then freeze D LOW on E.
+        // `e_g_upper` upper-bounds E's freeze frame `g` (E froze D at its own
+        // last_frame <= its current frame).
+        mesh.blocked.block(e_addr, a_addr);
+        mesh.blocked.block(e_addr, b_addr);
+        mesh.blocked.block(e_addr, mesh.addrs[2]);
+        mesh.e.remove_player(H_D).expect("E freezes D low");
+        let e_g_upper = mesh.e.current_frame();
+        let _ = mesh.e.events().count();
+
+        // Phase 3: prune E on A — the ONLY way to keep A's confirmed advancing past
+        // E's stale low D-view (a still-connected low-origin bounds A's confirmed
+        // for D, so without the prune A stalls and can never serve at S). The prune
+        // gossips `E@disconnected` to B (and C), which fold it and disconnect their
+        // E endpoint (the cascade — captured via B's `PeerDropped{E}`); this is the
+        // step that makes the relay B structurally unable to adopt `g`. With E
+        // excluded mesh-wide, A/B/C's confirmed for D now climbs HIGH (well above
+        // `g`) as D keeps delivering — building a wide, verifiable f_carried > g gap.
+        mesh.a.remove_player(H_E).expect("A prunes E");
+        let _ = mesh.a.events().count();
+        let mut b_dropped_e = false;
+        for i in 0..12_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(40 + i);
+            for e in mesh.b.events() {
+                if let FortressEvent::PeerDropped { handle, .. } = e {
+                    if handle == H_E {
+                        b_dropped_e = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            b_dropped_e,
+            "the cascade did not fire: B never dropped E, so this staging does not \
+             exercise the structural obstruction (A's prune of the low-origin must \
+             disconnect the relay's endpoint to it)"
+        );
+
+        // Phase 4: freeze D HIGH (f_carried) on A, B, C; drop D's session.
+        // `a_confirmed_at_freeze` lower-bounds A's D-freeze (A freezes D at its
+        // last_frame for D, which is >= its session-wide `confirmed_frame()`), and
+        // `f_carried_upper` upper-bounds it. The assert pins `g < f_carried`: E's
+        // low freeze IS strictly below the value the joiner will carry, so a relay
+        // that COULD deliver `g` would genuinely trip `converged < baseline`.
+        let a_confirmed_at_freeze = mesh.a.confirmed_frame();
+        let f_carried_upper = mesh.a.current_frame();
+        assert!(
+            a_confirmed_at_freeze.as_i32() > e_g_upper.as_i32(),
+            "the gradient is not established: A's D-freeze lower bound \
+             {a_confirmed_at_freeze:?} must sit strictly above E's `g` upper bound \
+             {e_g_upper:?}, else E's `g` is not a genuine lowering of the carried value \
+             (the test would be vacuous)"
+        );
+        mesh.a.remove_player(H_D).expect("A freezes D high");
+        mesh.b.remove_player(H_D).expect("B freezes D high");
+        if let Some(c) = mesh.c.as_mut() {
+            c.remove_player(H_D).expect("C freezes D high");
+        }
+        mesh.drop_d();
+        let _ = mesh.a.events().count();
+        let _ = mesh.b.events().count();
+
+        // Phase 5: rejoin C. Drop C cleanly; coordinator A re-reserves the slot.
+        drop_c_cleanly(&mut mesh);
+        let mut joiner = Joiner::build(&mesh)?;
+        assert_eq!(joiner.session.current_state(), SessionState::HotJoining);
+
+        // Phase 6: drive the joiner to Running over the wire. A serves carrying
+        // D@f_carried (it never learned `g`).
+        let mut reached = false;
+        for i in 0..1500_u32 {
+            mesh.poll_all(1);
+            joiner.poll();
+            if i % 3 == 2 {
+                mesh.advance_all(80 + (i % 8));
+            }
+            if joiner.session.current_state() == SessionState::Running {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "joiner reached Running over the wire (state {:?})",
+            joiner.session.current_state()
+        );
+        let serve_s = drive_first_advance(&mut joiner);
+        assert!(
+            serve_s.as_i32() > f_carried_upper.as_i32(),
+            "snapshot baseline S={serve_s:?} must sit strictly above D's freeze \
+             (upper bound {f_carried_upper:?}) — else 'D carried below S' is unproven"
+        );
+
+        // Phase 7: open E->B post-commit — the relay's chance to adopt `g` and relay
+        // it to the joiner. B's E endpoint is already terminal (Phase 3 cascade), so
+        // B drops E's Input and never adopts `g`.
+        mesh.blocked.unblock(e_addr, b_addr);
+        joiner.d_slot.clear();
+        run_mesh_and_joiner(&mut mesh, &mut joiner, 120);
+
+        // The joiner confirmed deep past S using its live remotes (A AND B): B IS a
+        // live gossip path, so a lowering WOULD reach the joiner if B held one. It
+        // does not.
+        assert!(
+            joiner.session.confirmed_frame().as_i32() > serve_s.as_i32(),
+            "joiner must confirm past S={serve_s:?} via its live remotes (incl. the \
+             relay B) — else 'B is a live path' is unproven (confirmed {:?})",
+            joiner.session.confirmed_frame()
+        );
+        // The violation never fired over the wire: the joiner stays Running, carrying
+        // D frozen at a single constant value (never lowered to `g`).
+        assert_eq!(
+            joiner.session.current_state(),
+            SessionState::Running,
+            "the fold-below-S trigger fired over the wire (joiner left Running) — the \
+             structural obstruction was bypassed"
+        );
+        assert!(
+            joiner.d_slot.len() >= 10,
+            "joiner recorded too few post-relay D-slot statuses ({}) — vacuous staging",
+            joiner.d_slot.len()
+        );
+        let frozen_values: std::collections::BTreeSet<u32> =
+            joiner.d_slot.values().map(|&(v, _)| v).collect();
+        assert_eq!(
+            frozen_values.len(),
+            1,
+            "D's carried value must stay frozen (never lowered to g) across all {} \
+             post-relay frames, got {frozen_values:?}",
+            joiner.d_slot.len()
+        );
+        for (frame, (value, status)) in &joiner.d_slot {
+            assert_eq!(
+                *status,
+                InputStatus::Disconnected,
+                "joiner must keep D Disconnected at frame {frame} (value {value})"
+            );
+        }
         Ok(())
     }
 }
