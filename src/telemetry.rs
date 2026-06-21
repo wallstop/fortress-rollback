@@ -24,7 +24,9 @@
 use crate::network::network_stats::NetworkStats;
 use crate::sync::Mutex;
 use crate::{Frame, PlayerHandle};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Custom serializer for `Option<Frame>` that outputs clean integers or null.
@@ -788,14 +790,13 @@ macro_rules! report_violation {
     ($severity:expr, $kind:expr, $msg:literal) => {{
         #[cfg(not(kani))]
         {
-            use $crate::telemetry::ViolationObserver as _;
             let violation = $crate::telemetry::SpecViolation::new(
                 $severity,
                 $kind,
                 $msg,
                 concat!(file!(), ":", line!()),
             );
-            $crate::telemetry::TracingObserver.on_violation(&violation);
+            $crate::telemetry::report_to_current_observer(&violation);
         }
         // Under Kani, borrow severity and kind to suppress unused import warnings
         // for ViolationSeverity/ViolationKind, but avoid format!() and tracing
@@ -810,14 +811,13 @@ macro_rules! report_violation {
     ($severity:expr, $kind:expr, $fmt:literal, $($arg:tt)+) => {{
         #[cfg(not(kani))]
         {
-            use $crate::telemetry::ViolationObserver as _;
             let violation = $crate::telemetry::SpecViolation::new(
                 $severity,
                 $kind,
                 format!($fmt, $($arg)+),
                 concat!(file!(), ":", line!()),
             );
-            $crate::telemetry::TracingObserver.on_violation(&violation);
+            $crate::telemetry::report_to_current_observer(&violation);
         }
         // Under Kani, borrow format arguments so non-Copy values are not moved
         // and unused-variable lints stay quiet. Accept `tt` here to preserve
@@ -1025,6 +1025,107 @@ pub fn report_to_observer<O: ViolationObserver + ?Sized>(
 ) {
     match observer {
         Some(obs) => obs.on_violation(violation),
+        None => TracingObserver.on_violation(violation),
+    }
+}
+
+thread_local! {
+    /// Per-thread stack of violation observers installed for the duration of a
+    /// session method call.
+    ///
+    /// The [`report_violation!`] macro consults the **top** of this stack via
+    /// [`report_to_current_observer`], falling back to [`TracingObserver`] when
+    /// it is empty. This is the ambient-context shim that lets a session route
+    /// `report_violation!` calls — emitted by low-level components
+    /// (`input_queue`, `sync_layer`, `protocol`, …) that hold no reference to the
+    /// session — to its configured [`ViolationObserver`] without threading the
+    /// observer through every one of the hundreds of call sites. A session
+    /// installs its observer with [`push_violation_observer`] at the top of each
+    /// public entry point (e.g. `advance_frame`, `poll_remote_clients`) and the
+    /// returned [`ScopedObserverGuard`] uninstalls it when the call returns.
+    ///
+    /// Thread-local, so it is parallel-test-safe and never observed across
+    /// threads; a violation emitted on a thread with no installed observer (e.g.
+    /// a background socket thread) routes to `TracingObserver` exactly as before.
+    static CURRENT_OBSERVER: RefCell<Vec<Arc<dyn ViolationObserver>>> = RefCell::new(Vec::new());
+}
+
+/// RAII guard returned by [`push_violation_observer`]. Pops the installed
+/// observer off the current thread's scoped-observer stack when dropped.
+///
+/// Guards must be dropped in reverse install order (the natural LIFO order of
+/// stack-allocated `let _guard = …` bindings), which sessions guarantee by
+/// holding the guard as a local for the duration of a single method call. The
+/// guard is intentionally **not** `Send`/`Sync`: moving it to another thread
+/// would pop the wrong thread's stack.
+#[must_use = "the scoped observer is uninstalled as soon as this guard is dropped"]
+pub struct ScopedObserverGuard {
+    // Make the guard `!Send` + `!Sync` so it cannot leave the installing thread.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for ScopedObserverGuard {
+    fn drop(&mut self) {
+        CURRENT_OBSERVER.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+impl std::fmt::Debug for ScopedObserverGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedObserverGuard").finish()
+    }
+}
+
+/// Installs `observer` as the current thread's scoped violation observer until
+/// the returned [`ScopedObserverGuard`] is dropped.
+///
+/// While installed, the [`report_violation!`] macro routes violations to
+/// `observer` instead of the default [`TracingObserver`]. Installs nest: each
+/// call pushes onto a per-thread stack and the **innermost** observer receives
+/// violations; dropping a guard restores the previously-installed observer. This
+/// is the mechanism behind [`SessionBuilder::with_violation_observer`] for
+/// `P2PSession` and `SyncTestSession`.
+///
+/// [`SessionBuilder::with_violation_observer`]: crate::SessionBuilder::with_violation_observer
+///
+/// # Example
+///
+/// ```
+/// use fortress_rollback::{report_violation, telemetry::{
+///     push_violation_observer, CollectingObserver, ViolationKind, ViolationSeverity,
+/// }};
+/// use std::sync::Arc;
+///
+/// let observer = Arc::new(CollectingObserver::new());
+/// {
+///     let _guard = push_violation_observer(observer.clone());
+///     report_violation!(ViolationSeverity::Warning, ViolationKind::FrameSync, "scoped");
+/// }
+/// assert_eq!(observer.len(), 1);
+/// ```
+pub fn push_violation_observer(observer: Arc<dyn ViolationObserver>) -> ScopedObserverGuard {
+    CURRENT_OBSERVER.with(|stack| stack.borrow_mut().push(observer));
+    ScopedObserverGuard {
+        _not_send: PhantomData,
+    }
+}
+
+/// Routes `violation` to the current thread's installed scoped observer (the top
+/// of the [`push_violation_observer`] stack), or to [`TracingObserver`] when no
+/// observer is installed.
+///
+/// This is the dispatch target of the [`report_violation!`] macro. The active
+/// observer's `Arc` is cloned out and the thread-local borrow released **before**
+/// `on_violation` is invoked, so an observer whose `on_violation` itself calls
+/// `report_violation!` cannot trigger a `RefCell` double-borrow.
+#[cold]
+#[inline(never)]
+pub fn report_to_current_observer(violation: &SpecViolation) {
+    let current = CURRENT_OBSERVER.with(|stack| stack.borrow().last().cloned());
+    match current {
+        Some(observer) => observer.on_violation(violation),
         None => TracingObserver.on_violation(violation),
     }
 }
@@ -3130,5 +3231,147 @@ mod tests {
         assert_eq!(telemetry.frame_advances().len(), 2);
         assert_eq!(telemetry.rollbacks().len(), 1);
         assert_eq!(telemetry.prediction_misses().len(), 1);
+    }
+
+    // ==========================================
+    // Scoped (thread-local) observer routing tests
+    // ==========================================
+    //
+    // These pin the contract that `report_violation!` routes to the
+    // thread-local observer installed by `push_violation_observer` (the ambient
+    // context shim sessions use so low-level components reach the per-session
+    // observer without threading it through every call site). Before the routing
+    // change, `report_violation!` unconditionally targeted `TracingObserver`, so
+    // the pushed observer received nothing — these are the red tests.
+
+    #[test]
+    fn report_violation_routes_to_pushed_thread_local_observer() {
+        let observer = Arc::new(CollectingObserver::new());
+        {
+            let _guard = push_violation_observer(observer.clone());
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "scoped {}",
+                1
+            );
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "scoped no-args"
+            );
+        }
+        assert_eq!(
+            observer.len(),
+            2,
+            "report_violation! must route to the installed scoped observer"
+        );
+    }
+
+    #[test]
+    fn report_violation_falls_back_to_tracing_when_no_observer_installed() {
+        // With no observer pushed, the pushed-elsewhere observer must NOT receive
+        // anything (the macro falls back to TracingObserver). We prove this by
+        // popping the guard and confirming subsequent violations are not captured.
+        let observer = Arc::new(CollectingObserver::new());
+        {
+            let _guard = push_violation_observer(observer.clone());
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "inside scope"
+            );
+        }
+        // Guard dropped: stack is empty again, fallback to TracingObserver.
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "outside scope"
+        );
+        assert_eq!(
+            observer.len(),
+            1,
+            "only the in-scope violation should reach the observer; \
+             the post-drop violation must fall back to TracingObserver"
+        );
+    }
+
+    #[test]
+    fn nested_scoped_observers_route_to_innermost_then_restore() {
+        let outer = Arc::new(CollectingObserver::new());
+        let inner = Arc::new(CollectingObserver::new());
+        let outer_guard = push_violation_observer(outer.clone());
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "to outer"
+        );
+        {
+            let _inner_guard = push_violation_observer(inner.clone());
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "to inner"
+            );
+        }
+        // Inner guard dropped: routing restored to the outer observer.
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "to outer again"
+        );
+        drop(outer_guard);
+        assert_eq!(
+            outer.len(),
+            2,
+            "outer observer gets the two outer-scope violations"
+        );
+        assert_eq!(
+            inner.len(),
+            1,
+            "inner observer gets only the inner-scope violation"
+        );
+    }
+
+    #[test]
+    fn reentrant_report_from_observer_does_not_deadlock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // An observer whose on_violation itself calls report_violation! must not
+        // deadlock on the thread-local borrow: the dispatcher clones the active
+        // Arc out and releases the RefCell borrow BEFORE invoking on_violation,
+        // so a re-entrant report is safe. A lock-free counter is used so the test
+        // does not itself deadlock on a non-reentrant lock held across re-entry.
+        struct ReentrantObserver {
+            seen: AtomicUsize,
+        }
+        impl ViolationObserver for ReentrantObserver {
+            fn on_violation(&self, _violation: &SpecViolation) {
+                // First entry re-enters once; the re-entry stops the recursion.
+                if self.seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::FrameSync,
+                        "reentrant"
+                    );
+                }
+            }
+        }
+        let observer = Arc::new(ReentrantObserver {
+            seen: AtomicUsize::new(0),
+        });
+        {
+            let _guard = push_violation_observer(observer.clone());
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "outer reentrant trigger"
+            );
+        }
+        assert_eq!(
+            observer.seen.load(Ordering::SeqCst),
+            2,
+            "the re-entrant violation must also route to the observer (no deadlock)"
+        );
     }
 }

@@ -4486,6 +4486,16 @@ fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
     // genuine `frame_to_load > first_incorrect` Error, and must not raise any
     // Error/Critical FrameSync violation. At most a Warning explaining the
     // gossip-lowered-disconnect-frame-outside-window residual is allowed.
+    //
+    // Session-59 note: `P2PSession` now routes `report_violation!` to the
+    // per-session observer (via the thread-local scope installed in
+    // `advance_frame` / `poll_remote_clients`), so the two checks below are no
+    // longer vacuous — an Error/Critical violation raised on this path would now
+    // be captured and would fail the test. (This particular scenario converges
+    // cleanly without raising any violation, so the observer may legitimately be
+    // empty; the dedicated routing red-green lives in the `telemetry` unit tests
+    // and the `p2p_advance_frame_routes_report_violation_to_session_observer` /
+    // `sync_test_construction_violation_routes_to_session_observer` tests.)
     let violations = observer.violations();
     let genuine_bug_errors: Vec<_> = violations
         .iter()
@@ -4551,9 +4561,10 @@ fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
 //
 // It asserts byte-identical recorded state across A and B for every mutually
 // confirmed frame. (The genuine `frame_to_load > first_incorrect` Error logged by
-// `adjust_gamestate` is NOT asserted here: it routes through the bare
-// `report_violation!` macro to the global `TracingObserver` only and never reaches
-// a session `CollectingObserver`, so it is unobservable from this test. See the
+// `adjust_gamestate` is NOT asserted here. Since session-59 such a
+// `report_violation!` raised inside `advance_frame` WOULD reach a per-session
+// `CollectingObserver`; this test simply installs none, and no
+// `tracing-subscriber` layer either, so the Error is unobservable here. See the
 // note at the verdict assertion below.) The verdict is whichever way it runs on
 // current code.
 #[test]
@@ -4770,15 +4781,13 @@ fn p2p_sparse_continue_without_gossip_lowered_disconnect_confirmed_stream_conver
     //
     // This state-equality check is the genuine red->green guard for F7. We do NOT
     // assert on the sparse-mode `frame_to_load > first_incorrect` Error (tagged
-    // "this indicates a bug") emitted by `adjust_gamestate`: that guard uses the
-    // bare `report_violation!` macro, which routes ONLY to the global
-    // `TracingObserver` and never pushes into a session's `CollectingObserver`
-    // (documented at `src/network/protocol/mod.rs` near the
-    // `enqueue_replicated_input_drops_entry_when_pending_output_full` test). The
-    // observer wired onto `sess1` therefore cannot observe that violation, and no
-    // test in this suite installs a `tracing-subscriber` layer to capture it.
-    // Byte-identical confirmed state across survivors is the contract that
-    // actually matters and the divergence the bug produces, so we rely on it. ---
+    // "this indicates a bug") emitted by `adjust_gamestate`. Since session-59,
+    // `report_violation!` raised inside `advance_frame` DOES route to a
+    // per-session `CollectingObserver` (via the thread-local scope) — but this
+    // test installs no observer on its sessions and no `tracing-subscriber`
+    // layer, so it simply does not observe that violation here. Byte-identical
+    // confirmed state across survivors is the contract that actually matters and
+    // the divergence the bug produces, so we rely on it. ---
     let confirmed_bound = std::cmp::min(
         sess1.confirmed_frame().as_i32(),
         sess2.confirmed_frame().as_i32(),

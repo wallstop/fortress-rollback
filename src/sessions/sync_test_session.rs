@@ -75,6 +75,11 @@ impl<T: Config> SyncTestSession<T> {
         violation_observer: Option<Arc<dyn ViolationObserver>>,
         queue_length: usize,
     ) -> Self {
+        // Route construction-time violations (e.g. a failed frame-delay setup)
+        // to the configured observer, the same as runtime entry points do.
+        let _violation_scope = violation_observer
+            .as_ref()
+            .map(|observer| crate::telemetry::push_violation_observer(Arc::clone(observer)));
         match Self::try_with_queue_length(
             num_players,
             max_prediction,
@@ -166,6 +171,7 @@ impl<T: Config> SyncTestSession<T> {
         player_handle: PlayerHandle,
         input: T::Input,
     ) -> Result<(), FortressError> {
+        let _violation_scope = self.scoped_violation_observer();
         if !player_handle.is_valid_player_for(self.num_players) {
             return Err(InvalidRequestKind::InvalidLocalPlayerHandle {
                 handle: player_handle,
@@ -189,6 +195,7 @@ impl<T: Config> SyncTestSession<T> {
     /// [`MismatchedChecksum`]: FortressError::MismatchedChecksum
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        let _violation_scope = self.scoped_violation_observer();
         // SmallVec inline capacity of 4 covers the typical case (save + advance)
         // without heap allocation. During rollback testing, it spills to the heap as needed.
         let mut requests = RequestVec::<T>::new();
@@ -306,6 +313,20 @@ impl<T: Config> SyncTestSession<T> {
     #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
+    }
+
+    /// Installs the session's configured violation observer (if any) as the
+    /// current thread's scoped observer for the duration of a public entry
+    /// point, so every `report_violation!` emitted beneath it routes to the
+    /// per-session observer. Returns `None` (a no-op — violations fall back to
+    /// the default `TracingObserver`) when no observer was configured. See
+    /// [`push_violation_observer`](crate::telemetry::push_violation_observer).
+    #[inline]
+    #[must_use]
+    fn scoped_violation_observer(&self) -> Option<crate::telemetry::ScopedObserverGuard> {
+        self.violation_observer
+            .as_ref()
+            .map(|observer| crate::telemetry::push_violation_observer(Arc::clone(observer)))
     }
 
     /// Returns handles for all players in the session.
@@ -674,6 +695,34 @@ mod tests {
         let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, Some(observer));
 
         assert!(session.violation_observer().is_some());
+    }
+
+    /// session-59: a `report_violation!` emitted during construction (here, a
+    /// failed per-player frame-delay setup) routes to the per-session observer —
+    /// `with_queue_length` installs a scoped observer for the duration of
+    /// construction, the same way the runtime entry points do. Before the
+    /// thread-local scoped-observer wiring this went only to the global
+    /// `TracingObserver`, so a `CollectingObserver` attached here stayed empty.
+    ///
+    /// NON-VACUITY: removing the construction-time scope push leaves the observer
+    /// empty and fails this test.
+    #[test]
+    fn sync_test_construction_violation_routes_to_session_observer() {
+        let observer = Arc::new(CollectingObserver::new());
+        // queue_length 8 => max_frame_delay 7; an input_delay of 100 exceeds it,
+        // so the per-player set_frame_delay fails during construction and reports
+        // a violation (logged, non-fatal — construction still succeeds).
+        let session: SyncTestSession<TestConfig> =
+            SyncTestSession::with_queue_length(2, 4, 2, 100, Some(observer.clone()), 8);
+
+        assert!(
+            session.violation_observer().is_some(),
+            "construction succeeded (the frame-delay failure is non-fatal)"
+        );
+        assert!(
+            !observer.violations().is_empty(),
+            "construction-time report_violation! must reach the per-session observer"
+        );
     }
 
     #[test]
