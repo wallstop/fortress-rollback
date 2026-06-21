@@ -72,6 +72,7 @@ SPECS=(
     "SpectatorReactivationEpoch"
     "PeerDrop"
     "NPeerReactivation"
+    "NPeerServeFreezeConvergence"
     "FreezeConvergence"
     "FrameAdvantageAggregation"
     "DoubleFailureRelay"
