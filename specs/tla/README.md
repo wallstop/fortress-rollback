@@ -601,8 +601,8 @@ by pinning `f0` uniform: here each peer freezes one dropped slot `D` at its own
 received-through frame (`receivedThrough`, the per-survivor `f0`), which under asymmetric
 loss differs across peers, and an over-frozen peer owes a monotone-**down** re-adjust to the
 mesh-agreed global min (`ConvergeDown`, the production `update_player_disconnects` mine-down
-+ `set_frozen_value_at` re-roll + forced re-simulation that runs only inside `advance_frame`
-— hence the lag the gate guards against). The coordinator serves a returning joiner a
+plus `set_frozen_value_at` re-roll plus forced re-simulation that runs only inside
+`advance_frame` — hence the lag the gate guards against). The coordinator serves a returning joiner a
 snapshot at frame `S` that **bakes its current view of `D`**; the joiner cannot re-base below
 `S` (the fold-below-`S` structural impossibility, S58/S60), so a snapshot captured before the
 coordinator's own re-adjust is applied is a **permanent** cross-peer confirmed-state desync.

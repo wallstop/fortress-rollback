@@ -97,6 +97,8 @@ def test_lychee_literal_path_args_exist(
     [
         "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar",
         "https://github.com/tlaplus/tlaplus/releases/download/v%24%7BTLA_TOOLS_VERSION%7D/tla2tools.jar",
+        "https://github.com/tlaplus/tlaplus/releases/download/v$%7BTLA_TOOLS_VERSION%7D/tla2tools.jar",
+        "https://github.com/tlaplus/tlaplus/releases/download/v$%7bTLA_TOOLS_VERSION%7d/tla2tools.jar",
     ],
 )
 def test_lychee_ignores_templated_runtime_urls(url: str) -> None:
