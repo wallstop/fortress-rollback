@@ -62,6 +62,14 @@ the unreleased features themselves must be folded into their `### Added` entry i
 - If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be dated.
 - Validate: `bash scripts/sync-version.sh --check`
 - Auto-fix link/date metadata: `bash scripts/sync-version.sh --changelog-only`
+- Post-publish finalization must stamp the immutable released version, not
+  whatever `Cargo.toml` says on the default branch after release:
+  `bash scripts/sync-version.sh --stamp-release-date --release-version X.Y.Z`
+- Issue-template release dropdown sync during publish must include the
+  just-created tag with `sync-issue-template-versions.py --ensure-version vX.Y.Z`
+  so GitHub API listing delay cannot omit the release.
+- Treat unresolved `sync-version.sh` metadata issues as failures; warnings are
+  not acceptable for required release metadata.
 
 ## Writing Guidelines
 

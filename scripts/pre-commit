@@ -58,18 +58,33 @@ if [[ -n "$CARGO_STAGED" ]]; then
         echo -e "${YELLOW}Cargo.toml version changed, checking version synchronization...${NC}"
 
         if [[ -x "$PROJECT_ROOT/scripts/sync-version.sh" ]]; then
-            # Run the sync script
-            if ! "$PROJECT_ROOT/scripts/sync-version.sh"; then
-                echo -e "${YELLOW}Version references were updated. Adding changes to commit...${NC}"
+            if ! git diff --quiet -- || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+                echo -e "${RED}✗ Unstaged or untracked changes are present while Cargo.toml has a staged version bump.${NC}"
+                echo -e "${YELLOW}Stage or stash unrelated changes, then run './scripts/sync-version.sh' and stage its output.${NC}"
+                FAILED=true
+            else
+                SYNC_FAILED=false
+                if ! "$PROJECT_ROOT/scripts/sync-version.sh"; then
+                    SYNC_FAILED=true
+                fi
 
-                # Stage any files that were modified by the sync script
-                # Find files with version patterns that were just modified
-                git diff --name-only | while read -r file; do
-                    if [[ -f "$file" ]]; then
-                        git add "$file"
-                        echo -e "${GREEN}  Added:${NC} $file"
-                    fi
-                done
+                if [[ -n "$(git diff --name-only)" ]]; then
+                    echo -e "${YELLOW}Version references were updated. Adding changes to commit...${NC}"
+
+                    # Safe because the worktree was clean before sync-version.sh ran.
+                    git diff --name-only | while read -r file; do
+                        if [[ -f "$file" ]]; then
+                            git add "$file"
+                            echo -e "${GREEN}  Added:${NC} $file"
+                        fi
+                    done
+                fi
+
+                if [[ "$SYNC_FAILED" == "true" ]] || ! "$PROJECT_ROOT/scripts/sync-version.sh" --check; then
+                    echo -e "${RED}✗ Version synchronization did not complete cleanly${NC}"
+                    echo -e "${YELLOW}Run './scripts/sync-version.sh' and resolve any reported issues.${NC}"
+                    FAILED=true
+                fi
             fi
         else
             echo -e "${YELLOW}Warning: sync-version.sh not found or not executable${NC}"

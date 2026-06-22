@@ -279,6 +279,53 @@ class TestMain:
         assert "- v1.0.0" in new_text
         assert "- v0.1.0" in new_text
 
+    def test_template_updated_with_sorted_deduplicated_versions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.1.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(
+            sync_mod,
+            "fetch_versions",
+            return_value=["v1.9.0", "v1.10.0", "v1.10.0", "v0.9.0"],
+        ):
+            result = sync_mod.main()
+        assert result == 0
+        new_text = template_file.read_text()
+        assert new_text.count("- v1.10.0") == 1
+        assert new_text.index("- v1.10.0") < new_text.index("- v1.9.0")
+        assert new_text.index("- v1.9.0") < new_text.index("- v0.9.0")
+
+    def test_template_includes_ensured_version_not_returned_by_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.9.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog", "--ensure-version", "v1.0.0"])
+        with patch.object(sync_mod, "fetch_versions", return_value=["v0.9.0"]):
+            result = sync_mod.main()
+        assert result == 0
+        new_text = template_file.read_text()
+        assert "- v1.0.0" in new_text
+        assert new_text.index("- v1.0.0") < new_text.index("- v0.9.0")
+
+    def test_ensure_version_rejects_non_release_tag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v0.9.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(
+            sys, "argv", ["prog", "--ensure-version", "v1.0.0-hotfix"]
+        )
+        with patch.object(sync_mod, "fetch_versions", return_value=["v0.9.0"]):
+            result = sync_mod.main()
+        assert result == 1
+        assert "requires vMAJOR.MINOR.PATCH" in capsys.readouterr().err
+
     def test_dry_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
         template_file = tmp_path / "bug_report.yml"
         original = _make_template(["v0.1.0"])
@@ -381,20 +428,37 @@ class TestMain:
 
 class TestValidateVersionTags:
     def test_validate_version_tags_passes_valid_tags(self) -> None:
-        # Prefix match: vX.Y.Z plus optional pre-release suffixes are all valid.
-        tags = ["v1.0.0", "v0.9.0", "v1.2.3-hotfix"]
+        tags = ["v1.0.0", "v0.9.0", "v1.2.3"]
         result = validate_version_tags(tags)
-        assert result == tags
+        assert result == ["v1.2.3", "v1.0.0", "v0.9.0"]
+
+    def test_validate_version_tags_sorts_and_deduplicates(self) -> None:
+        tags = ["v1.9.0", "v1.10.0", "v1.10.0", "v0.9.0"]
+        result = validate_version_tags(tags)
+        assert result == ["v1.10.0", "v1.9.0", "v0.9.0"]
 
     def test_validate_version_tags_filters_invalid_tags(
         self, capsys: pytest.CaptureFixture
     ) -> None:
-        tags = ["1.0.0", "release-1.0"]
+        tags = [
+            "1.0.0",
+            "release-1.0",
+            "v1.2.3-hotfix",
+            "v1.2.3+build.1",
+            "v1.2.3hotfix",
+            "v1.2.3.4",
+            "v01.2.3",
+        ]
         result = validate_version_tags(tags)
         assert result == []
         err = capsys.readouterr().err
         assert "1.0.0" in err
         assert "release-1.0" in err
+        assert "v1.2.3-hotfix" in err
+        assert "v1.2.3+build.1" in err
+        assert "v1.2.3hotfix" in err
+        assert "v1.2.3.4" in err
+        assert "v01.2.3" in err
 
     def test_validate_version_tags_all_invalid_returns_empty(
         self, capsys: pytest.CaptureFixture
@@ -435,6 +499,27 @@ class TestValidateVersionTags:
         assert "- v1.0.0" in new_text
         assert "- v0.9.0" in new_text
         assert "bad-tag" not in new_text
+
+    def test_main_excludes_invalid_suffix_tags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v1.2.3"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+        with patch.object(
+            sync_mod,
+            "fetch_versions",
+            return_value=["v1.2.4", "v1.2.3-hotfix", "v1.2.3"],
+        ):
+            result = sync_mod.main()
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "v1.2.3-hotfix" in err
+        new_text = template_file.read_text()
+        assert "- v1.2.4" in new_text
+        assert "- v1.2.3" in new_text
+        assert "v1.2.3-hotfix" not in new_text
 
 
 class TestRepoResolution:

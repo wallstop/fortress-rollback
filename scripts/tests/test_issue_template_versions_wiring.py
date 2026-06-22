@@ -92,3 +92,18 @@ def test_publish_workflow_stamps_release_date() -> None:
         "publish.yml must run 'sync-version.sh --stamp-release-date' so the "
         "changelog's placeholder date is refreshed to the real release date."
     )
+    assert "RELEASE_VERSION: ${{ steps.get_version.outputs.version }}" in text, (
+        "publish.yml must preserve the published version for post-publish "
+        "metadata finalization, even if the default branch is bumped before "
+        "the finalizer runs."
+    )
+    assert '--release-version "$RELEASE_VERSION"' in text, (
+        "publish.yml must pass the immutable published version into "
+        "sync-version.sh instead of letting the default branch Cargo.toml "
+        "choose which changelog header is stamped."
+    )
+    assert '--ensure-version "$RELEASE_TAG"' in text, (
+        "publish.yml must inject the just-created release tag into the "
+        "issue-template sync so API listing delay cannot omit the published "
+        "version from bug_report.yml."
+    )

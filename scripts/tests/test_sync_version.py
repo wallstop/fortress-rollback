@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Resolve repository root from scripts/tests/ (two parent levels up).
@@ -174,7 +175,22 @@ def test_help_documents_fortress_project_root() -> None:
 
     assert result.returncode == 0
     assert "FORTRESS_PROJECT_ROOT" in result.stdout
+    assert "FORTRESS_RELEASE_DATE" in result.stdout
     assert "repository root containing" in result.stdout
+
+
+def test_missing_cargo_version_reports_diagnostic(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _write(repo / "Cargo.toml", '[package]\nname = "fixture"\n')
+    _write(repo / "CHANGELOG.md", "# Changelog\n")
+
+    result = _run_sync(repo)
+
+    assert result.returncode == 1
+    assert "Could not extract version from Cargo.toml" in (
+        result.stdout + result.stderr
+    )
 
 
 def test_check_mode_ignores_gitignored_untracked_outputs(tmp_path: Path) -> None:
@@ -439,10 +455,11 @@ def test_sync_version_reports_anchor_missing_when_unreleased_footer_absent(tmp_p
 """
     repo = _setup_repo(tmp_path, changelog)
     result = _run_sync(repo, "--changelog-only")
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 1
 
     combined = result.stdout + result.stderr
     assert "Could not insert generated link footers" in combined
+    assert "require manual intervention" in combined
     assert "✓ Added: CHANGELOG.md [0.7.0] link" not in combined
 
     updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -475,10 +492,7 @@ _STAMP_CHANGELOG = """# Changelog
 
 def _utc_today_candidates() -> set[str]:
     """UTC dates around now, tolerating a midnight rollover during the test."""
-    out = subprocess.run(
-        ["date", "-u", "+%Y-%m-%d"], capture_output=True, text=True, check=True
-    )
-    return {out.stdout.strip()}
+    return {datetime.now(timezone.utc).date().isoformat()}
 
 
 def _current_version_header(changelog_text: str, version: str) -> str:
@@ -535,6 +549,86 @@ def test_stamp_release_date_preserves_check_invariants(tmp_path: Path) -> None:
     assert check.returncode == 0, check.stdout + check.stderr
 
 
+def test_stamp_release_date_targets_released_version_after_default_branch_bump(
+    tmp_path: Path,
+) -> None:
+    """Post-publish stamping must not follow a concurrently bumped Cargo.toml."""
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.10.0] - 2026-06-20
+
+### Added
+- Next in-flight feature
+
+## [0.9.0] - 2026-06-04
+
+### Added
+- Shipped feature
+
+## [0.8.1] - 2026-05-16
+
+### Added
+- Older thing
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
+"""
+    repo = _setup_repo(tmp_path, changelog, version="0.10.0")
+    before = _utc_today_candidates()
+    result = _run_sync(repo, "--stamp-release-date", "--release-version", "0.9.0")
+    after = _utc_today_candidates()
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    released_header = _current_version_header(text, "0.9.0")
+    valid_released_headers = {f"## [0.9.0] - {d}" for d in (before | after)}
+    assert released_header in valid_released_headers
+    assert "## [0.10.0] - 2026-06-20" in text
+    assert (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...HEAD"
+        in text
+    )
+
+
+def test_stamp_release_date_missing_release_header_fails_with_diagnostic(
+    tmp_path: Path,
+) -> None:
+    changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.8.1] - 2026-05-16
+
+### Added
+- Older thing
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
+"""
+    repo = _setup_repo(tmp_path, changelog, version="0.9.0")
+    result = _run_sync(repo, "--stamp-release-date")
+
+    assert result.returncode == 1
+    combined = result.stdout + result.stderr
+    assert "Cannot stamp release date: no '## [0.9.0]' header found" in combined
+    assert "CHANGELOG.md (release date)" in combined
+
+
+def test_release_version_requires_stamp_release_date(tmp_path: Path) -> None:
+    repo = _setup_repo(tmp_path, _STAMP_CHANGELOG, version="0.9.0")
+    result = _run_sync(repo, "--release-version", "0.9.0")
+
+    assert result.returncode == 1
+    assert "--release-version requires --stamp-release-date" in (
+        result.stdout + result.stderr
+    )
+
+
 def test_stamp_release_date_documented_in_help() -> None:
     # --help does not need a repo; run it directly against the script.
     result = subprocess.run(
@@ -545,3 +639,4 @@ def test_stamp_release_date_documented_in_help() -> None:
     )
     assert result.returncode == 0
     assert "--stamp-release-date" in result.stdout
+    assert "--release-version" in result.stdout
