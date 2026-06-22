@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782096137801,
+  "lastUpdate": 1782164546807,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "be03ad2b495cee8d3ef9450a9ebccf63c79d7068",
-          "message": "chore(deps): bump clap from 4.5.56 to 4.5.57 (#78)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.56 to 4.5.57.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.57</h2>\n<h2>[4.5.57] - 2026-02-03</h2>\n<h3>Fixes</h3>\n<ul>\n<li>Regression from 4.5.55 where having an argument with\n<code>.value_terminator(&quot;--&quot;)</code> caused problems with an\nargument with <code>.last(true)</code></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.57] - 2026-02-03</h2>\n<h3>Fixes</h3>\n<ul>\n<li>Regression from 4.5.55 where having an argument with\n<code>.value_terminator(&quot;--&quot;)</code> caused problems with an\nargument with <code>.last(true)</code></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/69c0ddbbfb56db1bccbb5954b62bb89a567a3c8d\"><code>69c0ddb</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8206bba73fd6c5d567cb95949fd1c3c6c48e4e20\"><code>8206bba</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c109d67ea493823727411f60f354edb3d83117ee\"><code>c109d67</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6104\">#6104</a>\nfrom epage/hide</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/9d7f2128f77023941b53b7cfc311120a2ead75a2\"><code>9d7f212</code></a>\nfix(complete): Hide dot files on dynamic completer</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/77b3fdbbea64ae0b0b3a51309bcbb861360de8d1\"><code>77b3fdb</code></a>\ntest(complete): Show dot file behavior</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/f89b9b8d1b818a2eb3863745be48725ace2d8f12\"><code>f89b9b8</code></a>\ntest(derive): Make stable across upgrade</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/58eb8a937ac6ca4a59614dc26deedb6cfe16c424\"><code>58eb8a9</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/10a2a7559b0663143d56c850c0c40ed31620cb5b\"><code>10a2a75</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/a42eebf56bf20d587347abb03105f95c98bfda51\"><code>a42eebf</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6103\">#6103</a>\nfrom epage/mut_subcommands</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/5335f54d73eef9276c13313661fcfffb720c87cf\"><code>5335f54</code></a>\nfeat: Add Command::mut_subcommands</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.56...clap_complete-v4.5.57\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.56&new-version=4.5.57)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-03T23:45:28-08:00",
-          "tree_id": "74963318c7fbcee933aa721c37e14108a0dcfa03",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/be03ad2b495cee8d3ef9450a9ebccf63c79d7068"
-        },
-        "date": 1770191426859,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 88,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 131,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 615,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 923,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1391,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103700,
-            "range": "± 1754",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24450,
-            "range": "± 201",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 681,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 871,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1601,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "505d631f9357be3964f3ae24b076043957c7bac0",
+          "message": "Doc Upgrades + Release Target Fixes (#184)\n\n## Description\n\nThis PR finalizes the `0.9.0` release-targeted docs and release tooling\nupdates.\n\nUser-facing highlights:\n\n- Refreshes project positioning text across README/docs/wiki\n(correctness-first messaging, formal-verification emphasis, and updated\nsupport/contact guidance).\n- Consolidates and promotes unreleased changelog content into a dated\n`0.9.0` section so release notes are emitted from the right section.\n- Fixes release automation so publish now also stamps the changelog date\nand syncs bug-report version options on the default branch.\n- Adds guardrail tests to prevent future regressions in changelog\nconsolidation, issue-template version wiring, sync-version stamping\nbehavior, and unaffiliated community links.\n\nCompatibility note:\n\n- No runtime/protocol behavior changes are introduced in this branch.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `scripts/tests/test_changelog_release_consolidation.py`\n- `scripts/tests/test_issue_template_versions_wiring.py`\n- `scripts/tests/test_no_unaffiliated_links.py`\n- `scripts/tests/test_sync_version.py` (new `--stamp-release-date`\ncoverage)\n\n**Manual testing performed:**\n\n- Verified release-workflow wiring updates in\n`.github/workflows/publish.yml` and\n`.github/workflows/sync-issue-template.yml`.\n- Verified changelog/version consistency updates in `CHANGELOG.md` and\n`scripts/sync-version.sh`.\n\n## Related Issues\n\n- Addresses release-note and issue-template sync regressions (issues\n#167 and #168 references in tests/comments).\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Low Risk**\n> Changes are documentation, changelog, CI/config, and release scripts\nonly; no production Rust networking or protocol code is modified.\n> \n> **Overview**\n> **Release and changelog:** In-flight `0.9.0` content is moved out of\n`## [Unreleased]` into a dated `## [0.9.0]` section (placeholder date\nfor dev; real date stamped at publish). Several `### Fixed` items drop\nthe `**Pre-existing:**` prefix.\n> \n> **Publish automation:** After `cargo publish` and the GitHub release,\n`publish.yml` now commits to the default branch (with retries): stamps\nthe changelog header via `sync-version.sh --stamp-release-date\n--release-version`, and refreshes the bug-report version dropdown via\n`sync-issue-template-versions.py --ensure-version`—because token-created\nreleases do not fire the standalone `release` workflow.\n> \n> **Tooling & CI:** `sync-version.sh` gains release stamping and fails\non unresolved metadata; legacy `pre-commit` refuses version bumps with a\ndirty tree; Cargo registry settings (`http.multiplexing = false`,\n`net.retry = 10`) and narrower `.cargo/config.toml` path filters are\nadded across workflows; semver failure messaging distinguishes API\nbreaks from crates.io flakes.\n> \n> **Docs & guardrails:** README, `lib.rs`, and docs/wiki shift to\ncorrectness-first positioning, drop the GGPO Discord link, and point\nsupport to GitHub Issues. New tests cover changelog consolidation,\npublish wiring, sync stamping, and unaffiliated links.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na573327cd38cb66610a1e1f7efcd4709276d1406. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-06-22T14:37:57-07:00",
+          "tree_id": "19091f35b85839ed1d5f098ce22ef49c3a75b0fc",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/505d631f9357be3964f3ae24b076043957c7bac0"
+        },
+        "date": 1782164545194,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 119,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 165,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 472,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 727,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1089,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 118527,
+            "range": "± 258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 47890,
+            "range": "± 433",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 3",
             "unit": "ns/iter"
           },
           {
