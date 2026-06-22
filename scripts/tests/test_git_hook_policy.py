@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ CONFIG_PATH = REPO_ROOT / ".pre-commit-config.yaml"
 DOCS_CONTRIBUTING = REPO_ROOT / "docs" / "contributing.md"
 WIKI_CONTRIBUTING = REPO_ROOT / "wiki" / "Contributing.md"
 INSTALL_HOOKS = REPO_ROOT / "scripts" / "install-hooks.sh"
+LEGACY_PRE_COMMIT = REPO_ROOT / "scripts" / "pre-commit"
 CARGO_HACK_WRAPPER = REPO_ROOT / "scripts" / "build" / "check-cargo-hack.py"
 RUSTFMT_WRAPPER = REPO_ROOT / "scripts" / "build" / "run-cargo-fmt.py"
 CI_DOCS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
@@ -58,6 +60,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "**.rs",
     "Cargo.toml",
     "Cargo.lock",
+    ".cargo/config.toml",
     "docs/**",
     "wiki/**",
     "scripts/docs/**",
@@ -189,6 +192,80 @@ def test_install_script_uses_pre_commit_framework_for_both_hooks() -> None:
     assert "Preserved custom $hook hook" in content
     assert "Removed legacy Fortress Rollback $hook hook" in content
     assert "Pre-commit hook for Fortress Rollback" in content
+
+
+def test_legacy_pre_commit_fails_cargo_bump_with_unstaged_work(tmp_path: Path) -> None:
+    """The legacy hook must not auto-stage unrelated unstaged files."""
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "pre-commit").write_text(
+        LEGACY_PRE_COMMIT.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    sync_stub = scripts_dir / "sync-version.sh"
+    sync_stub.write_text(
+        "#!/bin/sh\n"
+        "echo 'sync-version.sh should not run when unstaged changes exist' >&2\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    sync_stub.chmod(0o755)
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "fixture"\nversion = "1.2.3"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Hook Tests"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "fixture"\nversion = "1.2.4"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "add", "Cargo.toml"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "README.md").write_text("unstaged work\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "scripts/pre-commit"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert (
+        "Unstaged or untracked changes are present while Cargo.toml has a staged version bump"
+        in combined
+    )
+    assert "sync-version.sh should not run" not in combined
 
 
 def test_cargo_hack_local_excludes_match_ci_slow_features() -> None:

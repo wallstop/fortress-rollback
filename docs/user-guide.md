@@ -3963,7 +3963,6 @@ Key serialization behaviors:
 - Check the examples in `examples/ex_game/` for working code
 - See `examples/configuration.rs` for configuration patterns
 - See `examples/error_handling.rs` for error handling patterns
-- Join the GGPO Discord for community support
-- File issues at the project repository
+- Ask questions, request features, or report bugs on [GitHub Issues](https://github.com/wallstop/fortress-rollback/issues)
 
 Happy rollback networking!

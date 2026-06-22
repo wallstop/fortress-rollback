@@ -9,10 +9,13 @@
 #   ./scripts/sync-version.sh --check   # Check only (exit 1 if inconsistent)
 #   ./scripts/sync-version.sh --dry-run # Show what would be changed
 #   ./scripts/sync-version.sh --verbose # Show detailed output
+#   ./scripts/sync-version.sh --stamp-release-date --release-version 1.2.3
 #
 # Environment:
 #   FORTRESS_PROJECT_ROOT  Optional path to the repository root containing
 #                          Cargo.toml. Defaults to script parent directory.
+#   FORTRESS_RELEASE_DATE  Optional YYYY-MM-DD date used by --stamp-release-date.
+#                          Defaults to today's UTC date.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 # FILES SCANNED (comprehensive coverage)
@@ -145,6 +148,8 @@ CHECK_ONLY=false
 DRY_RUN=false
 VERBOSE=false
 CHANGELOG_ONLY=false
+STAMP_RELEASE_DATE=false
+RELEASE_VERSION=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -165,6 +170,21 @@ while [[ $# -gt 0 ]]; do
             CHANGELOG_ONLY=true
             shift
             ;;
+        --stamp-release-date)
+            # Force-refresh the current version's release date to today.
+            # Implies --changelog-only (it only touches CHANGELOG.md).
+            STAMP_RELEASE_DATE=true
+            CHANGELOG_ONLY=true
+            shift
+            ;;
+        --release-version)
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo -e "${RED}Error: --release-version requires a version argument${NC}" >&2
+                exit 1
+            fi
+            RELEASE_VERSION="${2#v}"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
@@ -173,12 +193,20 @@ while [[ $# -gt 0 ]]; do
             echo "Environment:"
             echo "  FORTRESS_PROJECT_ROOT  Optional path to repository root containing"
             echo "                         Cargo.toml. Defaults to script parent directory."
+            echo "  FORTRESS_RELEASE_DATE  Optional YYYY-MM-DD date used by --stamp-release-date."
+            echo "                         Defaults to today's UTC date."
             echo ""
             echo "Options:"
             echo "  --check     Check only, exit 1 if versions are inconsistent"
             echo "  --dry-run   Show what would be changed without modifying files"
             echo "  --verbose   Show detailed output including all files scanned"
             echo "  --changelog-only  Only check/update CHANGELOG.md release link footers and date"
+            echo "  --stamp-release-date  Force the current version's '## [VERSION]' header date"
+            echo "                        to today (rewrites an existing date); implies"
+            echo "                        --changelog-only. Used by the release/publish workflow."
+            echo "  --release-version VERSION"
+            echo "                        Stamp this released version instead of Cargo.toml."
+            echo "                        Accepts X.Y.Z or vX.Y.Z; requires --stamp-release-date."
             echo "  --help      Show this help message"
             echo ""
             echo "File types scanned:"
@@ -198,10 +226,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "$RELEASE_VERSION" ]]; then
+    if [[ "$STAMP_RELEASE_DATE" != "true" ]]; then
+        echo -e "${RED}Error: --release-version requires --stamp-release-date${NC}" >&2
+        exit 1
+    fi
+    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}Error: --release-version must be X.Y.Z or vX.Y.Z${NC}" >&2
+        exit 1
+    fi
+fi
+
 # Extract version from Cargo.toml
 get_cargo_version() {
     local version
-    version=$(grep -E '^version = "[0-9]+\.[0-9]+(\.[0-9]+)?"' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed -E 's/version = "([^"]+)"/\1/')
+    if ! version=$(awk -F '"' '/^version = "[0-9]+\.[0-9]+(\.[0-9]+)?"/ { print $2; exit }' "$PROJECT_ROOT/Cargo.toml"); then
+        echo -e "${RED}Error: Could not read Cargo.toml${NC}" >&2
+        exit 1
+    fi
     if [[ -z "$version" ]]; then
         echo -e "${RED}Error: Could not extract version from Cargo.toml${NC}" >&2
         exit 1
@@ -285,9 +327,16 @@ main() {
     VERSION=$(get_cargo_version)
     local MAJOR_MINOR
     MAJOR_MINOR=$(get_major_minor_version "$VERSION")
+    local STAMP_VERSION="$VERSION"
+    if [[ -n "$RELEASE_VERSION" ]]; then
+        STAMP_VERSION="$RELEASE_VERSION"
+    fi
 
     echo -e "${BLUE}Current Cargo.toml version:${NC} ${GREEN}$VERSION${NC}"
     echo -e "${BLUE}Major.Minor version:${NC} ${GREEN}$MAJOR_MINOR${NC}"
+    if [[ "$STAMP_RELEASE_DATE" == "true" && "$STAMP_VERSION" != "$VERSION" ]]; then
+        echo -e "${BLUE}Release stamp version:${NC} ${GREEN}$STAMP_VERSION${NC}"
+    fi
     echo ""
 
     local FILES_CHANGED=0
@@ -295,7 +344,15 @@ main() {
     local INCONSISTENT_FILES=()
     local SCANNED_COUNT=0
     local TODAY
-    TODAY=$(date -u +"%Y-%m-%d")
+    TODAY="${FORTRESS_RELEASE_DATE:-}"
+    if [[ -n "$TODAY" ]]; then
+        if ! [[ "$TODAY" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo -e "${RED}Error: FORTRESS_RELEASE_DATE must be YYYY-MM-DD${NC}" >&2
+            exit 1
+        fi
+    else
+        TODAY=$(date -u +"%Y-%m-%d")
+    fi
     local SKIPPED_COUNT=0
     local SKIPPED_MISSING=0
     local DISCOVERY_MODE=""
@@ -509,6 +566,7 @@ main() {
             fi
 
             if [[ "$file_changed" == "true" ]]; then
+                remove_inconsistent_file "$relative_path"
                 ((FILES_CHANGED++)) || true
                 echo -e "${GREEN}✓ Updated:${NC} $relative_path ${MAGENTA}($file_ext)${NC}"
             fi
@@ -592,6 +650,44 @@ main() {
                 else
                     portable_replace "^## \\[$ESCAPED_VERSION\\]$" "## [$VERSION] - $TODAY" "$CHANGELOG"
                     echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md release date for [$VERSION] → $TODAY"
+                    remove_inconsistent_file "CHANGELOG.md (release date)"
+                    ((FILES_CHANGED++)) || true
+                    ((TOTAL_REPLACEMENTS++)) || true
+                fi
+            fi
+        fi
+
+        # --stamp-release-date: force the stamp target's header date to today,
+        # rewriting whatever date is already there. By default the stamp target
+        # is Cargo.toml's version; release automation passes --release-version
+        # so default-branch version bumps cannot stamp the wrong release header.
+        # The committed steady state
+        # carries a *dated* placeholder header (`## [VERSION] - <date>`) — a bare
+        # `## [VERSION]` would fail the routine `--check` gate (flagged above) — so
+        # this overwrites that placeholder date with the real release date at
+        # publish time. The release-notes body is the section content, not the
+        # header line, so refreshing the date never alters the published notes.
+        if [[ "$STAMP_RELEASE_DATE" == "true" ]]; then
+            local ESCAPED_STAMP_VERSION="${STAMP_VERSION//./\\.}"
+            local DESIRED_HEADER="## [$STAMP_VERSION] - $TODAY"
+            local CURRENT_HEADER
+            CURRENT_HEADER=$(grep -m1 -E "^## \[$ESCAPED_STAMP_VERSION\]([[:space:]]|$)" "$CHANGELOG" 2>/dev/null | sed -E 's/[[:space:]]+$//' || true)
+            if [[ -z "$CURRENT_HEADER" ]]; then
+                log_always "${RED}✗ Cannot stamp release date: no '## [$STAMP_VERSION]' header found in CHANGELOG.md${NC}"
+                add_inconsistent_file "CHANGELOG.md (release date)"
+            elif [[ "$CURRENT_HEADER" == "$DESIRED_HEADER" ]]; then
+                log "${GREEN}  ✓ ## [$STAMP_VERSION] is already dated $TODAY${NC}"
+            else
+                if [[ "$CHECK_ONLY" == "true" ]]; then
+                    log "${YELLOW}  → ## [$STAMP_VERSION] date should be stamped to $TODAY${NC}"
+                    add_inconsistent_file "CHANGELOG.md (release date)"
+                elif [[ "$DRY_RUN" == "true" ]]; then
+                    echo -e "${YELLOW}Would update:${NC} CHANGELOG.md release date for [$STAMP_VERSION] → $TODAY"
+                else
+                    # Match the whole header line (version bracket is unique) so
+                    # both the bare and any already-dated form are rewritten.
+                    portable_replace "^## \\[$ESCAPED_STAMP_VERSION\\].*$" "## [$STAMP_VERSION] - $TODAY" "$CHANGELOG"
+                    echo -e "${GREEN}✓ Stamped:${NC} CHANGELOG.md release date for [$STAMP_VERSION] → $TODAY"
                     remove_inconsistent_file "CHANGELOG.md (release date)"
                     ((FILES_CHANGED++)) || true
                     ((TOTAL_REPLACEMENTS++)) || true
@@ -716,10 +812,11 @@ main() {
             echo -e "${BLUE}All version references now match:${NC} ${GREEN}$MAJOR_MINOR${NC}"
         fi
         if [[ ${#INCONSISTENT_FILES[@]} -gt 0 ]]; then
-            echo -e "${YELLOW}⚠ ${#INCONSISTENT_FILES[@]} issue(s) require manual intervention:${NC}"
+            echo -e "${RED}✗ ${#INCONSISTENT_FILES[@]} issue(s) require manual intervention:${NC}"
             for f in "${INCONSISTENT_FILES[@]}"; do
                 echo -e "  ${YELLOW}•${NC} $f"
             done
+            exit 1
         elif [[ $FILES_CHANGED -eq 0 ]]; then
             echo -e "${GREEN}✓ All version references are already consistent with Cargo.toml ($VERSION)${NC}"
         fi

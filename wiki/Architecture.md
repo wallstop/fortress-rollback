@@ -27,7 +27,7 @@ This document provides a comprehensive overview of Fortress Rollback's internal 
 
 ## Overview
 
-Fortress Rollback is a Rust implementation of rollback networking for real-time multiplayer games. It's based on the GGPO (Good Game Peace Out) network SDK concepts but with a modern, safe Rust API.
+Fortress Rollback is a correctness-first Rust implementation of rollback networking for real-time multiplayer games, built around a modern, safe, request-driven API. It applies the well-established rollback approach pioneered by the GGPO (Good Game Peace Out) network SDK, hardened with a zero-panic policy, determinism by construction, and formal verification.
 
 ### Design Philosophy
 

@@ -1,6 +1,11 @@
 ---
 name: Sync Issue Template Versions
 
+# Primary sync now happens inline in publish.yml (the "Finalize release metadata
+# on default branch" step): a release created there with the default GITHUB_TOKEN
+# does NOT emit the `release` event below, so this workflow would not fire on the
+# automated publish path. It is kept for manual re-syncs (workflow_dispatch) and
+# for releases created through the GitHub UI (a user token, which DOES trigger).
 on:
   release:
     types: [released]

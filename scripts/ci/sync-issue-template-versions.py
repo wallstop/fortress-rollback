@@ -9,6 +9,7 @@ Usage:
     python scripts/ci/sync-issue-template-versions.py
     python scripts/ci/sync-issue-template-versions.py --dry-run
     python scripts/ci/sync-issue-template-versions.py --check
+    python scripts/ci/sync-issue-template-versions.py --ensure-version v1.2.3
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ REQUEST_TIMEOUT = 30
 GIT_TIMEOUT = 10
 # Maximum bytes of a response body included in error messages to aid debugging.
 _ERROR_BODY_SNIPPET_LEN = 200
+VERSION_TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 def _repo_from_git_remote() -> str | None:
@@ -154,27 +156,41 @@ def fetch_versions(api_url: str | None = None) -> list[str]:
 
 
 def validate_version_tags(versions: list[str]) -> list[str]:
-    """Filter *versions* to those matching the ``vX.Y.Z`` semver pattern.
+    """Filter *versions* to strict ``vX.Y.Z`` release tags, newest first.
 
     Any tag that does not start with ``v`` followed by three dot-separated
     integers is logged as a warning to stderr and excluded from the returned
     list.  The sync can still proceed with the remaining valid tags.
 
-    Tags with pre-release or build-metadata suffixes (e.g. ``v1.2.3-hotfix``)
-    are accepted because the pattern is a prefix match; only the leading
-    ``vMAJOR.MINOR.PATCH`` portion is required.
+    Suffix tags such as ``v1.2.3-hotfix`` are excluded because the bug-report
+    dropdown represents published stable releases, not arbitrary release-like
+    tag names.
     """
     valid: list[str] = []
-    pattern = re.compile(r"^v\d+\.\d+\.\d+")
+    seen: set[str] = set()
     for tag in versions:
-        if pattern.match(tag):
+        if VERSION_TAG_RE.match(tag):
+            if tag in seen:
+                continue
+            seen.add(tag)
             valid.append(tag)
         else:
             print(
-                f"warning: skipping tag {tag!r} — does not match vX.Y.Z format",
+                f"warning: skipping tag {tag!r} — does not match "
+                "vMAJOR.MINOR.PATCH format",
                 file=sys.stderr,
             )
+    valid.sort(key=_semver_key, reverse=True)
     return valid
+
+
+def _semver_key(tag: str) -> tuple[int, int, int]:
+    """Return the numeric sort key for a tag already validated by VERSION_TAG_RE."""
+    match = VERSION_TAG_RE.match(tag)
+    if match is None:
+        raise ValueError(f"invalid release tag: {tag}")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
 
 
 def build_version_block(versions: list[str], indent: str) -> str:
@@ -241,7 +257,29 @@ def main() -> int:
         action="store_true",
         help="Exit 1 if the template would change (for CI validation).",
     )
+    parser.add_argument(
+        "--ensure-version",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help=(
+            "Force TAG into the synced list before sorting/deduping. "
+            "Used by publish.yml so the just-created release is present even "
+            "if the GitHub releases API has not listed it yet."
+        ),
+    )
     args = parser.parse_args()
+    ensured_versions: list[str] = args.ensure_version
+    invalid_ensured = [
+        tag for tag in ensured_versions if VERSION_TAG_RE.match(tag) is None
+    ]
+    if invalid_ensured:
+        joined = ", ".join(repr(tag) for tag in invalid_ensured)
+        print(
+            f"{TEMPLATE_PATH}:0: --ensure-version requires vMAJOR.MINOR.PATCH; got {joined}",
+            file=sys.stderr,
+        )
+        return 1
 
     _, api_url, is_fallback = _resolve_github_repo()
     if is_fallback:
@@ -260,7 +298,7 @@ def main() -> int:
 
     versions: list[str] = []
     try:
-        versions = validate_version_tags(fetch_versions(api_url))
+        versions = validate_version_tags(fetch_versions(api_url) + ensured_versions)
     except NetworkError as exc:
         if args.check:
             print(f"Skipping issue template version check: {exc}", file=sys.stderr)

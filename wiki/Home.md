@@ -8,7 +8,7 @@
 
 ## *Deterministic Rollback Netcode Built on Correctness*
 
-Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollback networking in deterministic multiplayer games. Built as a hardened fork of GGRS (Good Game Rollback System), it prioritizes safety, formal verification, and production reliability.
+Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollback networking in deterministic multiplayer games. It prioritizes safety, formal verification, and production reliability: 100% safe Rust, zero panics in production code, and machine-checked proofs of its trickiest invariants. It began as a hardened fork of [GGRS](https://github.com/gschup/ggrs) (itself inspired by the GGPO network SDK) and has since grown its own feature set — see [Fortress vs GGRS](Fortress-vs-GGRS) for the full comparison.
 
 ---
 
