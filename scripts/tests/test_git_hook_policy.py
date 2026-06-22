@@ -58,6 +58,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "**.rs",
     "Cargo.toml",
     "Cargo.lock",
+    ".cargo/config.toml",
     "docs/**",
     "wiki/**",
     "scripts/docs/**",

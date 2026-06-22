@@ -8,7 +8,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
-      - '.cargo/**'
+      - '.cargo/config.toml'
       - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
@@ -22,7 +22,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'rust-toolchain.toml'
-      - '.cargo/**'
+      - '.cargo/config.toml'
       - 'Cross.toml'
       - 'clippy.toml'
       - 'rustfmt.toml'
@@ -509,21 +509,26 @@ jobs:
         run: |
           version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           {
-            echo "### ❌ Semver check failed"
+            echo "### ❌ Semver check did not pass"
             echo ""
-            echo "\`cargo-semver-checks\` found a breaking public-API change that the current"
-            echo "version bump does not permit."
+            echo "\`cargo-semver-checks\` failed before CI could accept this PR. This can mean"
+            echo "either a real public-API compatibility break or a setup/dependency-resolution"
+            echo "problem such as a crates.io network error. Use the failed step log above as"
+            echo "the source of truth."
             echo ""
             echo "**Current crate version:** \`${version}\` (compared against the latest crates.io release)."
             echo ""
-            echo "Resolve by **one** of:"
+            echo "Resolve according to the log:"
             echo ""
-            echo "1. **Intended break** — bump \`version\` in \`Cargo.toml\` (pre-1.0: a breaking"
+            echo "1. **Semver finding** — if the log lists public-API incompatibilities, either"
+            echo "   revert the accidental break or bump \`version\` in \`Cargo.toml\` (pre-1.0: a breaking"
             echo "   change needs a *minor* bump, e.g. \`0.9.x\` → \`0.10.0\`), add a CHANGELOG"
             echo "   section for it, then run \`./scripts/sync-version.sh\`."
-            echo "2. **Accidental break** — revert the public-API change."
+            echo "2. **Setup or network failure** — rerun after the dependency source recovers;"
+            echo "   if it repeats, inspect Cargo registry/network diagnostics before changing"
+            echo "   production code."
             echo ""
-            echo "The exact flagged items are listed in the step log above."
+            echo "Cargo network hardening for CI Cargo jobs is kept in \`.cargo/config.toml\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # WASM build verification

@@ -29,6 +29,19 @@ split-debuginfo = "unpacked"
 # Note: [profile.dev.package."*"] with opt-level=1 is defined in Cargo.toml
 # to optimize dependencies while keeping local code unoptimized for faster builds
 
+[http]
+# CI has seen crates.io HTTP/2 framing flakes during dependency resolution.
+# This is intentionally repo-wide rather than semver-only: every cargo-heavy CI
+# job shares the same registry transport, and local builds still prefer a
+# slightly less aggressive fetch path over failing on transient network behavior.
+multiplexing = false
+
+[net]
+# Cargo's default is 3. CI dependency resolution is usually cached, so extra
+# retries mainly help cold-cache or semver-checks runs survive brief registry
+# hiccups without affecting normal build time.
+retry = 10
+
 [alias]
 # Convenient aliases for common operations
 # All test aliases use --no-capture so output is visible on failures
