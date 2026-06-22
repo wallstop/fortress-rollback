@@ -490,6 +490,7 @@ impl<T: Config> SpectatorSession<T> {
     /// Returns the number of frames behind the host
     #[must_use]
     pub fn frames_behind_host(&self) -> usize {
+        let _violation_scope = self.scoped_violation_observer();
         // Gracefully handle the case where current_frame somehow exceeds last_recv_frame.
         // This shouldn't happen in normal operation, but we report it and return 0 rather than panic.
         if self.current_frame > self.last_recv_frame {
@@ -587,6 +588,29 @@ impl<T: Config> SpectatorSession<T> {
         self.violation_observer.as_ref()
     }
 
+    /// Installs the session's configured violation observer (if any) as the
+    /// current thread's scoped observer for the duration of a public entry
+    /// point, so every `report_violation!` emitted beneath it routes to the
+    /// per-session observer. Returns `None` (a no-op — violations fall back to
+    /// the default [`TracingObserver`]) when no observer was configured.
+    ///
+    /// Mirrors the scoping in [`P2PSession`] and [`SyncTestSession`]. Nested
+    /// entry points (e.g. `advance_frame` calling `poll_remote_clients`) push
+    /// the same observer twice and pop in LIFO order, which is harmless. Sites
+    /// that already hold the observer in hand use `report_violation_to!` and
+    /// route directly regardless of this scope.
+    ///
+    /// [`TracingObserver`]: crate::telemetry::TracingObserver
+    /// [`P2PSession`]: crate::P2PSession
+    /// [`SyncTestSession`]: crate::SyncTestSession
+    #[inline]
+    #[must_use]
+    fn scoped_violation_observer(&self) -> Option<crate::telemetry::ScopedObserverGuard> {
+        self.violation_observer
+            .as_ref()
+            .map(|observer| crate::telemetry::push_violation_observer(Arc::clone(observer)))
+    }
+
     /// Computes the request-batch preallocation capacity for [`advance_frame`].
     ///
     /// `frames_to_advance` is clamped to `buffer_size` because the advance loop
@@ -623,6 +647,7 @@ impl<T: Config> SpectatorSession<T> {
     /// [`NotSynchronized`]: FortressError::NotSynchronized
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        let _violation_scope = self.scoped_violation_observer();
         if let Some(err) = self.spectator_divergence_error() {
             return Err(err);
         }
@@ -802,6 +827,7 @@ impl<T: Config> SpectatorSession<T> {
     /// [`SpectatorConfig::enable_rewind`]: crate::SpectatorConfig::enable_rewind
     #[must_use = "FortressRequests must be processed to seek the game state"]
     pub fn seek_to_frame(&mut self, target_frame: Frame) -> FortressResult<RequestVec<T>> {
+        let _violation_scope = self.scoped_violation_observer();
         if !self.enable_rewind {
             return Err(InvalidRequestKind::NotSupported {
                 operation: "seek_to_frame",
@@ -855,6 +881,7 @@ impl<T: Config> SpectatorSession<T> {
     /// Receive UDP packages, distribute them to corresponding UDP endpoints, handle all occurring events and send all outgoing UDP packages.
     /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work like packet transmissions.
     pub fn poll_remote_clients(&mut self) {
+        let _violation_scope = self.scoped_violation_observer();
         // Get all udp packets and distribute them to associated endpoints.
         // The endpoints will handle their packets, which will trigger both events and UDP replies.
         // Route each message to the FIRST host that claims to handle it, then stop.
@@ -3092,6 +3119,45 @@ mod tests {
             .violations()
             .iter()
             .any(|violation| violation.kind == ViolationKind::FrameSync));
+    }
+
+    #[test]
+    fn spectator_frames_behind_host_routes_report_violation_to_session_observer() {
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session(test_addr(7350), DummySocket)
+            .unwrap();
+
+        // Force the defensive guard `current_frame > last_recv_frame`. That site
+        // uses the plain `report_violation!` macro (which routes through the
+        // thread-local scoped observer), unlike the session's `report_violation_to!`
+        // sites which carry the observer explicitly. Without a scope installed at
+        // this entry point the violation reaches only the default `TracingObserver`
+        // and never the per-session observer configured via
+        // `with_violation_observer` — the gap this test pins.
+        session.current_frame = Frame::new(10);
+        session.last_recv_frame = Frame::new(5);
+
+        let behind = session.frames_behind_host();
+        assert_eq!(
+            behind, 0,
+            "frames_behind_host returns 0 when current_frame exceeds last_recv_frame"
+        );
+
+        // NON-VACUITY: deleting the `let _violation_scope = self.scoped_violation_observer();`
+        // line from `frames_behind_host` makes this assertion fail.
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.kind == ViolationKind::FrameSync),
+            "frames_behind_host violation must route to the per-session observer"
+        );
     }
 
     #[test]

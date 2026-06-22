@@ -22,6 +22,7 @@ unavailable so this file can still be collected on minimal CI shards.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import textwrap
@@ -142,6 +143,12 @@ def _build_tree(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+@pytest.fixture(scope="session")
+def cargo_target_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Share cargo build artifacts across subprocess cases."""
+    return tmp_path_factory.mktemp("verify-markdown-code-target")
+
+
 CASES: tuple[Case, ...] = (
     Case(
         name="single_good_file_passes",
@@ -190,13 +197,17 @@ CASES: tuple[Case, ...] = (
 def test_verify_markdown_code_behaviour(
     case: Case,
     tmp_path: Path,
+    cargo_target_dir: Path,
 ) -> None:
     """Drive verify-markdown-code.sh and assert exit code + key substrings."""
     paths = _build_tree(tmp_path)
     args = case.args_builder(paths)  # type: ignore[operator]
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(cargo_target_dir)
     result = subprocess.run(
         ["bash", str(SCRIPT_PATH), *args],
         cwd=PROJECT_ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,

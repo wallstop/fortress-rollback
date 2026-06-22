@@ -20,10 +20,10 @@
 
 use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 use crate::common::{
-    create_channel_pair, create_channel_quad, create_channel_triple, create_filtered_channel_quad,
-    create_filtered_channel_triple, drain_sync_events, poll_with_advance,
-    synchronize_sessions_deterministic, BlockedLinks, BusSocket, FilterSocket, RoutingBus,
-    SyncConfig, TestClock, POLL_INTERVAL_DETERMINISTIC,
+    create_channel_pair, create_channel_quad, create_channel_triple, create_filtered_channel_mesh,
+    create_filtered_channel_quad, create_filtered_channel_triple, drain_sync_events,
+    poll_with_advance, synchronize_sessions_deterministic, BlockedLinks, BusSocket, FilterSocket,
+    RoutingBus, SyncConfig, TestClock, POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
     telemetry::{CollectingObserver, ViolationSeverity},
@@ -2496,6 +2496,200 @@ fn poll_four(
     }
 }
 
+/// Builds five fully-meshed `P2PSession`s over a filtered in-process mesh, with a
+/// PER-SESSION disconnect timeout (`timeouts[i]` applies to session i) and an
+/// explicit `max_prediction` window — the 5-player analog of
+/// [`build_filtered_four_player_sessions_with_timeouts_and_prediction`].
+///
+/// Returns `(A, B, C, D, C2, blocked, a_A, a_B, a_C, a_D, a_C2, clock)`, where the
+/// session order is handles `0..5` (A=h0, B=h1, C=h2, D=h3, C2=h4) and the five
+/// addresses are index-aligned to those handles. The N=5 double-failure-relay
+/// coverage needs the SECOND relay survivor C2 so the fold-min over relays is a
+/// genuine multi-element conjunction (see the test for the choreography).
+#[allow(clippy::type_complexity)]
+fn build_filtered_five_player_sessions_with_timeouts_and_prediction(
+    timeouts: [Duration; 5],
+    max_prediction: usize,
+) -> Result<
+    (
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        P2PSession<StubConfig>,
+        BlockedLinks,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        SocketAddr,
+        TestClock,
+    ),
+    FortressError,
+> {
+    let clock = TestClock::new();
+    let (mut sockets, addrs, blocked) = create_filtered_channel_mesh(5);
+    assert_eq!(sockets.len(), 5, "five-player mesh must yield five sockets");
+    assert_eq!(addrs.len(), 5, "five-player mesh must yield five addresses");
+    // Drain the socket Vec into named bindings (reverse order so `pop` is in
+    // index order). The addresses stay index-aligned to the handles below.
+    let s5 = sockets.pop().expect("socket 5");
+    let s4 = sockets.pop().expect("socket 4");
+    let s3 = sockets.pop().expect("socket 3");
+    let s2 = sockets.pop().expect("socket 2");
+    let s1 = sockets.pop().expect("socket 1");
+    let (a1, a2, a3, a4, a5) = (addrs[0], addrs[1], addrs[2], addrs[3], addrs[4]);
+    let pc = protocol_config(&clock);
+
+    let build = |local: PlayerHandle,
+                 socket: FilterSocket,
+                 disconnect_timeout: Duration,
+                 remotes: [(PlayerHandle, SocketAddr); 4]|
+     -> Result<P2PSession<StubConfig>, FortressError> {
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_protocol_config(pc.clone())
+            .with_num_players(5)?
+            .with_max_prediction_window(max_prediction)
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_disconnect_timeout(disconnect_timeout)
+            .with_disconnect_notify_delay(Duration::from_millis(100))
+            .add_player(PlayerType::Local, local)?;
+        for (handle, addr) in remotes {
+            builder = builder.add_player(PlayerType::Remote(addr), handle)?;
+        }
+        builder.start_p2p_session(socket)
+    };
+
+    let mut sess1 = build(
+        PlayerHandle::new(0),
+        s1,
+        timeouts[0],
+        [
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(3), a4),
+            (PlayerHandle::new(4), a5),
+        ],
+    )?;
+    let mut sess2 = build(
+        PlayerHandle::new(1),
+        s2,
+        timeouts[1],
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(3), a4),
+            (PlayerHandle::new(4), a5),
+        ],
+    )?;
+    let mut sess3 = build(
+        PlayerHandle::new(2),
+        s3,
+        timeouts[2],
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(3), a4),
+            (PlayerHandle::new(4), a5),
+        ],
+    )?;
+    let mut sess4 = build(
+        PlayerHandle::new(3),
+        s4,
+        timeouts[3],
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(4), a5),
+        ],
+    )?;
+    let mut sess5 = build(
+        PlayerHandle::new(4),
+        s5,
+        timeouts[4],
+        [
+            (PlayerHandle::new(0), a1),
+            (PlayerHandle::new(1), a2),
+            (PlayerHandle::new(2), a3),
+            (PlayerHandle::new(3), a4),
+        ],
+    )?;
+
+    synchronize_five_sessions(
+        &mut sess1, &mut sess2, &mut sess3, &mut sess4, &mut sess5, &clock, 800,
+    );
+    let _ = drain_events(&mut sess1);
+    let _ = drain_events(&mut sess2);
+    let _ = drain_events(&mut sess3);
+    let _ = drain_events(&mut sess4);
+    let _ = drain_events(&mut sess5);
+
+    Ok((
+        sess1, sess2, sess3, sess4, sess5, blocked, a1, a2, a3, a4, a5, clock,
+    ))
+}
+
+/// Synchronizes five sessions deterministically. Returns when all five are in
+/// `Running` state, or panics if synchronization does not complete in
+/// `iterations` iterations. The 5-player analog of [`synchronize_four_sessions`].
+fn synchronize_five_sessions(
+    sess1: &mut P2PSession<StubConfig>,
+    sess2: &mut P2PSession<StubConfig>,
+    sess3: &mut P2PSession<StubConfig>,
+    sess4: &mut P2PSession<StubConfig>,
+    sess5: &mut P2PSession<StubConfig>,
+    clock: &TestClock,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        sess4.poll_remote_clients();
+        sess5.poll_remote_clients();
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+            && sess3.current_state() == SessionState::Running
+            && sess4.current_state() == SessionState::Running
+            && sess5.current_state() == SessionState::Running
+        {
+            return;
+        }
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+    panic!(
+        "Five sessions failed to synchronize: sess1={:?}, sess2={:?}, sess3={:?}, sess4={:?}, sess5={:?}",
+        sess1.current_state(),
+        sess2.current_state(),
+        sess3.current_state(),
+        sess4.current_state(),
+        sess5.current_state()
+    );
+}
+
+/// Polls five sessions and advances virtual time by
+/// `POLL_INTERVAL_DETERMINISTIC * iterations`. The 5-player analog of
+/// [`poll_four`].
+fn poll_five(
+    sess1: &mut P2PSession<StubConfig>,
+    sess2: &mut P2PSession<StubConfig>,
+    sess3: &mut P2PSession<StubConfig>,
+    sess4: &mut P2PSession<StubConfig>,
+    sess5: &mut P2PSession<StubConfig>,
+    clock: &TestClock,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        sess3.poll_remote_clients();
+        sess4.poll_remote_clients();
+        sess5.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    }
+}
+
 #[test]
 fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
 ) -> Result<(), FortressError> {
@@ -3570,6 +3764,296 @@ fn p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors() -> Resu
     Ok(())
 }
 
+#[test]
+fn p2p_n5_double_failure_relay_two_relays_dropped_slot_converges_across_survivors(
+) -> Result<(), FortressError> {
+    // LONG symmetric timeouts so NO auto-timeout fires; every prune is an
+    // explicit `remove_player`. SMALL prediction window (4) so A can burn its
+    // whole window and (absent the HOLD) DISCARD frames below `F` before the
+    // relays' low lands.
+    let long = Duration::from_secs(20);
+    let (
+        mut sess_a,
+        mut sess_b,
+        mut sess_c,
+        mut sess_d,
+        mut sess_c2,
+        blocked,
+        a_addr,
+        b_addr,
+        c_addr,
+        d_addr,
+        c2_addr,
+        clock,
+    ) = build_filtered_five_player_sessions_with_timeouts_and_prediction([long; 5], 4)?;
+
+    let mut stub_a = GameStub::new();
+    let mut stub_b = GameStub::new();
+    let mut stub_c = GameStub::new();
+    let mut stub_d = GameStub::new();
+    let mut stub_c2 = GameStub::new();
+
+    let mut states_a: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_c: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut states_c2: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink_b: BTreeMap<i32, StateStub> = BTreeMap::new();
+    let mut sink_d: BTreeMap<i32, StateStub> = BTreeMap::new();
+
+    let h_a = PlayerHandle::new(0);
+    let h_b = PlayerHandle::new(1);
+    let h_c = PlayerHandle::new(2);
+    let h_d = PlayerHandle::new(3);
+    let h_c2 = PlayerHandle::new(4);
+
+    // --- Phase 1: warmup, all links open so all five confirm together. ---
+    let warmup_frames = 6_u32;
+    for i in 0..warmup_frames {
+        poll_five(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &mut sess_c2,
+            &clock,
+            3,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, i + 1000, &mut sink_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, i + 2000, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, i + 3000, &mut sink_d)?;
+        try_advance_recording(&mut sess_c2, &mut stub_c2, h_c2, i + 4000, &mut states_c2)?;
+    }
+    poll_five(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &mut sess_c2,
+        &clock,
+        8,
+    );
+
+    // --- Phase 2: build the D-receipt gradient B(low=F) < {A,C,C2}(high≈M). ---
+    blocked.block(d_addr, b_addr);
+    let climb = 16_u32;
+    for i in 0..climb {
+        poll_five(
+            &mut sess_a,
+            &mut sess_b,
+            &mut sess_c,
+            &mut sess_d,
+            &mut sess_c2,
+            &clock,
+            2,
+        );
+        try_advance_recording(&mut sess_a, &mut stub_a, h_a, 100 + i, &mut states_a)?;
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1100 + i, &mut sink_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2100 + i, &mut states_c)?;
+        try_advance_recording(&mut sess_d, &mut stub_d, h_d, 3100 + i, &mut sink_d)?;
+        try_advance_recording(&mut sess_c2, &mut stub_c2, h_c2, 4100 + i, &mut states_c2)?;
+    }
+    poll_five(
+        &mut sess_a,
+        &mut sess_b,
+        &mut sess_c,
+        &mut sess_d,
+        &mut sess_c2,
+        &clock,
+        4,
+    );
+
+    // --- Phase 3: arm the DOUBLE FAILURE across BOTH relays (all via explicit
+    // removals; no timeout). ---
+    blocked.block(d_addr, c_addr);
+    blocked.block(d_addr, c2_addr);
+    blocked.block(c_addr, a_addr);
+    blocked.block(a_addr, c_addr);
+    blocked.block(c2_addr, a_addr);
+    blocked.block(a_addr, c2_addr);
+    blocked.block(b_addr, a_addr);
+    blocked.block(a_addr, b_addr);
+
+    // B freezes D at F and gossips {disconnected, F} to C AND C2 (B -> C, B -> C2
+    // open); both adopt F. B -> A is cut so A does NOT adopt F here.
+    sess_b.remove_player(h_d).unwrap();
+    // B's endpoint on A goes terminal → PRUNED from A's D fold. A's running
+    // remotes are now {C, C2, D} = 3 running → relay topology engaged with TWO
+    // folded relays (one ABOVE the floor).
+    sess_a.remove_player(h_b).unwrap();
+
+    // --- Phase 4: A confirms/records D HIGH; the multi-relay HOLD must engage so
+    // A never discards the contested window. ---
+    let mut a_dropped_b = false;
+    let mut a_dropped_d_p4 = false;
+    let mut a_stall_error: Option<FortressError> = None;
+    for _ in 0..140 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_c2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        match try_advance_recording(&mut sess_a, &mut stub_a, h_a, 500, &mut states_a) {
+            Ok(_) => {},
+            Err(e) => {
+                if a_stall_error.is_none() {
+                    a_stall_error = Some(e);
+                }
+            },
+        }
+        try_advance_recording(&mut sess_b, &mut stub_b, h_b, 1500, &mut sink_b)?;
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2500, &mut states_c)?;
+        try_advance_recording(&mut sess_c2, &mut stub_c2, h_c2, 4500, &mut states_c2)?;
+
+        for e in sess_a.events() {
+            if let FortressEvent::PeerDropped { handle, .. } = e {
+                if handle == h_b {
+                    a_dropped_b = true;
+                }
+                if handle == h_d {
+                    a_dropped_d_p4 = true;
+                }
+            }
+        }
+    }
+
+    // --- Phase 5: re-open BOTH relays. Their relayed {disconnected, F} lands on
+    // A (arming a below-window rollback the S20 clamp survives) and their
+    // `FloorReply`s answer A's round with F, so A converges. ---
+    blocked.unblock(c_addr, a_addr);
+    blocked.unblock(a_addr, c_addr);
+    blocked.unblock(c2_addr, a_addr);
+    blocked.unblock(a_addr, c2_addr);
+
+    let mut a_dropped_d_p5 = false;
+    for _ in 0..200 {
+        sess_a.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_c2.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+
+        match try_advance_recording(&mut sess_a, &mut stub_a, h_a, 700, &mut states_a) {
+            Ok(_) => {},
+            Err(e) => {
+                if a_stall_error.is_none() {
+                    a_stall_error = Some(e);
+                }
+            },
+        }
+        try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2700, &mut states_c)?;
+        try_advance_recording(&mut sess_c2, &mut stub_c2, h_c2, 4700, &mut states_c2)?;
+
+        if sess_a
+            .events()
+            .any(|e| matches!(e, FortressEvent::PeerDropped { handle, .. } if handle == h_d))
+        {
+            a_dropped_d_p5 = true;
+        }
+    }
+
+    let a_dropped_d = a_dropped_d_p4 || a_dropped_d_p5;
+
+    // --- Byte oracle (F4 pattern, TWO relay witnesses): over the shared
+    // confirmed range A vs C AND A vs C2 must agree. ---
+    let confirmed_bound = sess_a
+        .confirmed_frame()
+        .as_i32()
+        .min(sess_c.confirmed_frame().as_i32())
+        .min(sess_c2.confirmed_frame().as_i32());
+    let mut compared = 0_u32;
+    let mut divergences: Vec<(i32, &'static str, StateStub, StateStub)> = Vec::new();
+    for (&frame, &state_a) in &states_a {
+        if frame > confirmed_bound {
+            continue;
+        }
+        if let Some(&state_c) = states_c.get(&frame) {
+            compared += 1;
+            if state_a != state_c {
+                divergences.push((frame, "A!=C", state_a, state_c));
+            }
+        }
+        if let Some(&state_c2) = states_c2.get(&frame) {
+            compared += 1;
+            if state_a != state_c2 {
+                divergences.push((frame, "A!=C2", state_a, state_c2));
+            }
+        }
+    }
+
+    // PROBE: D's confirmed INPUT (handle 3) on A vs C vs C2 at sample in-window
+    // frames must MATCH (the freeze converged) — the decisive signature that this
+    // is the silent state-only divergence, not a plain input split.
+    let mut input_probe: Vec<(i32, Option<u32>, Option<u32>, Option<u32>)> = Vec::new();
+    let mut queryable_matches = 0_u32;
+    let mut queryable_mismatch = false;
+    for &pf in &[60_i32, 110, 160] {
+        if pf > confirmed_bound {
+            continue;
+        }
+        let da = sess_a
+            .confirmed_inputs_for_frame(Frame::new(pf))
+            .ok()
+            .and_then(|v| v.get(3).map(|i| i.inp));
+        let dc = sess_c
+            .confirmed_inputs_for_frame(Frame::new(pf))
+            .ok()
+            .and_then(|v| v.get(3).map(|i| i.inp));
+        let dc2 = sess_c2
+            .confirmed_inputs_for_frame(Frame::new(pf))
+            .ok()
+            .and_then(|v| v.get(3).map(|i| i.inp));
+        // Only frames queryable on ALL THREE peers count toward the non-vacuous
+        // match (a discarded frame yields `None` and proves nothing).
+        if da.is_some() && dc.is_some() && dc2.is_some() {
+            if da == dc && da == dc2 {
+                queryable_matches += 1;
+            } else {
+                queryable_mismatch = true;
+            }
+        }
+        input_probe.push((pf, da, dc, dc2));
+    }
+
+    assert!(
+        compared > 0,
+        "no confirmed frames were compared across survivors (bound={confirmed_bound}); \
+         the N=5 double-failure-relay choreography did not produce overlapping confirmed history"
+    );
+    assert!(
+        a_dropped_d_p5 && !a_dropped_d_p4,
+        "expected A to learn D's disconnect ONLY via the late relay (p4={a_dropped_d_p4}, \
+         p5={a_dropped_d_p5}); the double-failure ordering did not hold \
+         (bound={confirmed_bound}, a_dropped_b={a_dropped_b})"
+    );
+    assert!(
+        a_stall_error.is_none(),
+        "expected A to stay live via the S20 clamp, but advance_frame errored: \
+         {a_stall_error:?} (bound={confirmed_bound})"
+    );
+    // POSITIVE CONVERGENCE GUARD (the S55 fix at N=5, two relays): an EMPTY
+    // `divergences` is GREEN; a regression repopulates it and flips this RED.
+    assert!(
+        divergences.is_empty(),
+        "N=5 double-failure-relay REGRESSED: confirmed state diverged across survivors \
+         (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
+         a_stall_error={a_stall_error:?}, divergences={divergences:?}). The multi-relay \
+         floor-round HOLD should keep A's confirmed bound at F until BOTH relays' rounds \
+         are fresh, so the contested window is never discarded."
+    );
+    assert!(
+        queryable_matches > 0,
+        "input probe was vacuous: no sampled frame was queryable on all of A, C, C2 \
+         (all discarded from the input ring) — got {input_probe:?} (bound={confirmed_bound})"
+    );
+    assert!(
+        !queryable_mismatch,
+        "expected D's confirmed inputs to MATCH across A, C, C2 on every queryable \
+         frame (the freeze frame converged); got {input_probe:?}"
+    );
+
+    Ok(())
+}
+
 // ============================================================================
 // Regression (direct-detection path): `remove_player` under asymmetric loss
 // ============================================================================
@@ -4002,6 +4486,16 @@ fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
     // genuine `frame_to_load > first_incorrect` Error, and must not raise any
     // Error/Critical FrameSync violation. At most a Warning explaining the
     // gossip-lowered-disconnect-frame-outside-window residual is allowed.
+    //
+    // Session-59 note: `P2PSession` now routes `report_violation!` to the
+    // per-session observer (via the thread-local scope installed in
+    // `advance_frame` / `poll_remote_clients`), so the two checks below are no
+    // longer vacuous — an Error/Critical violation raised on this path would now
+    // be captured and would fail the test. (This particular scenario converges
+    // cleanly without raising any violation, so the observer may legitimately be
+    // empty; the dedicated routing red-green lives in the `telemetry` unit tests
+    // and the `p2p_advance_frame_routes_report_violation_to_session_observer` /
+    // `sync_test_construction_violation_routes_to_session_observer` tests.)
     let violations = observer.violations();
     let genuine_bug_errors: Vec<_> = violations
         .iter()
@@ -4067,9 +4561,10 @@ fn p2p_continue_without_gossip_lowered_disconnect_outside_window_stays_live(
 //
 // It asserts byte-identical recorded state across A and B for every mutually
 // confirmed frame. (The genuine `frame_to_load > first_incorrect` Error logged by
-// `adjust_gamestate` is NOT asserted here: it routes through the bare
-// `report_violation!` macro to the global `TracingObserver` only and never reaches
-// a session `CollectingObserver`, so it is unobservable from this test. See the
+// `adjust_gamestate` is NOT asserted here. Since session-59 such a
+// `report_violation!` raised inside `advance_frame` WOULD reach a per-session
+// `CollectingObserver`; this test simply installs none, and no
+// `tracing-subscriber` layer either, so the Error is unobservable here. See the
 // note at the verdict assertion below.) The verdict is whichever way it runs on
 // current code.
 #[test]
@@ -4286,15 +4781,13 @@ fn p2p_sparse_continue_without_gossip_lowered_disconnect_confirmed_stream_conver
     //
     // This state-equality check is the genuine red->green guard for F7. We do NOT
     // assert on the sparse-mode `frame_to_load > first_incorrect` Error (tagged
-    // "this indicates a bug") emitted by `adjust_gamestate`: that guard uses the
-    // bare `report_violation!` macro, which routes ONLY to the global
-    // `TracingObserver` and never pushes into a session's `CollectingObserver`
-    // (documented at `src/network/protocol/mod.rs` near the
-    // `enqueue_replicated_input_drops_entry_when_pending_output_full` test). The
-    // observer wired onto `sess1` therefore cannot observe that violation, and no
-    // test in this suite installs a `tracing-subscriber` layer to capture it.
-    // Byte-identical confirmed state across survivors is the contract that
-    // actually matters and the divergence the bug produces, so we rely on it. ---
+    // "this indicates a bug") emitted by `adjust_gamestate`. Since session-59,
+    // `report_violation!` raised inside `advance_frame` DOES route to a
+    // per-session `CollectingObserver` (via the thread-local scope) — but this
+    // test installs no observer on its sessions and no `tracing-subscriber`
+    // layer, so it simply does not observe that violation here. Byte-identical
+    // confirmed state across survivors is the contract that actually matters and
+    // the divergence the bug produces, so we rely on it. ---
     let confirmed_bound = std::cmp::min(
         sess1.confirmed_frame().as_i32(),
         sess2.confirmed_frame().as_i32(),
@@ -6852,4 +7345,863 @@ fn p2p_n0_nudge_does_not_starve_pending_retransmission_after_blackout() -> Resul
     );
 
     Ok(())
+}
+
+// ============================================================================
+// Integration-level N-peer hot-join joiner lifecycle (toward fold-below-`S`)
+// ============================================================================
+//
+// THE MECHANISM (traced, for context): an N-peer hot-join JOINER applies a
+// snapshot at frame `S` and inherits a "carried-dead" slot (a peer that died
+// before the snapshot) frozen at the coordinator's captured view
+// `f_carried < S`. This sits stably. The fold-below-`S` fail-closed violation
+// fires inside `disconnect_player_at_frames` (`src/sessions/p2p_session.rs`)
+// ONLY when a relay delivers a freeze STRICTLY BELOW `f_carried` (hence below
+// `S`) for the carried-dead slot: a LOWERING `update_player_disconnects` fold
+// converges `converged < S = npeer_joiner_baseline`, and the joiner — whose
+// entire history starts at `S` — structurally cannot re-roll or re-simulate
+// below its only saved state, so it fails closed (leave `Running`, surface
+// `NotSynchronized`, tear down terminally). The authoritative coverage of that
+// fail-closed behavior is the in-crate unit guard
+// `npeer_quad_committed_joiner_fold_below_snapshot_baseline_fails_closed_for_rejoin`,
+// which injects the below-`S` claim via a private cache seam.
+//
+// WHAT THIS MODULE LANDS (the reusable harness + the two legs reachable over a
+// genuine `FilterBusSocket` wire — every prune an explicit `remove_player`, no
+// seam injection, no `set_peer_connect_status_for_tests`, no private-field
+// writes): (1) a real `start_hot_join_session` N-peer joiner driven to
+// `Running` over the wire (the first such integration test — the full N-peer
+// joiner-drive lifecycle previously lived ONLY in `src/` unit tests on the
+// in-process `MeshBus`); (2) that committed joiner genuinely CARRYING a
+// dead slot disconnected BELOW its snapshot baseline `S` (the foundational leg
+// of the corner), proven via the PUBLIC per-slot `InputStatus` threaded into
+// each `AdvanceFrame` request (`local_connect_status` is private).
+//
+// WHY THE VIOLATION TRIGGER IS STRUCTURALLY UNREACHABLE OVER A GENUINE WIRE
+// (Session 60 — the resolution of S58's "open question / roster tension"). The
+// strongest natural attacker is an N>=5 double-failure relay aimed at the fresh
+// joiner: A=h0 coordinator/HOST holding the dead slot HIGH and serving; B=h1
+// RELAY; C=h2 the joiner's re-filled slot; D=h3 the carried-dead slot (dies
+// asymmetrically); E=h4 the low-origin (the only peer to freeze D at the low
+// receipt `g`). It cannot reach the violation, for three composing code reasons:
+//   1. The coordinator serves at `S` only when `confirmed_frame() >= S` AND
+//      `npeer_owed_freeze_readjust_at_or_below(S) == false` — and that gate folds
+//      EVERY running non-reserved endpoint's claims, so the serve DEFERS (pre-
+//      capture) / ABORTS (post-capture) while ANY folded endpoint reports a slot
+//      freeze that would re-sim at/below `S`. So A never serves D@f_carried while
+//      any folded peer (origin OR relay) holds D@`g` (`g < S`).
+//   2. To carry D@f_carried > `g`, A must EXCLUDE the low-origin from its fold
+//      (a connected remote reporting D@low also bounds A's confirmed low via
+//      `remote_slot_confirmed_bound`), and the only exclusion that does not stall
+//      A is to PRUNE it. Pruning gossips `origin@disconnected` to A's survivors.
+//   3. A Disconnected protocol endpoint drops all `Input`
+//      (`message_allowed_in_current_state` admits only `SyncRequest`), so any
+//      survivor that folds `origin@disconnected` disconnects its origin endpoint
+//      and can never adopt `g`. The relay that delivers `g` to the joiner MUST be
+//      a coordinator-directed survivor (only a survivor reactivating the joiner's
+//      slot gets a live endpoint to it) — hence A-folded, hence cascaded.
+// So the joiner commits carrying D below `S` and STAYS Running: no wire ordering
+// delivers a sub-baseline freeze. This is exercised end-to-end (over the wire,
+// strongest-attacker staging) by
+// `npeer_hot_join_fold_below_s_trigger_unreachable_over_wire` below, and the
+// seam-injected `src/` unit guard proves the bytes WOULD fail closed if delivered
+// — so that guard is the authoritative (and only-possible) coverage. Full
+// argument + adversarial-review consensus: `progress/session-60-…`.
+#[cfg(feature = "hot-join")]
+mod npeer_hot_join_joiner_integration {
+    use super::{protocol_config, FilterBusSocket};
+    use crate::common::stubs::{GameStub, StubConfig, StubInput};
+    use crate::common::{BlockedLinks, RoutingBus, TestClock, POLL_INTERVAL_DETERMINISTIC};
+    use fortress_rollback::{
+        DesyncDetection, DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame,
+        InputStatus, P2PSession, PlayerHandle, PlayerType, SessionBuilder, SessionState,
+    };
+    use std::collections::BTreeMap;
+    use std::net::SocketAddr;
+    use web_time::Duration;
+
+    /// Handles, in roster order: A=host(0), B=relay(1), C=joiner-slot(2),
+    /// D=carried-dead(3), E=survivor(4).
+    const H_A: PlayerHandle = PlayerHandle::new(0);
+    const H_B: PlayerHandle = PlayerHandle::new(1);
+    const H_C: PlayerHandle = PlayerHandle::new(2);
+    const H_D: PlayerHandle = PlayerHandle::new(3);
+    const H_E: PlayerHandle = PlayerHandle::new(4);
+
+    /// Returns the five mesh addresses (index-aligned to handles 0..5).
+    fn mesh_addrs() -> [SocketAddr; 5] {
+        [
+            ([127, 0, 0, 1], 50001).into(),
+            ([127, 0, 0, 1], 50002).into(),
+            ([127, 0, 0, 1], 50003).into(),
+            ([127, 0, 0, 1], 50004).into(),
+            ([127, 0, 0, 1], 50005).into(),
+        ]
+    }
+
+    /// The five live full-mesh sessions plus the wire handle and addresses.
+    /// A is the hot-join coordinator (`with_hot_join(true)`); the rest are plain
+    /// survivors. LONG symmetric timeouts so NO auto-timeout ever fires — every
+    /// prune in the choreography is an explicit `remove_player`. Sockets are
+    /// [`FilterBusSocket`]s over a shared [`RoutingBus`], so (a) directional loss
+    /// is toggleable mid-run via `blocked`, and (b) a fresh joiner can re-attach at
+    /// C's vacated address after C drops (the hot-join rejoin needs both — neither
+    /// `FilterSocket`/`ChannelSocket` nor a plain `BusSocket` alone suffices).
+    struct Mesh5 {
+        a: P2PSession<StubConfig>,
+        b: P2PSession<StubConfig>,
+        e: P2PSession<StubConfig>,
+        /// C is `Option` so the test can `drop` it (vacating its socket/address)
+        /// before re-attaching the joiner at the same address.
+        c: Option<P2PSession<StubConfig>>,
+        /// D is `Option` so the test can `drop` it after D dies (vacating its
+        /// address — D is never rejoined, it stays carried-dead).
+        d: Option<P2PSession<StubConfig>>,
+        stub_a: GameStub,
+        stub_b: GameStub,
+        stub_c: GameStub,
+        stub_d: GameStub,
+        stub_e: GameStub,
+        bus: RoutingBus,
+        blocked: BlockedLinks,
+        addrs: [SocketAddr; 5],
+        clock: TestClock,
+    }
+
+    /// Builds + synchronizes the five-player hot-join mesh. A=h0 is the
+    /// coordinator; the snapshot serve uses `EveryFrame` saving (StubConfig
+    /// default) and input delay 0 (default), so the public `start_hot_join_session`
+    /// works for the joiner that re-fills C's slot.
+    // The five sessions bind to single-char roster locals `a`..`e` (mirroring the
+    // `Mesh5` fields and the `H_A`..`H_E` handles) — intentional and clearer than
+    // `sess_a`..`sess_e` for a fixed five-peer roster.
+    #[allow(clippy::many_single_char_names)]
+    fn build_mesh5() -> Result<Mesh5, FortressError> {
+        let clock = TestClock::new();
+        let bus = RoutingBus::new();
+        let blocked = BlockedLinks::new();
+        let addrs = mesh_addrs();
+        let pc = protocol_config(&clock);
+        let long = Duration::from_secs(20);
+
+        // The coordinator A: hot-join enabled.
+        let a = {
+            let mut builder = SessionBuilder::<StubConfig>::new()
+                .with_protocol_config(pc.clone())
+                .with_num_players(5)?
+                .with_hot_join(true)
+                .with_desync_detection_mode(DesyncDetection::On { interval: 2 })
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .with_disconnect_timeout(long)
+                .with_disconnect_notify_delay(Duration::from_millis(100))
+                .add_player(PlayerType::Local, H_A)?;
+            for (h, idx) in [(H_B, 1), (H_C, 2), (H_D, 3), (H_E, 4)] {
+                builder = builder.add_player(PlayerType::Remote(addrs[idx]), h)?;
+            }
+            builder.start_p2p_session(FilterBusSocket::new(&bus, addrs[0], blocked.clone()))?
+        };
+
+        let build_survivor = |local: PlayerHandle,
+                              local_idx: usize,
+                              remotes: [(PlayerHandle, usize); 4]|
+         -> Result<P2PSession<StubConfig>, FortressError> {
+            let mut builder = SessionBuilder::<StubConfig>::new()
+                .with_protocol_config(pc.clone())
+                .with_num_players(5)?
+                .with_desync_detection_mode(DesyncDetection::On { interval: 2 })
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .with_disconnect_timeout(long)
+                .with_disconnect_notify_delay(Duration::from_millis(100))
+                .add_player(PlayerType::Local, local)?;
+            for (h, idx) in remotes {
+                builder = builder.add_player(PlayerType::Remote(addrs[idx]), h)?;
+            }
+            builder.start_p2p_session(FilterBusSocket::new(
+                &bus,
+                addrs[local_idx],
+                blocked.clone(),
+            ))
+        };
+
+        let b = build_survivor(H_B, 1, [(H_A, 0), (H_C, 2), (H_D, 3), (H_E, 4)])?;
+        let c = build_survivor(H_C, 2, [(H_A, 0), (H_B, 1), (H_D, 3), (H_E, 4)])?;
+        let d = build_survivor(H_D, 3, [(H_A, 0), (H_B, 1), (H_C, 2), (H_E, 4)])?;
+        let e = build_survivor(H_E, 4, [(H_A, 0), (H_B, 1), (H_C, 2), (H_D, 3)])?;
+
+        let mut mesh = Mesh5 {
+            a,
+            b,
+            e,
+            c: Some(c),
+            d: Some(d),
+            stub_a: GameStub::new(),
+            stub_b: GameStub::new(),
+            stub_c: GameStub::new(),
+            stub_d: GameStub::new(),
+            stub_e: GameStub::new(),
+            bus,
+            blocked,
+            addrs,
+            clock,
+        };
+        mesh.synchronize(1200);
+        let _ = mesh.a.events().count();
+        let _ = mesh.b.events().count();
+        if let Some(c) = mesh.c.as_mut() {
+            let _ = c.events().count();
+        }
+        if let Some(d) = mesh.d.as_mut() {
+            let _ = d.events().count();
+        }
+        let _ = mesh.e.events().count();
+        Ok(mesh)
+    }
+
+    impl Mesh5 {
+        fn synchronize(&mut self, iterations: usize) {
+            for _ in 0..iterations {
+                self.poll_all(1);
+                if self.a.current_state() == SessionState::Running
+                    && self.b.current_state() == SessionState::Running
+                    && self
+                        .c
+                        .as_ref()
+                        .is_none_or(|c| c.current_state() == SessionState::Running)
+                    && self
+                        .d
+                        .as_ref()
+                        .is_none_or(|d| d.current_state() == SessionState::Running)
+                    && self.e.current_state() == SessionState::Running
+                {
+                    return;
+                }
+            }
+            panic!(
+                "five hot-join mesh sessions failed to synchronize: A={:?} B={:?} C={:?} D={:?} E={:?}",
+                self.a.current_state(),
+                self.b.current_state(),
+                self.c.as_ref().map(P2PSession::current_state),
+                self.d.as_ref().map(P2PSession::current_state),
+                self.e.current_state()
+            );
+        }
+
+        /// Polls all currently-live sessions (A, B, D, E, and C if present)
+        /// `iterations` times, advancing the clock each iteration.
+        fn poll_all(&mut self, iterations: usize) {
+            for _ in 0..iterations {
+                self.a.poll_remote_clients();
+                self.b.poll_remote_clients();
+                self.e.poll_remote_clients();
+                if let Some(c) = self.c.as_mut() {
+                    c.poll_remote_clients();
+                }
+                if let Some(d) = self.d.as_mut() {
+                    d.poll_remote_clients();
+                }
+                self.clock.advance(POLL_INTERVAL_DETERMINISTIC);
+            }
+        }
+
+        /// Advances every currently-live survivor one frame on distinct,
+        /// per-peer input streams (so any frozen value is frame-sensitive, never
+        /// vacuously byte-equal). `base + handle` keeps the streams distinct.
+        fn advance_all(&mut self, base: u32) {
+            try_advance(&mut self.a, &mut self.stub_a, H_A, base);
+            try_advance(&mut self.b, &mut self.stub_b, H_B, base + 100);
+            try_advance(&mut self.e, &mut self.stub_e, H_E, base + 400);
+            if let Some(c) = self.c.as_mut() {
+                try_advance(c, &mut self.stub_c, H_C, base + 200);
+            }
+            if let Some(d) = self.d.as_mut() {
+                try_advance(d, &mut self.stub_d, H_D, base + 300);
+            }
+        }
+
+        /// Moves D out and drops it (vacating D's address; D never rejoins).
+        fn drop_d(&mut self) {
+            if let Some(d) = self.d.take() {
+                drop(d);
+            }
+        }
+
+        /// Settles in-flight inputs (poll-only rounds) so every live peer's
+        /// receipt of every other converges — a subsequent drop then freezes the
+        /// slot at ONE frame mesh-wide.
+        fn settle(&mut self, polls: usize) {
+            self.poll_all(polls);
+        }
+    }
+
+    /// A real N-peer hot-join joiner re-filling C's slot (local handle 2),
+    /// registering the full roster — including the carried-DEAD slot D at D's
+    /// address (a rejoiner knows the session shape, not who is alive; its
+    /// endpoint toward the dead address simply never synchronizes, and the
+    /// snapshot's carried statuses tell it the slot is frozen). Built through the
+    /// PUBLIC `start_hot_join_session` (S35 guard lift) — no test bypass.
+    struct Joiner {
+        session: P2PSession<StubConfig>,
+        stub: GameStub,
+        events: Vec<FortressEvent<StubConfig>>,
+        /// Per-frame `(value, InputStatus)` the joiner surfaces for the
+        /// carried-dead slot D in its `AdvanceFrame` requests (last write per
+        /// frame is the post-rollback value). A public proxy for "the joiner
+        /// carries D disconnected": `local_connect_status` is private, but the
+        /// per-slot status threaded into every `AdvanceFrame` is observable.
+        d_slot: BTreeMap<i32, (u32, InputStatus)>,
+    }
+
+    impl Joiner {
+        /// Builds the joiner at C's (vacated) address over a fresh
+        /// [`FilterBusSocket`] sharing the mesh bus + blocked-links handle.
+        fn build(mesh: &Mesh5) -> Result<Self, FortressError> {
+            let addrs = mesh.addrs;
+            let socket = FilterBusSocket::new(&mesh.bus, addrs[2], mesh.blocked.clone());
+            let session = SessionBuilder::<StubConfig>::new()
+                .with_protocol_config(protocol_config(&mesh.clock))
+                .with_num_players(5)?
+                .with_desync_detection_mode(DesyncDetection::On { interval: 2 })
+                .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+                .add_player(PlayerType::Remote(addrs[0]), H_A)?
+                .add_player(PlayerType::Remote(addrs[1]), H_B)?
+                .add_player(PlayerType::Local, H_C)?
+                .add_player(PlayerType::Remote(addrs[3]), H_D)?
+                .add_player(PlayerType::Remote(addrs[4]), H_E)?
+                .start_hot_join_session(socket, addrs[0])?;
+            Ok(Self {
+                session,
+                stub: GameStub::new(),
+                events: Vec::new(),
+                d_slot: BTreeMap::new(),
+            })
+        }
+
+        fn poll(&mut self) {
+            self.session.poll_remote_clients();
+            self.events.extend(self.session.events());
+        }
+
+        /// Applies the joiner's advance requests into its stub, recording the
+        /// D-slot `(value, status)` from each `AdvanceFrame` (re-simulations
+        /// re-key the same frame, so the last write per frame is post-rollback).
+        fn apply_recording(&mut self, requests: fortress_rollback::RequestVec<StubConfig>) {
+            const D: usize = 3;
+            for request in requests {
+                match request {
+                    FortressRequest::LoadGameState { cell, .. } => {
+                        self.stub.gs = cell.load().expect("joiner load cell");
+                    },
+                    FortressRequest::SaveGameState { cell, frame } => {
+                        let checksum = crate::common::calculate_hash(&self.stub.gs);
+                        cell.save(frame, Some(self.stub.gs), Some(checksum as u128));
+                    },
+                    FortressRequest::AdvanceFrame { inputs } => {
+                        let d = inputs.get(D).map(|&(input, status)| (input.inp, status));
+                        self.stub.gs.advance_frame_pub(inputs);
+                        if let Some(vs) = d {
+                            self.d_slot.insert(self.stub.gs.frame, vs);
+                        }
+                    },
+                }
+            }
+        }
+
+        /// Drives one local-input + advance on the joiner, recording D's slot.
+        /// Tolerates the prediction cap (the fold still ran).
+        fn advance_recording(&mut self, value: u32) {
+            match self.session.add_local_input(H_C, StubInput { inp: value }) {
+                Ok(()) => {},
+                Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => return,
+                Err(other) => panic!("joiner add_local_input error: {other:?}"),
+            }
+            match self.session.advance_frame() {
+                Ok(requests) => self.apply_recording(requests),
+                Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+                Err(other) => panic!("joiner advance_frame error: {other:?}"),
+            }
+        }
+    }
+
+    /// Advances a live survivor one frame with a deterministic local input,
+    /// applying the resulting requests into `stub`. Tolerates the prediction cap
+    /// and `NotSynchronized` (the fold still ran inside `advance_frame`).
+    fn try_advance(
+        session: &mut P2PSession<StubConfig>,
+        stub: &mut GameStub,
+        handle: PlayerHandle,
+        value: u32,
+    ) {
+        match session.add_local_input(handle, StubInput { inp: value }) {
+            Ok(()) => {},
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => return,
+            Err(other) => panic!("unexpected add_local_input error: {other:?}"),
+        }
+        match session.advance_frame() {
+            Ok(requests) => stub.handle_requests(requests),
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(other) => panic!(
+                "unexpected advance_frame error for handle {handle:?} at current {:?}: {other:?}",
+                session.current_frame()
+            ),
+        }
+    }
+
+    /// Drops slot D mesh-wide (symmetric freeze) and frees D's session, leaving
+    /// D carried-dead. The surviving mesh then advances so the eventual snapshot
+    /// frame `S` sits strictly above D's freeze frame (so a joiner inherits D
+    /// disconnected BELOW its baseline `S`). D is NEVER rejoined.
+    ///
+    /// Returns an UPPER BOUND on D's freeze frame: the coordinator A's
+    /// `current_frame` at the moment of the drop. A froze D at its own received
+    /// frame for D, which cannot exceed A's current frame — so any later
+    /// snapshot frame `S` strictly above this witness is provably strictly above
+    /// D's freeze. The caller asserts `S > witness` to make "below `S`" rigorous
+    /// rather than merely staged.
+    fn drop_d_symmetric(mesh: &mut Mesh5) -> Frame {
+        mesh.settle(8);
+        mesh.a.remove_player(H_D).expect("A removes D");
+        mesh.b.remove_player(H_D).expect("B removes D");
+        mesh.e.remove_player(H_D).expect("E removes D");
+        if let Some(c) = mesh.c.as_mut() {
+            c.remove_player(H_D).expect("C removes D");
+        }
+        // A froze D at <= A's current frame; capture that upper bound before the
+        // mesh advances past it.
+        let d_freeze_upper_bound = mesh.a.current_frame();
+        // Free D's session: its address goes quiet, its slot stays frozen
+        // mesh-wide. D never rejoins (it remains carried-dead).
+        mesh.drop_d();
+        let _ = mesh.a.events().count();
+        let _ = mesh.b.events().count();
+        let _ = mesh.e.events().count();
+
+        // The surviving live mesh (A, B, C, E) keeps advancing with D frozen, so
+        // S climbs strictly above D's freeze frame.
+        for i in 0..5_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(40 + i);
+        }
+        d_freeze_upper_bound
+    }
+
+    /// Drops slot C cleanly on every live survivor (explicit `remove_player`),
+    /// then frees C's session so its address is vacant for the rejoiner. The
+    /// hot-join coordinator A re-reserves the slot. Asserts A re-armed the slot.
+    fn drop_c_cleanly(mesh: &mut Mesh5) {
+        mesh.settle(8);
+        mesh.a.remove_player(H_C).expect("A removes C");
+        mesh.b.remove_player(H_C).expect("B removes C");
+        mesh.e.remove_player(H_C).expect("E removes C");
+        if let Some(d) = mesh.d.as_mut() {
+            d.remove_player(H_C).expect("D removes C");
+        }
+        let c = mesh.c.take().expect("C present before drop");
+        drop(c);
+        let _ = mesh.a.events().count();
+        let _ = mesh.b.events().count();
+        let _ = mesh.e.events().count();
+        if let Some(d) = mesh.d.as_mut() {
+            let _ = d.events().count();
+        }
+        // Let the drop converge mesh-wide.
+        for _ in 0..6 {
+            mesh.poll_all(3);
+            mesh.advance_all(70);
+        }
+    }
+
+    /// Drives a joiner from "constructed" to "Running real-from-F" over the wire,
+    /// keeping the live survivors advancing so the serve can capture + commit.
+    /// Returns the snapshot frame `S` (the frame the joiner loads). Asserts the
+    /// first post-commit `advance_frame()` is exactly
+    /// `[LoadGameState(S), AdvanceFrame(bridge)]`.
+    fn drive_joiner_to_running(mesh: &mut Mesh5, joiner: &mut Joiner) -> Frame {
+        let mut reached = false;
+        for i in 0..1200_u32 {
+            mesh.poll_all(1);
+            joiner.poll();
+            if i % 3 == 2 {
+                mesh.advance_all(80 + (i % 8));
+            }
+            if joiner.session.current_state() == SessionState::Running {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "joiner reached Running over the wire (state {:?})",
+            joiner.session.current_state()
+        );
+        drive_first_advance(joiner)
+    }
+
+    /// The joiner's first post-commit `advance_frame()`: asserts it is exactly
+    /// `[LoadGameState(S), AdvanceFrame(bridge)]`, applies it (recording D), and
+    /// returns the snapshot frame `S`.
+    fn drive_first_advance(joiner: &mut Joiner) -> Frame {
+        let requests = joiner.session.advance_frame().expect("post-commit advance");
+        let mut load_frame = None;
+        let mut load_count = 0;
+        let mut advance_count = 0;
+        for request in &*requests {
+            match request {
+                FortressRequest::LoadGameState { frame, .. } => {
+                    load_count += 1;
+                    load_frame = Some(*frame);
+                },
+                FortressRequest::AdvanceFrame { .. } => advance_count += 1,
+                FortressRequest::SaveGameState { .. } => {},
+            }
+        }
+        assert_eq!(load_count, 1, "exactly one LoadGameState on first advance");
+        assert_eq!(advance_count, 1, "exactly one bridge AdvanceFrame");
+        let serve_s = load_frame.expect("a snapshot frame was loaded");
+        joiner.apply_recording(requests);
+        serve_s
+    }
+
+    /// Runs the live mesh + joiner forward together for `rounds`, advancing the
+    /// joiner with distinct inputs (recording D's slot) so the joiner settles
+    /// into deep post-join operation and its carried-dead D status is observable.
+    fn run_mesh_and_joiner(mesh: &mut Mesh5, joiner: &mut Joiner, rounds: u32) {
+        for k in 0..rounds {
+            mesh.poll_all(2);
+            joiner.poll();
+            // Advance every round; the prediction cap self-throttles (advance
+            // helpers early-return at the cap), and frequent advances let the
+            // joiner confirm — and thus record D's carried status on — many
+            // distinct post-join frames rather than re-simulating a tiny window.
+            mesh.advance_all(90 + (k % 8));
+            joiner.advance_recording(95 + (k % 8));
+        }
+    }
+
+    #[test]
+    fn npeer_hot_join_five_player_mesh_builds_and_synchronizes() -> Result<(), FortressError> {
+        let mesh = build_mesh5()?;
+        assert_eq!(mesh.a.num_players(), 5);
+        assert_eq!(mesh.a.current_state(), SessionState::Running);
+        assert_eq!(mesh.e.current_state(), SessionState::Running);
+        assert_eq!(
+            mesh.c.as_ref().map(P2PSession::current_state),
+            Some(SessionState::Running)
+        );
+        // The wire handle is shared and directional toggling works.
+        assert!(!mesh.blocked.is_blocked_pub(mesh.addrs[0], mesh.addrs[1]));
+        Ok(())
+    }
+
+    /// The reusable integration joiner-drive. Warm up the 5-peer mesh, drop C
+    /// cleanly, drive a real public `start_hot_join_session` joiner to `Running`
+    /// over the wire, and assert the first post-commit advance is exactly the
+    /// `[LoadGameState(S), AdvanceFrame(bridge)]` batch. The first integration
+    /// test that exercises the N-peer joiner-drive lifecycle over a genuine wire
+    /// (previously `src/`-unit-test / `MeshBus`-only).
+    #[test]
+    fn npeer_hot_join_joiner_drives_to_running_over_filtered_wire() -> Result<(), FortressError> {
+        let mut mesh = build_mesh5()?;
+
+        // Warm up so the mesh has confirmed history.
+        for i in 0..8_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(i);
+        }
+
+        drop_c_cleanly(&mut mesh);
+        assert!(mesh.c.is_none(), "C vacated its slot");
+
+        let mut joiner = Joiner::build(&mesh)?;
+        assert_eq!(joiner.session.current_state(), SessionState::HotJoining);
+
+        let serve_s = drive_joiner_to_running(&mut mesh, &mut joiner);
+        assert!(serve_s.as_i32() >= 0, "snapshot frame is real");
+        assert_eq!(
+            joiner.session.current_state(),
+            SessionState::Running,
+            "joiner is Running after the load+bridge"
+        );
+        assert!(
+            joiner.session.current_frame().as_i32() > serve_s.as_i32(),
+            "joiner advanced past the snapshot frame (real from F={serve_s:?})"
+        );
+        Ok(())
+    }
+
+    /// The foundational leg of the fold-below-`S` corner: stage the carried-dead
+    /// slot D (died mesh-wide before the serve) so the committed joiner inherits
+    /// it disconnected and frozen strictly BELOW its snapshot baseline `S`, over
+    /// a genuine wire. Proven via the PUBLIC per-slot `InputStatus` threaded into
+    /// the joiner's `AdvanceFrame` requests: every post-join frame surfaces D as
+    /// `Disconnected` with a single constant (genuinely frozen) value. This is
+    /// the stable carried-below-`S` state the (unlanded) violation trigger would
+    /// then lower further — see the module header for why that delivery is the
+    /// open future-work delta.
+    #[test]
+    fn npeer_hot_join_joiner_commits_carrying_dead_slot_below_snapshot_baseline(
+    ) -> Result<(), FortressError> {
+        let mut mesh = build_mesh5()?;
+        for i in 0..6_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(i);
+        }
+
+        let d_freeze_upper_bound = drop_d_symmetric(&mut mesh);
+        drop_c_cleanly(&mut mesh);
+
+        let mut joiner = Joiner::build(&mesh)?;
+        let serve_s = drive_joiner_to_running(&mut mesh, &mut joiner);
+        run_mesh_and_joiner(&mut mesh, &mut joiner, 90);
+
+        // "Below S" is rigorous, not merely staged: D's freeze is <= the witness
+        // (A's frame when it froze D), and the snapshot baseline S is strictly
+        // above that witness — so D is carried frozen strictly below S.
+        assert!(
+            serve_s.as_i32() > d_freeze_upper_bound.as_i32(),
+            "snapshot baseline S={serve_s:?} must sit strictly above D's freeze \
+             (upper bound {d_freeze_upper_bound:?}) — else 'below S' is unproven"
+        );
+
+        // The joiner must surface D as Disconnected on every frame it recorded,
+        // and that frozen value must be constant (a genuine frozen slot). A floor
+        // of >= 10 recorded frames keeps the constant-value check non-vacuous (a
+        // single-frame sample could not distinguish frozen from coincidental).
+        assert!(
+            joiner.d_slot.len() >= 10,
+            "joiner recorded too few D-slot statuses ({}) — vacuous staging",
+            joiner.d_slot.len()
+        );
+        let frozen_values: std::collections::BTreeSet<u32> =
+            joiner.d_slot.values().map(|&(v, _)| v).collect();
+        assert_eq!(
+            frozen_values.len(),
+            1,
+            "D's carried value must be frozen (constant) across all {} recorded post-join \
+             frames, got {frozen_values:?}",
+            joiner.d_slot.len()
+        );
+        for (frame, (value, status)) in &joiner.d_slot {
+            assert_eq!(
+                *status,
+                InputStatus::Disconnected,
+                "joiner must carry D Disconnected at frame {frame} (value {value})"
+            );
+        }
+        // Sanity: the joiner is deep in post-join operation, advancing past S.
+        assert!(
+            joiner.session.current_frame().as_i32() > serve_s.as_i32(),
+            "joiner advanced its current frame past S={serve_s:?} (deep post-join), got {:?} \
+             (confirmed {:?})",
+            joiner.session.current_frame(),
+            joiner.session.confirmed_frame(),
+        );
+        Ok(())
+    }
+
+    /// The fold-below-`S` VIOLATION TRIGGER is **structurally unreachable over a
+    /// genuine wire** — the resolution of Session 58's "open question / roster
+    /// tension." This test drives the *strongest natural attacker construction* (a
+    /// genuine N≥5 double-failure relay aimed at a freshly-committed joiner) and
+    /// demonstrates the obstruction end-to-end over the `FilterBusSocket` mesh.
+    ///
+    /// **Roles:** A=h0 coordinator, B=h1 relay-survivor, C=h2 joiner-slot,
+    /// D=h3 dropped slot, E=h4 low-origin (the only peer to freeze D at the low
+    /// receipt `g`; its gossip to A/B/C is cut so `g` lives ONLY on E).
+    ///
+    /// **The obstruction (verified-code-grounded; the body exercises every step):**
+    /// 1. The serve gate is `confirmed_frame() >= S` AND
+    ///    `npeer_owed_freeze_readjust_at_or_below(S) == false` (the serve poll
+    ///    defers pre-capture / aborts post-capture otherwise). The owed-readjust
+    ///    dry-run folds EVERY running non-reserved endpoint, so A will not serve
+    ///    while ANY folded peer reports a slot freeze that re-sims at/below `S`.
+    ///    Separately, for A's confirmed to even climb to `S` above D's freeze, D
+    ///    must be **mesh-agreed disconnected** on A — `remote_slot_confirmed_bound`
+    ///    excludes a slot (`None`) ONLY in the `(true, false, _)` arm: locally
+    ///    disconnected AND no running remote reports it connected. A running remote
+    ///    reporting D at a low receipt instead bounds A low → A stalls below `S`.
+    /// 2. The low `g` is a FREEZE: its holder (E) reports D disconnected@`g`. If E is
+    ///    in A's fold, A's sticky-min merge adopts `g` → A captures D@`g`, the joiner
+    ///    inherits `g`, and there is no later lowering (the benign converged case, no
+    ///    violation). So to carry D@f_carried > `g`, A must EXCLUDE E — and the only
+    ///    exclusion that doesn't stall A's confirmed on E is to **prune** E.
+    /// 3. Pruning E gossips `E@disconnected` to B (the relay). A **Disconnected**
+    ///    protocol endpoint drops all `Input` (`message_allowed_in_current_state`
+    ///    admits only `SyncRequest`), so once B folds `E@disconnected` it disconnects
+    ///    its E endpoint (asserted here via B's `PeerDropped{E}`) and can **never**
+    ///    adopt `g` from E — even after the E→B link is re-opened post-commit.
+    /// 4. The relay MUST be a coordinator-directed survivor: only a survivor that
+    ///    reactivates the joiner's slot has a live endpoint to deliver `Input` to the
+    ///    joiner. A directed survivor is A-running, so if it held `g` A would have
+    ///    learned it (step 2). The same-poll fold-order race is unwinnable because A
+    ///    prunes E *pre-serve* (necessary to make D mesh-agreed), so B has long since
+    ///    disconnected E before any post-commit delivery window.
+    ///
+    /// So the joiner commits carrying D frozen strictly below `S` (the S58
+    /// foundational leg), the relay link is opened, B→joiner is a live gossip path
+    /// (the joiner confirms past `S` via its live remotes incl. B) — and yet the
+    /// joiner STAYS Running: no genuine-wire ordering delivers a sub-baseline freeze.
+    /// The seam-injected `src/` unit guard
+    /// `npeer_quad_committed_joiner_fold_below_snapshot_baseline_fails_closed_for_rejoin`
+    /// proves the violation MECHANISM fires on those exact bytes; this test proves the
+    /// bytes have no wire preimage, so that guard is the authoritative (and
+    /// only-possible) coverage. See `progress/session-60-*` for the full argument.
+    ///
+    /// **Scope:** unreachability for the committed N-peer JOINER specifically (no
+    /// history below `S` → fails closed). A *survivor* CAN see a below-its-history
+    /// lowering — that is the double-failure relay, which the S55 floor-round
+    /// CONVERGES (not fail-closes). The joiner is unique because its only inbound
+    /// relays are coordinator-directed survivors the coordinator necessarily folds.
+    #[test]
+    fn npeer_hot_join_fold_below_s_trigger_unreachable_over_wire() -> Result<(), FortressError> {
+        let mut mesh = build_mesh5()?;
+        let [a_addr, b_addr, _c_addr, _d_addr, e_addr] = mesh.addrs;
+
+        // Phase 1: warmup, all links open.
+        for i in 0..6_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(i);
+        }
+
+        // Phase 2: make E the low-origin. Cut E's gossip to A, B, C so E's low
+        // D-view never reaches them (`g` lives ONLY on E), then freeze D LOW on E.
+        // `e_g_upper` upper-bounds E's freeze frame `g` (E froze D at its own
+        // last_frame <= its current frame).
+        mesh.blocked.block(e_addr, a_addr);
+        mesh.blocked.block(e_addr, b_addr);
+        mesh.blocked.block(e_addr, mesh.addrs[2]);
+        mesh.e.remove_player(H_D).expect("E freezes D low");
+        let e_g_upper = mesh.e.current_frame();
+        let _ = mesh.e.events().count();
+
+        // Phase 3: prune E on A — the ONLY way to keep A's confirmed advancing past
+        // E's stale low D-view (a still-connected low-origin bounds A's confirmed
+        // for D, so without the prune A stalls and can never serve at S). The prune
+        // gossips `E@disconnected` to B (and C), which fold it and disconnect their
+        // E endpoint (the cascade — captured via B's `PeerDropped{E}`); this is the
+        // step that makes the relay B structurally unable to adopt `g`. With E
+        // excluded mesh-wide, A/B/C's confirmed for D now climbs HIGH (well above
+        // `g`) as D keeps delivering — building a wide, verifiable f_carried > g gap.
+        mesh.a.remove_player(H_E).expect("A prunes E");
+        let _ = mesh.a.events().count();
+        let mut b_dropped_e = false;
+        for i in 0..12_u32 {
+            mesh.poll_all(3);
+            mesh.advance_all(40 + i);
+            for e in mesh.b.events() {
+                if let FortressEvent::PeerDropped { handle, .. } = e {
+                    if handle == H_E {
+                        b_dropped_e = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            b_dropped_e,
+            "the cascade did not fire: B never dropped E, so this staging does not \
+             exercise the structural obstruction (A's prune of the low-origin must \
+             disconnect the relay's endpoint to it)"
+        );
+
+        // Phase 4: freeze D HIGH (f_carried) on A, B, C; drop D's session.
+        // `a_confirmed_at_freeze` lower-bounds A's D-freeze (A freezes D at its
+        // last_frame for D, which is >= its session-wide `confirmed_frame()`), and
+        // `f_carried_upper` upper-bounds it. The assert pins `g < f_carried`: E's
+        // low freeze IS strictly below the value the joiner will carry, so a relay
+        // that COULD deliver `g` would genuinely trip `converged < baseline`.
+        let a_confirmed_at_freeze = mesh.a.confirmed_frame();
+        let f_carried_upper = mesh.a.current_frame();
+        assert!(
+            a_confirmed_at_freeze.as_i32() > e_g_upper.as_i32(),
+            "the gradient is not established: A's D-freeze lower bound \
+             {a_confirmed_at_freeze:?} must sit strictly above E's `g` upper bound \
+             {e_g_upper:?}, else E's `g` is not a genuine lowering of the carried value \
+             (the test would be vacuous)"
+        );
+        mesh.a.remove_player(H_D).expect("A freezes D high");
+        mesh.b.remove_player(H_D).expect("B freezes D high");
+        if let Some(c) = mesh.c.as_mut() {
+            c.remove_player(H_D).expect("C freezes D high");
+        }
+        mesh.drop_d();
+        let _ = mesh.a.events().count();
+        let _ = mesh.b.events().count();
+
+        // Phase 5: rejoin C. Drop C cleanly; coordinator A re-reserves the slot.
+        drop_c_cleanly(&mut mesh);
+        let mut joiner = Joiner::build(&mesh)?;
+        assert_eq!(joiner.session.current_state(), SessionState::HotJoining);
+
+        // Phase 6: drive the joiner to Running over the wire. A serves carrying
+        // D@f_carried (it never learned `g`).
+        let mut reached = false;
+        for i in 0..1500_u32 {
+            mesh.poll_all(1);
+            joiner.poll();
+            if i % 3 == 2 {
+                mesh.advance_all(80 + (i % 8));
+            }
+            if joiner.session.current_state() == SessionState::Running {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "joiner reached Running over the wire (state {:?})",
+            joiner.session.current_state()
+        );
+        let serve_s = drive_first_advance(&mut joiner);
+        assert!(
+            serve_s.as_i32() > f_carried_upper.as_i32(),
+            "snapshot baseline S={serve_s:?} must sit strictly above D's freeze \
+             (upper bound {f_carried_upper:?}) — else 'D carried below S' is unproven"
+        );
+
+        // Phase 7: open E->B post-commit — the relay's chance to adopt `g` and relay
+        // it to the joiner. B's E endpoint is already terminal (Phase 3 cascade), so
+        // B drops E's Input and never adopts `g`.
+        mesh.blocked.unblock(e_addr, b_addr);
+        joiner.d_slot.clear();
+        run_mesh_and_joiner(&mut mesh, &mut joiner, 120);
+
+        // The joiner confirmed deep past S using its live remotes (A AND B): B IS a
+        // live gossip path, so a lowering WOULD reach the joiner if B held one. It
+        // does not.
+        assert!(
+            joiner.session.confirmed_frame().as_i32() > serve_s.as_i32(),
+            "joiner must confirm past S={serve_s:?} via its live remotes (incl. the \
+             relay B) — else 'B is a live path' is unproven (confirmed {:?})",
+            joiner.session.confirmed_frame()
+        );
+        // The violation never fired over the wire: the joiner stays Running, carrying
+        // D frozen at a single constant value (never lowered to `g`).
+        assert_eq!(
+            joiner.session.current_state(),
+            SessionState::Running,
+            "the fold-below-S trigger fired over the wire (joiner left Running) — the \
+             structural obstruction was bypassed"
+        );
+        assert!(
+            joiner.d_slot.len() >= 10,
+            "joiner recorded too few post-relay D-slot statuses ({}) — vacuous staging",
+            joiner.d_slot.len()
+        );
+        let frozen_values: std::collections::BTreeSet<u32> =
+            joiner.d_slot.values().map(|&(v, _)| v).collect();
+        assert_eq!(
+            frozen_values.len(),
+            1,
+            "D's carried value must stay frozen (never lowered to g) across all {} \
+             post-relay frames, got {frozen_values:?}",
+            joiner.d_slot.len()
+        );
+        for (frame, (value, status)) in &joiner.d_slot {
+            assert_eq!(
+                *status,
+                InputStatus::Disconnected,
+                "joiner must keep D Disconnected at frame {frame} (value {value})"
+            );
+        }
+        Ok(())
+    }
 }

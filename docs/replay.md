@@ -209,7 +209,7 @@ while !session.is_complete() {
 | `num_players` | Number of players in the recorded match |
 | `frames` | `Vec<Vec<I>>` -- inputs per frame, one entry per player |
 | `checksums` | `Vec<Option<u128>>` -- per-frame checksums for validation |
-| `metadata` | `ReplayMetadata` -- version, player count, frame count |
+| `metadata` | `ReplayMetadata` -- library version, player count, total frame count, and skipped-frame count |
 | `to_bytes()` | Serialize to bytes (deterministic bincode codec) |
 | `from_bytes(&[u8])` | Deserialize from bytes and validate the result |
 | `from_bytes_with_config(&[u8], ReplayDecodeConfig)` | Deserialize with a caller-defined byte limit or validation setting |

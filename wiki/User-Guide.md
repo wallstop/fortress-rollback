@@ -913,7 +913,7 @@ Rollback networking works best under certain network conditions. Understanding t
 - Frequent rollbacks
 - Noticeable input delay recommended (2-3 frames)
 - Use `SyncConfig::high_latency()` preset
-- Consider increasing `max_prediction_frames`
+- Consider increasing the prediction window via `with_max_prediction_window`
 
 **Very High Latency (>200ms RTT)**
 
@@ -1561,7 +1561,10 @@ use fortress_rollback::{network::codec, Message, NonBlockingSocket};
 
 const MAX_MESSAGES_PER_POLL: usize = 64;
 
-struct MyCustomSocket { /* ... */ }
+struct MyCustomSocket {
+    // Raw packets queued by your transport, drained in bounded batches below.
+    incoming: std::collections::VecDeque<(MyAddress, Vec<u8>)>,
+}
 
 impl NonBlockingSocket<MyAddress> for MyCustomSocket {
     fn send_to(&mut self, msg: &Message, addr: &MyAddress) {
@@ -1570,7 +1573,9 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
 
     fn receive_all_messages(&mut self) -> Vec<(MyAddress, Message)> {
         // Return a bounded batch and leave excess packets for a future poll
-        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
+        let batch_len = self.incoming.len().min(MAX_MESSAGES_PER_POLL);
+        self.incoming
+            .drain(..batch_len)
             .filter_map(|(addr, bytes)| {
                 codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (addr, msg))
             })
@@ -2353,6 +2358,8 @@ const MAX_MESSAGES_PER_POLL: usize = 64;
 
 struct MyWebSocketTransport {
     // Your WebSocket implementation
+    // Raw packets queued by your transport, drained in bounded batches below.
+    incoming: std::collections::VecDeque<(MyPeerId, Vec<u8>)>,
 }
 
 impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
@@ -2364,7 +2371,9 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 
     fn receive_all_messages(&mut self) -> Vec<(MyPeerId, Message)> {
         // Return a bounded batch and leave excess packets for a future poll
-        self.drain_received_messages_bounded(MAX_MESSAGES_PER_POLL)
+        let batch_len = self.incoming.len().min(MAX_MESSAGES_PER_POLL);
+        self.incoming
+            .drain(..batch_len)
             .filter_map(|(peer, bytes)| {
                 codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (peer, msg))
             })

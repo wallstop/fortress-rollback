@@ -35,6 +35,7 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | `TimeSync.tla` | `TimeSync.cfg` | ✓ CI | Per-endpoint rolling-window frame-advantage (pinned N=2; the cross-endpoint aggregation is modeled separately in `FrameAdvantageAggregation.tla`, see cfg) |
 | `PeerDrop.tla` | `PeerDrop.cfg` | ✓ CI | Halt vs ContinueWithout peer-drop policy model |
 | `NPeerReactivation.tla` | `NPeerReactivation.cfg` | ✓ CI | N-peer mesh reconnection activation-frame agreement (Agreement C) (N=3 survivors) |
+| `NPeerServeFreezeConvergence.tla` | `NPeerServeFreezeConvergence.cfg` (+ `_GateBlind.cfg` demo-FAIL, `_Witness.cfg` non-vacuity — both manual, not auto-run) | ✓ CI | N-peer hot-join SERVE GATE vs per-survivor freeze convergence (Session-33 round-5 Finding 1, `npeer_owed_freeze_readjust_at_or_below`), the companion to `NPeerReactivation.tla` that de-vacuizes its round-5 gates: models per-PEER freeze frames `f0` that initially differ (asymmetric loss), the owed downward re-adjust, and the coordinator serving a joiner a snapshot it cannot re-base below (fold-below-S, S58/S60). FIX_MODE ladder mirrors `DoubleFailureRelay.tla` (GateBlind → `NoServeDivergence` violated; Gate PASS safety+liveness). Closes the NPeerReactivation per-survivor-`f0` spec-budget residual (S33 residual 10) |
 | `FreezeConvergence.tla` | `FreezeConvergence.cfg` | ✓ CI | Cross-survivor freeze-value convergence to the global-min agreed frame (the c25fc1f desync fix, N=3 survivors) |
 | `FrameAdvantageAggregation.tla` | `FrameAdvantageAggregation.cfg` | ✓ CI | Cross-endpoint `max_frame_advantage` fold over N≥3 remotes — multi-handle idempotence, disconnect-gate exclusion, `i32::MIN→0` fallback (companion to `TimeSync.tla`) |
 | `SpectatorFailover.tla` | `SpectatorFailover.cfg` | ✓ CI | Multi-host spectator connect-status merge — converge-down to live global-min freeze + provenance-gated reactivation under host failover (companion to `SpectatorSession.tla`; audit F4 / critic-#1 / critic-#2) |
@@ -581,6 +582,62 @@ values. The default config pins P-A (`AssumePA = TRUE`) and passes. `NPeerReacti
 (`AssumePA = FALSE`, not registered in CI) drops P-A and TLC reports an `Agreement`
 counterexample — demonstrating P-A is necessary.
 
+**Tracked spec-budget residual — the per-survivor `f0` extension — is now CLOSED by a
+companion spec.** NPeerReactivation's committed-history abstraction assumes the pre-attempt
+per-survivor freeze frame `f0` is *uniform*, so its Session-33 round-5 freeze-convergence
+serve gates are checked only vacuously. That extension is modeled separately in
+`NPeerServeFreezeConvergence.tla` (below) — a dedicated companion, in the same spirit as
+`SpectatorReactivationEpoch.tla` (companion to `SpectatorFailover.tla`) and
+`FreezeConvergence.tla` (companion to `InputQueue.tla`), since an in-place bump would
+explode this already-at-CI-budget liveness spec.
+
+### NPeerServeFreezeConvergence.tla
+
+Models the N-peer hot-join **serve gate** against per-survivor freeze-frame convergence —
+the Session-33 round-5 review Finding 1 (coordinator sibling),
+`npeer_owed_freeze_readjust_at_or_below` in `src/sessions/p2p_session.rs:1977`. It
+**de-vacuizes the round-5 freeze-convergence gates** `NPeerReactivation.tla` assumes away
+by pinning `f0` uniform: here each peer freezes one dropped slot `D` at its own
+received-through frame (`receivedThrough`, the per-survivor `f0`), which under asymmetric
+loss differs across peers, and an over-frozen peer owes a monotone-**down** re-adjust to the
+mesh-agreed global min (`ConvergeDown`, the production `update_player_disconnects` mine-down
+plus `set_frozen_value_at` re-roll plus forced re-simulation that runs only inside
+`advance_frame` — hence the lag the gate guards against). The coordinator serves a returning joiner a
+snapshot at frame `S` that **bakes its current view of `D`**; the joiner cannot re-base below
+`S` (the fold-below-`S` structural impossibility, S58/S60), so a snapshot captured before the
+coordinator's own re-adjust is applied is a **permanent** cross-peer confirmed-state desync.
+
+**FIX_MODE ladder** (the repo's standard negative→positive demo, cf. `DoubleFailureRelay.tla`
+/ `SpectatorReactivationEpoch.tla`):
+
+- `FIX_MODE = "GateBlind"` (demo-FAIL, `_GateBlind.cfg`, manual): serve as soon as the
+  wait-then-capture `confirmed >= S` precondition holds, ignoring the owed re-adjust. TLC
+  reports `NoServeDivergence` **violated** — the coordinator bakes a stale over-frozen view
+  of `D` (its real input at `S`) into the joiner, which then diverges from the converged
+  mesh (which freezes `D` at the global min). Model-level RED proving the gate is load-bearing.
+- `FIX_MODE = "Gate"` (default, `NPeerServeFreezeConvergence.cfg`, ✓ CI): serve only when no
+  re-adjust at or below `S` is owed (`~OwedAtOrBelow(serveFrame)`, faithful to the production
+  fold). **PASS** — every served snapshot already reflects the converged value for frames
+  `<= S`, so the joiner agrees with the mesh forever.
+
+**Safety:** `NoServeDivergence` (the served joiner's baked `D`-stream matches the converged
+mesh value at every frame `<= S`), `FreezeFrameInRange` (no peer ever freezes below the
+global min — the `FreezeConvergence` lift), `TypeInvariant`.
+**Liveness (weak fairness):** `EventuallyServed` — the gate never deadlocks the serve (every
+owed re-adjust is eventually applied, then the gate opens).
+**Non-vacuity** (`_Witness.cfg`, manual): `WitnessGateDefers` is deliberately falsifiable —
+TLC reports it violated, exhibiting a reachable state where the gate genuinely defers an owed
+serve (the coordinator over-frozen above the agreed min, `S` above it), so the "Gate" PASS is
+not vacuous.
+
+**Scope (honest):** the gossiped agreed freeze frame is the true global min (claims delivered
+instantly — the Finding-1 hazard is precisely that the fold sees mesh agreement *instantly*
+while the coordinator's own re-adjust lags); gossip loss/reorder and the freeze barrier that
+holds `confirmed_frame()` at the gossip min until convergence (S32/S55) are orthogonal and
+modeled in `DoubleFailureRelay.tla` / `FreezeConvergence.tla`. The gate's `local_connected`
+first-freeze-propagation arm is the orthogonal not-yet-frozen case, out of this
+convergence-scope model.
+
 ### Rollback.tla
 
 **Safety (from formal-spec.md):**
@@ -700,6 +757,9 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
 | `ChecksumExchange.cfg` | PEERS={p1,p2,p3}, MAX_FRAME=3, SYMMETRY | ~1.47M distinct states (~11.7M generated), ~106s single worker |
 | `FreezeConvergence.cfg` | SURVIVORS={s1,s2,s3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — liveness) | ~24,100 distinct states (~79,000 generated) |
+| `NPeerServeFreezeConvergence.cfg` | SURVIVORS={s1,s2}, COORD=k, MAX_FRAME=3, NULL_FRAME=999, FIX_MODE="Gate" (no symmetry — liveness) | ~47,000 distinct states (~103,000 generated), ~1s workers-auto |
+| `NPeerServeFreezeConvergence_GateBlind.cfg` (demo, expected FAIL — safety) | same constants, FIX_MODE="GateBlind" | `NoServeDivergence` violated (premature serve bakes the over-frozen view) |
+| `NPeerServeFreezeConvergence_Witness.cfg` (demo, expected FAIL — non-vacuity) | same constants, FIX_MODE="Gate" | `WitnessGateDefers` violated — a reachable gate-deferral state, so the Gate PASS is non-vacuous |
 | `FrameAdvantageAggregation.cfg` | NUM_ENDPOINTS=3, MAX_ADVANTAGE=4, MULTI_HANDLE_COUNT=2, MIN_RECOMMENDATION=3 (no symmetry) | ~26,200 distinct states (~901,000 generated) |
 | `SpectatorFailover.cfg` | HOSTS={1,2,3}, MAX_FRAME=3, NULL_FRAME=999 (no symmetry — canonical=min(live), liveness) | ~96,800 distinct states (~446,000 generated), ~6s single worker |
 | `SpectatorReactivationEpoch.cfg` | HOSTS={1,2}, MAX_FRAME=2, NULL_FRAME=999, MAXGEN=3, FIX_MODE="Epoch" (no symmetry — canonical=min(HOSTS)) | ~10,900 distinct states (~92,700 generated), ~3s single worker |

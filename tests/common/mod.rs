@@ -36,7 +36,8 @@ pub use channel_socket::{
 };
 #[allow(unused_imports)]
 pub use filter_socket::{
-    create_filtered_channel_quad, create_filtered_channel_triple, BlockedLinks, FilterSocket,
+    create_filtered_channel_mesh, create_filtered_channel_quad, create_filtered_channel_triple,
+    BlockedLinks, FilterSocket,
 };
 #[allow(unused_imports)]
 pub use reorder_socket::{create_reorder_mesh_triple, HeldLinks, ReorderSocket};

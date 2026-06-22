@@ -774,6 +774,12 @@ impl<T: Config> P2PSession<T> {
         disconnect_behavior: DisconnectBehavior,
         #[cfg(feature = "hot-join")] hot_join: HotJoinConfig<T>,
     ) -> Result<Self, FortressError> {
+        // Route construction-time violations (e.g. a failed frame-delay setup or
+        // reserved-slot freeze) to the configured observer, the same as runtime
+        // entry points do.
+        let _violation_scope = violation_observer
+            .as_ref()
+            .map(|observer| crate::telemetry::push_violation_observer(Arc::clone(observer)));
         // local connection status
         let mut local_connect_status = Vec::new();
         local_connect_status
@@ -934,6 +940,7 @@ impl<T: Config> P2PSession<T> {
         player_handle: PlayerHandle,
         input: T::Input,
     ) -> Result<(), FortressError> {
+        let _violation_scope = self.scoped_violation_observer();
         // make sure the input is for a registered local player (zero-allocation check)
         if !self.player_reg.is_local_player(player_handle) {
             return Err(InvalidRequestKind::NotLocalPlayer {
@@ -979,6 +986,7 @@ impl<T: Config> P2PSession<T> {
     /// [`RequestVec`]: crate::RequestVec
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
+        let _violation_scope = self.scoped_violation_observer();
         // receive info from remote players, trigger events and send messages
         self.poll_remote_clients();
 
@@ -1240,6 +1248,7 @@ impl<T: Config> P2PSession<T> {
     /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work.
     /// Fortress Rollback will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
     pub fn poll_remote_clients(&mut self) {
+        let _violation_scope = self.scoped_violation_observer();
         // Get all packets and distribute them to associated endpoints.
         // The endpoints will handle their packets, which will trigger both events and UPD replies.
         for (from_addr, msg) in &self.socket.receive_all_messages() {
@@ -5329,6 +5338,7 @@ impl<T: Config> P2PSession<T> {
     /// [`InternalErrorKind::IndexOutOfBounds`]: crate::error::InternalErrorKind::IndexOutOfBounds
     #[must_use = "remove_player errors should be handled"]
     pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
+        let _violation_scope = self.scoped_violation_observer();
         let player_type = self.player_reg.handles.get(&player_handle).ok_or(
             InvalidRequestKind::DisconnectInvalidHandle {
                 handle: player_handle,
@@ -5440,6 +5450,7 @@ impl<T: Config> P2PSession<T> {
     /// [`InternalErrorKind::DisconnectStatusNotFound`]: crate::error::InternalErrorKind::DisconnectStatusNotFound
     #[must_use = "disconnect errors should be handled"]
     pub fn disconnect_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
+        let _violation_scope = self.scoped_violation_observer();
         match self.player_reg.handles.get(&player_handle) {
             // the local player cannot be disconnected
             None => Err(InvalidRequestKind::DisconnectInvalidHandle {
@@ -5672,6 +5683,13 @@ impl<T: Config> P2PSession<T> {
     /// decreases.
     #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
+        // This public accessor can itself emit a violation (the all-disconnected
+        // fallback below), and it is also reachable directly (not only via the
+        // already-scoped `advance_frame`/`poll_remote_clients`), so it installs
+        // the per-session observer scope too. When no observer is configured this
+        // is a cheap `Option` check (no push), so it adds no cost to the common
+        // path; nested under a driver method's scope it is a harmless re-push.
+        let _violation_scope = self.scoped_violation_observer();
         let mut confirmed_frame = Frame::new(i32::MAX);
 
         // The double-failure-relay fold-membership-asymmetry gate is
@@ -6463,6 +6481,7 @@ impl<T: Config> P2PSession<T> {
         player_handle: PlayerHandle,
         delay: usize,
     ) -> Result<(), FortressError> {
+        let _violation_scope = self.scoped_violation_observer();
         if !self.player_reg.is_local_player(player_handle) {
             return Err(InvalidRequestKind::NotLocalPlayer {
                 handle: player_handle,
@@ -6604,19 +6623,41 @@ impl<T: Config> P2PSession<T> {
 
     /// Returns a reference to the violation observer, if one was configured.
     ///
-    /// Note that `P2PSession`'s violation paths currently report through the
-    /// `tracing`-backed default observer and do **not** invoke this
-    /// per-session observer yet (see
-    /// [`SessionBuilder::with_violation_observer`] for the current routing
-    /// per session type); a [`CollectingObserver`] attached here therefore
-    /// stays empty for now. Routing P2P violations to the per-session
-    /// observer is tracked future work.
+    /// While any public, state-driving method of this session is executing
+    /// (e.g. [`advance_frame`](Self::advance_frame),
+    /// [`poll_remote_clients`](Self::poll_remote_clients),
+    /// [`add_local_input`](Self::add_local_input)), every `report_violation!`
+    /// emitted beneath it — including from the low-level `input_queue`,
+    /// `sync_layer`, and `protocol` components — is routed to this observer
+    /// instead of the default `tracing`-backed observer, via a thread-local
+    /// scope installed for the duration of the call (see
+    /// [`push_violation_observer`]). A [`CollectingObserver`] attached here
+    /// therefore captures violations raised during session operations.
     ///
     /// [`CollectingObserver`]: crate::telemetry::CollectingObserver
+    /// [`push_violation_observer`]: crate::telemetry::push_violation_observer
     /// [`SessionBuilder::with_violation_observer`]: crate::SessionBuilder::with_violation_observer
     #[must_use]
     pub fn violation_observer(&self) -> Option<&Arc<dyn ViolationObserver>> {
         self.violation_observer.as_ref()
+    }
+
+    /// Installs the session's configured violation observer (if any) as the
+    /// current thread's scoped observer for the duration of a public entry
+    /// point, so every `report_violation!` emitted beneath it routes to the
+    /// per-session observer. Returns `None` (a no-op — violations fall back to
+    /// the default `TracingObserver`) when no observer was configured.
+    ///
+    /// Hold the returned guard in a local (`let _scope = …;`) for the whole
+    /// method body. Nested entry points (e.g. `advance_frame` calling
+    /// `poll_remote_clients`) push the same observer twice and pop in LIFO
+    /// order, which is harmless.
+    #[inline]
+    #[must_use]
+    fn scoped_violation_observer(&self) -> Option<crate::telemetry::ScopedObserverGuard> {
+        self.violation_observer
+            .as_ref()
+            .map(|observer| crate::telemetry::push_violation_observer(Arc::clone(observer)))
     }
 
     /// Returns a reference to the telemetry observer, if one is attached.
@@ -10868,6 +10909,89 @@ mod tests {
             .expect("Failed to add remote player D")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
+    }
+
+    /// session-59: `P2PSession` routes a `report_violation!` emitted while a
+    /// public entry point is executing to the **per-session** violation observer
+    /// configured via [`SessionBuilder::with_violation_observer`]. Before the
+    /// thread-local scoped-observer wiring, P2P violations went only to the
+    /// global `TracingObserver`, so a [`CollectingObserver`] attached to the
+    /// session stayed empty (the released API promise was false — see the audit
+    /// `with_violation_observer` P2P-gap item).
+    ///
+    /// This drives the B3 checksum-mismatch trust-downgrade WARNING through the
+    /// **public** [`advance_frame`](P2PSession::advance_frame) path (which calls
+    /// `compare_local_checksums_against_peers` under the scoped-observer guard)
+    /// and asserts the per-session observer captured exactly that one WARNING.
+    ///
+    /// NON-VACUITY: deleting the `let _violation_scope = self.scoped_violation_observer();`
+    /// guard from `advance_frame` leaves the observer empty and fails this test.
+    #[test]
+    fn p2p_advance_frame_routes_report_violation_to_session_observer() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let addr_b = test_addr(8080);
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
+            .with_violation_observer(observer.clone())
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Remote(addr_b), PlayerHandle::new(1))
+            .unwrap()
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session");
+
+        // Advance the sync layer so frame 0 is comparable (the comparison skips
+        // frames >= last_confirmed_frame) and force Running so advance_frame runs
+        // its desync-detection block (DummySocket never synchronizes on its own).
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+        session.state = SessionState::Running;
+
+        // Arm B one mismatch below the trust-downgrade threshold, then plant a
+        // mismatching confirmed-frame checksum so the next comparison crosses the
+        // threshold and fires exactly one WARNING.
+        let frame = Frame::new(0);
+        session.local_checksum_history.insert(frame, 0xABCD_1234);
+        {
+            let b = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint exists");
+            b.checksum_mismatch_count = CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD - 1;
+            b.pending_checksums.insert(frame, 0x0000_0001); // differs from local
+        }
+
+        session
+            .add_local_input(PlayerHandle::new(0), 0)
+            .expect("local input accepted");
+        // The desync-detection comparison runs inside advance_frame, under the
+        // scoped-observer guard, BEFORE the rest of the advance can error. We
+        // only assert the violation routed, so either outcome is acceptable —
+        // handled explicitly (the result is deliberately not propagated).
+        match session.advance_frame() {
+            Ok(_) | Err(_) => {},
+        }
+
+        let downgrades: Vec<_> = observer
+            .violations()
+            .into_iter()
+            .filter(|v| v.kind == crate::telemetry::ViolationKind::ChecksumMismatch)
+            .collect();
+        assert_eq!(
+            downgrades.len(),
+            1,
+            "the B3 trust-downgrade WARNING emitted inside advance_frame must reach \
+             the per-session observer; got: {:?}",
+            observer.violations()
+        );
     }
 
     /// F12 regression: with N>=3, a matching checksum from ONE remote (B) must not

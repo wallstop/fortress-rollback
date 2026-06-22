@@ -43,11 +43,11 @@ Fortress Rollback includes interactive game examples built with [macroquad](http
 
 ```shell
 # P2P session (run in two terminals with different ports)
-cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --remote-addr 127.0.0.1:7001
-cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --remote-addr 127.0.0.1:7000
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001
+cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 localhost
 
 # Sync test (determinism verification)
-cargo run --example ex_game_synctest --features graphical-examples
+cargo run --example ex_game_synctest --features graphical-examples -- --num-players 2 --check-distance 7
 ```
 
 See the [examples README](./examples/README.md) for system dependencies and more options.
@@ -118,6 +118,7 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 | Feature | Description |
 |---------|-------------|
 | `sync-send` | Adds `Send + Sync` bounds for multi-threaded game engines (e.g., Bevy) |
+| `hot-join` | Allows a peer to join/rejoin a running session by filling a reserved or gracefully-dropped slot via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`; player count stays fixed) |
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications |
 | `paranoid` | Runtime invariant checking in release builds |
 | `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |

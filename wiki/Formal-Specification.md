@@ -116,7 +116,10 @@ InputStatus = Confirmed | Predicted | Disconnected
 ```
 ConnectionStatus = {
     disconnected: Bool,
-    last_frame: Frame
+    last_frame: Frame,
+    epoch: ℕ            -- u16 monotonic per-slot generation, bumped on each
+                       -- connected<->disconnected transition; rides the
+                       -- connect-status gossip on every Input packet
 }
 ```
 
@@ -197,11 +200,11 @@ less than the current frame. When `first_incorrect_frame >= current_frame`,
 This invariant captures the guard in `adjust_gamestate()`:
 
 ```rust
-if frame_to_load >= current_frame {
+if load_target >= current_frame {
     // skip_rollback path
     return Ok(());
 }
-// Only reach load_frame if frame_to_load < current_frame
+// Only reach load_frame if load_target < current_frame
 ```
 
 ### INV-9a: Message Causality
@@ -304,7 +307,7 @@ POST:
     RETURNS Ok(inputs[frame mod 128])
 
 ERROR:
-    frame > last_added_frame → MissingInput
+    frame mismatch (no confirmed input at slot) → NoConfirmedInput (FortressError::InvalidRequestStructured)
 ```
 
 #### reset_prediction()
@@ -357,7 +360,7 @@ POST:
     RETURNS input_queues[handle].add_input(input)
 ```
 
-#### synchronized_inputs(connect_status) → Vec&lt;(Input, InputStatus)&gt;
+#### synchronized_inputs(connect_status) → Option&lt;Vec&lt;(Input, InputStatus)&gt;&gt;
 
 ```
 POST:
@@ -400,8 +403,8 @@ POST:
     RETURNS Ok(LoadGameState { frame, cell })
 
 ERROR:
-    frame = NULL_FRAME → InvalidFrame("cannot load NULL_FRAME")
-    frame >= current_frame → InvalidFrame("must load frame in the past")
+    frame = NULL_FRAME → InvalidFrameStructured(NullFrame)        -- "cannot load NULL_FRAME"
+    frame >= current_frame → InvalidFrameStructured(NotInPast)    -- "must load frame in the past (current: …)"
 ```
 
 #### skip_rollback()
@@ -426,7 +429,8 @@ COMMENT:
         first_incorrect_frame = 0, current_frame = 0
 
     Production code (p2p_session.rs, adjust_gamestate):
-        if frame_to_load >= current_frame {
+        let load_target = frame_to_load.max(window_floor); // clamp UP to prediction-window floor
+        if load_target >= current_frame {
             self.sync_layer.reset_prediction();
             return Ok(());  // Skip rollback
         }
@@ -498,6 +502,17 @@ MessageBody =
     | QualityReport { frame_advantage: i16, ping: u128 }
     | QualityReply { pong: u128 }
     | ChecksumReport { checksum: u128, frame: Frame }
+    | KeepAlive
+    | FloorRequest { round_seq: u32 }                    -- floor-round protocol (N>=4 double-failure-relay convergence)
+    | FloorReply { round_seq: u32, floors: Vec<Frame> }  -- relay's per-slot pessimistic floors
+    -- The following are only present with cfg(feature = "hot-join"):
+    | JoinRequest { player_handle: usize }
+    | StateSnapshot { ... }
+    | StateSnapshotAck { ... }
+    | ReactivateSlot { ... }
+    | ReactivateSlotAck { ... }
+    | JoinCommitted { ... }
+    | JoinAborted { frame: Frame }
 ```
 
 ---
@@ -639,8 +654,8 @@ MessageBody =
 | Protocol state machine        | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`)  |
 | LIVE-1 (sync convergence)     | TLA+ | ✅ Implemented (`specs/tla/NetworkProtocol.tla`)  |
 | SAFE-4 (rollback consistency) | TLA+ | ✅ Implemented (`specs/tla/Rollback.tla`)         |
-| Frame arithmetic              | Z3   | ✅ Implemented (`tests/test_z3_verification.rs`)  |
-| Queue index math              | Z3   | ✅ Implemented (`tests/test_z3_verification.rs`)  |
+| Frame arithmetic              | Z3   | ✅ Implemented (`tests/verification/z3.rs`)       |
+| Queue index math              | Z3   | ✅ Implemented (`tests/verification/z3.rs`)       |
 | Concurrency (GameStateCell)   | Loom | ✅ Implemented (`loom-tests/`)                    |
 | Time synchronization          | TLA+ | ✅ Implemented (`specs/tla/TimeSync.tla`)         |
 | Checksum exchange             | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |

@@ -184,3 +184,76 @@ pub fn create_filtered_channel_quad() -> (
         blocked,
     )
 }
+
+/// Creates a fully-meshed set of `n` [`FilterSocket`]-wrapped [`ChannelSocket`]s
+/// for N-player asymmetric-loss testing, all sharing one [`BlockedLinks`] handle.
+///
+/// This is the arbitrary-`n` generalization of [`create_filtered_channel_triple`]
+/// / [`create_filtered_channel_quad`], built on the generic
+/// [`create_channel_mesh`](super::channel_socket::create_channel_mesh). It returns
+/// `Vec`s (rather than a fixed-arity tuple) because at `n >= 5` a positional tuple
+/// becomes unwieldy and error-prone — index `sockets[i]` / `addrs[i]` instead.
+///
+/// It is needed for **N≥5** desync coverage that a 4-node mesh cannot express.
+/// The first consumer is the genuine multi-relay *double-failure relay* repro,
+/// where a receipt-bound lowering is folded as a `min` over **two** relay
+/// survivors (not the single relay an N=4 mesh affords), so the multi-relay
+/// fresh-ack round (S55) is exercised as a genuine many-element conjunction rather
+/// than a degenerate one-relay echo. (A future live-wire repro of the hot-join
+/// *fold-below-`S`* corner — which the S35 audit note flags as also needing N≥5 —
+/// can reuse this same harness.)
+///
+/// Returns the `n` sockets, their `n` addresses (index-aligned), and the shared
+/// [`BlockedLinks`] handle the test uses to toggle directional loss mid-run.
+///
+/// # Panics
+///
+/// Panics if `n` is outside `2..=1000` — this delegates to
+/// [`create_channel_mesh`](super::channel_socket::create_channel_mesh), which
+/// asserts that bound (both `n < 2` and `n > 1000` panic).
+#[allow(dead_code)]
+#[must_use]
+pub fn create_filtered_channel_mesh(
+    n: usize,
+) -> (Vec<FilterSocket>, Vec<SocketAddr>, BlockedLinks) {
+    let (sockets, addrs) = super::channel_socket::create_channel_mesh(n);
+    let blocked = BlockedLinks::new();
+    let filtered = sockets
+        .into_iter()
+        .map(|s| FilterSocket::new(s, blocked.clone()))
+        .collect();
+    (filtered, addrs, blocked)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_filtered_channel_mesh_sizes_and_shared_blocked_handle() {
+        for n in [2_usize, 3, 4, 5, 8] {
+            let (sockets, addrs, blocked) = create_filtered_channel_mesh(n);
+            assert_eq!(sockets.len(), n, "mesh must have n filtered sockets");
+            assert_eq!(addrs.len(), n, "mesh must have n addresses");
+            let unique: std::collections::HashSet<_> = addrs.iter().collect();
+            assert_eq!(unique.len(), n, "mesh addresses must be distinct (n={n})");
+            // The returned handle and every socket's handle alias the SAME set:
+            // a block toggled through the returned handle is observed by a socket.
+            assert!(!blocked.is_blocked(addrs[0], addrs[1]));
+            blocked.block(addrs[0], addrs[1]);
+            assert!(
+                blocked.is_blocked(addrs[0], addrs[1]),
+                "the returned BlockedLinks handle must toggle the shared set (n={n})"
+            );
+            // Directional: the reverse link is unaffected.
+            assert!(!blocked.is_blocked(addrs[1], addrs[0]));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "at least 2")]
+    fn create_filtered_channel_mesh_rejects_too_few_peers() {
+        let _ = create_filtered_channel_mesh(1);
+    }
+}
