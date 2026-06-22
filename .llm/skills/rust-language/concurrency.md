@@ -30,6 +30,7 @@ Is data accessed from multiple threads?
 ## Key Patterns
 
 ### Mutex -- Minimize Hold Time
+
 ```rust
 // Use parking_lot::Mutex -- no poisoning, so .lock() returns the guard directly
 let value = {
@@ -40,6 +41,7 @@ expensive_operation(); // other threads can proceed
 ```
 
 ### RwLock -- Drop Read Before Write
+
 ```rust
 // Use parking_lot::RwLock -- no poisoning, no .unwrap() needed
 let needs_write = {
@@ -53,6 +55,7 @@ if needs_write {
 ```
 
 ### Atomic State Machine
+
 ```rust
 fn try_connect(&self) -> bool {
     self.state.compare_exchange(
@@ -63,6 +66,7 @@ fn try_connect(&self) -> bool {
 ```
 
 ### Message Passing
+
 ```rust
 enum Command { Process(Data), Shutdown }
 fn worker(rx: mpsc::Receiver<Command>) {
@@ -74,6 +78,16 @@ fn worker(rx: mpsc::Receiver<Command>) {
     }
 }
 ```
+
+### Same-Thread RAII Guards
+
+If a `Drop` guard mutates thread-local state, make it explicitly `!Send` and `!Sync`
+with a private `PhantomData<Rc<()>>` marker. Add `compile_fail` doctests that try
+to move and borrow the guard across threads so the thread-affinity contract is
+checked by doctest CI. If removing owned resources from a `RefCell`-backed
+thread-local stack, return the removed value and drop it after releasing the
+borrow so destructors can safely re-enter telemetry/logging. In guard `Drop`,
+use `LocalKey::try_with` rather than `with` so TLS teardown cannot panic.
 
 ## Memory Ordering
 

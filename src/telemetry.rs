@@ -27,6 +27,7 @@ use crate::{Frame, PlayerHandle};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Custom serializer for `Option<Frame>` that outputs clean integers or null.
@@ -1029,6 +1030,49 @@ pub fn report_to_observer<O: ViolationObserver + ?Sized>(
     }
 }
 
+struct ScopedObserverEntry {
+    token: u64,
+    observer: Arc<dyn ViolationObserver>,
+}
+
+#[derive(Default)]
+struct ScopedObserverStack {
+    next_token: u64,
+    entries: Vec<ScopedObserverEntry>,
+}
+
+impl ScopedObserverStack {
+    fn push(&mut self, observer: Arc<dyn ViolationObserver>) -> u64 {
+        let token = self.next_token;
+        self.next_token = self.next_token.wrapping_add(1);
+        // alloc-bound: scoped observer stack depth is bounded by same-thread
+        // nested observer scopes; every entry is removed by its guard's Drop.
+        self.entries.push(ScopedObserverEntry { token, observer });
+        token
+    }
+
+    fn remove(&mut self, token: u64) -> Option<ScopedObserverEntry> {
+        let position = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.token == token)?;
+        Some(self.entries.remove(position))
+    }
+
+    fn current_observer(&self) -> Option<Arc<dyn ViolationObserver>> {
+        self.entries.last().map(|entry| Arc::clone(&entry.observer))
+    }
+}
+
+fn report_scoped_observer_drop_failure() {
+    TracingObserver.on_violation(&SpecViolation::new(
+        ViolationSeverity::Critical,
+        ViolationKind::InternalError,
+        "scoped observer guard could not borrow the thread-local observer stack during drop",
+        "src/telemetry.rs:ScopedObserverGuard::drop",
+    ));
+}
+
 thread_local! {
     /// Per-thread stack of violation observers installed for the duration of a
     /// session method call.
@@ -1047,28 +1091,69 @@ thread_local! {
     /// Thread-local, so it is parallel-test-safe and never observed across
     /// threads; a violation emitted on a thread with no installed observer (e.g.
     /// a background socket thread) routes to `TracingObserver` exactly as before.
-    static CURRENT_OBSERVER: RefCell<Vec<Arc<dyn ViolationObserver>>> = RefCell::new(Vec::new());
+    static CURRENT_OBSERVER: RefCell<ScopedObserverStack> = RefCell::new(ScopedObserverStack::default());
 }
 
-/// RAII guard returned by [`push_violation_observer`]. Pops the installed
-/// observer off the current thread's scoped-observer stack when dropped.
+/// RAII guard returned by [`push_violation_observer`]. Removes the installed
+/// observer from the current thread's scoped-observer stack when dropped.
 ///
-/// Guards must be dropped in reverse install order (the natural LIFO order of
-/// stack-allocated `let _guard = …` bindings), which sessions guarantee by
-/// holding the guard as a local for the duration of a single method call. The
-/// guard is intentionally **not** `Send`/`Sync`: moving it to another thread
-/// would pop the wrong thread's stack.
+/// Guards normally drop in reverse install order (the natural LIFO order of
+/// stack-allocated `let _guard = …` bindings), which sessions get by holding the
+/// guard as a local for the duration of a single method call. Out-of-order drops
+/// on the same thread remove that guard's own observer entry rather than popping
+/// an unrelated nested observer. The guard is intentionally **not** `Send`/`Sync`:
+/// moving it to another thread would remove from the wrong thread's stack.
+///
+/// # Compile-time thread affinity
+///
+/// A guard cannot be moved to another thread:
+///
+/// ```compile_fail
+/// use fortress_rollback::telemetry::{
+///     push_violation_observer, CollectingObserver, ViolationObserver,
+/// };
+/// use std::sync::Arc;
+///
+/// let observer: Arc<dyn ViolationObserver> = Arc::new(CollectingObserver::new());
+/// let guard = push_violation_observer(observer);
+/// let _handle = std::thread::spawn(move || drop(guard));
+/// ```
+///
+/// A guard also cannot be shared with another thread by reference:
+///
+/// ```compile_fail
+/// use fortress_rollback::telemetry::{
+///     push_violation_observer, CollectingObserver, ViolationObserver,
+/// };
+/// use std::sync::Arc;
+///
+/// let observer: Arc<dyn ViolationObserver> = Arc::new(CollectingObserver::new());
+/// let guard = push_violation_observer(observer);
+/// std::thread::scope(|scope| {
+///     scope.spawn(|| {
+///         let _guard_ref = &guard;
+///     });
+/// });
+/// ```
 #[must_use = "the scoped observer is uninstalled as soon as this guard is dropped"]
 pub struct ScopedObserverGuard {
+    token: u64,
     // Make the guard `!Send` + `!Sync` so it cannot leave the installing thread.
-    _not_send: PhantomData<*const ()>,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for ScopedObserverGuard {
     fn drop(&mut self) {
-        CURRENT_OBSERVER.with(|stack| {
-            stack.borrow_mut().pop();
+        let removed = CURRENT_OBSERVER.try_with(|stack| {
+            if let Ok(mut stack) = stack.try_borrow_mut() {
+                stack.remove(self.token)
+            } else {
+                report_scoped_observer_drop_failure();
+                None
+            }
         });
+        let removed = removed.unwrap_or(None);
+        drop(removed);
     }
 }
 
@@ -1084,9 +1169,11 @@ impl std::fmt::Debug for ScopedObserverGuard {
 /// While installed, the [`report_violation!`] macro routes violations to
 /// `observer` instead of the default [`TracingObserver`]. Installs nest: each
 /// call pushes onto a per-thread stack and the **innermost** observer receives
-/// violations; dropping a guard restores the previously-installed observer. This
-/// is the mechanism behind [`SessionBuilder::with_violation_observer`] for
-/// `P2PSession` and `SyncTestSession`.
+/// violations; dropping a guard removes that guard's observer, so normal LIFO
+/// drops restore the previously-installed observer and same-thread out-of-order
+/// drops leave newer observers active. This is the mechanism behind
+/// [`SessionBuilder::with_violation_observer`] for `P2PSession`,
+/// `SyncTestSession`, and `SpectatorSession`.
 ///
 /// [`SessionBuilder::with_violation_observer`]: crate::SessionBuilder::with_violation_observer
 ///
@@ -1106,8 +1193,9 @@ impl std::fmt::Debug for ScopedObserverGuard {
 /// assert_eq!(observer.len(), 1);
 /// ```
 pub fn push_violation_observer(observer: Arc<dyn ViolationObserver>) -> ScopedObserverGuard {
-    CURRENT_OBSERVER.with(|stack| stack.borrow_mut().push(observer));
+    let token = CURRENT_OBSERVER.with(|stack| stack.borrow_mut().push(observer));
     ScopedObserverGuard {
+        token,
         _not_send: PhantomData,
     }
 }
@@ -1123,7 +1211,7 @@ pub fn push_violation_observer(observer: Arc<dyn ViolationObserver>) -> ScopedOb
 #[cold]
 #[inline(never)]
 pub fn report_to_current_observer(violation: &SpecViolation) {
-    let current = CURRENT_OBSERVER.with(|stack| stack.borrow().last().cloned());
+    let current = CURRENT_OBSERVER.with(|stack| stack.borrow().current_observer());
     match current {
         Some(observer) => observer.on_violation(violation),
         None => TracingObserver.on_violation(violation),
@@ -3331,6 +3419,106 @@ mod tests {
             1,
             "inner observer gets only the inner-scope violation"
         );
+    }
+
+    #[test]
+    fn out_of_order_scoped_observer_drop_removes_matching_scope() {
+        let outer = Arc::new(CollectingObserver::new());
+        let inner = Arc::new(CollectingObserver::new());
+
+        let outer_guard = push_violation_observer(outer.clone());
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "to outer before nested scope"
+        );
+
+        let inner_guard = push_violation_observer(inner.clone());
+        drop(outer_guard);
+
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "still to inner after out-of-order outer drop"
+        );
+
+        drop(inner_guard);
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "to tracing after both guards dropped"
+        );
+
+        assert_eq!(
+            outer.len(),
+            1,
+            "dropping the outer guard out of order must not pop the inner observer"
+        );
+        assert_eq!(
+            inner.len(),
+            1,
+            "the inner observer should remain installed until its own guard is dropped"
+        );
+    }
+
+    #[test]
+    fn pushed_observer_is_thread_local_to_installing_thread() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(observer.clone());
+
+        let child = std::thread::spawn(|| {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::FrameSync,
+                "child thread"
+            );
+        });
+        assert!(child.join().is_ok(), "child thread should not panic");
+
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::FrameSync,
+            "installing thread"
+        );
+
+        assert_eq!(
+            observer.len(),
+            1,
+            "the pushed observer must only capture violations from the installing thread"
+        );
+    }
+
+    #[test]
+    fn observer_dropped_by_scope_can_report_without_refcell_panic() {
+        struct DropReportingObserver;
+
+        impl ViolationObserver for DropReportingObserver {
+            fn on_violation(&self, _violation: &SpecViolation) {}
+        }
+
+        impl Drop for DropReportingObserver {
+            fn drop(&mut self) {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::InternalError,
+                    "observer drop reported"
+                );
+            }
+        }
+
+        let outer = Arc::new(CollectingObserver::new());
+        let outer_guard = push_violation_observer(outer.clone());
+        let inner_guard = push_violation_observer(Arc::new(DropReportingObserver));
+
+        drop(inner_guard);
+
+        assert_eq!(
+            outer.len(),
+            1,
+            "observer destructors must be able to report after their scope is removed"
+        );
+
+        drop(outer_guard);
     }
 
     #[test]

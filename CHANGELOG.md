@@ -18,9 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`telemetry::push_violation_observer` / `telemetry::ScopedObserverGuard` /
   `telemetry::report_to_current_observer` — a thread-local *scoped* violation-observer primitive.**
-  `push_violation_observer(observer)` installs `observer` as the current thread's violation observer for as
+  `push_violation_observer(observer)` installs `observer` as the current thread's violation observer as
   long as the returned guard lives; while installed, the `report_violation!` macro routes to it (installs
-  nest; the innermost wins; the guard restores the previous observer on drop). This is the mechanism that
+  nest; the innermost wins; the guard removes its own observer on drop, restoring the previous observer
+  for normal LIFO scopes). This is the mechanism that
   makes `with_violation_observer` work for `P2PSession`/`SyncTestSession`/`SpectatorSession` (see *Fixed*), and is also usable
   directly to scope violation routing around arbitrary code. `report_to_current_observer` is the macro's
   dispatch target (it falls back to the `tracing` observer when none is installed).
