@@ -1,12 +1,18 @@
-//! # Fortress Rollback (formerly GGRS)
+//! # Fortress Rollback
 //!
 //! <p align="center">
 //!   <img src="https://raw.githubusercontent.com/wallstop/fortress-rollback/main/docs/assets/logo-banner.svg" alt="Fortress Rollback" width="400">
 //! </p>
 //!
-//! Fortress Rollback is a fortified, verified reimagination of the GGPO network SDK written in 100% safe Rust.
-//! The callback-style API from the original library has been replaced with a simple request-driven control flow.
-//! Instead of registering callback functions, Fortress Rollback (previously GGRS) returns a list of requests for the user to fulfill.
+//! Fortress Rollback is a correctness-first peer-to-peer rollback networking library for
+//! deterministic multiplayer games, written in 100% safe Rust (`#![forbid(unsafe_code)]`) and
+//! hardened with extensive testing and formal verification (TLA+, Kani, Z3). The callback-style
+//! API common to rollback libraries is replaced with a simple request-driven control flow:
+//! instead of registering callback functions, Fortress Rollback returns a list of requests for
+//! the user to fulfill.
+//!
+//! It began as a fortified fork of the [`ggrs`](https://github.com/gschup/ggrs) crate (itself
+//! inspired by the GGPO network SDK) and has since grown its own feature set.
 
 #![forbid(unsafe_code)] // let us try
 #![deny(warnings)] // Treat all warnings as errors (matches CI behavior)

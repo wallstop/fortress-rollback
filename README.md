@@ -33,9 +33,11 @@
 
 ## P2P Rollback Networking in Rust
 
-Fortress Rollback is a fortified, correctness-first port of the original, phenomenal [ggrs crate](https://github.com/gschup/ggrs) and reimagination of the [GGPO network SDK](https://www.ggpo.net/), written in 100% safe [Rust 🦀](https://www.rust-lang.org/). This crate was primarily developed with AI assistance. The callback-style API from the original library has been replaced with a simple, request-driven control flow: instead of registering callback functions, Fortress Rollback returns a list of requests for the user to fulfill.
+Fortress Rollback is a correctness-first peer-to-peer rollback networking library for deterministic multiplayer games, written in 100% safe [Rust 🦀](https://www.rust-lang.org/) (`#![forbid(unsafe_code)]`). It is engineered for reliability: zero panics in production code, determinism by construction, extensive property and fuzz testing, and formal verification (TLA+, Kani, Z3) of its trickiest invariants. The callback-style API common to rollback libraries is replaced with a simple, request-driven control flow — instead of registering callbacks, you advance the session and fulfill the list of requests it returns.
 
-If you are interested in integrating rollback networking into your game or just want to chat with other rollback developers (not limited to Rust), check out the [GGPO Developers Discord](https://discord.com/invite/8FKKhCRCCE)!
+Fortress Rollback began as a fortified fork of the excellent [`ggrs`](https://github.com/gschup/ggrs) crate — itself inspired by the [GGPO](https://www.ggpo.net/) network SDK — and has since grown its own capabilities, including graceful peer drop, runtime input delay, redundant-host spectators, and hot-join. Migrating from `ggrs`? See [Migration from ggrs](#migration-from-ggrs) below.
+
+Questions, bug reports, or feature ideas are welcome on [GitHub Issues](https://github.com/wallstop/fortress-rollback/issues).
 
 ## Interactive Examples
 

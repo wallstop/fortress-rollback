@@ -145,6 +145,7 @@ CHECK_ONLY=false
 DRY_RUN=false
 VERBOSE=false
 CHANGELOG_ONLY=false
+STAMP_RELEASE_DATE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -165,6 +166,13 @@ while [[ $# -gt 0 ]]; do
             CHANGELOG_ONLY=true
             shift
             ;;
+        --stamp-release-date)
+            # Force-refresh the current version's release date to today.
+            # Implies --changelog-only (it only touches CHANGELOG.md).
+            STAMP_RELEASE_DATE=true
+            CHANGELOG_ONLY=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
@@ -179,6 +187,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --dry-run   Show what would be changed without modifying files"
             echo "  --verbose   Show detailed output including all files scanned"
             echo "  --changelog-only  Only check/update CHANGELOG.md release link footers and date"
+            echo "  --stamp-release-date  Force the current version's '## [VERSION]' header date"
+            echo "                        to today (rewrites an existing date); implies"
+            echo "                        --changelog-only. Used by the release/publish workflow."
             echo "  --help      Show this help message"
             echo ""
             echo "File types scanned:"
@@ -592,6 +603,40 @@ main() {
                 else
                     portable_replace "^## \\[$ESCAPED_VERSION\\]$" "## [$VERSION] - $TODAY" "$CHANGELOG"
                     echo -e "${GREEN}✓ Updated:${NC} CHANGELOG.md release date for [$VERSION] → $TODAY"
+                    remove_inconsistent_file "CHANGELOG.md (release date)"
+                    ((FILES_CHANGED++)) || true
+                    ((TOTAL_REPLACEMENTS++)) || true
+                fi
+            fi
+        fi
+
+        # --stamp-release-date: force the current version's header date to today,
+        # rewriting whatever date is already there. The committed steady state
+        # carries a *dated* placeholder header (`## [VERSION] - <date>`) — a bare
+        # `## [VERSION]` would fail the routine `--check` gate (flagged above) — so
+        # this overwrites that placeholder date with the real release date at
+        # publish time. The release-notes body is the section content, not the
+        # header line, so refreshing the date never alters the published notes.
+        if [[ "$STAMP_RELEASE_DATE" == "true" ]]; then
+            local DESIRED_HEADER="## [$VERSION] - $TODAY"
+            local CURRENT_HEADER
+            CURRENT_HEADER=$(grep -E "^## \[$ESCAPED_VERSION\]([[:space:]]|$)" "$CHANGELOG" | head -1 | sed -E 's/[[:space:]]+$//')
+            if [[ -z "$CURRENT_HEADER" ]]; then
+                log_always "${YELLOW}⚠ Cannot stamp release date: no '## [$VERSION]' header found in CHANGELOG.md${NC}"
+                add_inconsistent_file "CHANGELOG.md (release date)"
+            elif [[ "$CURRENT_HEADER" == "$DESIRED_HEADER" ]]; then
+                log "${GREEN}  ✓ ## [$VERSION] is already dated $TODAY${NC}"
+            else
+                if [[ "$CHECK_ONLY" == "true" ]]; then
+                    log "${YELLOW}  → ## [$VERSION] date should be stamped to $TODAY${NC}"
+                    add_inconsistent_file "CHANGELOG.md (release date)"
+                elif [[ "$DRY_RUN" == "true" ]]; then
+                    echo -e "${YELLOW}Would update:${NC} CHANGELOG.md release date for [$VERSION] → $TODAY"
+                else
+                    # Match the whole header line (version bracket is unique) so
+                    # both the bare and any already-dated form are rewritten.
+                    portable_replace "^## \\[$ESCAPED_VERSION\\].*$" "## [$VERSION] - $TODAY" "$CHANGELOG"
+                    echo -e "${GREEN}✓ Stamped:${NC} CHANGELOG.md release date for [$VERSION] → $TODAY"
                     remove_inconsistent_file "CHANGELOG.md (release date)"
                     ((FILES_CHANGED++)) || true
                     ((TOTAL_REPLACEMENTS++)) || true

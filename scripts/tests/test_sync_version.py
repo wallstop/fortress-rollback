@@ -447,3 +447,101 @@ def test_sync_version_reports_anchor_missing_when_unreleased_footer_absent(tmp_p
 
     updated = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "[0.7.0]: https://github.com/wallstop/fortress-rollback/compare/v0.6.0...v0.7.0" not in updated
+
+
+# --------------------------------------------------------------------------- #
+# --stamp-release-date (refresh-at-release date stamping)
+# --------------------------------------------------------------------------- #
+
+_STAMP_CHANGELOG = """# Changelog
+
+## [Unreleased]
+
+## [0.9.0] - 2026-06-04
+
+### Added
+- A shipped feature
+
+## [0.8.1] - 2026-05-16
+
+### Added
+- Older thing
+
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
+"""
+
+
+def _utc_today_candidates() -> set[str]:
+    """UTC dates around now, tolerating a midnight rollover during the test."""
+    out = subprocess.run(
+        ["date", "-u", "+%Y-%m-%d"], capture_output=True, text=True, check=True
+    )
+    return {out.stdout.strip()}
+
+
+def _current_version_header(changelog_text: str, version: str) -> str:
+    esc = re.escape(version)
+    m = re.search(rf"^## \[{esc}\].*$", changelog_text, re.MULTILINE)
+    assert m, f"no '## [{version}]' header found"
+    return m.group(0).rstrip()
+
+
+def test_stamp_release_date_rewrites_existing_dated_header(tmp_path: Path) -> None:
+    repo = _setup_repo(tmp_path, _STAMP_CHANGELOG, version="0.9.0")
+    before = _utc_today_candidates()
+    result = _run_sync(repo, "--stamp-release-date")
+    after = _utc_today_candidates()
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    header = _current_version_header(text, "0.9.0")
+    valid_headers = {f"## [0.9.0] - {d}" for d in (before | after)}
+    assert header in valid_headers, f"header was {header!r}, expected one of {valid_headers}"
+    # The placeholder date must have been replaced.
+    assert "## [0.9.0] - 2026-06-04" not in text
+    # Other version headers are untouched.
+    assert "## [0.8.1] - 2026-05-16" in text
+
+
+def test_stamp_release_date_is_idempotent(tmp_path: Path) -> None:
+    repo = _setup_repo(tmp_path, _STAMP_CHANGELOG, version="0.9.0")
+    candidates = _utc_today_candidates()
+    first = _run_sync(repo, "--stamp-release-date")
+    candidates |= _utc_today_candidates()
+    assert first.returncode == 0, first.stdout + first.stderr
+    after_first = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    # The first run must have actually rewritten the placeholder date to today
+    # (this is what fails if the --stamp-release-date feature is reverted).
+    header_first = _current_version_header(after_first, "0.9.0")
+    assert header_first in {f"## [0.9.0] - {d}" for d in candidates}, header_first
+    assert "## [0.9.0] - 2026-06-04" not in after_first
+    assert "Stamped:" in (first.stdout + first.stderr)
+
+    second = _run_sync(repo, "--stamp-release-date")
+    assert second.returncode == 0, second.stdout + second.stderr
+    after_second = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert after_first == after_second
+    # The second run must not re-stamp (no-op when already dated today).
+    assert "Stamped:" not in (second.stdout + second.stderr)
+
+
+def test_stamp_release_date_preserves_check_invariants(tmp_path: Path) -> None:
+    """After stamping, the routine --check gate still passes."""
+    repo = _setup_repo(tmp_path, _STAMP_CHANGELOG, version="0.9.0")
+    assert _run_sync(repo, "--stamp-release-date").returncode == 0
+    check = _run_sync(repo, "--check")
+    assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_stamp_release_date_documented_in_help() -> None:
+    # --help does not need a repo; run it directly against the script.
+    result = subprocess.run(
+        ["bash", str(SYNC_SCRIPT_SOURCE), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "--stamp-release-date" in result.stdout

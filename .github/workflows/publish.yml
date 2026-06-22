@@ -163,3 +163,56 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize release metadata on default branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ steps.get_version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Runs AFTER cargo publish + tag + GitHub release so the working tree
+          # can safely switch to the default branch. Two post-release fixups,
+          # committed together to avoid racing pushes:
+          #
+          #  1. Stamp the changelog's '## [VERSION]' header with today's real
+          #     release date (the committed source carries a dated placeholder so
+          #     the routine sync-version --check gate passes during development).
+          #  2. Sync the bug-report version dropdown. The standalone
+          #     sync-issue-template workflow triggers on `release: [released]`,
+          #     but a release created here with the default GITHUB_TOKEN does NOT
+          #     emit that event (GitHub suppresses triggers from the default
+          #     token to prevent recursion), so we sync inline instead.
+          #
+          # Note: this refreshes the *default branch* only. The published crate
+          # and the git tag are made from the tag tree (above) and keep whatever
+          # date the committed source had — acceptable because the changelog's
+          # placeholder is normally set close to release; the release notes never
+          # include the header date (see the awk extraction above).
+          #
+          # The loop re-derives both fixups from a freshly fetched tip on each
+          # attempt, so a concurrent push to the default branch is handled by a
+          # clean retry rather than a non-fast-forward failure.
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin "$DEFAULT_BRANCH"
+            git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+            bash ./scripts/sync-version.sh --stamp-release-date
+            python3 scripts/ci/sync-issue-template-versions.py
+            git add CHANGELOG.md .github/ISSUE_TEMPLATE/bug_report.yml
+            if git diff --staged --quiet; then
+              echo "Release metadata already up to date on ${DEFAULT_BRANCH}"
+              exit 0
+            fi
+            git commit -m "chore: finalize release metadata for ${RELEASE_TAG}"
+            if git push origin "HEAD:${DEFAULT_BRANCH}"; then
+              echo "Pushed release metadata to ${DEFAULT_BRANCH} (attempt ${attempt})"
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}); retrying on a fresh tip" >&2
+            git reset --hard "HEAD~1"
+          done
+          echo "Failed to push release metadata after 3 attempts" >&2
+          exit 1
