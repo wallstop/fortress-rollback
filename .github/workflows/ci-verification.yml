@@ -75,7 +75,7 @@ jobs:
           java-version: '17'
 
       - name: Cache TLA+ tools
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: .tla-tools
@@ -141,7 +141,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache Kani
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -156,7 +156,7 @@ jobs:
       # changes; the restore-keys prefix lets a near-miss (same Kani version,
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -225,7 +225,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache Kani
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -240,7 +240,7 @@ jobs:
       # changes; the restore-keys prefix lets a near-miss (same Kani version,
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -308,7 +308,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache Kani
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -323,7 +323,7 @@ jobs:
       # changes; the restore-keys prefix lets a near-miss (same Kani version,
       # different lockfile) restore a warm target as a starting point.
       - name: Cache Kani build (cargo registry + target)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -387,7 +387,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
