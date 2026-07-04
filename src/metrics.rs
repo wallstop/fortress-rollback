@@ -217,12 +217,13 @@ impl Serialize for EventKindCounts {
 
 /// A cumulative snapshot of session-level metrics.
 ///
-/// Returned by [`P2PSession::metrics`] and [`SpectatorSession::metrics`]. Every
-/// counter is monotonic for the life of the session and cheap to read (the type
-/// is `Copy`).
+/// In normal use you read a snapshot from [`P2PSession::metrics`] or
+/// [`SpectatorSession::metrics`]; every counter is monotonic for the life of the
+/// session and cheap to read (the type is `Copy`).
 ///
-/// This type is `#[non_exhaustive]`: future library versions may add counters,
-/// so obtain instances only from the session accessors and match with `..`.
+/// This type is `#[non_exhaustive]`: future library versions may add counters
+/// without a breaking change, so it cannot be built with a struct literal
+/// outside this crate — match with `..`.
 ///
 /// # Example
 ///
