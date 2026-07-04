@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782164546807,
+  "lastUpdate": 1783189596418,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "14f9ad04cf2b437bb3df3d2fa4357ab4ea84e6b9",
-          "message": "chore(deps): bump proptest from 1.9.0 to 1.10.0 (#80)\n\nBumps [proptest](https://github.com/proptest-rs/proptest) from 1.9.0 to\n1.10.0.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/4814e510f61b402c94d7063086ed61fda732736f\"><code>4814e51</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/627\">#627</a>\nfrom proptest-rs/release-prep-1.10</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/8221c9a314ccb85209fc1a314736d0e97d1f8650\"><code>8221c9a</code></a>\nprep 1.10 (and other) release(s)</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/28961bf85a80183e3e8e032f8627ffe3e32493e1\"><code>28961bf</code></a>\nfix(macro): set <code>Config::test_name</code> to actual fn name (<a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/619\">#619</a>)</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/8fb08ffca8e70e16956f5d34fed35ab47f001e88\"><code>8fb08ff</code></a>\nUpdate trybuild requirement from =1.0.113 to =1.0.115 (<a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/624\">#624</a>)</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/5b7a435151b5755169e04561118c07b40f03e7c4\"><code>5b7a435</code></a>\nUpdate convert_case requirement from 0.6 to 0.11 (<a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/623\">#623</a>)</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/14d95fcd7f7800ee792a177628c4fcdc4bb03713\"><code>14d95fc</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/586\">#586</a>\nfrom regexident/range-subset-strategy</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/229e72393f07966965c88a2c24c281be1a6854d0\"><code>229e723</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/622\">#622</a>\nfrom ssanderson/proptest-macro-fixes</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/3663c38fc8572c90fa76f4d9de2c93dc955d88b7\"><code>3663c38</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/proptest-rs/proptest/issues/621\">#621</a>\nfrom wgyt/wgyt-patch</li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/1fe04c9345768f37750b3eb557cae6ae7562c936\"><code>1fe04c9</code></a>\nFix import of <code>HashMap</code></li>\n<li><a\nhref=\"https://github.com/proptest-rs/proptest/commit/9c644db2becec9c77d038d7d877e444641f9aed7\"><code>9c644db</code></a>\nSupport returning TestCaseResult from #[property_test] tests.</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/proptest-rs/proptest/compare/v1.9.0...v1.10.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=proptest&package-manager=cargo&previous-version=1.9.0&new-version=1.10.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-04T20:23:40-08:00",
-          "tree_id": "3be6127466149a6b45aac5004eba95b7a7be0ae1",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/14f9ad04cf2b437bb3df3d2fa4357ab4ea84e6b9"
-        },
-        "date": 1770265738309,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 87,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 131,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 632,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 943,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1355,
-            "range": "± 29",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 96164,
-            "range": "± 1859",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24831,
-            "range": "± 1299",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 675,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 872,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1602,
             "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "70938662471d747b299b203a22437f060398ab18",
+          "message": "Hardening: DST simulation fleet (M0/M1) + wire-exact bandwidth accounting (D1) (#189)\n\n## Summary\n\nDistributed-systems hardening for the rollback netcode, in two coherent\nparts.\n\n### M0/M1 — deterministic whole-mesh simulation fleet (commit `b3c1b67`)\n- **M0 (D6):** ping/RTT round-trip timing virtualized onto the\ninjectable protocol clock (`ping_epoch_base`/`ping_millis`) —\nquality-report RTT can no longer be corrupted by wall-clock steps\n(NTP/VM restore) and is exactly reproducible under a virtual clock.\n`js-sys` dropped as a `wasm32` dependency.\n- **M1:** a seeded virtual-time whole-mesh simulation harness — `SimNet`\nmessage switch (per-link drop/dup/delay/jitter/partition/hold), a\nstoryline schedule generator, and an invariant oracle (confirmed-prefix\nagreement, end-state agreement, in-band desync consistency, liveness),\neach with a negative control; PR smoke fleet of 8 seeds × N∈{2,3,4}.\n- **Real bug found & fixed by the fleet on its first 4-player run\n(D8):** a permanent whole-mesh confirmation deadlock at N≥3.\nConnect-status gossip rides only `Input` packets; once every peer\nexhausted its prediction window with acked send queues, stale\n`Frame::NULL` caches never refreshed and the mesh froze permanently on a\nhealed network with every session `Running`. Fixed by arming the\nconnect-status nudge on the deadlock signature (window exhausted AND\ngossip-bound below receipts), with reserved hot-join endpoints excluded.\n\n### M2 §5.1 — wire-exact bandwidth accounting (D1, commit `6ace99e`)\n- `NetworkStats::kbps_sent` accounted `std::mem::size_of_val(&Message)`\n— the constant in-memory enum size, identical for every packet\nregardless of payload — so reported send bandwidth was fiction. Sends\nare now metered with a new alloc-free arithmetic\n`Message::encoded_len()` that is byte-exact against the codec.\n- Regression: proptest `encoded_len == codec::encode(&msg).len()` for\narbitrary messages of every variant (hot-join under `cfg`); plus a test\ndocumenting the `size_of_val` divergence.\n\n## Validation\n- `cargo fmt` + `cargo clippy --workspace --all-targets` (`tokio,json`\nand `…,hot-join`) — clean.\n- `cargo nextest run` — 2336 passed (default) / 2574 passed (hot-join),\n55 skipped.\n- `python3 scripts/ci/agent-preflight.py` — all checks pass.\n\nChangelog carries `**Pre-existing:** ### Fixed` entries for D6, D8, and\nD1.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes P2P confirmation liveness logic and alters reported\nbandwidth/ping semantics; incorrect nudge timing could affect production\nmesh behavior or hot-join.\n> \n> **Overview**\n> Fixes **network telemetry** and a **multi-player liveness deadlock**,\nand adds a **deterministic whole-mesh simulation** test stack.\n> \n> **Bandwidth and ping:** Outbound metering now uses alloc-free\n`Message::encoded_len()` (proptest vs `codec::encode`) instead of\n`size_of_val(&Message)`. `kbps_sent` is corrected to kilobits/sec (×8,\n÷1000). Quality-report RTT uses the injectable protocol clock via\n`ping_epoch_base`/`ping_millis`, not wall time; **`js-sys` is removed**\non `wasm32`. Send counters use **`u64`** to avoid wrap on 32-bit\ntargets.\n> \n> **N≥3 confirmation deadlock (D8):** Connect-status gossip only rides\non `Input`. When every peer exhausted its prediction window with\nfully-acked queues, stale gossip could freeze confirmation forever. The\nconnect-status nudge now also arms when the prediction window is\nexhausted **and** mesh gossip binds confirmation below local receipts\n(`gossip_holds_confirmation_below_receipts`); reserved hot-join\nendpoints are never nudged.\n> \n> **Simulation fleet (M0/M1):** New `SimNet` (seeded per-link faults,\nvirtual clock), schedule generator, harness oracle, PR smoke tests for\n2–4 players, pinned regression for seed 1 / 4 players, integration tests\nfor deterministic ping, and hidden `diagnostic_connect_status` for stall\ndebugging. `serde_json` gains **`float_roundtrip`** for schedule corpus\nartifacts.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n822e944145b55daf2e1ee14bbf60b48eb776723a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-04T11:21:34-07:00",
+          "tree_id": "a289c07fbaf20a6b573655fcec0ac043b561e713",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/70938662471d747b299b203a22437f060398ab18"
+        },
+        "date": 1783189595748,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 111,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 459,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 716,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1028,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 126051,
+            "range": "± 2462",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45147,
+            "range": "± 146",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 85",
             "unit": "ns/iter"
           },
           {
