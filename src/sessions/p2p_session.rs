@@ -5766,8 +5766,11 @@ impl<T: Config> P2PSession<T> {
 
     /// Diagnostics/testing surface (hidden; **not** part of the stable public
     /// API, like [`__internal`](crate::__internal)): renders this session's
-    /// per-slot local connect status and every running remote endpoint's
-    /// gossiped view of every slot — the exact inputs to the
+    /// per-slot local connect status and every remote endpoint's gossiped view
+    /// of every slot — each view labeled with the endpoint's `running` state
+    /// (non-running endpoints are included deliberately, since a stalled or
+    /// not-yet-synchronized peer's stale view is exactly what explains a
+    /// confirmed-frame hold). These are the inputs to the
     /// [`confirmed_frame`](Self::confirmed_frame) mesh fold. Used by the
     /// deterministic simulation harness to explain confirmed-frame holds.
     #[doc(hidden)]
