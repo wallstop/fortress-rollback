@@ -125,15 +125,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Pre-existing:** `NetworkStats::kbps_sent` now reflects the true serialized wire size of each
-  outbound packet instead of `std::mem::size_of_val(&Message)` — the constant in-memory size of the
-  `Message` enum, which is identical for every variant (dominated by the largest one) and independent
-  of the actual payload, since `Vec` contents live on the heap. The old accounting charged a bare
-  `KeepAlive` the same as a fully-loaded `Input`, so the reported send bandwidth was fiction (both
-  systematically wrong and payload-blind). Sending is now metered with a new alloc-free arithmetic
+- **Pre-existing:** `NetworkStats::kbps_sent` is now accurate on both axes it was previously wrong on.
+  (1) *Payload size:* it accounted `std::mem::size_of_val(&Message)` — the constant in-memory size of
+  the `Message` enum, identical for every variant (dominated by the largest one) and independent of
+  the actual payload, since `Vec` contents live on the heap, so a bare `KeepAlive` was charged the
+  same as a fully-loaded `Input`. Sending is now metered with a new alloc-free arithmetic
   `Message::encoded_len()` that is byte-exact against the codec (a property test asserts
-  `encoded_len() == codec::encode(&msg).len()` for arbitrary messages of every variant). The
-  `+ UDP_HEADER_SIZE` per-packet estimate is unchanged; only the payload term is corrected.
+  `encoded_len() == codec::encode(&msg).len()` for arbitrary messages of every variant). (2) *Unit:*
+  the field is documented and named as kilobits per second, but the rate was computed as
+  `bytes / seconds / 1024` — kibibytes per second, off by the 8x byte-vs-bit factor. It is now
+  computed as bits (x8) per second / 1000, matching the documented unit. The `+ UDP_HEADER_SIZE`
+  per-packet header estimate is unchanged. Net effect: reported values change (they were previously
+  fiction); code that hard-coded a calibration against the old numbers should re-baseline.
 - **Pre-existing:** Closed a permanent whole-mesh confirmation deadlock at 3 or more players (the
   no-drop sibling of the 0.9.0 gossip-mute fix), found by the new deterministic whole-mesh
   simulation fleet on its first four-player run. Connect-status gossip rides only `Input` messages;

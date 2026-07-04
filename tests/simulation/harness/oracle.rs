@@ -419,12 +419,32 @@ mod tests {
         )));
     }
 
-    /// Negative control: a desync event and an Error-severity violation each
-    /// fail the run.
+    /// Negative control: a desync event and an `Error`-severity violation each
+    /// fail the run, while a sub-`Error` (`Warning`) violation does not.
     #[test]
     fn oracle_records_desync_events_and_violations() {
+        use fortress_rollback::telemetry::ViolationKind;
+
         let mut oracle = Oracle::new(2);
         oracle.observe_desync_event(0, Frame::new(42));
+        oracle.observe_violations(
+            1,
+            &[
+                SpecViolation::new(
+                    ViolationSeverity::Error,
+                    ViolationKind::ChecksumMismatch,
+                    "seeded error violation",
+                    "oracle.rs",
+                ),
+                // A sub-`Error` violation must be ignored by the severity gate.
+                SpecViolation::new(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "seeded warning violation",
+                    "oracle.rs",
+                ),
+            ],
+        );
         let verdict = oracle.finalize(
             &[BTreeMap::new(), BTreeMap::new()],
             &[Frame::new(500), Frame::new(500)],
@@ -434,6 +454,20 @@ mod tests {
             f,
             OracleFailure::InbandDesyncDetected { peer: 0, frame: 42 }
         )));
+        assert!(verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::Violation { peer: 1, .. })));
+        // Exactly one violation failure: the `Warning` must not have counted.
+        assert_eq!(
+            verdict
+                .failures
+                .iter()
+                .filter(|f| matches!(f, OracleFailure::Violation { .. }))
+                .count(),
+            1,
+            "only the Error-severity violation should fail the run"
+        );
     }
 
     /// The failure cap keeps a systemically broken run readable.

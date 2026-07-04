@@ -824,13 +824,21 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         let total_bytes_sent = self.bytes_sent + (self.packets_sent * UDP_HEADER_SIZE);
-        let bps = total_bytes_sent / seconds as usize;
-        //let upd_overhead = (self.packets_sent * UDP_HEADER_SIZE) / self.bytes_sent;
+        // `kbps_sent` is documented and named as **kilobits per second**. The
+        // previous `bytes / seconds / 1024` produced kibibytes/sec — wrong by the
+        // 8× byte<->bit factor against the field's own unit. Correct it to bits
+        // (x8) over elapsed seconds, per SI kilo (/1000, the standard base for
+        // network bit-rates). Now that D1 makes `bytes_sent` wire-exact this rate
+        // is finally meaningful. `u64` with a saturating multiply avoids overflow
+        // on long sessions; the divisions then bring it back into `usize` range.
+        let kbps_sent =
+            usize::try_from((total_bytes_sent as u64).saturating_mul(8) / seconds / 1000)
+                .unwrap_or(usize::MAX);
 
         Ok(NetworkStats {
             ping: self.round_trip_time,
             send_queue_len: self.pending_output.len(),
-            kbps_sent: bps / 1024,
+            kbps_sent,
             local_frames_behind: self.local_frame_advantage,
             remote_frames_behind: self.remote_frame_advantage,
             // Checksum fields are populated by P2PSession::network_stats()
