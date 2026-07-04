@@ -9654,8 +9654,8 @@ impl<T: Config> P2PSession<T> {
     /// arrive; the dropped events are lost. This used to happen silently
     /// (defect D9) — a discarded [`FortressEvent::Disconnected`] or
     /// [`FortressEvent::DesyncDetected`] left no trace. Every drop is now
-    /// recorded in [`SessionMetrics`] (total + per-[`EventKind`]), and one
-    /// rate-limited `Warning` violation is reported per overflow episode so the
+    /// recorded in [`SessionMetrics`] (total + per-[`EventKind`](crate::metrics::EventKind)),
+    /// and one rate-limited `Warning` violation is reported per overflow episode so the
     /// loss is observable via the metrics snapshot and any registered violation
     /// observer.
     ///
