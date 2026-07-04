@@ -47,58 +47,6 @@ use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
 
-/// Returns the current wall-clock time as milliseconds since UNIX_EPOCH.
-///
-/// This function returns `Some(millis)` under normal conditions, or `None` if the system
-/// clock is in an invalid state (e.g., before UNIX_EPOCH due to NTP adjustments, VM snapshots,
-/// or misconfigured clocks).
-///
-/// # When to use
-/// Use this ONLY when you need wall-clock time that can be compared across different machines
-/// (e.g., for ping/pong RTT calculation). For local elapsed time measurements, prefer using
-/// `Instant` which is guaranteed monotonic.
-///
-/// # Returns
-/// - `Some(millis)` - The current time in milliseconds since UNIX_EPOCH
-/// - `None` - If the system clock is before UNIX_EPOCH (abnormal condition)
-fn millis_since_epoch() -> Option<u128> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => Some(duration.as_millis()),
-            Err(_) => {
-                // System time is before UNIX_EPOCH - this can happen due to:
-                // - NTP adjustments moving clock backwards
-                // - VM snapshots with stale time
-                // - Misconfigured system clocks
-                // Report via telemetry and return None so callers can handle appropriately.
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::InternalError,
-                    "System time is before UNIX_EPOCH - clock may have gone backwards"
-                );
-                None
-            },
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // In WASM, Date.getTime() returns milliseconds since epoch as a f64.
-        // It can technically be negative for dates before 1970, but this is rare.
-        let time = js_sys::Date::new_0().get_time();
-        if time >= 0.0 {
-            Some(time as u128)
-        } else {
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::InternalError,
-                "WASM Date.getTime() returned negative value - clock may be misconfigured"
-            );
-            None
-        }
-    }
-}
-
 /// UDP protocol handler for peer-to-peer communication.
 ///
 /// # Note
@@ -272,9 +220,21 @@ where
     /// Using Instant (monotonic clock) instead of wall-clock time ensures reliable
     /// duration measurements even if the system clock is adjusted.
     stats_start_time: Instant,
-    packets_sent: usize,
-    bytes_sent: usize,
+    // `u64` (not `usize`) so these lifetime counters cannot wrap on 32-bit
+    // targets (notably `wasm32`): a `usize` `bytes_sent` would overflow after
+    // ~4 GiB of cumulative traffic and corrupt `network_stats()`.
+    packets_sent: u64,
+    bytes_sent: u64,
     round_trip_time: u128,
+    /// Origin instant for quality-report `ping` timestamps, captured from the
+    /// protocol clock at endpoint construction. The peer echoes `ping` back
+    /// verbatim ([`Self::on_quality_report`]), so timestamps are only ever
+    /// compared against this endpoint's own clock — a session-local monotonic
+    /// origin is sufficient. Deriving it from [`Self::now`] honors an injected
+    /// [`ProtocolConfig::clock`] (deterministic simulation) and is immune to
+    /// the wall-clock adjustments (NTP steps, VM snapshot restores) that could
+    /// corrupt RTT when this was derived from `SystemTime`.
+    ping_epoch_base: Instant,
     last_send_time: Instant,
     last_recv_time: Instant,
 
@@ -763,6 +723,7 @@ impl<T: Config> UdpProtocol<T> {
             packets_sent: 0,
             bytes_sent: 0,
             round_trip_time: 0,
+            ping_epoch_base: now,
             last_send_time: now,
             last_recv_time: now,
 
@@ -805,6 +766,18 @@ impl<T: Config> UdpProtocol<T> {
             Some(clock_fn) => clock_fn(),
             None => Instant::now(),
         }
+    }
+
+    /// Returns milliseconds elapsed on the protocol clock since this endpoint
+    /// was constructed — the timestamp basis for quality-report pings (see
+    /// [`Self::ping_epoch_base`]).
+    ///
+    /// Saturates to zero if the clock reads earlier than the construction
+    /// instant (impossible for a monotonic clock; defensive for injected ones).
+    fn ping_millis(&self) -> u128 {
+        self.now()
+            .saturating_duration_since(self.ping_epoch_base)
+            .as_millis()
     }
 
     pub(crate) fn update_local_frame_advantage(&mut self, local_frame: Frame) {
@@ -853,14 +826,25 @@ impl<T: Config> UdpProtocol<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let total_bytes_sent = self.bytes_sent + (self.packets_sent * UDP_HEADER_SIZE);
-        let bps = total_bytes_sent / seconds as usize;
-        //let upd_overhead = (self.packets_sent * UDP_HEADER_SIZE) / self.bytes_sent;
+        // All-`u64` so the sum cannot overflow on 32-bit targets before the rate
+        // math runs (`bytes_sent`/`packets_sent` are already `u64`).
+        let total_bytes_sent = self
+            .bytes_sent
+            .saturating_add(self.packets_sent.saturating_mul(UDP_HEADER_SIZE as u64));
+        // `kbps_sent` is documented and named as **kilobits per second**. The
+        // previous `bytes / seconds / 1024` produced kibibytes/sec — wrong by the
+        // 8× byte<->bit factor against the field's own unit. Correct it to bits
+        // (x8) over elapsed seconds, per SI kilo (/1000, the standard base for
+        // network bit-rates). Now that D1 makes `bytes_sent` wire-exact this rate
+        // is finally meaningful. Saturating multiply avoids overflow on long
+        // sessions; the divisions then bring it back into `usize` range.
+        let kbps_sent = usize::try_from(total_bytes_sent.saturating_mul(8) / seconds / 1000)
+            .unwrap_or(usize::MAX);
 
         Ok(NetworkStats {
             ping: self.round_trip_time,
             send_queue_len: self.pending_output.len(),
-            kbps_sent: bps / 1024,
+            kbps_sent,
             local_frames_behind: self.local_frame_advantage,
             remote_frames_behind: self.remote_frame_advantage,
             // Checksum fields are populated by P2PSession::network_stats()
@@ -1780,13 +1764,10 @@ impl<T: Config> UdpProtocol<T> {
     fn send_quality_report(&mut self) {
         self.running_last_quality_report = self.now();
 
-        // Get wall-clock time for ping calculation.
-        // If the system clock is in an abnormal state, skip sending this quality report.
-        // The peer will request another one later, and hopefully the clock will be fixed by then.
-        let Some(ping_timestamp) = millis_since_epoch() else {
-            trace!("Skipping quality report due to invalid system clock");
-            return;
-        };
+        // Timestamp from the (injectable) protocol clock. The peer echoes it
+        // back verbatim, so it is only ever compared against this endpoint's
+        // own clock in `on_quality_reply` — no wall-clock source is needed.
+        let ping_timestamp = self.ping_millis();
 
         // Clamp to i16 range and convert - the clamp guarantees this won't fail,
         // but we use unwrap_or as defense-in-depth
@@ -1809,9 +1790,15 @@ impl<T: Config> UdpProtocol<T> {
         let header = MessageHeader { magic: self.magic };
         let msg = Message { header, body };
 
-        self.packets_sent += 1;
+        self.packets_sent = self.packets_sent.saturating_add(1);
         self.last_send_time = self.now();
-        self.bytes_sent += std::mem::size_of_val(&msg);
+        // Wire-exact payload bytes (D1 fix): the previous `size_of_val(&msg)`
+        // measured the constant in-memory `Message` enum size, not what the
+        // socket serializes, so `kbps_sent` was fiction. `Message::encoded_len`
+        // matches `codec::encode(&msg).len()` exactly (property-tested).
+        // Saturating so the lifetime counter degrades to a ceiling rather than
+        // wrapping (or panicking under overflow-checks) on any target.
+        self.bytes_sent = self.bytes_sent.saturating_add(msg.encoded_len() as u64);
 
         // add the packet to the back of the send queue
         self.send_queue.push_back(msg);
@@ -2272,16 +2259,11 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `QualityReply`, update network stats.
     fn on_quality_reply(&mut self, body: &QualityReply) {
-        // Get current wall-clock time to calculate RTT.
-        // If the system clock is in an abnormal state, skip this RTT update.
-        // The next quality report cycle will try again.
-        let Some(millis) = millis_since_epoch() else {
-            trace!("Skipping RTT update due to invalid system clock");
-            return;
-        };
-        // Use saturating subtraction to handle edge cases where system time
-        // may have drifted between the ping and pong (e.g., NTP adjustments).
-        // A 0 RTT is harmless - it will be corrected on the next quality report.
+        let millis = self.ping_millis();
+        // Saturating: a pong is normally an echo of this endpoint's own earlier
+        // ping (never in the future), but a stale packet from a previous
+        // endpoint era could carry an arbitrary value. A 0 RTT is harmless -
+        // it will be corrected on the next quality report.
         self.round_trip_time = millis.saturating_sub(body.pong);
     }
 
@@ -6400,117 +6382,113 @@ mod tests {
     }
 
     // ==========================================
-    // Time Utility Tests
+    // Ping Clock Tests
     // ==========================================
 
-    #[test]
-    fn millis_since_epoch_returns_some_under_normal_conditions() {
-        // Under normal conditions, millis_since_epoch should return Some with a valid timestamp
-        let millis = millis_since_epoch();
-        assert!(
-            millis.is_some(),
-            "millis_since_epoch should return Some under normal conditions"
-        );
+    /// Builds a `ProtocolConfig` whose clock reads `base + offset_ms`,
+    /// returning the shared offset handle so tests can advance virtual time.
+    fn injected_clock_config() -> (ProtocolConfig, Arc<std::sync::atomic::AtomicU64>) {
+        let base = Instant::now();
+        let offset_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let offset = Arc::clone(&offset_ms);
+        let config = ProtocolConfig {
+            clock: Some(Arc::new(move || {
+                base + Duration::from_millis(offset.load(std::sync::atomic::Ordering::Relaxed))
+            })),
+            ..ProtocolConfig::default()
+        };
+        (config, offset_ms)
     }
 
     #[test]
-    fn millis_since_epoch_returns_reasonable_value() {
-        // The function should return a value representing milliseconds since UNIX_EPOCH.
-        // As of 2020, this is at least 1577836800000 (Jan 1, 2020 00:00:00 UTC).
-        // As of 2030, it would be around 1893456000000.
-        let millis = millis_since_epoch().expect("Should return Some under normal conditions");
-
-        // Should be at least year 2020 timestamp
-        assert!(
-            millis >= 1_577_836_800_000,
-            "Time should be after year 2020"
+    fn ping_millis_starts_at_zero_with_injected_clock() {
+        let (config, _offset) = injected_clock_config();
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
         );
-
-        // Should not be unreasonably far in the future (year 2100)
-        assert!(
-            millis < 4_102_444_800_000,
-            "Time should be before year 2100"
-        );
+        assert_eq!(protocol.ping_millis(), 0);
     }
 
     #[test]
-    fn millis_since_epoch_is_monotonically_non_decreasing_in_short_term() {
-        // Within a single execution context, time should not go backwards
-        let first = millis_since_epoch().expect("Should return Some");
-        let second = millis_since_epoch().expect("Should return Some");
+    fn ping_millis_tracks_injected_clock_exactly() {
+        let (config, offset) = injected_clock_config();
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
 
-        // Second call should be >= first (could be equal if very fast)
+        offset.store(1_234, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(protocol.ping_millis(), 1_234);
+
+        offset.store(10_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(protocol.ping_millis(), 10_000);
+    }
+
+    #[test]
+    fn ping_millis_without_injected_clock_is_monotonic() {
+        let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+        );
+
+        let first = protocol.ping_millis();
+        let second = protocol.ping_millis();
         assert!(
             second >= first,
-            "Time should not go backwards within same execution"
+            "monotonic clock must not go backwards (first={first}, second={second})"
         );
     }
 
     #[test]
-    fn millis_since_epoch_advances_over_time() {
-        let first = millis_since_epoch().expect("Should return Some");
-
-        // `millis_since_epoch` reads the real system clock at millisecond
-        // resolution, so a fixed `sleep` + strict `>` is flaky: two reads can
-        // legitimately land in the same millisecond on a coarse-resolution
-        // clock or a heavily loaded CI runner. Instead, poll (bounded) until
-        // the clock actually ticks — guaranteed to happen on any real clock,
-        // so this asserts the "advances over time" property without depending
-        // on a single sleep being long enough.
-        let mut second = first;
-        for _ in 0..1000 {
-            second = millis_since_epoch().expect("Should return Some");
-            if second > first {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert!(
-            second > first,
-            "millis_since_epoch should advance within ~1s (first={first}, second={second})"
+    fn on_quality_reply_updates_rtt_from_injected_clock() {
+        let (config, offset) = injected_clock_config();
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
         );
+
+        // Ping issued at t=100ms, reply processed at t=175ms => RTT 75ms.
+        offset.store(100, std::sync::atomic::Ordering::Relaxed);
+        let ping = protocol.ping_millis();
+        offset.store(175, std::sync::atomic::Ordering::Relaxed);
+        protocol.on_quality_reply(&QualityReply { pong: ping });
+
+        assert_eq!(protocol.round_trip_time, 75);
     }
 
-    /// Test documentation: The `millis_since_epoch` function gracefully handles
-    /// the case where system time is before UNIX_EPOCH by returning None and
-    /// reporting a violation. This cannot be easily tested without mocking,
-    /// but the code path is verified through code review. The test below
-    /// documents the expected behavior.
     #[test]
-    fn millis_since_epoch_documents_backwards_time_handling() {
-        // This test documents the behavior when time goes backwards.
-        // The actual scenario (SystemTime before UNIX_EPOCH) cannot be triggered
-        // in a unit test without mocking std::time::SystemTime.
-        //
-        // Expected behavior:
-        // 1. When SystemTime::now().duration_since(UNIX_EPOCH) returns Err
-        // 2. The function reports a ViolationKind::InternalError via telemetry
-        // 3. The function returns None to signal the abnormal condition
-        //
-        // Callers are responsible for handling None appropriately:
-        // - send_quality_report: Skips sending the report
-        // - on_quality_reply: Skips updating RTT
-        //
-        // This design ensures:
-        // - No incorrect fallback values (like 0) propagate through the system
-        // - Callers make explicit decisions about how to handle clock issues
-        // - The system degrades gracefully rather than using invalid data
-        //
-        // This is covered by:
-        // - Code review of the implementation
-        // - The fact that the code compiles with the error handling path
-        // - Integration tests that would fail if the function panicked
+    fn on_quality_reply_with_future_pong_saturates_to_zero() {
+        let (config, _offset) = injected_clock_config();
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
 
-        // Simply verify the function works normally
-        let result = millis_since_epoch();
-        assert!(
-            result.is_some(),
-            "Under normal conditions, should return Some"
-        );
-        assert!(
-            result.unwrap() > 0,
-            "Under normal conditions, should return positive value"
-        );
+        // A pong larger than any timestamp this endpoint issued (e.g. a stale
+        // packet from a previous endpoint era) must clamp to 0, not underflow.
+        protocol.on_quality_reply(&QualityReply { pong: u128::MAX });
+        assert_eq!(protocol.round_trip_time, 0);
     }
 
     // ==========================================

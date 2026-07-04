@@ -20,6 +20,7 @@ pub mod bus_socket;
 pub mod channel_socket;
 pub mod filter_socket;
 pub mod reorder_socket;
+pub mod sim_net;
 pub mod stubs;
 pub mod stubs_enum;
 pub mod test_clock;
@@ -41,6 +42,8 @@ pub use filter_socket::{
 };
 #[allow(unused_imports)]
 pub use reorder_socket::{create_reorder_mesh_triple, HeldLinks, ReorderSocket};
+#[allow(unused_imports)]
+pub use sim_net::{LinkPolicy, SimClockFn, SimNet, SimNetStats, SimSocket, UnattachedPolicy};
 #[allow(unused_imports)]
 pub use test_clock::TestClock;
 #[allow(unused_imports)]

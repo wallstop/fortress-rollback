@@ -10,7 +10,10 @@ pub struct NetworkStats {
     pub send_queue_len: usize,
     /// The roundtrip packet transmission time as calculated by Fortress Rollback.
     pub ping: u128,
-    /// The estimated bandwidth used between the two clients, in kilobits per second.
+    /// The estimated outbound bandwidth to this peer, in **kilobits per second**
+    /// (bits ÷ 1000). Computed from the wire-exact serialized size of every sent
+    /// packet plus an estimated per-packet UDP/IP header, averaged over the time
+    /// since synchronization.
     pub kbps_sent: usize,
 
     /// The number of frames Fortress Rollback calculates that the local client is behind the remote client at this instant in time.
