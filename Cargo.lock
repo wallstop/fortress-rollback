@@ -432,7 +432,6 @@ dependencies = [
  "bincode",
  "clap",
  "criterion",
- "js-sys",
  "loom",
  "macroquad",
  "parking_lot",

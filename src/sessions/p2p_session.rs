@@ -1278,6 +1278,16 @@ impl<T: Config> P2PSession<T> {
         // the mesh agrees. Allocation-free.
         let nudge_needed = self.connect_status_nudge_needed();
         for remote_endpoint in self.player_reg.remotes.values_mut() {
+            // A reserved hot-join endpoint (the host↔joiner channel) is
+            // excluded from every confirmation fold, so nudging it cannot
+            // release any hold — and a duplicate `Input` injected into the
+            // join handshake (the endpoint is `Running` mid-dance) interferes
+            // with the joiner's deferred input processing. Never nudge it.
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(remote_endpoint) {
+                remote_endpoint.set_connect_status_nudge(false);
+                continue;
+            }
             remote_endpoint.set_connect_status_nudge(nudge_needed);
         }
 
@@ -5754,6 +5764,47 @@ impl<T: Config> P2PSession<T> {
         self.sync_layer.current_frame()
     }
 
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API, like [`__internal`](crate::__internal)): renders this session's
+    /// per-slot local connect status and every running remote endpoint's
+    /// gossiped view of every slot — the exact inputs to the
+    /// [`confirmed_frame`](Self::confirmed_frame) mesh fold. Used by the
+    /// deterministic simulation harness to explain confirmed-frame holds.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_connect_status(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let _ = write!(out, "local=[");
+        for (idx, status) in self.local_connect_status.iter().enumerate() {
+            let _ = write!(
+                out,
+                "{}{}:{}{}",
+                if idx == 0 { "" } else { ", " },
+                idx,
+                if status.disconnected { "D" } else { "C" },
+                status.last_frame.as_i32()
+            );
+        }
+        let _ = write!(out, "]");
+        for (addr, endpoint) in &self.player_reg.remotes {
+            let _ = write!(out, " view[{:?} running={}]=[", addr, endpoint.is_running());
+            for idx in 0..self.num_players {
+                let status = endpoint.peer_connect_status(PlayerHandle::new(idx));
+                let _ = write!(
+                    out,
+                    "{}{}:{}{}",
+                    if idx == 0 { "" } else { ", " },
+                    idx,
+                    if status.disconnected { "D" } else { "C" },
+                    status.last_frame.as_i32()
+                );
+            }
+            let _ = write!(out, "]");
+        }
+        out
+    }
+
     /// Returns the maximum prediction window of a session.
     #[must_use]
     pub fn max_prediction(&self) -> usize {
@@ -8616,17 +8667,100 @@ impl<T: Config> P2PSession<T> {
     /// agreement can never be reached. Allocation-free; called once per
     /// [`Self::poll_remote_clients`].
     fn connect_status_nudge_needed(&self) -> bool {
-        self.local_connect_status
-            .iter()
-            .enumerate()
-            .any(|(idx, status)| {
-                let handle = PlayerHandle::new(idx);
-                // Local players can never be disconnected; the guard keeps the
-                // helper's contract honest if that ever changes.
-                status.disconnected
-                    && !self.player_reg.is_local_player(handle)
-                    && self.remote_slot_confirmed_bound(handle, status).is_some()
-            })
+        let drop_awaiting_agreement =
+            self.local_connect_status
+                .iter()
+                .enumerate()
+                .any(|(idx, status)| {
+                    let handle = PlayerHandle::new(idx);
+                    // Local players can never be disconnected; the guard keeps the
+                    // helper's contract honest if that ever changes.
+                    status.disconnected
+                        && !self.player_reg.is_local_player(handle)
+                        && self.remote_slot_confirmed_bound(handle, status).is_some()
+                });
+        drop_awaiting_agreement || self.gossip_holds_confirmation_below_receipts()
+    }
+
+    /// Cold-start / catch-up gossip hold (the no-drop sibling of the
+    /// drop-awaiting-agreement nudge arm): `true` when the mesh-gossip fold
+    /// pins [`confirmed_frame`](Self::confirmed_frame) **strictly below** the
+    /// local-receipt-only fold — i.e. every input needed to confirm further
+    /// has already been received locally, and only some running remote
+    /// endpoint's stale cached view of a slot (possibly its initial
+    /// `Frame::NULL`, never updated by any `Input` packet) holds confirmation
+    /// back.
+    ///
+    /// Why this needs a dedicated liveness carrier: connect-status gossip
+    /// rides only `Input` messages. At `N >= 3`, if a peer sends its entire
+    /// initial prediction window's inputs before hearing a third peer's first
+    /// input (transient startup loss/jitter/reorder is enough), its last
+    /// gossip leaves that slot's view at `Frame::NULL` in every receiver's
+    /// cache. Once **every** peer exhausts its prediction window
+    /// (`current - confirmed >= max_prediction`) with fully-acked send
+    /// queues, no peer ever sends another `Input` — `KeepAlive`,
+    /// `QualityReport`, and `InputAck` carry no connect status — so the stale
+    /// caches never refresh and the whole mesh deadlocks permanently at
+    /// `confirmed == NULL` on a perfectly healed network, every session
+    /// `Running`. (Found by the deterministic simulation fleet; the 0.9.0
+    /// nudge closed exactly this gossip-mute mechanism, but only while a
+    /// local drop awaited mesh agreement.)
+    ///
+    /// While this condition holds, each input-idle endpoint re-sends one
+    /// status-bearing duplicate input per keepalive interval (the existing
+    /// nudge wire shape — receivers treat it as a stale retransmission), so
+    /// every peer's contribution to the others' folds catches up to its real
+    /// receipts and the fold releases.
+    ///
+    /// The condition deliberately requires BOTH legs of the deadlock
+    /// signature:
+    ///
+    /// 1. **The prediction window is exhausted**
+    ///    (`current - confirmed >= max_prediction`): a healthy `N >= 3` mesh
+    ///    *permanently* paces `confirmed` roughly one gossip delivery behind
+    ///    the local receipts (GGPO `PollNPlayers` parity — see
+    ///    [`confirmed_frame`](Self::confirmed_frame)), so "gossip binds" alone
+    ///    is the ordinary steady state, not a stall; while the window has
+    ///    room, real input traffic flows and carries gossip organically.
+    ///    Only a session that can no longer advance has lost its carrier.
+    /// 2. **Gossip, not receipts, is what binds**
+    ///    (`confirmed < receipt_fold`): when confirmation is receipt-bound (a
+    ///    peer's inputs are genuinely missing locally) no nudge fires —
+    ///    pending-output retransmission owns that recovery path.
+    ///
+    /// At `N == 2` the fold never binds below the receipt (the peer's
+    /// gossiped self-claim always covers the inputs it sent), so this arm is
+    /// inert there. In lockstep (`max_prediction == 0`) leg 1 is satisfied
+    /// whenever confirmation stalls at all, which is exactly the intended
+    /// carrier semantics there.
+    fn gossip_holds_confirmation_below_receipts(&self) -> bool {
+        let confirmed = self.confirmed_frame();
+        let gap = self
+            .sync_layer
+            .current_frame()
+            .as_i32()
+            .saturating_sub(confirmed.as_i32());
+        let window = i32::try_from(self.max_prediction).unwrap_or(i32::MAX);
+        if gap < window {
+            return false;
+        }
+
+        let mut receipt_fold = Frame::new(i32::MAX);
+        for (idx, status) in self.local_connect_status.iter().enumerate() {
+            let handle = PlayerHandle::new(idx);
+            // Disconnected remote slots are the drop arm's business (their
+            // liveness carrier is the drop-awaiting-agreement nudge and the
+            // mesh-agreed exclusion); fold only connected slots plus local
+            // slots, mirroring the connected arms of `confirmed_frame`.
+            if status.disconnected && !self.player_reg.is_local_player(handle) {
+                continue;
+            }
+            receipt_fold = std::cmp::min(receipt_fold, status.last_frame);
+        }
+        if receipt_fold.as_i32() == i32::MAX {
+            return false;
+        }
+        confirmed < receipt_fold
     }
 
     /// Applies a freeze-frame convergence re-adjust to a RESERVED (or
@@ -9883,6 +10017,66 @@ mod tests {
         const _: () = assert!(DEFAULT_MAX_EVENT_QUEUE_SIZE <= 1000);
         // Verify at runtime the constant is what we expect
         assert_eq!(DEFAULT_MAX_EVENT_QUEUE_SIZE, 100);
+    }
+
+    /// Red-documentation test for defect D9 (PLAN.md §2): event-queue
+    /// overflow silently discards the oldest event — even a safety-critical
+    /// `Disconnected` — with **zero** telemetry: no violation, no counter,
+    /// nothing an application could use to learn an event was lost.
+    ///
+    /// This pins today's defective behavior so the defect is executable, not
+    /// just documented. When the M2 discard telemetry lands (rate-limited
+    /// Warning violation + `events_discarded_total` counter), the final
+    /// assertion flips to expect the violation instead.
+    #[test]
+    fn event_queue_overflow_discards_disconnected_event_with_zero_telemetry() {
+        let mut session = create_two_player_session();
+        let addr = test_addr(8080);
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _guard = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+
+        // Canary: an undrained Disconnected event at the front of the queue.
+        session
+            .event_queue
+            .push_back(FortressEvent::Disconnected { addr });
+
+        // Churn wave: `max_event_queue_size` benign protocol events arrive
+        // before the application drains — the D9 scenario (a slow-draining
+        // app during a sync/churn burst).
+        for _ in 0..session.max_event_queue_size {
+            session.handle_event(
+                Event::Synchronizing {
+                    total: 10,
+                    count: 1,
+                    total_requests_sent: 1,
+                    elapsed_ms: 5,
+                },
+                Arc::from([PlayerHandle::new(1)]),
+                addr,
+            );
+        }
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "queue must be trimmed to its cap"
+        );
+        let disconnected_still_queued = session
+            .event_queue
+            .iter()
+            .any(|e| matches!(e, FortressEvent::Disconnected { .. }));
+        assert!(
+            !disconnected_still_queued,
+            "the Disconnected canary must have been evicted by the overflow trim"
+        );
+        // RED (defect D9): the loss is completely silent today.
+        assert!(
+            observer.violations().is_empty(),
+            "expected today's defective silent discard (no telemetry); observed violations: {:?}",
+            observer.violations()
+        );
     }
 
     // ==========================================
