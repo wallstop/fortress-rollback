@@ -10103,7 +10103,7 @@ mod tests {
     /// could use to learn an event was lost). The M2 metrics layer makes the
     /// loss observable: every discarded event increments [`SessionMetrics`]
     /// (total + per-[`EventKind`](crate::metrics::EventKind)) and the session
-    /// reports a single rate-limited `Warning` violation per overflow pass.
+    /// reports one rate-limited `Warning` violation per overflow episode.
     ///
     /// This is the green successor to the red-documentation test that pinned
     /// the silent behavior (PLAN.md §21.3): the final assertions flipped from
