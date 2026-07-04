@@ -14,7 +14,8 @@ use crate::{
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
     GameStateCell, InputStatus, InputVec, InternalErrorKind, InvalidFrameReason,
-    InvalidRequestKind, NetworkStats, NonBlockingSocket, PlayerHandle, RequestVec, SessionState,
+    InvalidRequestKind, NetworkStats, NonBlockingSocket, PlayerHandle, RequestVec, SessionMetrics,
+    SessionState,
 };
 
 /// The number of frames the spectator advances in a single step during normal operation.
@@ -174,6 +175,13 @@ where
     violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Maximum number of events to queue before oldest are dropped.
     max_event_queue_size: usize,
+    /// Cumulative, always-on session metrics (see [`SpectatorSession::metrics`]).
+    metrics: SessionMetrics,
+    /// Whether an event-queue-overflow `Warning` has already been reported since
+    /// the last [`events`](SpectatorSession::events) drain. Rate-limits the
+    /// overflow violation to one per overflow episode; `metrics` keeps the full
+    /// history regardless.
+    event_discard_warned: bool,
     spectator_divergence: Option<SpectatorDivergenceState<T::Address>>,
     /// Host indices that will emit `Disconnected` during the current poll.
     /// Cross-host comparisons must ignore these hosts so same-poll failover
@@ -321,6 +329,8 @@ impl<T: Config> SpectatorSession<T> {
             state_buffer,
             violation_observer,
             max_event_queue_size: event_queue_size,
+            metrics: SessionMetrics::new(),
+            event_discard_warned: false,
             spectator_divergence: None,
             disconnecting_hosts: Vec::new(),
         })
@@ -574,7 +584,25 @@ impl<T: Config> SpectatorSession<T> {
     /// oldest events will be discarded.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
+        // Draining starts a new overflow episode: re-arm the rate-limited
+        // event-queue-overflow warning (see `trim_event_queue`).
+        self.event_discard_warned = false;
         EventDrain::from_drain(self.event_queue.drain(..))
+    }
+
+    /// Returns a snapshot of this spectator's cumulative [`SessionMetrics`].
+    ///
+    /// Counters are always-on, monotonic for the life of the session, and cheap
+    /// to read (the returned value is `Copy`). A non-zero
+    /// [`events_discarded_total`](SessionMetrics::events_discarded_total) means
+    /// the application is draining [`events`](Self::events) slower than they
+    /// arrive and has lost notifications.
+    ///
+    /// [`SessionMetrics`] is shared with [`P2PSession`](crate::P2PSession), so
+    /// per-kind categories a spectator never emits (for example
+    /// `wait_recommendation`) stay at zero here.
+    pub fn metrics(&self) -> SessionMetrics {
+        self.metrics
     }
 
     /// Returns a reference to the violation observer, if one was configured.
@@ -1292,9 +1320,38 @@ impl<T: Config> SpectatorSession<T> {
         self.trim_event_queue();
     }
 
+    /// Bounds the event queue to `max_event_queue_size`, dropping the oldest
+    /// events first.
+    ///
+    /// Overflow means the application is draining events slower than they
+    /// arrive; the dropped events are lost. This used to happen silently
+    /// (defect D9). Every drop is now recorded in [`SessionMetrics`] (total +
+    /// per-[`EventKind`](crate::metrics::EventKind)), and one rate-limited
+    /// `Warning` violation is reported per overflow episode (the flag is cleared
+    /// on each [`events`](Self::events) drain) so the loss is observable via
+    /// [`metrics`](Self::metrics) and any registered violation observer without
+    /// flooding on a churn burst.
     fn trim_event_queue(&mut self) {
+        let mut discarded = 0u64;
         while self.event_queue.len() > self.max_event_queue_size {
-            self.event_queue.pop_front();
+            if let Some(dropped) = self.event_queue.pop_front() {
+                self.metrics.record_event_discard(dropped.kind());
+                discarded += 1;
+            } else {
+                break;
+            }
+        }
+        if discarded > 0 && !self.event_discard_warned {
+            self.event_discard_warned = true;
+            report_violation_to!(
+                &self.violation_observer,
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "spectator event queue overflow: discarding undrained event(s) (queue cap {}); \
+                 drain events every poll or raise the event-queue size to avoid losing \
+                 notifications. See SessionMetrics::events_discarded_total for the running count",
+                self.max_event_queue_size
+            );
         }
     }
 
@@ -2433,6 +2490,136 @@ mod tests {
     fn spectator_session_creates_successfully() {
         let session = create_test_spectator_session();
         assert!(session.is_some());
+    }
+
+    /// Regression for defect D9 (PLAN.md §2) on the **spectator** session: its
+    /// event-queue trim used to discard undrained events silently, just like
+    /// the P2P session. The overflow now increments [`SessionMetrics`] (total +
+    /// per-[`EventKind`](crate::metrics::EventKind)) and reports a single
+    /// rate-limited `Warning` to the configured violation observer.
+    #[test]
+    fn spectator_event_queue_overflow_records_discard_telemetry() {
+        use crate::metrics::EventKind;
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_event_queue_size(10)
+            .unwrap()
+            .with_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>)
+            .start_spectator_session(test_addr(7100), DummySocket)
+            .expect("spectator session builds");
+
+        assert_eq!(session.metrics().events_discarded_total, 0);
+
+        let addr = test_addr(9000);
+        // Canary at the front: a safety-critical Disconnected.
+        session
+            .event_queue
+            .push_back(FortressEvent::Disconnected { addr });
+        // Push past the cap with benign events so the canary overflows out.
+        for _ in 0..session.max_event_queue_size {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr });
+        }
+        session.trim_event_queue();
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "queue must be trimmed to its cap"
+        );
+        let metrics = session.metrics();
+        assert!(
+            metrics.events_discarded_total >= 1,
+            "overflow must count discarded events; got {}",
+            metrics.events_discarded_total
+        );
+        assert_eq!(
+            metrics
+                .events_discarded_by_kind
+                .get(EventKind::Disconnected),
+            1,
+            "the safety-critical Disconnected canary must be attributed to its kind"
+        );
+        let violations = observer.violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.severity == ViolationSeverity::Warning
+                    && v.kind == ViolationKind::NetworkProtocol
+                    && v.message.contains("spectator event queue overflow")),
+            "expected a rate-limited spectator overflow Warning; observed: {violations:?}"
+        );
+    }
+
+    /// The spectator's overflow `Warning` is rate-limited per overflow episode
+    /// (mirror of the P2P contract): several trim passes within one drain gap
+    /// yield a single `Warning`, and `events()` re-arms it. The per-kind
+    /// counters keep incrementing regardless.
+    #[test]
+    fn spectator_event_queue_overflow_warning_is_rate_limited_per_drain_gap() {
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_event_queue_size(10)
+            .unwrap()
+            .with_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>)
+            .start_spectator_session(test_addr(7101), DummySocket)
+            .expect("spectator session builds");
+
+        let addr = test_addr(9001);
+        let overflow_warnings = |observer: &CollectingObserver| {
+            observer
+                .violations()
+                .iter()
+                .filter(|v| {
+                    v.severity == ViolationSeverity::Warning
+                        && v.kind == ViolationKind::NetworkProtocol
+                        && v.message.contains("spectator event queue overflow")
+                })
+                .count()
+        };
+
+        // First episode: several overflowing trim passes, no drain between them.
+        for _ in 0..5 {
+            for _ in 0..(session.max_event_queue_size + 1) {
+                session
+                    .event_queue
+                    .push_back(FortressEvent::NetworkResumed { addr });
+            }
+            session.trim_event_queue();
+        }
+        assert!(
+            session.metrics().events_discarded_total >= 5,
+            "the passes must discard repeatedly; got {}",
+            session.metrics().events_discarded_total
+        );
+        assert_eq!(
+            overflow_warnings(&observer),
+            1,
+            "many discards within one drain gap must yield a single Warning"
+        );
+
+        // Draining re-arms the rate limiter.
+        let _ = session.events();
+        for _ in 0..(session.max_event_queue_size + 1) {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr });
+        }
+        session.trim_event_queue();
+        assert_eq!(
+            overflow_warnings(&observer),
+            2,
+            "a fresh drain must re-arm the overflow Warning"
+        );
     }
 
     #[test]

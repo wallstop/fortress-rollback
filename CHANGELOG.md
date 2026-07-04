@@ -109,6 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exactly like a build-time reserved slot — this is the "previously gracefully-dropped" path above.
     Legacy `disconnect_player` (`Halt`-style) drops, and drops on a host that does not serve hot-joins, are
     not made re-joinable.
+- Always-on session metrics: `SessionMetrics` (a cheap, `Copy`, `serde::Serialize` snapshot of cumulative
+  counters), exposed via `P2PSession::metrics()` and `SpectatorSession::metrics()`. Counters are plain
+  integers updated inline on the paths they measure — no timers, no allocation, no `Instant` — so reads are
+  deterministic and WASM-safe. The first surface is **event-queue-overflow accounting**:
+  `SessionMetrics::events_discarded_total` counts events dropped because the application drained the bounded
+  event queue slower than events arrived, and `events_discarded_by_kind` (an `EventKindCounts`) breaks that
+  total down per category so a lost safety-critical notification (a `Disconnected` or `DesyncDetected`) is
+  visible rather than silent. Supporting types: `EventKind` (a payload-free mirror of `FortressEvent`'s
+  variants, with `as_str()`, `ALL`, and `COUNT`) plus `FortressEvent::kind()` to obtain one, and — under the
+  `json` feature — `SessionMetrics::to_json()` / `to_json_pretty()` (the per-kind breakdown serializes as a
+  self-describing snake_case-keyed map). `SessionMetrics` is `#[non_exhaustive]`, so later releases can add
+  counters without a breaking change.
 
 ### Changed
 
@@ -276,6 +288,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framing as the existing protocol messages). Byzantine peers are out of scope. The existing
   defense-in-depth — the prediction-window rollback clamp, the sparse earlier-checkpoint search, and the
   disconnect-rollback checksum invalidation/deferral — is unchanged and now mostly dormant.
+- **Pre-existing:** Event-queue overflow no longer discards events **silently**. When the bounded event
+  queue exceeds its configured size the session still drops the oldest events (unchanged retention — that
+  policy is revisited separately), but each drop is now recorded in `SessionMetrics` (see *Added*) and a
+  rate-limited `Warning`/`NetworkProtocol` violation is reported once per overflow episode (re-armed each
+  time the application drains events), so a churn burst warns once rather than once per message. Previously the
+  oldest event — even a safety-critical `Disconnected` or `DesyncDetected` — was dropped with no violation
+  and no counter, so an application draining events slower than they arrive could miss a disconnect or a
+  desync with no way to detect the loss. Both `P2PSession` and `SpectatorSession` are covered. Drain events
+  every poll, or raise the event-queue size, to keep `events_discarded_total` at zero.
 
 ## [0.8.1] - 2026-05-16
 
