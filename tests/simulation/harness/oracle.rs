@@ -486,4 +486,37 @@ mod tests {
         );
         assert!(verdict.failures.len() <= 64);
     }
+
+    /// The per-class cap must isolate failure *variants*: a flood of one variant
+    /// cannot evict a lone failure of another (the HD-1 "silent cap inside the
+    /// instrument" regression). This also pins that `push_failure` discriminates
+    /// by the failure's own `mem::discriminant`, not the always-equal
+    /// discriminant of a reference — one noisy variant filling the cap would
+    /// otherwise starve the rest.
+    #[test]
+    fn oracle_per_class_cap_preserves_rare_variants() {
+        let mut oracle = Oracle::new(2);
+        // Flood one variant far past the per-class cap (8).
+        for frame in 0..100 {
+            oracle.observe_desync_event(0, Frame::new(frame));
+        }
+        // A single failure of a different variant, pushed after the flood.
+        oracle.observe_confirmed_unavailable(1, 5, "must survive the flood");
+
+        let desyncs = oracle
+            .failures
+            .iter()
+            .filter(|f| matches!(f, OracleFailure::InbandDesyncDetected { .. }))
+            .count();
+        let unavailable = oracle
+            .failures
+            .iter()
+            .filter(|f| matches!(f, OracleFailure::ConfirmedInputUnavailable { .. }))
+            .count();
+        assert_eq!(desyncs, 8, "noisy variant is capped at per_class_cap");
+        assert_eq!(
+            unavailable, 1,
+            "the rare variant is not evicted by the flood"
+        );
+    }
 }
