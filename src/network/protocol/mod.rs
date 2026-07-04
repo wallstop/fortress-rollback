@@ -1778,7 +1778,11 @@ impl<T: Config> UdpProtocol<T> {
 
         self.packets_sent += 1;
         self.last_send_time = self.now();
-        self.bytes_sent += std::mem::size_of_val(&msg);
+        // Wire-exact payload bytes (D1 fix): the previous `size_of_val(&msg)`
+        // measured the constant in-memory `Message` enum size, not what the
+        // socket serializes, so `kbps_sent` was fiction. `Message::encoded_len`
+        // matches `codec::encode(&msg).len()` exactly (property-tested).
+        self.bytes_sent += msg.encoded_len();
 
         // add the packet to the back of the send queue
         self.send_queue.push_back(msg);

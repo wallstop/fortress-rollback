@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** `NetworkStats::kbps_sent` now reflects the true serialized wire size of each
+  outbound packet instead of `std::mem::size_of_val(&Message)` — the constant in-memory size of the
+  `Message` enum, which is identical for every variant (dominated by the largest one) and independent
+  of the actual payload, since `Vec` contents live on the heap. The old accounting charged a bare
+  `KeepAlive` the same as a fully-loaded `Input`, so the reported send bandwidth was fiction (both
+  systematically wrong and payload-blind). Sending is now metered with a new alloc-free arithmetic
+  `Message::encoded_len()` that is byte-exact against the codec (a property test asserts
+  `encoded_len() == codec::encode(&msg).len()` for arbitrary messages of every variant). The
+  `+ UDP_HEADER_SIZE` per-packet estimate is unchanged; only the payload term is corrected.
 - **Pre-existing:** Closed a permanent whole-mesh confirmation deadlock at 3 or more players (the
   no-drop sibling of the 0.9.0 gossip-mute fix), found by the new deterministic whole-mesh
   simulation fleet on its first four-player run. Connect-status gossip rides only `Input` messages;

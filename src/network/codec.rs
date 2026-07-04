@@ -1092,6 +1092,252 @@ mod tests {
         }
     }
 
+    /// A `ConnectionStatus` with arbitrary field values (used by the wire-size
+    /// property strategies for both `Input` and `StateSnapshot`).
+    fn arb_connection_status() -> impl proptest::strategy::Strategy<Value = ConnectionStatus> {
+        use proptest::prelude::*;
+        (any::<bool>(), any::<i32>(), any::<u16>()).prop_map(|(disconnected, frame, epoch)| {
+            ConnectionStatus {
+                disconnected,
+                last_frame: Frame::new(frame),
+                epoch,
+            }
+        })
+    }
+
+    /// A strategy producing an arbitrary [`Message`] of any body variant with
+    /// arbitrary field values and (bounded) collection lengths, covering the
+    /// hot-join variants when the feature is enabled.
+    fn arb_message() -> impl proptest::strategy::Strategy<Value = Message> {
+        use proptest::collection::vec as pvec;
+        use proptest::prelude::*;
+        use proptest::strategy::{BoxedStrategy, Union};
+
+        // `bodies` is only pushed to under the hot-join feature; without it the
+        // `vec!` literal is the complete set.
+        #[cfg_attr(not(feature = "hot-join"), allow(unused_mut))]
+        let mut bodies: Vec<BoxedStrategy<MessageBody>> = vec![
+            any::<u32>()
+                .prop_map(|random_request| MessageBody::SyncRequest(SyncRequest { random_request }))
+                .boxed(),
+            any::<u32>()
+                .prop_map(|random_reply| MessageBody::SyncReply(SyncReply { random_reply }))
+                .boxed(),
+            (
+                pvec(arb_connection_status(), 0..8),
+                any::<bool>(),
+                any::<i32>(),
+                any::<i32>(),
+                pvec(any::<u8>(), 0..64),
+            )
+                .prop_map(
+                    |(peer_connect_status, disconnect_requested, start, ack, bytes)| {
+                        MessageBody::Input(Input {
+                            peer_connect_status,
+                            disconnect_requested,
+                            start_frame: Frame::new(start),
+                            ack_frame: Frame::new(ack),
+                            bytes,
+                        })
+                    },
+                )
+                .boxed(),
+            any::<i32>()
+                .prop_map(|f| {
+                    MessageBody::InputAck(InputAck {
+                        ack_frame: Frame::new(f),
+                    })
+                })
+                .boxed(),
+            (any::<i16>(), any::<u128>())
+                .prop_map(|(frame_advantage, ping)| {
+                    MessageBody::QualityReport(QualityReport {
+                        frame_advantage,
+                        ping,
+                    })
+                })
+                .boxed(),
+            any::<u128>()
+                .prop_map(|pong| MessageBody::QualityReply(QualityReply { pong }))
+                .boxed(),
+            (any::<u128>(), any::<i32>())
+                .prop_map(|(checksum, f)| {
+                    MessageBody::ChecksumReport(ChecksumReport {
+                        checksum,
+                        frame: Frame::new(f),
+                    })
+                })
+                .boxed(),
+            Just(MessageBody::KeepAlive).boxed(),
+            any::<u32>()
+                .prop_map(|round_seq| MessageBody::FloorRequest(FloorRequest { round_seq }))
+                .boxed(),
+            (any::<u32>(), pvec(any::<i32>().prop_map(Frame::new), 0..8))
+                .prop_map(|(round_seq, floors)| {
+                    MessageBody::FloorReply(FloorReply { round_seq, floors })
+                })
+                .boxed(),
+        ];
+
+        #[cfg(feature = "hot-join")]
+        {
+            use crate::network::messages::{
+                JoinAborted, JoinCommitted, JoinRequest, ReactivateSlot, ReactivateSlotAck,
+                StateSnapshot, StateSnapshotAck,
+            };
+            bodies.push(
+                any::<usize>()
+                    .prop_map(|player_handle| {
+                        MessageBody::JoinRequest(JoinRequest { player_handle })
+                    })
+                    .boxed(),
+            );
+            bodies.push(
+                (
+                    any::<i32>(),
+                    any::<usize>(),
+                    pvec(any::<u8>(), 0..64),
+                    pvec(any::<u8>(), 0..32),
+                    pvec(arb_connection_status(), 0..8),
+                    proptest::option::of(any::<u128>()),
+                )
+                    .prop_map(
+                        |(
+                            f,
+                            num_players,
+                            state_bytes,
+                            bridge_inputs,
+                            bridge_statuses,
+                            checksum,
+                        )| {
+                            MessageBody::StateSnapshot(StateSnapshot {
+                                frame: Frame::new(f),
+                                num_players,
+                                state_bytes,
+                                bridge_inputs,
+                                bridge_statuses,
+                                checksum,
+                            })
+                        },
+                    )
+                    .boxed(),
+            );
+            bodies.push(
+                any::<i32>()
+                    .prop_map(|f| {
+                        MessageBody::StateSnapshotAck(StateSnapshotAck {
+                            frame: Frame::new(f),
+                        })
+                    })
+                    .boxed(),
+            );
+            bodies.push(
+                (any::<usize>(), any::<i32>())
+                    .prop_map(|(handle, f)| {
+                        MessageBody::ReactivateSlot(ReactivateSlot {
+                            handle,
+                            frame: Frame::new(f),
+                        })
+                    })
+                    .boxed(),
+            );
+            bodies.push(
+                (any::<usize>(), any::<i32>())
+                    .prop_map(|(handle, f)| {
+                        MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                            handle,
+                            frame: Frame::new(f),
+                        })
+                    })
+                    .boxed(),
+            );
+            bodies.push(
+                (any::<usize>(), any::<i32>())
+                    .prop_map(|(handle, f)| {
+                        MessageBody::JoinCommitted(JoinCommitted {
+                            handle,
+                            frame: Frame::new(f),
+                        })
+                    })
+                    .boxed(),
+            );
+            bodies.push(
+                (any::<usize>(), any::<i32>())
+                    .prop_map(|(handle, f)| {
+                        MessageBody::JoinAborted(JoinAborted {
+                            handle,
+                            frame: Frame::new(f),
+                        })
+                    })
+                    .boxed(),
+            );
+        }
+
+        (any::<u16>(), Union::new(bodies)).prop_map(|(magic, body)| Message {
+            header: MessageHeader { magic },
+            body,
+        })
+    }
+
+    proptest::proptest! {
+        /// The D1 regression artifact: `Message::encoded_len` is arithmetic and
+        /// alloc-free, so it can silently drift from the real wire format if a
+        /// field width or the codec configuration ever changes. This asserts it
+        /// equals the exact serialized byte count for arbitrary messages of every
+        /// variant — the property that makes it a trustworthy bandwidth meter.
+        #[test]
+        fn encoded_len_matches_exact_wire_bytes(msg in arb_message()) {
+            let encoded = encode(&msg).expect("arbitrary message must encode");
+            proptest::prop_assert_eq!(
+                msg.encoded_len(),
+                encoded.len(),
+                "encoded_len diverged from wire bytes for {:?}",
+                msg
+            );
+        }
+    }
+
+    /// Documents why D1 was a real defect: the old accounting charged
+    /// `std::mem::size_of_val(&msg)` — the constant in-memory `Message` size,
+    /// which is identical for a bare `KeepAlive` and a fully-loaded `Input`
+    /// because `Vec` payloads live on the heap. Wire size differs by hundreds of
+    /// bytes; `encoded_len` reports the truth.
+    #[test]
+    fn size_of_val_is_constant_while_wire_size_is_not_d1() {
+        let tiny = Message {
+            header: MessageHeader { magic: 0 },
+            body: MessageBody::KeepAlive,
+        };
+        let heavy = Message {
+            header: MessageHeader { magic: 0 },
+            body: MessageBody::Input(Input {
+                peer_connect_status: vec![ConnectionStatus::default(); 16],
+                disconnect_requested: false,
+                start_frame: Frame::new(10_000),
+                ack_frame: Frame::new(9_999),
+                bytes: vec![0xAB; 128],
+            }),
+        };
+
+        // The old metric: identical for both, regardless of payload.
+        assert_eq!(
+            std::mem::size_of_val(&tiny),
+            std::mem::size_of_val(&heavy),
+            "in-memory size is payload-independent — the D1 fiction"
+        );
+
+        // The truth: wire footprints differ by hundreds of bytes, and
+        // `encoded_len` matches the serialized length exactly for each.
+        assert_eq!(tiny.encoded_len(), encode(&tiny).unwrap().len());
+        assert_eq!(heavy.encoded_len(), encode(&heavy).unwrap().len());
+        assert!(
+            heavy.encoded_len() > tiny.encoded_len() + 200,
+            "loaded Input must dwarf KeepAlive on the wire ({} vs {})",
+            heavy.encoded_len(),
+            tiny.encoded_len()
+        );
+    }
+
     #[test]
     fn decode_message_roundtrips_input_without_generic_vec_decode() {
         let original = Message {

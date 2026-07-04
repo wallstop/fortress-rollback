@@ -37,6 +37,14 @@ pub struct ConnectionStatus {
     pub epoch: u16,
 }
 
+impl ConnectionStatus {
+    /// Exact number of bytes a `ConnectionStatus` serializes to under the crate's
+    /// bincode configuration (little-endian, fixed-int): `disconnected` (`bool`, 1) +
+    /// `last_frame` ([`Frame`] = `i32`, 4) + `epoch` (`u16`, 2). Kept honest by
+    /// [`Message::encoded_len`]'s wire-exactness property test.
+    pub(crate) const WIRE_LEN: usize = 1 + 4 + 2;
+}
+
 impl Default for ConnectionStatus {
     fn default() -> Self {
         Self {
@@ -392,6 +400,91 @@ pub(crate) enum MessageBody {
 pub struct Message {
     pub(crate) header: MessageHeader,
     pub(crate) body: MessageBody,
+}
+
+impl MessageBody {
+    /// The exact number of bytes this body serializes to under the crate's bincode
+    /// configuration (little-endian, fixed-int), computed arithmetically without
+    /// allocating or serializing.
+    ///
+    /// Wire-exactness (`encoded_len == codec::encode(..).len()`) is asserted for
+    /// every variant by [`Message::encoded_len`]'s property test, so this stays
+    /// honest if the codec configuration or any field ever changes. The `match`
+    /// is wildcard-free: adding a `MessageBody` variant fails to compile until it
+    /// is accounted here.
+    pub(crate) fn encoded_len(&self) -> usize {
+        // Fixed bincode widths under `standard().with_little_endian().with_fixed_int_encoding()`.
+        const DISCRIMINANT: usize = 4; // enum variant tag (u32)
+        const FRAME: usize = 4; // Frame(i32)
+        const LEN_PREFIX: usize = 8; // collection length (usize -> u64 with fixed-int)
+
+        let payload = match self {
+            Self::SyncRequest(_) => 4, // random_request: u32
+            Self::SyncReply(_) => 4,   // random_reply: u32
+            Self::Input(input) => {
+                LEN_PREFIX
+                    + input.peer_connect_status.len() * ConnectionStatus::WIRE_LEN
+                    + 1 // disconnect_requested: bool
+                    + FRAME // start_frame
+                    + FRAME // ack_frame
+                    + LEN_PREFIX
+                    + input.bytes.len() // bytes: Vec<u8>
+            },
+            Self::InputAck(_) => FRAME,            // ack_frame
+            Self::QualityReport(_) => 2 + 16,      // frame_advantage: i16, ping: u128
+            Self::QualityReply(_) => 16,           // pong: u128
+            Self::ChecksumReport(_) => 16 + FRAME, // checksum: u128, frame
+            Self::KeepAlive => 0,
+            Self::FloorRequest(_) => 4, // round_seq: u32
+            Self::FloorReply(reply) => {
+                4 // round_seq: u32
+                    + LEN_PREFIX
+                    + reply.floors.len() * FRAME // floors: Vec<Frame>
+            },
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequest(_) => 8, // player_handle: usize
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshot(snapshot) => {
+                FRAME // frame
+                    + 8 // num_players: usize
+                    + LEN_PREFIX
+                    + snapshot.state_bytes.len()
+                    + LEN_PREFIX
+                    + snapshot.bridge_inputs.len()
+                    + LEN_PREFIX
+                    + snapshot.bridge_statuses.len() * ConnectionStatus::WIRE_LEN
+                    + 1 // Option tag
+                    + snapshot.checksum.map_or(0, |_| 16) // Some(u128)
+            },
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshotAck(_) => FRAME, // frame
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlot(_) => 8 + FRAME, // handle: usize, frame
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlotAck(_) => 8 + FRAME, // handle: usize, frame
+            #[cfg(feature = "hot-join")]
+            Self::JoinCommitted(_) => 8 + FRAME, // handle: usize, frame
+            #[cfg(feature = "hot-join")]
+            Self::JoinAborted(_) => 8 + FRAME, // handle: usize, frame
+        };
+
+        DISCRIMINANT + payload
+    }
+}
+
+impl Message {
+    /// The exact number of bytes this message serializes to on the wire under the
+    /// crate's bincode configuration: the [`MessageHeader`] (`magic`: `u16`, 2
+    /// bytes) plus the [`MessageBody`] ([`MessageBody::encoded_len`]).
+    ///
+    /// This is the true payload size a [`NonBlockingSocket`](crate::NonBlockingSocket)
+    /// transmits, used for bandwidth accounting. It is computed arithmetically
+    /// (alloc-free) and kept wire-exact by a property test against
+    /// [`codec::encode`](crate::network::codec::encode).
+    pub(crate) fn encoded_len(&self) -> usize {
+        const HEADER: usize = 2; // MessageHeader { magic: u16 }
+        HEADER + self.body.encoded_len()
+    }
 }
 
 #[cfg(test)]
