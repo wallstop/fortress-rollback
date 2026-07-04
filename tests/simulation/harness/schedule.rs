@@ -225,6 +225,17 @@ pub fn generate(seed: u64, config: SimConfig) -> Schedule {
         "simulation supports 2..=16 players (got {})",
         config.n_players
     );
+    // The schedule always appends a `HealAll` at `heal_at` followed by a drain
+    // window, and the run loop is `0..steps`. With fewer than 2 steps `heal_at`
+    // saturates to 1 (or the loop is empty), stranding the heal at a step that
+    // never runs and violating the heal-before-end invariant. Guard it like the
+    // player bound; real configs use hundreds of steps (smoke default 600).
+    assert!(
+        config.steps >= 2,
+        "simulation needs at least 2 steps so the appended HealAll lands inside \
+         the run (got {})",
+        config.steps
+    );
     // Domain-separated generator stream; link noise gets its own stream so
     // shrinking events never perturbs background rolls.
     let mut rng = Pcg32::seed_from_u64(seed ^ 0x5EED_5EED_0000_0001);
@@ -407,6 +418,39 @@ mod tests {
                 "no fault events may fire inside the drain window (seed={seed})"
             );
         }
+    }
+
+    /// The heal-before-end invariant must hold at the minimum allowed step
+    /// count, not just for the smoke default — the boundary the `steps >= 2`
+    /// guard protects.
+    #[test]
+    fn generate_heals_before_end_at_minimum_steps() {
+        let schedule = generate(
+            7,
+            SimConfig {
+                steps: 2,
+                ..SimConfig::smoke(2)
+            },
+        );
+        assert!(schedule.heal_at < schedule.config.steps);
+        assert!(schedule
+            .events
+            .iter()
+            .any(|(step, ev)| *step == schedule.heal_at && matches!(ev, ScheduleEvent::HealAll)));
+    }
+
+    /// Too few steps would strand `HealAll` outside the `0..steps` run — the
+    /// guard rejects it rather than emitting an inconsistent schedule.
+    #[test]
+    #[should_panic(expected = "at least 2 steps")]
+    fn generate_rejects_degenerate_step_count() {
+        let _ = generate(
+            0,
+            SimConfig {
+                steps: 1,
+                ..SimConfig::smoke(2)
+            },
+        );
     }
 
     #[test]
