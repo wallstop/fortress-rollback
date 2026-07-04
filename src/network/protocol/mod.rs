@@ -220,8 +220,11 @@ where
     /// Using Instant (monotonic clock) instead of wall-clock time ensures reliable
     /// duration measurements even if the system clock is adjusted.
     stats_start_time: Instant,
-    packets_sent: usize,
-    bytes_sent: usize,
+    // `u64` (not `usize`) so these lifetime counters cannot wrap on 32-bit
+    // targets (notably `wasm32`): a `usize` `bytes_sent` would overflow after
+    // ~4 GiB of cumulative traffic and corrupt `network_stats()`.
+    packets_sent: u64,
+    bytes_sent: u64,
     round_trip_time: u128,
     /// Origin instant for quality-report `ping` timestamps, captured from the
     /// protocol clock at endpoint construction. The peer echoes `ping` back
@@ -823,17 +826,20 @@ impl<T: Config> UdpProtocol<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let total_bytes_sent = self.bytes_sent + (self.packets_sent * UDP_HEADER_SIZE);
+        // All-`u64` so the sum cannot overflow on 32-bit targets before the rate
+        // math runs (`bytes_sent`/`packets_sent` are already `u64`).
+        let total_bytes_sent = self
+            .bytes_sent
+            .saturating_add(self.packets_sent.saturating_mul(UDP_HEADER_SIZE as u64));
         // `kbps_sent` is documented and named as **kilobits per second**. The
         // previous `bytes / seconds / 1024` produced kibibytes/sec — wrong by the
         // 8× byte<->bit factor against the field's own unit. Correct it to bits
         // (x8) over elapsed seconds, per SI kilo (/1000, the standard base for
         // network bit-rates). Now that D1 makes `bytes_sent` wire-exact this rate
-        // is finally meaningful. `u64` with a saturating multiply avoids overflow
-        // on long sessions; the divisions then bring it back into `usize` range.
-        let kbps_sent =
-            usize::try_from((total_bytes_sent as u64).saturating_mul(8) / seconds / 1000)
-                .unwrap_or(usize::MAX);
+        // is finally meaningful. Saturating multiply avoids overflow on long
+        // sessions; the divisions then bring it back into `usize` range.
+        let kbps_sent = usize::try_from(total_bytes_sent.saturating_mul(8) / seconds / 1000)
+            .unwrap_or(usize::MAX);
 
         Ok(NetworkStats {
             ping: self.round_trip_time,
@@ -1784,13 +1790,15 @@ impl<T: Config> UdpProtocol<T> {
         let header = MessageHeader { magic: self.magic };
         let msg = Message { header, body };
 
-        self.packets_sent += 1;
+        self.packets_sent = self.packets_sent.saturating_add(1);
         self.last_send_time = self.now();
         // Wire-exact payload bytes (D1 fix): the previous `size_of_val(&msg)`
         // measured the constant in-memory `Message` enum size, not what the
         // socket serializes, so `kbps_sent` was fiction. `Message::encoded_len`
         // matches `codec::encode(&msg).len()` exactly (property-tested).
-        self.bytes_sent += msg.encoded_len();
+        // Saturating so the lifetime counter degrades to a ceiling rather than
+        // wrapping (or panicking under overflow-checks) on any target.
+        self.bytes_sent = self.bytes_sent.saturating_add(msg.encoded_len() as u64);
 
         // add the packet to the back of the send queue
         self.send_queue.push_back(msg);
