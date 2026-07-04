@@ -14,52 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Pre-existing:** `NetworkStats::kbps_sent` now reflects the true serialized wire size of each
-  outbound packet instead of `std::mem::size_of_val(&Message)` — the constant in-memory size of the
-  `Message` enum, which is identical for every variant (dominated by the largest one) and independent
-  of the actual payload, since `Vec` contents live on the heap. The old accounting charged a bare
-  `KeepAlive` the same as a fully-loaded `Input`, so the reported send bandwidth was fiction (both
-  systematically wrong and payload-blind). Sending is now metered with a new alloc-free arithmetic
-  `Message::encoded_len()` that is byte-exact against the codec (a property test asserts
-  `encoded_len() == codec::encode(&msg).len()` for arbitrary messages of every variant). The
-  `+ UDP_HEADER_SIZE` per-packet estimate is unchanged; only the payload term is corrected.
-- **Pre-existing:** Closed a permanent whole-mesh confirmation deadlock at 3 or more players (the
-  no-drop sibling of the 0.9.0 gossip-mute fix), found by the new deterministic whole-mesh
-  simulation fleet on its first four-player run. Connect-status gossip rides only `Input` messages;
-  if a peer sent its entire initial prediction window's inputs before hearing a third peer's first
-  input (transient startup loss, jitter, or reordering is enough), its last gossip left that slot's
-  view at `Frame::NULL` in every receiver's cache. Once every peer exhausted its prediction window
-  (`current - confirmed >= max_prediction`) with fully-acked send queues, no peer ever sent another
-  `Input` — `KeepAlive`, `QualityReport`, and `InputAck` carry no connect status — so the stale
-  caches never refreshed and the whole mesh deadlocked **permanently** at `confirmed_frame() ==
-  Frame::NULL` on a perfectly healed network, with every session `Running` and no error or event
-  (an application-visible infinite freeze). The connect-status nudge introduced in 0.9.0 closed
-  exactly this gossip-mute mechanism but only while a locally-detected drop awaited mesh agreement;
-  it now also arms when **both** legs of the deadlock signature hold: the prediction window is
-  exhausted AND the mesh-gossip fold pins confirmation strictly below what locally-received inputs
-  alone would allow (gossip, not receipts, is the binding constraint). While armed, each input-idle
-  endpoint re-sends one status-bearing duplicate input per keepalive interval (the existing nudge
-  wire shape — receivers already treat it as a stale retransmission; no wire-format change), so
-  every peer's contribution to the others' folds catches up to its real receipts and confirmation
-  releases. A healthy mesh's normal one-gossip-delivery pacing lag never exhausts the prediction
-  window, receipt-bound stalls (a peer's inputs genuinely missing) still belong exclusively to
-  pending-output retransmission, and reserved hot-join endpoints are never nudged (a duplicate
-  `Input` injected into the join handshake interferes with the joiner's deferred input processing),
-  so actively-advancing sessions' packet streams are unchanged. Two-player sessions were never
-  affected (the fold collapses to the local receipt).
-- **Pre-existing:** `NetworkStats::ping` (the quality-report round-trip time) is now measured on the
-  protocol's monotonic clock — honoring an injected `ProtocolConfig::clock` — instead of the system
-  wall clock. Wall-clock adjustments (NTP steps, VM snapshot restores) can no longer corrupt the
-  reported RTT, and sessions driven by a virtual clock (deterministic tests and simulations) now
-  measure virtual network latency exactly and reproducibly instead of leaking wall-clock scheduling
-  noise. The previous behavior of silently skipping a quality report or RTT update while the system
-  clock was in an abnormal state is gone entirely (a monotonic elapsed reading cannot fail). The wire
-  format is unchanged — the peer echoes the timestamp verbatim, so mixed builds across this change
-  interoperate — and as a consequence `js-sys` is no longer a dependency on `wasm32` targets (its
-  only use was reading the wall clock for these timestamps).
-
 ## [0.9.0] - 2026-06-22
 
 ### Added
@@ -171,6 +125,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** `NetworkStats::kbps_sent` now reflects the true serialized wire size of each
+  outbound packet instead of `std::mem::size_of_val(&Message)` — the constant in-memory size of the
+  `Message` enum, which is identical for every variant (dominated by the largest one) and independent
+  of the actual payload, since `Vec` contents live on the heap. The old accounting charged a bare
+  `KeepAlive` the same as a fully-loaded `Input`, so the reported send bandwidth was fiction (both
+  systematically wrong and payload-blind). Sending is now metered with a new alloc-free arithmetic
+  `Message::encoded_len()` that is byte-exact against the codec (a property test asserts
+  `encoded_len() == codec::encode(&msg).len()` for arbitrary messages of every variant). The
+  `+ UDP_HEADER_SIZE` per-packet estimate is unchanged; only the payload term is corrected.
+- **Pre-existing:** Closed a permanent whole-mesh confirmation deadlock at 3 or more players (the
+  no-drop sibling of the 0.9.0 gossip-mute fix), found by the new deterministic whole-mesh
+  simulation fleet on its first four-player run. Connect-status gossip rides only `Input` messages;
+  if a peer sent its entire initial prediction window's inputs before hearing a third peer's first
+  input (transient startup loss, jitter, or reordering is enough), its last gossip left that slot's
+  view at `Frame::NULL` in every receiver's cache. Once every peer exhausted its prediction window
+  (`current - confirmed >= max_prediction`) with fully-acked send queues, no peer ever sent another
+  `Input` — `KeepAlive`, `QualityReport`, and `InputAck` carry no connect status — so the stale
+  caches never refreshed and the whole mesh deadlocked **permanently** at `confirmed_frame() ==
+  Frame::NULL` on a perfectly healed network, with every session `Running` and no error or event
+  (an application-visible infinite freeze). The connect-status nudge introduced in 0.9.0 closed
+  exactly this gossip-mute mechanism but only while a locally-detected drop awaited mesh agreement;
+  it now also arms when **both** legs of the deadlock signature hold: the prediction window is
+  exhausted AND the mesh-gossip fold pins confirmation strictly below what locally-received inputs
+  alone would allow (gossip, not receipts, is the binding constraint). While armed, each input-idle
+  endpoint re-sends one status-bearing duplicate input per keepalive interval (the existing nudge
+  wire shape — receivers already treat it as a stale retransmission; no wire-format change), so
+  every peer's contribution to the others' folds catches up to its real receipts and confirmation
+  releases. A healthy mesh's normal one-gossip-delivery pacing lag never exhausts the prediction
+  window, receipt-bound stalls (a peer's inputs genuinely missing) still belong exclusively to
+  pending-output retransmission, and reserved hot-join endpoints are never nudged (a duplicate
+  `Input` injected into the join handshake interferes with the joiner's deferred input processing),
+  so actively-advancing sessions' packet streams are unchanged. Two-player sessions were never
+  affected (the fold collapses to the local receipt).
+- **Pre-existing:** `NetworkStats::ping` (the quality-report round-trip time) is now measured on the
+  protocol's monotonic clock — honoring an injected `ProtocolConfig::clock` — instead of the system
+  wall clock. Wall-clock adjustments (NTP steps, VM snapshot restores) can no longer corrupt the
+  reported RTT, and sessions driven by a virtual clock (deterministic tests and simulations) now
+  measure virtual network latency exactly and reproducibly instead of leaking wall-clock scheduling
+  noise. The previous behavior of silently skipping a quality report or RTT update while the system
+  clock was in an abnormal state is gone entirely (a monotonic elapsed reading cannot fail). The wire
+  format is unchanged — the peer echoes the timestamp verbatim, so mixed builds across this change
+  interoperate — and as a consequence `js-sys` is no longer a dependency on `wasm32` targets (its
+  only use was reading the wall clock for these timestamps).
 - `SessionBuilder::with_violation_observer` now routes specification violations to the
   configured observer for **every** session type — `P2PSession`, `SyncTestSession`, and `SpectatorSession`.
   Previously `P2PSession` and `SyncTestSession` emitted every specification violation through the global
