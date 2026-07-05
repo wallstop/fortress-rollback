@@ -819,6 +819,106 @@ fn run_rejects_out_of_range_peer_index() {
     let _ = run(&schedule, &RunOptions::default());
 }
 
+/// Builds an input-delay-change schedule: a clean `n`-mesh in which peer 1
+/// raises its local input delay from the smoke default (1) to `delay` frames at
+/// step 100 — a mid-session *increase*, which gap-fills the newly delayed
+/// frames with replicated confirmed inputs and flushes them to every remote (a
+/// reconfiguration path a fixed-delay fleet never exercises). `None` yields the
+/// identical schedule without the change, the control the premise compares to.
+fn input_delay_change_schedule(n: usize, delay: Option<usize>) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: 600,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 400;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some(delay) = delay {
+        events.push((100, ScheduleEvent::SetInputDelay { peer: 1, delay }));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+/// M3 §6.1 lifecycle vocabulary — the mid-run input-delay change
+/// (`ScheduleEvent::SetInputDelay`). Raising a peer's input delay mid-session
+/// drives `P2PSession::set_input_delay`'s gap-fill/flush reconfiguration path
+/// (replicated confirmed inputs pushed to every remote, connect-status stamped,
+/// pending output flushed) — untouched by a fixed-delay fleet. The change is
+/// local to one peer, so the mesh must still agree on every confirmed frame and
+/// keep progressing.
+///
+/// The premise is asserted directly: the same clean schedule *with* and
+/// *without* the delay change must produce different traces (the reconfiguration
+/// demonstrably took effect, not a silent no-op), while both pass the oracle;
+/// two changed runs fold the identical trace (determinism).
+#[test]
+fn input_delay_increase_keeps_mesh_consistent() {
+    for n in [2usize, 4] {
+        let base = input_delay_change_schedule(n, None);
+        let changed = input_delay_change_schedule(n, Some(3));
+
+        let base_report = run(&base, &RunOptions::default());
+        base_report.expect_pass(&base);
+        let changed_report = run(&changed, &RunOptions::default());
+        changed_report.expect_pass(&changed);
+
+        let changed_again = run(&changed, &RunOptions::default());
+        assert_eq!(
+            changed_report.trace_hash, changed_again.trace_hash,
+            "a SetInputDelay schedule must reproduce its exact trace (n={n})"
+        );
+        assert_ne!(
+            base_report.trace_hash, changed_report.trace_hash,
+            "the SetInputDelay must change execution — a silent no-op would \
+             leave the trace identical (n={n})"
+        );
+    }
+}
+
+/// Negative control for the input-delay change: a real state divergence seeded
+/// into a survivor must still be caught while a peer reconfigures its input
+/// delay — the reconfiguration path must not blind the oracle.
+#[test]
+fn oracle_catches_seeded_divergence_under_input_delay_change() {
+    let schedule = input_delay_change_schedule(4, Some(3));
+    let options = RunOptions {
+        corrupt_state_from: Some((0, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded divergence must fail the run even under an input-delay change"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the oracle's state comparison must keep its teeth under a delay change: {:?}",
+        report.verdict.failures
+    );
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]
