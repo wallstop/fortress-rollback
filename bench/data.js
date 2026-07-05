@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783246477447,
+  "lastUpdate": 1783275579751,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "df78c65f3a2cd8b14578803f12e0ef3c60c85d61",
-          "message": "chore(deps): bump clap from 4.5.58 to 4.5.59 (#94)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.58 to 4.5.59.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.5.59</h2>\n<h2>[4.5.59] - 2026-02-16</h2>\n<h3>Fixes</h3>\n<ul>\n<li><code>Command::ignore_errors</code> no longer masks help/version on\nsubcommands</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.5.59] - 2026-02-16</h2>\n<h3>Fixes</h3>\n<ul>\n<li><code>Command::ignore_errors</code> no longer masks help/version on\nsubcommands</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/0bb3ad7e12e729be9f152391558689ac4fdd31ec\"><code>0bb3ad7</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/5cb5ce3873a882ba2a7d619864202eadef21fffa\"><code>5cb5ce3</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/245c8ba75a481250a48170f1add11532a7b7fd33\"><code>245c8ba</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6149\">#6149</a>\nfrom epage/wrap</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/dd17a418a9e6665c98ff6e0ba2a039fd1921988e\"><code>dd17a41</code></a>\nfix(help): Correctly calculate wrap points with ANSI escape codes</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/2cc4e350b9ea8955a9cf229405407426921e7871\"><code>2cc4e35</code></a>\ntest(ui): Avoid override term width</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/93e3559b1e4c8c81377f3598f7249b7708f4c379\"><code>93e3559</code></a>\nrefactor(help): Clarify that we're carrying over indentation</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/b1c46e633c04f5cb0d819b15f25c1fde1a6e42c4\"><code>b1c46e6</code></a>\nrefactor(help): Clarify var name</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/03b9b38df059c1a9a529f295e038f81de295627a\"><code>03b9b38</code></a>\ntest(help): Show styled wrapping behavior</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c9a39a534c3e95926be272765bec48a80e5ea9e7\"><code>c9a39a5</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6146\">#6146</a>\nfrom clap-rs/renovate/actions-checkout-5.x</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/58599fb7bf865f8ec0a7a021dea8111f5dffe6d2\"><code>58599fb</code></a>\nchore(deps): Update actions/checkout action to v5</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.58...clap_complete-v4.5.59\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.58&new-version=4.5.59)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-16T20:27:21-08:00",
-          "tree_id": "2167b2ba865a8677a9d901d5714393301b4a5849",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/df78c65f3a2cd8b14578803f12e0ef3c60c85d61"
-        },
-        "date": 1771302733623,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 159,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 432,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 689,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1000,
-            "range": "± 23",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 104806,
-            "range": "± 670",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27421,
-            "range": "± 966",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 77",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1602,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "236e1f506ac134b72e8fb01dbf9297a77cb2cce2",
+          "message": "Hardening M3 §6.1: PeerStall lifecycle fault (peer hang) in the DST harness (#198)\n\nFirst M3 §6.1 lifecycle-vocabulary fault: `ScheduleEvent::PeerStall` freezes a peer for a bounded window (local hang — GC pause / frame-time spike), distinct from the existing network-only faults. Test-infra only (no src/ or public-crate API, no changelog).\n\n- schedule.rs: new PeerStall variant; schema bump 1->2; random generator untouched so every existing seed (incl. the D8 regression) stays bit-identical.\n- harness/mod.rs: per-peer stall deadline + frozen-but-folded trace; reusable mid-run confirmed-frame probe; up-front schedule-index + probe-range validation so malformed corpus schedules fail loudly.\n- fleet.rs: freeze->recover arc (measured clean [244,245] vs frozen [195,195]); oracle-teeth-under-hitch negative control; malformed-schedule should_panic.\n\nReviewed by an adversarial sub-agent (verdict: solid) + GitHub Copilot (2 rounds, all threads resolved) + Cursor Bugbot (Low Risk).",
+          "timestamp": "2026-07-05T11:14:55-07:00",
+          "tree_id": "d85b1e079b7c71dcf8d23934d3cfd0a344be5948",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/236e1f506ac134b72e8fb01dbf9297a77cb2cce2"
+        },
+        "date": 1783275579302,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 110,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 159,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 461,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 700,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1033,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 123352,
+            "range": "± 1962",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45166,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 102",
             "unit": "ns/iter"
           },
           {
