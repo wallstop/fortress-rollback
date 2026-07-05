@@ -366,6 +366,10 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 *peer < n,
                 "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
             ),
+            ScheduleEvent::PeerKill { peer } => assert!(
+                *peer < n,
+                "PeerKill peer {peer} out of range for a {n}-peer mesh"
+            ),
             ScheduleEvent::HealAll => {},
         }
     }
@@ -444,6 +448,9 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
     // sets it to `step + steps`.
     let mut stalled_until: Vec<u32> = vec![0; n];
+    // Peers killed by a `PeerKill` event: no longer driven, detached from the
+    // fabric, and excluded from the oracle's end-of-run checks.
+    let mut dead: Vec<bool> = vec![false; n];
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
@@ -477,21 +484,32 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                         oracle.observe_advance_error(*peer, step, &error);
                     }
                 },
+                ScheduleEvent::PeerKill { peer } => {
+                    // Crash the peer: stop driving it, discard its inbox (so
+                    // further traffic to it is dropped under the default
+                    // `UnattachedPolicy::Drop`), and exclude it from the oracle.
+                    // Its remaining mesh survives per the configured
+                    // `DisconnectBehavior`. Idempotent.
+                    dead[*peer] = true;
+                    net.detach(addrs[*peer]);
+                    oracle.mark_peer_dead(*peer);
+                },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
             next_event += 1;
         }
 
-        // Drive every peer in fixed order. A peer inside its stall window is
-        // frozen (a local hang): it does not poll, drain events, add input, or
-        // advance, and puts nothing on the wire until it resumes. Its state is
-        // still folded into the trace below so the digest stays uniform and the
-        // stall reproduces bit-for-bit.
+        // Drive every peer in fixed order. A peer that is stalled (a local hang:
+        // frozen for its stall window) or dead (crashed by `PeerKill`) is not
+        // driven — it does not poll, drain events, add input, or advance, and
+        // puts nothing on the wire. A stalled peer resumes when its window ends;
+        // a dead peer never does. Either way its state is still folded into the
+        // trace below so the digest stays uniform and reproduces bit-for-bit.
         for (i, slot) in peers.iter_mut().enumerate() {
             // Confirmed frame after this step's drive (or the frozen value for a
-            // stalled peer): read exactly once and reused for both the trace
-            // fold and any probe snapshot.
-            let confirmed = if step >= stalled_until[i] {
+            // stalled/dead peer): read exactly once and reused for both the
+            // trace fold and any probe snapshot.
+            let confirmed = if !dead[i] && step >= stalled_until[i] {
                 slot.session.poll_remote_clients();
 
                 let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
@@ -534,7 +552,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 }
                 confirmed
             } else {
-                // Frozen peer (local hang): no poll/advance, no wire traffic.
+                // Stalled (local hang) or dead (crashed): no poll/advance, no
+                // wire traffic — just its last confirmed frame, frozen.
                 slot.session.confirmed_frame()
             };
 

@@ -118,6 +118,13 @@ pub struct Oracle {
     /// anti-pattern inside the oracle itself). Every class is now
     /// guaranteed representation.
     per_class_cap: usize,
+    /// Peers that were killed mid-run (`ScheduleEvent::PeerKill`). A crashed
+    /// peer is gone and no longer observable, so it is excluded from the
+    /// end-of-run checks: it cannot satisfy the `Running`/end-progress bar, and
+    /// its frozen confirmed frame must not drag the globally-confirmed prefix
+    /// below where the survivors actually agree. Pre-death observations already
+    /// entered the canonical stream and stand.
+    dead: Vec<bool>,
 }
 
 impl Oracle {
@@ -129,7 +136,21 @@ impl Oracle {
             failures: Vec::new(),
             failure_cap: 64,
             per_class_cap: 8,
+            dead: vec![false; n_players],
         }
+    }
+
+    /// Marks `peer` as killed (crashed): it is excluded from the end-of-run
+    /// checks in [`Self::finalize`]. Idempotent; out-of-range is a no-op.
+    pub fn mark_peer_dead(&mut self, peer: usize) {
+        if let Some(slot) = self.dead.get_mut(peer) {
+            *slot = true;
+        }
+    }
+
+    /// Whether `peer` was killed mid-run.
+    fn is_dead(&self, peer: usize) -> bool {
+        self.dead.get(peer).copied().unwrap_or(false)
     }
 
     fn push_failure(&mut self, failure: OracleFailure) {
@@ -229,8 +250,12 @@ impl Oracle {
         assert_eq!(end_confirmed.len(), self.n_players);
         assert_eq!(end_state.len(), self.n_players);
 
-        // (c-lite) end progress per peer.
+        // (c-lite) end progress per peer. Killed peers are excluded — a crashed
+        // peer cannot be `Running` and its frozen frame is not its own fault.
         for peer in 0..self.n_players {
+            if self.is_dead(peer) {
+                continue;
+            }
             let confirmed = end_confirmed
                 .get(peer)
                 .copied()
@@ -250,10 +275,14 @@ impl Oracle {
             }
         }
 
-        // (b) state agreement over the globally confirmed prefix.
+        // (b) state agreement over the globally confirmed prefix. The prefix is
+        // the minimum over *live* peers only — a killed peer's frozen confirmed
+        // frame must not shrink the window the survivors are checked across.
         let global_confirmed = end_confirmed
             .iter()
-            .map(|frame| frame.as_i32())
+            .enumerate()
+            .filter(|(peer, _)| !self.is_dead(*peer))
+            .map(|(_, frame)| frame.as_i32())
             .min()
             .unwrap_or(-1);
         // Recorded states are keyed by post-advance frame (frame N+1 holds
@@ -263,6 +292,9 @@ impl Oracle {
         // region.
         let mut canonical_states: BTreeMap<i32, (usize, StateStub)> = BTreeMap::new();
         for (peer, states) in recorded.iter().enumerate() {
+            if self.is_dead(peer) {
+                continue;
+            }
             for (&frame, &state) in states.range(..=global_confirmed) {
                 match canonical_states.get(&frame) {
                     None => {
@@ -417,6 +449,45 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A killed peer is excluded from the end-of-run checks: it cannot fail
+    /// end-progress (crashed, so never `Running`), while the *same* shortfall on
+    /// a live peer still fails — the alive-mask must exclude only the dead.
+    #[test]
+    fn oracle_excludes_killed_peer_from_end_checks() {
+        // Peer 1 is dead (stuck in Synchronizing); peers 0 and 2 are healthy.
+        let recorded = [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+        let confirmed = [Frame::new(500), Frame::new(3), Frame::new(500)];
+        let states = [
+            SessionState::Running,
+            SessionState::Synchronizing,
+            SessionState::Running,
+        ];
+
+        let mut killed = Oracle::new(3);
+        killed.mark_peer_dead(1);
+        let verdict = killed.finalize(&recorded, &confirmed, &states);
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
+            "a killed peer must not fail end-progress: {:?}",
+            verdict.failures
+        );
+
+        // Control: the identical shortfall on a *live* peer 1 does fail.
+        let live = Oracle::new(3);
+        let control = live.finalize(&recorded, &confirmed, &states);
+        assert!(
+            control
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
+            "a live peer with the same shortfall must fail: {:?}",
+            control.failures
+        );
     }
 
     /// Negative control: a desync event and an `Error`-severity violation each
