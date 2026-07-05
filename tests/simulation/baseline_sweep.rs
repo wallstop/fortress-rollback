@@ -64,8 +64,9 @@ impl CellParams {
     }
 
     /// A materialized [`Schedule`] with constant conditions: the cell's uniform
-    /// policy on every directed link, no fault events, and `heal_at` past the
-    /// end so no `HealAll` ever fires.
+    /// policy on every directed link and an empty event list (no fault events,
+    /// no `HealAll`). The `heal_at` field is present in the struct but inert —
+    /// it has no effect without a corresponding `HealAll` in `events`.
     fn schedule(self) -> Schedule {
         let config = SimConfig {
             n_players: self.n_players,
@@ -84,8 +85,9 @@ impl CellParams {
         Schedule {
             schema_version: SCHEDULE_SCHEMA_VERSION,
             seed: self.seed,
-            // Constant conditions ⇒ a single fault-roll stream drives loss/jitter.
-            link_seed: self.seed,
+            // Domain-separated from `seed` so link-noise rolls are an
+            // independent stream (same convention as `schedule::generate()`).
+            link_seed: self.seed ^ 0x1111_2222_3333_4444,
             config,
             initial_links,
             // No storyline events; heal_at is inert (no HealAll in `events`).
@@ -270,11 +272,9 @@ pub fn run_cell(params: CellParams) -> CellReport {
     } else {
         (total_lag_sum as f64) / (total_visual as f64)
     };
-    // Guard `n == 0` as well as the sibling rate helpers do (`sum_to_rate_per_sec`):
-    // `schedule()` builds the `Schedule` directly and so bypasses `generate`'s
-    // `n_players >= 2` assert, so a degenerate caller must not produce a
-    // `0.0 / 0.0 = NaN` (which would also break the determinism replay assert,
-    // since `NaN != NaN`).
+    // Guard `virtual_minutes <= 0.0` and `n == 0` for consistency with the
+    // sibling `sum_to_rate_per_sec` helper (which also guards zero players),
+    // keeping the rate well-defined even for degenerate inputs.
     #[allow(clippy::cast_precision_loss)]
     let stalls_per_min = if virtual_minutes <= 0.0 || n == 0 {
         0.0
