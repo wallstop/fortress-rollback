@@ -6,6 +6,11 @@
 //! the paths they measure — no timers, no allocation, no `Instant` — so reading
 //! them is deterministic and WASM-safe.
 //!
+//! [`PeerMetrics`] is the per-peer analogue, returned by
+//! [`P2PSession::peer_metrics`]: wire-exact byte and packet counters, a
+//! per-[`MessageKind`] breakdown of traffic in each direction, input-compression
+//! totals, and a few instantaneous connection gauges for one remote endpoint.
+//!
 //! The first surface exposed here is **event-queue overflow accounting**: when
 //! the bounded event queue discards an undrained [`FortressEvent`] the session
 //! records it in [`SessionMetrics::events_discarded_total`] and the per-category
@@ -14,6 +19,7 @@
 //! [`FortressEvent::DesyncDetected`] — is observable instead of silent.
 //!
 //! [`P2PSession::metrics`]: crate::P2PSession::metrics
+//! [`P2PSession::peer_metrics`]: crate::P2PSession::peer_metrics
 //! [`SpectatorSession::metrics`]: crate::SpectatorSession::metrics
 //! [`FortressEvent`]: crate::FortressEvent
 //! [`FortressEvent::Disconnected`]: crate::FortressEvent::Disconnected
@@ -543,6 +549,356 @@ impl SessionMetrics {
     }
 }
 
+/// The category of a protocol message, independent of its payload.
+///
+/// Mirrors the crate's internal wire-message variants one-to-one so per-peer
+/// traffic can be counted and labeled by kind — see
+/// [`PeerMetrics::messages_sent_by_kind`] and
+/// [`PeerMetrics::messages_received_by_kind`] — without exposing the internal
+/// message types.
+///
+/// The hot-join categories (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`,
+/// `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`) exist
+/// only when the `hot-join` feature is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    /// A synchronization request (part of the connection handshake).
+    SyncRequest,
+    /// A synchronization reply (part of the connection handshake).
+    SyncReply,
+    /// A player-input packet — the steady-state gameplay message.
+    Input,
+    /// An acknowledgement of received input.
+    InputAck,
+    /// A quality report (round-trip-time / frame-advantage probe).
+    QualityReport,
+    /// A quality reply — the pong answering a [`QualityReport`](Self::QualityReport).
+    QualityReply,
+    /// A confirmed-frame checksum report (desync detection).
+    ChecksumReport,
+    /// A keep-alive, sent when no other traffic is otherwise due.
+    KeepAlive,
+    /// A floor-round request (the double-failure-relay reorder fix).
+    FloorRequest,
+    /// A floor-round reply (the double-failure-relay reorder fix).
+    FloorReply,
+    /// A hot-join slot-occupancy request.
+    #[cfg(feature = "hot-join")]
+    JoinRequest,
+    /// A hot-join game-state snapshot.
+    #[cfg(feature = "hot-join")]
+    StateSnapshot,
+    /// A hot-join snapshot acknowledgement.
+    #[cfg(feature = "hot-join")]
+    StateSnapshotAck,
+    /// A hot-join slot-reactivation request.
+    #[cfg(feature = "hot-join")]
+    ReactivateSlot,
+    /// A hot-join slot-reactivation acknowledgement.
+    #[cfg(feature = "hot-join")]
+    ReactivateSlotAck,
+    /// A hot-join commit notification.
+    #[cfg(feature = "hot-join")]
+    JoinCommitted,
+    /// A hot-join abort notification.
+    #[cfg(feature = "hot-join")]
+    JoinAborted,
+}
+
+impl MessageKind {
+    /// The number of message categories.
+    ///
+    /// Varies with enabled features: seven additional categories exist when the
+    /// `hot-join` feature is on.
+    #[cfg(not(feature = "hot-join"))]
+    pub const COUNT: usize = 10;
+    /// The number of message categories.
+    ///
+    /// Varies with enabled features: seven additional categories exist when the
+    /// `hot-join` feature is on.
+    #[cfg(feature = "hot-join")]
+    pub const COUNT: usize = 17;
+
+    /// Every category, in declaration (wire-discriminant) order. Its length is
+    /// [`Self::COUNT`].
+    #[cfg(not(feature = "hot-join"))]
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::SyncRequest,
+        Self::SyncReply,
+        Self::Input,
+        Self::InputAck,
+        Self::QualityReport,
+        Self::QualityReply,
+        Self::ChecksumReport,
+        Self::KeepAlive,
+        Self::FloorRequest,
+        Self::FloorReply,
+    ];
+    /// Every category, in declaration (wire-discriminant) order. Its length is
+    /// [`Self::COUNT`].
+    #[cfg(feature = "hot-join")]
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::SyncRequest,
+        Self::SyncReply,
+        Self::Input,
+        Self::InputAck,
+        Self::QualityReport,
+        Self::QualityReply,
+        Self::ChecksumReport,
+        Self::KeepAlive,
+        Self::FloorRequest,
+        Self::FloorReply,
+        Self::JoinRequest,
+        Self::StateSnapshot,
+        Self::StateSnapshotAck,
+        Self::ReactivateSlot,
+        Self::ReactivateSlotAck,
+        Self::JoinCommitted,
+        Self::JoinAborted,
+    ];
+
+    /// A stable snake_case label for this category, suitable for logging or as a
+    /// metrics key. Matches the JSON key produced by serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyncRequest => "sync_request",
+            Self::SyncReply => "sync_reply",
+            Self::Input => "input",
+            Self::InputAck => "input_ack",
+            Self::QualityReport => "quality_report",
+            Self::QualityReply => "quality_reply",
+            Self::ChecksumReport => "checksum_report",
+            Self::KeepAlive => "keep_alive",
+            Self::FloorRequest => "floor_request",
+            Self::FloorReply => "floor_reply",
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequest => "join_request",
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshot => "state_snapshot",
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshotAck => "state_snapshot_ack",
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlot => "reactivate_slot",
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlotAck => "reactivate_slot_ack",
+            #[cfg(feature = "hot-join")]
+            Self::JoinCommitted => "join_committed",
+            #[cfg(feature = "hot-join")]
+            Self::JoinAborted => "join_aborted",
+        }
+    }
+
+    /// The array index this category occupies in [`MessageKindCounts`]. Always
+    /// less than [`Self::COUNT`].
+    const fn index(self) -> usize {
+        match self {
+            Self::SyncRequest => 0,
+            Self::SyncReply => 1,
+            Self::Input => 2,
+            Self::InputAck => 3,
+            Self::QualityReport => 4,
+            Self::QualityReply => 5,
+            Self::ChecksumReport => 6,
+            Self::KeepAlive => 7,
+            Self::FloorRequest => 8,
+            Self::FloorReply => 9,
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequest => 10,
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshot => 11,
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshotAck => 12,
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlot => 13,
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlotAck => 14,
+            #[cfg(feature = "hot-join")]
+            Self::JoinCommitted => 15,
+            #[cfg(feature = "hot-join")]
+            Self::JoinAborted => 16,
+        }
+    }
+}
+
+impl std::fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-[`MessageKind`] counters, keyed by category.
+///
+/// Backed by a fixed-size array (one slot per [`MessageKind`]); read individual
+/// counts with [`get`](Self::get) or the grand total with [`total`](Self::total).
+/// Serializes as a JSON object keyed by each category's [`MessageKind::as_str`]
+/// label, so the wire form is self-describing and stable across counter values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageKindCounts([u64; MessageKind::COUNT]);
+
+impl Default for MessageKindCounts {
+    fn default() -> Self {
+        Self([0; MessageKind::COUNT])
+    }
+}
+
+impl MessageKindCounts {
+    /// The count recorded for `kind`.
+    ///
+    /// `kind.index()` is always in bounds, so the `unwrap_or` fallback is
+    /// unreachable; it keeps the accessor panic-free without an index.
+    #[must_use]
+    pub fn get(&self, kind: MessageKind) -> u64 {
+        self.0.get(kind.index()).copied().unwrap_or(0)
+    }
+
+    /// The total number of messages recorded across every category.
+    ///
+    /// By construction this equals the corresponding packet counter
+    /// ([`PeerMetrics::packets_sent`] / [`PeerMetrics::packets_received`]): every
+    /// counted packet increments exactly one category bucket.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.0.iter().copied().fold(0u64, u64::saturating_add)
+    }
+
+    /// Increments the counter for `kind` by one, saturating at [`u64::MAX`].
+    pub(crate) fn record(&mut self, kind: MessageKind) {
+        if let Some(slot) = self.0.get_mut(kind.index()) {
+            *slot = slot.saturating_add(1);
+        }
+    }
+}
+
+impl Serialize for MessageKindCounts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(MessageKind::COUNT))?;
+        for kind in MessageKind::ALL {
+            map.serialize_entry(kind.as_str(), &self.get(kind))?;
+        }
+        map.end()
+    }
+}
+
+/// A per-peer snapshot of protocol-level traffic and connection metrics for one
+/// remote endpoint.
+///
+/// Read one with [`P2PSession::peer_metrics`]. Like [`SessionMetrics`], this is a
+/// cheap `Copy` snapshot updated inline on the paths it measures — no timers, no
+/// allocation, no `Instant` — so reading it is deterministic and WASM-safe.
+///
+/// # Counters vs gauges
+///
+/// The byte, packet, message-kind, and input-compression fields are **cumulative
+/// counters**, monotonic for the life of the endpoint. The trailing four fields —
+/// [`pending_output_len`](Self::pending_output_len),
+/// [`pending_checksums_len`](Self::pending_checksums_len),
+/// [`ping_ms`](Self::ping_ms), and
+/// [`remote_frame_advantage`](Self::remote_frame_advantage) — are **instantaneous
+/// gauges** sampled at the moment of the snapshot.
+///
+/// Byte counts are wire-exact (the same arithmetic as the bandwidth accounting
+/// behind [`NetworkStats`](crate::NetworkStats)) and count payload bytes only —
+/// they exclude the per-packet UDP/IP header that
+/// [`NetworkStats::kbps_sent`](crate::NetworkStats::kbps_sent) folds into its
+/// estimate.
+///
+/// This type is `#[non_exhaustive]`: future library versions may add fields
+/// without a breaking change, so match with `..`.
+///
+/// [`P2PSession::peer_metrics`]: crate::P2PSession::peer_metrics
+/// [`SessionMetrics`]: crate::metrics::SessionMetrics
+///
+/// # Example
+///
+/// ```
+/// # use fortress_rollback::metrics::PeerMetrics;
+/// let metrics = PeerMetrics::default();
+/// assert_eq!(metrics.bytes_sent, 0);
+/// assert_eq!(metrics.packets_received, 0);
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[must_use = "PeerMetrics should be inspected after being queried"]
+pub struct PeerMetrics {
+    /// Total wire-exact payload bytes sent to this peer over the life of the
+    /// endpoint (payload only; see the type docs).
+    pub bytes_sent: u64,
+
+    /// Total wire-exact payload bytes received from this peer, counted for every
+    /// message delivered to the endpoint before any protocol-state filtering.
+    pub bytes_received: u64,
+
+    /// Total packets (messages) sent to this peer — equal to the
+    /// [`messages_sent_by_kind`](Self::messages_sent_by_kind) total.
+    pub packets_sent: u64,
+
+    /// Total packets (messages) received from this peer — equal to the
+    /// [`messages_received_by_kind`](Self::messages_received_by_kind) total.
+    pub packets_received: u64,
+
+    /// Per-[`MessageKind`] breakdown of [`packets_sent`](Self::packets_sent).
+    pub messages_sent_by_kind: MessageKindCounts,
+
+    /// Per-[`MessageKind`] breakdown of
+    /// [`packets_received`](Self::packets_received).
+    pub messages_received_by_kind: MessageKindCounts,
+
+    /// Cumulative raw input bytes batched into `Input` packets **before**
+    /// delta/RLE compression. Divide
+    /// [`input_bytes_post_compression`](Self::input_bytes_post_compression) by
+    /// this for the realized compression ratio.
+    pub input_bytes_pre_compression: u64,
+
+    /// Cumulative encoded input bytes placed on the wire in `Input` packets
+    /// **after** delta/RLE compression.
+    pub input_bytes_post_compression: u64,
+
+    /// **Gauge.** The number of input frames queued for (re)transmission that the
+    /// peer has not yet acknowledged — the connection-backpressure signal also
+    /// reported as
+    /// [`NetworkStats::send_queue_len`](crate::NetworkStats::send_queue_len).
+    pub pending_output_len: u64,
+
+    /// **Gauge.** The number of this peer's confirmed-frame checksums buffered
+    /// awaiting comparison against the local history.
+    pub pending_checksums_len: u64,
+
+    /// **Gauge.** The round-trip time to this peer in milliseconds, as most
+    /// recently measured by a quality-report exchange (the same value as
+    /// [`NetworkStats::ping`](crate::NetworkStats::ping)).
+    pub ping_ms: u128,
+
+    /// **Gauge.** The peer's most recently reported frame advantage over the
+    /// local client (the same value as
+    /// [`NetworkStats::remote_frames_behind`](crate::NetworkStats::remote_frames_behind)).
+    pub remote_frame_advantage: i32,
+}
+
+impl PeerMetrics {
+    /// Serializes this snapshot to a compact JSON string.
+    ///
+    /// Returns `None` if serialization fails — not expected for this small set of
+    /// integer counters, but not impossible (for example, an allocation failure
+    /// inside `serde_json`).
+    #[cfg(feature = "json")]
+    #[must_use]
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// Serializes this snapshot to a pretty-printed JSON string.
+    ///
+    /// Like [`to_json`](Self::to_json), but indented for readability.
+    #[cfg(feature = "json")]
+    #[must_use]
+    pub fn to_json_pretty(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,5 +1210,80 @@ mod tests {
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""disconnected":1"#), "{json}");
         assert!(json.contains(r#""synchronized":0"#), "{json}");
+    }
+
+    #[test]
+    fn message_kind_all_len_matches_count() {
+        assert_eq!(MessageKind::ALL.len(), MessageKind::COUNT);
+    }
+
+    #[test]
+    fn message_kind_index_is_bijective_over_all() {
+        for (i, kind) in MessageKind::ALL.into_iter().enumerate() {
+            assert_eq!(kind.index(), i, "index of {kind:?}");
+        }
+    }
+
+    #[test]
+    fn message_kind_as_str_labels_are_unique_and_nonempty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in MessageKind::ALL {
+            assert!(!kind.as_str().is_empty());
+            assert!(
+                seen.insert(kind.as_str()),
+                "duplicate label {}",
+                kind.as_str()
+            );
+        }
+        assert_eq!(seen.len(), MessageKind::COUNT);
+    }
+
+    #[test]
+    fn message_kind_counts_record_get_and_total_saturate() {
+        let mut counts = MessageKindCounts::default();
+        assert_eq!(counts.total(), 0);
+        for kind in MessageKind::ALL {
+            assert_eq!(counts.get(kind), 0);
+        }
+        counts.record(MessageKind::Input);
+        counts.record(MessageKind::Input);
+        counts.record(MessageKind::KeepAlive);
+        assert_eq!(counts.get(MessageKind::Input), 2);
+        assert_eq!(counts.get(MessageKind::KeepAlive), 1);
+        assert_eq!(counts.get(MessageKind::SyncRequest), 0);
+        // The total is the sum across every category.
+        assert_eq!(counts.total(), 3);
+    }
+
+    #[test]
+    fn peer_metrics_default_is_zero() {
+        let m = PeerMetrics::default();
+        assert_eq!(m.bytes_sent, 0);
+        assert_eq!(m.bytes_received, 0);
+        assert_eq!(m.packets_sent, 0);
+        assert_eq!(m.packets_received, 0);
+        assert_eq!(m.messages_sent_by_kind.total(), 0);
+        assert_eq!(m.messages_received_by_kind.total(), 0);
+        assert_eq!(m.input_bytes_pre_compression, 0);
+        assert_eq!(m.input_bytes_post_compression, 0);
+        assert_eq!(m.pending_output_len, 0);
+        assert_eq!(m.pending_checksums_len, 0);
+        assert_eq!(m.ping_ms, 0);
+        assert_eq!(m.remote_frame_advantage, 0);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn peer_metrics_serializes_kind_breakdown_as_labeled_map() {
+        let mut m = PeerMetrics {
+            packets_sent: 1,
+            ..Default::default()
+        };
+        m.messages_sent_by_kind.record(MessageKind::Input);
+        let json = m.to_json().expect("json serialization succeeds");
+        assert!(json.contains(r#""packets_sent":1"#), "{json}");
+        // The per-kind breakdown is a self-describing, snake_case-keyed map.
+        assert!(json.contains(r#""input":1"#), "{json}");
+        assert!(json.contains(r#""keep_alive":0"#), "{json}");
     }
 }

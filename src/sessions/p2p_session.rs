@@ -1,6 +1,6 @@
 use crate::error::{allocation_failed, FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
-use crate::metrics::SessionMetrics;
+use crate::metrics::{PeerMetrics, SessionMetrics};
 use crate::network::messages::ConnectionStatus;
 #[cfg(feature = "hot-join")]
 use crate::network::messages::StateSnapshot;
@@ -5617,6 +5617,41 @@ impl<T: Config> P2PSession<T> {
         self.populate_checksum_stats(&mut stats, player_handle);
 
         Ok(stats)
+    }
+
+    /// Returns a [`PeerMetrics`] snapshot of protocol-level traffic and
+    /// connection metrics for one remote peer or spectator.
+    ///
+    /// This complements [`network_stats`](Self::network_stats) with wire-exact,
+    /// always-on per-peer counters: cumulative bytes and packets sent/received, a
+    /// per-[`MessageKind`](crate::metrics::MessageKind) breakdown of traffic in
+    /// each direction, input pre/post-compression totals, plus a few
+    /// instantaneous connection gauges. Unlike `network_stats`, it does not
+    /// require the peer to be synchronized — the counters are valid from
+    /// endpoint construction.
+    ///
+    /// # Errors
+    /// - Returns a [`FortressError`] if the handle does not refer to a remote
+    ///   player or spectator.
+    pub fn peer_metrics(&self, player_handle: PlayerHandle) -> Result<PeerMetrics, FortressError> {
+        match self.player_reg.handles.get(&player_handle) {
+            Some(PlayerType::Remote(addr)) => match self.player_reg.remotes.get(addr) {
+                Some(endpoint) => Ok(endpoint.peer_metrics()),
+                None => Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForRemote { player_handle },
+                }),
+            },
+            Some(PlayerType::Spectator(addr)) => match self.player_reg.spectators.get(addr) {
+                Some(endpoint) => Ok(endpoint.peer_metrics()),
+                None => Err(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForSpectator { player_handle },
+                }),
+            },
+            _ => Err(InvalidRequestKind::NotRemotePlayerOrSpectator {
+                handle: player_handle,
+            }
+            .into()),
+        }
     }
 
     /// Populates the checksum-related fields in NetworkStats.

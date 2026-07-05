@@ -104,7 +104,10 @@ pub use error::{
 /// ```
 pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 
-pub use metrics::{EventKind, EventKindCounts, RollbackDepthHistogram, SessionMetrics};
+pub use metrics::{
+    EventKind, EventKindCounts, MessageKind, MessageKindCounts, PeerMetrics,
+    RollbackDepthHistogram, SessionMetrics,
+};
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;

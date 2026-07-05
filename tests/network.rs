@@ -13,5 +13,6 @@ mod network {
     pub mod deterministic_ping;
     pub mod in_process_chaos;
     pub mod multi_process;
+    pub mod peer_metrics;
     pub mod resilience;
 }

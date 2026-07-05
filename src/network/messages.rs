@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::MessageKind;
 use crate::Frame;
 
 /// Connection status for a peer in the network protocol.
@@ -470,6 +471,40 @@ impl MessageBody {
 
         DISCRIMINANT + payload
     }
+
+    /// The payload-independent [`MessageKind`] category of this body.
+    ///
+    /// The `match` is wildcard-free: adding a `MessageBody` variant fails to
+    /// compile until it is categorized here (and, in lockstep, in
+    /// [`MessageKind`]).
+    pub(crate) fn kind(&self) -> MessageKind {
+        match self {
+            Self::SyncRequest(_) => MessageKind::SyncRequest,
+            Self::SyncReply(_) => MessageKind::SyncReply,
+            Self::Input(_) => MessageKind::Input,
+            Self::InputAck(_) => MessageKind::InputAck,
+            Self::QualityReport(_) => MessageKind::QualityReport,
+            Self::QualityReply(_) => MessageKind::QualityReply,
+            Self::ChecksumReport(_) => MessageKind::ChecksumReport,
+            Self::KeepAlive => MessageKind::KeepAlive,
+            Self::FloorRequest(_) => MessageKind::FloorRequest,
+            Self::FloorReply(_) => MessageKind::FloorReply,
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequest(_) => MessageKind::JoinRequest,
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshot(_) => MessageKind::StateSnapshot,
+            #[cfg(feature = "hot-join")]
+            Self::StateSnapshotAck(_) => MessageKind::StateSnapshotAck,
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlot(_) => MessageKind::ReactivateSlot,
+            #[cfg(feature = "hot-join")]
+            Self::ReactivateSlotAck(_) => MessageKind::ReactivateSlotAck,
+            #[cfg(feature = "hot-join")]
+            Self::JoinCommitted(_) => MessageKind::JoinCommitted,
+            #[cfg(feature = "hot-join")]
+            Self::JoinAborted(_) => MessageKind::JoinAborted,
+        }
+    }
 }
 
 impl Message {
@@ -484,6 +519,11 @@ impl Message {
     pub(crate) fn encoded_len(&self) -> usize {
         const HEADER: usize = 2; // MessageHeader { magic: u16 }
         HEADER + self.body.encoded_len()
+    }
+
+    /// The [`MessageKind`] category of this message's body.
+    pub(crate) fn kind(&self) -> MessageKind {
+        self.body.kind()
     }
 }
 
@@ -763,5 +803,110 @@ mod tests {
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("0x")); // Empty bytes should still show "0x" prefix
+    }
+
+    #[test]
+    fn message_body_kind_maps_every_variant() {
+        let cases: &[(MessageBody, MessageKind)] = &[
+            (
+                MessageBody::SyncRequest(SyncRequest::default()),
+                MessageKind::SyncRequest,
+            ),
+            (
+                MessageBody::SyncReply(SyncReply::default()),
+                MessageKind::SyncReply,
+            ),
+            (MessageBody::Input(Input::default()), MessageKind::Input),
+            (
+                MessageBody::InputAck(InputAck::default()),
+                MessageKind::InputAck,
+            ),
+            (
+                MessageBody::QualityReport(QualityReport::default()),
+                MessageKind::QualityReport,
+            ),
+            (
+                MessageBody::QualityReply(QualityReply::default()),
+                MessageKind::QualityReply,
+            ),
+            (
+                MessageBody::ChecksumReport(ChecksumReport::default()),
+                MessageKind::ChecksumReport,
+            ),
+            (MessageBody::KeepAlive, MessageKind::KeepAlive),
+            (
+                MessageBody::FloorRequest(FloorRequest::default()),
+                MessageKind::FloorRequest,
+            ),
+            (
+                MessageBody::FloorReply(FloorReply::default()),
+                MessageKind::FloorReply,
+            ),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(body.kind(), *expected, "body.kind() for {body:?}");
+            // Message::kind() delegates to its body.
+            let msg = Message {
+                header: MessageHeader::default(),
+                body: body.clone(),
+            };
+            assert_eq!(msg.kind(), *expected, "Message::kind() for {body:?}");
+        }
+
+        #[cfg(feature = "hot-join")]
+        {
+            let hot_cases: &[(MessageBody, MessageKind)] = &[
+                (
+                    MessageBody::JoinRequest(JoinRequest { player_handle: 0 }),
+                    MessageKind::JoinRequest,
+                ),
+                (
+                    MessageBody::StateSnapshot(StateSnapshot {
+                        frame: Frame::NULL,
+                        num_players: 2,
+                        state_bytes: vec![],
+                        bridge_inputs: vec![],
+                        bridge_statuses: vec![],
+                        checksum: None,
+                    }),
+                    MessageKind::StateSnapshot,
+                ),
+                (
+                    MessageBody::StateSnapshotAck(StateSnapshotAck { frame: Frame::NULL }),
+                    MessageKind::StateSnapshotAck,
+                ),
+                (
+                    MessageBody::ReactivateSlot(ReactivateSlot {
+                        handle: 0,
+                        frame: Frame::NULL,
+                    }),
+                    MessageKind::ReactivateSlot,
+                ),
+                (
+                    MessageBody::ReactivateSlotAck(ReactivateSlotAck {
+                        handle: 0,
+                        frame: Frame::NULL,
+                    }),
+                    MessageKind::ReactivateSlotAck,
+                ),
+                (
+                    MessageBody::JoinCommitted(JoinCommitted {
+                        handle: 0,
+                        frame: Frame::NULL,
+                    }),
+                    MessageKind::JoinCommitted,
+                ),
+                (
+                    MessageBody::JoinAborted(JoinAborted {
+                        handle: 0,
+                        frame: Frame::NULL,
+                    }),
+                    MessageKind::JoinAborted,
+                ),
+            ];
+            for (body, expected) in hot_cases {
+                assert_eq!(body.kind(), *expected, "body.kind() for {body:?}");
+            }
+        }
     }
 }
