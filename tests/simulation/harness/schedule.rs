@@ -41,6 +41,26 @@ impl From<DropPolicy> for DisconnectBehavior {
     }
 }
 
+/// How the harness's app model reacts to `FortressEvent::WaitRecommendation`.
+///
+/// The real time-sync control loop is only closed if the application actually
+/// *obeys* the recommendation (skips the recommended frames to let peers catch
+/// up). The reference client and every prior fleet run **ignore** it, leaving
+/// the loop open — so oscillation (H-OSC) is unobservable. This makes the app
+/// behavior an explicit, per-run axis.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppModel {
+    /// Ignore `WaitRecommendation` — the open-loop behavior of the reference
+    /// client (and of every fleet run before this axis existed). The default,
+    /// so pre-existing schedules replay identically.
+    #[default]
+    Ignore,
+    /// Obey `WaitRecommendation`: skip `skip_frames` advances (poll but do not
+    /// advance) so the ahead peer lets the others catch up — closing the
+    /// time-sync loop the H-OSC hypothesis probes.
+    Obey,
+}
+
 /// Schema version for serialized schedules (bump on breaking layout change).
 ///
 /// - `1`: network-fault vocabulary only (`SetLink`/`Block`/`Hold`/`HealAll`).
@@ -90,6 +110,11 @@ pub struct SimConfig {
     /// replayable without a schema bump.
     #[serde(default)]
     pub disconnect_behavior: DropPolicy,
+    /// How every peer's app model reacts to `WaitRecommendation`.
+    /// `#[serde(default)]` (= `Ignore`, the open-loop behavior every prior run
+    /// used) keeps pre-existing corpus artifacts replayable without a bump.
+    #[serde(default)]
+    pub app_model: AppModel,
 }
 
 impl SimConfig {
@@ -109,6 +134,7 @@ impl SimConfig {
             desync_interval: 30,
             noise: BackgroundNoise::Mild,
             disconnect_behavior: DropPolicy::default(),
+            app_model: AppModel::default(),
         }
     }
 

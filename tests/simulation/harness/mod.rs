@@ -28,7 +28,7 @@ use fortress_rollback::{
     SessionBuilder, SessionState,
 };
 use oracle::{Oracle, Verdict};
-use schedule::{Schedule, ScheduleEvent};
+use schedule::{AppModel, Schedule, ScheduleEvent};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -452,6 +452,11 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // fabric, and excluded from the oracle's liveness checks (their pre-death
     // observations still count for agreement).
     let mut dead: Vec<bool> = vec![false; n];
+    // Per-peer count of advances still owed to an obeyed `WaitRecommendation`
+    // (only accumulates under `AppModel::Obey`). While > 0 the peer polls but
+    // does not advance, letting the others catch up — the closed time-sync loop.
+    let app_model = schedule.config.app_model;
+    let mut wait_skip: Vec<u32> = vec![0; n];
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
@@ -518,10 +523,22 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     if let FortressEvent::DesyncDetected { frame, .. } = event {
                         oracle.observe_desync_event(i, *frame);
                     }
+                    // Closed-loop app model: obey a `WaitRecommendation` by owing
+                    // that many skipped advances (max so a stronger one wins).
+                    if app_model == AppModel::Obey {
+                        if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                            wait_skip[i] = wait_skip[i].max(*skip_frames);
+                        }
+                    }
                     fold_trace(&mut trace_hash, &format!("{event:?}"));
                 }
 
-                if slot.session.current_state() == SessionState::Running {
+                if wait_skip[i] > 0 {
+                    // Obeying a WaitRecommendation: poll/receive this step (done
+                    // above) but skip the advance so the ahead peer lets the
+                    // others catch up — the time-sync loop, now closed.
+                    wait_skip[i] -= 1;
+                } else if slot.session.current_state() == SessionState::Running {
                     for handle in slot.session.local_player_handles() {
                         if let Err(error) = slot.session.add_local_input(handle, input_for(step, i))
                         {
