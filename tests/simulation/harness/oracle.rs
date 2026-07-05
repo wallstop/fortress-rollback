@@ -86,6 +86,10 @@ pub enum OracleFailure {
         confirmed: i32,
         required: i32,
     },
+    /// Every peer was killed: there is nothing left to verify, so the run is a
+    /// vacuous pass unless flagged. A schedule that crashes the whole mesh
+    /// proves no correctness property and must not report success.
+    NoLivePeers { n_players: usize },
 }
 
 /// Final verdict of a run.
@@ -118,6 +122,15 @@ pub struct Oracle {
     /// anti-pattern inside the oracle itself). Every class is now
     /// guaranteed representation.
     per_class_cap: usize,
+    /// Peers that were killed mid-run (`ScheduleEvent::PeerKill`). A crashed
+    /// peer is excluded from the *liveness* checks only: it cannot satisfy the
+    /// `Running`/end-progress bar (c-lite), and its frozen confirmed frame must
+    /// not drag the globally-confirmed prefix below where the survivors agree.
+    /// Its **pre-death** observations still count — recorded states it produced
+    /// before crashing are compared in (b), and its confirmed-input samples
+    /// stand in (a) — so a peer that diverged before it died cannot escape
+    /// detection by being killed.
+    dead: Vec<bool>,
 }
 
 impl Oracle {
@@ -129,7 +142,27 @@ impl Oracle {
             failures: Vec::new(),
             failure_cap: 64,
             per_class_cap: 8,
+            dead: vec![false; n_players],
         }
+    }
+
+    /// Marks `peer` as killed (crashed): it is excluded from the liveness
+    /// checks in [`Self::finalize`]. Idempotent for in-range peers. An
+    /// out-of-range peer is a programming error — the runner validates every
+    /// event's peer index up front — so it panics loudly rather than silently
+    /// leaving the mask unset.
+    pub fn mark_peer_dead(&mut self, peer: usize) {
+        assert!(
+            peer < self.dead.len(),
+            "mark_peer_dead: peer {peer} out of range (dead-mask len {})",
+            self.dead.len()
+        );
+        self.dead[peer] = true;
+    }
+
+    /// Whether `peer` was killed mid-run.
+    fn is_dead(&self, peer: usize) -> bool {
+        self.dead.get(peer).copied().unwrap_or(false)
     }
 
     fn push_failure(&mut self, failure: OracleFailure) {
@@ -229,8 +262,12 @@ impl Oracle {
         assert_eq!(end_confirmed.len(), self.n_players);
         assert_eq!(end_state.len(), self.n_players);
 
-        // (c-lite) end progress per peer.
+        // (c-lite) end progress per peer. Killed peers are excluded — a crashed
+        // peer cannot be `Running` and its frozen frame is not its own fault.
         for peer in 0..self.n_players {
+            if self.is_dead(peer) {
+                continue;
+            }
             let confirmed = end_confirmed
                 .get(peer)
                 .copied()
@@ -250,17 +287,34 @@ impl Oracle {
             }
         }
 
-        // (b) state agreement over the globally confirmed prefix.
+        // Guard against a vacuous pass: if every peer was killed, the excluded
+        // end-checks below all skip and the run would report success with
+        // nothing verified. A whole-mesh crash proves no property.
+        if self.n_players > 0 && (0..self.n_players).all(|peer| self.is_dead(peer)) {
+            self.push_failure(OracleFailure::NoLivePeers {
+                n_players: self.n_players,
+            });
+        }
+
+        // (b) state agreement over the globally confirmed prefix. The prefix is
+        // the minimum over *live* peers only — a killed peer's frozen confirmed
+        // frame must not shrink the window the survivors are checked across.
         let global_confirmed = end_confirmed
             .iter()
-            .map(|frame| frame.as_i32())
+            .enumerate()
+            .filter(|(peer, _)| !self.is_dead(*peer))
+            .map(|(_, frame)| frame.as_i32())
             .min()
             .unwrap_or(-1);
         // Recorded states are keyed by post-advance frame (frame N+1 holds
         // the result of simulating frame N with confirmed inputs ≤ N), so a
         // frame's state is final once the *previous* frame is confirmed;
         // comparing up to `global_confirmed` stays strictly inside the final
-        // region.
+        // region. Killed peers are NOT skipped here: their *pre-death* recorded
+        // states are real observations for the frames they produced, so a peer
+        // that diverged before it crashed is still caught (it cannot escape the
+        // check merely by being killed). They only lack states past their death,
+        // so they never contribute past the survivor prefix.
         let mut canonical_states: BTreeMap<i32, (usize, StateStub)> = BTreeMap::new();
         for (peer, states) in recorded.iter().enumerate() {
             for (&frame, &state) in states.range(..=global_confirmed) {
@@ -417,6 +471,68 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A killed peer is excluded from the liveness checks: it cannot fail
+    /// end-progress (crashed, so never `Running`), while the *same* shortfall on
+    /// a live peer still fails — the alive-mask must exclude only the dead.
+    #[test]
+    fn oracle_excludes_killed_peer_from_end_checks() {
+        // Peer 1 is dead (stuck in Synchronizing); peers 0 and 2 are healthy.
+        let recorded = [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+        let confirmed = [Frame::new(500), Frame::new(3), Frame::new(500)];
+        let states = [
+            SessionState::Running,
+            SessionState::Synchronizing,
+            SessionState::Running,
+        ];
+
+        let mut killed = Oracle::new(3);
+        killed.mark_peer_dead(1);
+        let verdict = killed.finalize(&recorded, &confirmed, &states);
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
+            "a killed peer must not fail end-progress: {:?}",
+            verdict.failures
+        );
+
+        // Control: the identical shortfall on a *live* peer 1 does fail.
+        let live = Oracle::new(3);
+        let control = live.finalize(&recorded, &confirmed, &states);
+        assert!(
+            control
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
+            "a live peer with the same shortfall must fail: {:?}",
+            control.failures
+        );
+    }
+
+    /// Killing *every* peer must not be a vacuous pass: with no live peer left,
+    /// the excluded end-checks all skip, so the oracle flags `NoLivePeers`
+    /// rather than reporting success for a mesh that proved nothing.
+    #[test]
+    fn oracle_flags_all_peers_killed_as_no_live_peers() {
+        let mut oracle = Oracle::new(2);
+        oracle.mark_peer_dead(0);
+        oracle.mark_peer_dead(1);
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::NoLivePeers { n_players: 2 })),
+            "an all-crashed mesh must fail, not vacuously pass: {:?}",
+            verdict.failures
+        );
     }
 
     /// Negative control: a desync event and an `Error`-severity violation each

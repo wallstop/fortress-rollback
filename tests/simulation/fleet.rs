@@ -938,6 +938,180 @@ fn run_rejects_out_of_range_set_input_delay_peer() {
     let _ = run(&schedule, &RunOptions::default());
 }
 
+/// Builds a peer-kill schedule: a clean 4-mesh (`ContinueWithout`) in which peer
+/// 1 crashes at step 100 — the harness stops driving it and detaches it from the
+/// fabric, so it never returns (not even after `HealAll`). Under `ContinueWithout`
+/// the three survivors time it out, freeze its slot, and keep confirming together
+/// on their own timeline; the crashed peer is excluded from the oracle's
+/// liveness checks. `None` yields the identical schedule without the kill, the
+/// control the premise compares to.
+fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
+    let n = 4;
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some(peer) = kill {
+        events.push((100, ScheduleEvent::PeerKill { peer }));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+/// M3 §6.1 lifecycle vocabulary — the peer crash (`ScheduleEvent::PeerKill`).
+/// Under `ContinueWithout`, crashing one peer must degrade gracefully: the three
+/// survivors converge on dropping it (freeze its slot to an agreed value) and
+/// keep confirming *together* — no fork among them. The crashed peer is excluded
+/// from the oracle's liveness checks (it can't be `Running`), which is the
+/// alive-mask this op adds.
+///
+/// This is the green half — a clean single-peer removal is not a partition, so
+/// the survivors must stay byte-consistent (contrast the symmetric split-brain,
+/// which forks). Premise (with-vs-without the kill diverges the trace) and
+/// determinism are asserted directly; the negative control below proves the
+/// oracle still catches a real divergence among the survivors.
+#[test]
+fn peer_kill_survivors_converge_under_continue_without() {
+    let base = peer_kill_schedule(None);
+    let killed = peer_kill_schedule(Some(1));
+
+    let base_report = run(&base, &RunOptions::default());
+    base_report.expect_pass(&base);
+    let killed_report = run(&killed, &RunOptions::default());
+    killed_report.expect_pass(&killed);
+
+    let killed_again = run(&killed, &RunOptions::default());
+    assert_eq!(
+        killed_report.trace_hash, killed_again.trace_hash,
+        "a PeerKill schedule must reproduce its exact trace"
+    );
+    assert_ne!(
+        base_report.trace_hash, killed_report.trace_hash,
+        "the PeerKill must change execution — a silent no-op would leave the \
+         trace identical"
+    );
+
+    // The three survivors kept confirming; the crashed peer stayed frozen far
+    // behind them (excluded from the oracle's liveness checks, so it does not
+    // fail end-progress and the run still passes).
+    let confirmed = &killed_report.final_confirmed;
+    for (peer, &c) in confirmed.iter().enumerate() {
+        if peer == 1 {
+            continue;
+        }
+        assert!(
+            c > 200,
+            "survivor {peer} must keep confirming after the crash: {confirmed:?}"
+        );
+    }
+    assert!(
+        confirmed[1] < confirmed[0],
+        "the crashed peer 1 must stay frozen behind the survivors: {confirmed:?}"
+    );
+}
+
+/// Negative control for the peer crash: a real state divergence seeded into a
+/// *surviving* peer must still be caught while another peer is crashed — the
+/// alive-mask must exclude only the dead peer, never blind the oracle to the
+/// survivors (the HD-1 "silent instrument" failure mode, checked against the
+/// new op).
+#[test]
+fn oracle_catches_seeded_divergence_under_peer_kill() {
+    let schedule = peer_kill_schedule(Some(1));
+    // Corrupt peer 0 (a survivor) from frame 300 — *after* the crash at step
+    // 100. This exercises the alive-mask's effect on the recorded-state
+    // comparison (b): that check spans the globally-confirmed prefix, and
+    // without excluding the crashed peer the prefix would be pinned at its
+    // frozen frame (~99), so (b) would never reach frame 300. The in-band desync
+    // detector still catches the corruption independently (so the *run* fails
+    // either way) — the mask is what keeps the oracle's own state-agreement
+    // signal from going blind past the crash. Assert `StateDivergence`
+    // specifically, the class the mask restores.
+    let options = RunOptions {
+        corrupt_state_from: Some((0, 300)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded divergence in a survivor must fail the run even under a crash"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the state comparison (b) must reach the post-crash survivor prefix via \
+         the alive-mask and flag StateDivergence (not just the in-band detector): {:?}",
+        report.verdict.failures
+    );
+}
+
+/// A peer that diverges *before* it crashes must not escape detection by being
+/// killed. Corrupt the soon-to-be-killed peer 1 from frame 40, then crash it at
+/// step 100: its pre-death recorded states (frames 40..~99) diverge from the
+/// survivors and must still surface as `StateDivergence`. The alive-mask excises
+/// a dead peer from the liveness checks, not from pre-death state agreement — so
+/// a determinism bug on a doomed peer cannot hide behind its own crash.
+#[test]
+fn oracle_catches_pre_kill_divergence_on_the_killed_peer() {
+    let schedule = peer_kill_schedule(Some(1));
+    let options = RunOptions {
+        corrupt_state_from: Some((1, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a pre-crash divergence on the killed peer must fail the run"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the killed peer's pre-death states must still be compared (b): {:?}",
+        report.verdict.failures
+    );
+}
+
+/// A `PeerKill` naming a peer outside the mesh must fail loudly with the same
+/// clear message as the other events (per-event fail-loud contract of the
+/// up-front validation).
+#[test]
+#[should_panic(expected = "out of range")]
+fn run_rejects_out_of_range_peer_kill() {
+    let mut schedule = peer_kill_schedule(None);
+    schedule
+        .events
+        .push((100, ScheduleEvent::PeerKill { peer: 9 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    let _ = run(&schedule, &RunOptions::default());
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]

@@ -51,7 +51,10 @@ impl From<DropPolicy> for DisconnectBehavior {
 ///   the bump.
 /// - `3`: adds [`ScheduleEvent::SetInputDelay`] (a mid-run input-delay change,
 ///   exercising the session's gap-fill/reconfiguration path).
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 3;
+/// - `4`: adds [`ScheduleEvent::PeerKill`] (a peer crash — the harness stops
+///   driving the peer and detaches it from the fabric — modeled distinctly from
+///   a network black-hole).
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 4;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +163,25 @@ pub enum ScheduleEvent {
     /// Like `PeerStall`, this is planted by lifecycle tests, not yet emitted by
     /// the random generator (that lands with the §6.1 storyline overhaul).
     SetInputDelay { peer: usize, delay: usize },
+    /// Permanently kill peer `peer`: the harness stops driving its session and
+    /// detaches it from the fabric (its inbox is discarded; further traffic to
+    /// it is dropped). Models a **crash** — the peer is gone for good and, being
+    /// no longer observable, is excluded from the oracle's *liveness* checks
+    /// (its pre-death observations still count for agreement; its remaining mesh
+    /// survives per the configured `DisconnectBehavior`).
+    /// Distinct from a network black-hole (`Block`), where the peer keeps
+    /// running and observing. `HealAll` does not revive it.
+    ///
+    /// Survivor byte-consistency after a kill is a property of
+    /// `DisconnectBehavior::ContinueWithout` over a clean-enough link (the
+    /// freeze-convergence path). Under `Halt` the mesh instead halts with
+    /// fabricated frames (defect D13), and under heavy loss a survivor could
+    /// confirm a fabricated slot value the dead peer had already contributed —
+    /// so the oracle's unmasked confirmed-input agreement is only sound for the
+    /// `ContinueWithout` case the planted tests use.
+    ///
+    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    PeerKill { peer: usize },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
@@ -518,6 +540,9 @@ mod tests {
         schedule
             .events
             .push((250, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 }));
+        schedule
+            .events
+            .push((300, ScheduleEvent::PeerKill { peer: 2 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
         let back: Schedule = serde_json::from_str(&json).unwrap();
@@ -533,5 +558,9 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerKill { peer: 2 })));
     }
 }
