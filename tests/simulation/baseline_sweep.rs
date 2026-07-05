@@ -462,7 +462,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             cur.label, base.label,
             "gate cell order/label changed — re-bless the baseline"
         );
-        // The cell identity must match the baseline exactly: a reparametrization
+        // The cell identity must match the baseline exactly: a reparameterization
         // (different players/loss/rtt/jitter/steps under the same label) changes
         // what the metrics mean, so it must re-bless rather than slip through the
         // metric tolerances below.
