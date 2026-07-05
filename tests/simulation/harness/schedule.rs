@@ -42,7 +42,14 @@ impl From<DropPolicy> for DisconnectBehavior {
 }
 
 /// Schema version for serialized schedules (bump on breaking layout change).
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 1;
+///
+/// - `1`: network-fault vocabulary only (`SetLink`/`Block`/`Hold`/`HealAll`).
+/// - `2`: adds the first lifecycle-vocabulary fault
+///   [`ScheduleEvent::PeerStall`] (a peer that hangs, not just a degraded
+///   link). A v1 reader cannot interpret a v2 schedule carrying a `PeerStall`,
+///   so the format capability — not just this generator's output — dictates
+///   the bump.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 2;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +136,18 @@ pub enum ScheduleEvent {
         to: usize,
         holding: bool,
     },
+    /// Freeze peer `peer` for `steps` steps: it stops polling, draining
+    /// events, adding input, and advancing — modeling a local hang (GC pause,
+    /// frame-time spike, blocked save) rather than a network fault. Unlike a
+    /// link fault, the peer emits *nothing* (no inputs, keepalives, or quality
+    /// reports) while frozen and resumes exactly where it left off.
+    ///
+    /// The stall must stay shorter than the mesh's disconnect timeout, or the
+    /// silence tips the peer into a genuine disconnect. The planted lifecycle
+    /// tests keep it well under that bound so the hitch is a recoverable pause,
+    /// not a drop; the random generator does not emit this event yet (it lands
+    /// with the M3 storyline overhaul, which re-blesses seed baselines).
+    PeerStall { peer: usize, steps: u32 },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
@@ -473,5 +492,24 @@ mod tests {
             schedule, back,
             "corpus artifacts must round-trip losslessly"
         );
+    }
+
+    /// The lifecycle-vocabulary event must serialize losslessly — a corpus
+    /// artifact carrying a `PeerStall` has to replay the same hitch. The
+    /// generator does not yet emit it, so plant one explicitly.
+    #[test]
+    fn peer_stall_event_round_trips_through_json() {
+        let mut schedule = generate(42, SimConfig::smoke(3));
+        schedule
+            .events
+            .push((200, ScheduleEvent::PeerStall { peer: 1, steps: 40 }));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        let json = serde_json::to_string(&schedule).unwrap();
+        let back: Schedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(schedule, back, "PeerStall must round-trip losslessly");
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerStall { peer: 1, steps: 40 })));
     }
 }

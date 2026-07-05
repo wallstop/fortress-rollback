@@ -636,6 +636,189 @@ fn partition_under_continue_without_forks_into_divergent_halves() {
     );
 }
 
+/// Step at which [`peer_hitch_schedule`] freezes peer 1. The recovery test
+/// derives its mid-run probe step from this so the two never drift.
+const PEER_HITCH_START: u32 = 200;
+
+/// Builds a peer-hitch schedule: an otherwise-clean `n`-mesh in which peer 1
+/// freezes for `stall` steps starting at [`PEER_HITCH_START`] — a *local* hang
+/// (GC pause, frame-time spike, blocked save), not a network fault. `stall` is
+/// kept well under the 2 s (~125-step) disconnect timeout, so the mesh predicts
+/// past the frozen peer to the prediction wall, stalls waiting for its inputs,
+/// then catches up when it resumes — a recoverable pause, never a drop. Passing
+/// `None` for `stall` yields the identical schedule *without* the hitch, the
+/// control the premise assertion compares against.
+fn peer_hitch_schedule(n: usize, stall: Option<u32>) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some(steps) = stall {
+        events.push((
+            PEER_HITCH_START,
+            ScheduleEvent::PeerStall { peer: 1, steps },
+        ));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+/// M3 §6.1 lifecycle vocabulary — the peer-hitch fault (`ScheduleEvent::
+/// PeerStall`). A peer that hangs for a bounded window shorter than the
+/// disconnect timeout must be a *recoverable* pause: the mesh predicts past it
+/// to the prediction wall, stalls for its inputs, then catches up on resume,
+/// and the confirmed prefix stays byte-identical across every peer.
+///
+/// The test asserts the full freeze→recover arc, not just the converged
+/// end-state (a clean drain always converges, so end-state alone has no teeth):
+/// 1. **Premise** — the same clean schedule *with* and *without* the stall
+///    produces different traces (the hitch is effective, not a silent no-op),
+///    and two hitched runs fold the identical trace (determinism).
+/// 2. **Freeze** — mid-stall (probed at the last frozen step), the hitched
+///    mesh's confirmation is stalled far behind the clean run's: confirmation
+///    is gated by the frozen peer's missing inputs, so the *whole* mesh's
+///    confirmed frame is held back, not just the hitching peer's.
+/// 3. **Recovery** — by end-of-run the hitched peer has caught up to within the
+///    prediction window of the leader (no permanent lag — stronger than the
+///    coarse end-progress bar, which a recovered-but-lagging peer would pass).
+#[test]
+fn peer_hitch_recovers_with_consistent_mesh() {
+    const HITCH_STEPS: u32 = 50;
+    // Probe the last frozen step: the stall spans [START, START+STEPS), so the
+    // peer resumes at START+STEPS and START+STEPS-1 is the deepest freeze.
+    const PROBE_AT: u32 = PEER_HITCH_START + HITCH_STEPS - 1;
+
+    for n in [2usize, 4] {
+        let clean = peer_hitch_schedule(n, None);
+        let hitched = peer_hitch_schedule(n, Some(HITCH_STEPS));
+        let opts = RunOptions {
+            probe_confirmed_at: Some(PROBE_AT),
+            ..RunOptions::default()
+        };
+
+        let clean_report = run(&clean, &opts);
+        clean_report.expect_pass(&clean);
+        let hitched_report = run(&hitched, &opts);
+        hitched_report.expect_pass(&hitched);
+        let hitched_again = run(&hitched, &opts);
+
+        // (1) Premise + determinism.
+        assert_ne!(
+            clean_report.trace_hash, hitched_report.trace_hash,
+            "the PeerStall must change execution — a silent no-op would leave \
+             the trace identical (n={n})"
+        );
+        assert_eq!(
+            hitched_report.trace_hash, hitched_again.trace_hash,
+            "a PeerStall schedule must reproduce its exact trace (n={n})"
+        );
+
+        // (2) Freeze: mid-stall the whole hitched mesh trails the clean mesh —
+        // even the furthest-along hitched peer is well behind the least-along
+        // clean peer, because the frozen peer's missing inputs gate everyone's
+        // confirmation. (Expected gap ≈ HITCH_STEPS; require a conservative
+        // fraction so this is unambiguous, not a one-frame coincidence.)
+        let clean_slowest = clean_report
+            .probe_confirmed
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(-1);
+        let hitched_fastest = hitched_report
+            .probe_confirmed
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(-1);
+        assert!(
+            clean_slowest - hitched_fastest >= (HITCH_STEPS as i32) / 2,
+            "the hitch must freeze mesh-wide confirmation mid-stall \
+             (clean slowest={clean_slowest}, hitched fastest={hitched_fastest}, \
+             n={n}): clean={:?} hitched={:?}",
+            clean_report.probe_confirmed,
+            hitched_report.probe_confirmed,
+        );
+
+        // (3) Recovery: by end-of-run the hitched peer is within the prediction
+        // window of the leader — no permanent lag.
+        let confirmed = &hitched_report.final_confirmed;
+        let leader = confirmed.iter().copied().max().unwrap_or(-1);
+        let hitched_peer = confirmed[1];
+        assert!(
+            (leader - hitched_peer) as usize <= hitched.config.max_prediction,
+            "hitched peer 1 must catch up to within the prediction window \
+             (leader={leader}, peer1={hitched_peer}, max_prediction={}): {confirmed:?}",
+            hitched.config.max_prediction,
+        );
+    }
+}
+
+/// Negative control for the peer-hitch fault: a real state divergence seeded
+/// into a *surviving* peer must still be caught while another peer is
+/// hitching. A stall that blinded the oracle would make the fleet miss desyncs
+/// exactly when a peer is under stress — the HD-1 "silent instrument" failure
+/// mode (PLAN.md Part V), here checked against the new lifecycle op.
+#[test]
+fn oracle_catches_seeded_divergence_under_peer_hitch() {
+    let schedule = peer_hitch_schedule(4, Some(50));
+    // Corrupt peer 0 (a survivor, not the hitching peer 1) from frame 40 on —
+    // well before the stall window, so the divergence is already established
+    // and still live while peer 1 hitches.
+    let options = RunOptions {
+        corrupt_state_from: Some((0, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded divergence must fail the run even under a peer hitch"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the oracle's state comparison must keep its teeth under a peer hitch: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// A malformed schedule (here: a `PeerStall` naming a peer outside the mesh, as
+/// a hand-edited or corrupt corpus artifact might) must fail loudly with a
+/// clear message, not panic on a raw slice index — the fail-loud contract the
+/// harness's up-front validation enforces for corpus replay.
+#[test]
+#[should_panic(expected = "out of range")]
+fn run_rejects_out_of_range_peer_index() {
+    let mut schedule = peer_hitch_schedule(2, None);
+    schedule
+        .events
+        .push((100, ScheduleEvent::PeerStall { peer: 9, steps: 10 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    let _ = run(&schedule, &RunOptions::default());
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]

@@ -43,6 +43,12 @@ pub struct RunOptions {
     /// Corrupt `(peer, from_frame)`'s saved **checksums only** (states stay
     /// identical): exercises the in-band detector cross-check path.
     pub corrupt_checksum_from: Option<(usize, i32)>,
+    /// If set, snapshot every peer's confirmed frame at this step into
+    /// [`RunReport::probe_confirmed`]. Lets a test observe mid-run confirmation
+    /// (frozen during a hitch, converged after heal) — end-of-run state alone
+    /// hides recovery dynamics because a clean drain always converges. Must be
+    /// within `0..steps` (asserted up front, so a requested probe always fires).
+    pub probe_confirmed_at: Option<u32>,
 }
 
 /// Outcome of one simulation run.
@@ -53,6 +59,9 @@ pub struct RunReport {
     pub trace_hash: u64,
     /// Each peer's final confirmed frame.
     pub final_confirmed: Vec<i32>,
+    /// Each peer's confirmed frame sampled at [`RunOptions::probe_confirmed_at`]
+    /// (empty when no probe step was requested). Indexed by peer.
+    pub probe_confirmed: Vec<i32>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
@@ -324,6 +333,46 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
 
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+
+    // Validate every peer index up front so a malformed or hand-edited corpus
+    // schedule fails loudly with a clear message instead of panicking on a raw
+    // slice index deep in the run (or, for `PeerStall` steps, silently in a
+    // release build). Covers initial links, every event, and the probe step.
+    for (from, to, _) in &schedule.initial_links {
+        assert!(
+            *from < n && *to < n,
+            "initial link ({from} -> {to}) out of range for a {n}-peer mesh"
+        );
+    }
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::SetLink { from, to, .. }
+            | ScheduleEvent::Block { from, to, .. }
+            | ScheduleEvent::Hold { from, to, .. } => assert!(
+                *from < n && *to < n,
+                "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
+            ),
+            ScheduleEvent::PeerStall { peer, steps } => {
+                assert!(
+                    *peer < n,
+                    "PeerStall peer {peer} out of range for a {n}-peer mesh"
+                );
+                assert!(
+                    *steps > 0,
+                    "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
+                );
+            },
+            ScheduleEvent::HealAll => {},
+        }
+    }
+    if let Some(probe) = options.probe_confirmed_at {
+        assert!(
+            probe < schedule.config.steps,
+            "probe_confirmed_at ({probe}) is outside the run (0..{})",
+            schedule.config.steps
+        );
+    }
+
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
     }
@@ -387,6 +436,12 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     let mut oracle = Oracle::new(n);
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     let mut next_event = 0usize;
+    // Per-peer stall deadline (exclusive step): peer `i` is frozen while
+    // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
+    // sets it to `step + steps`.
+    let mut stalled_until: Vec<u32> = vec![0; n];
+    // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
+    let mut probe_confirmed: Vec<i32> = Vec::new();
 
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
@@ -404,53 +459,83 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 ScheduleEvent::Hold { from, to, holding } => {
                     net.set_holding(addrs[*from], addrs[*to], *holding);
                 },
+                ScheduleEvent::PeerStall { peer, steps } => {
+                    // `peer` in range and `steps > 0` are validated up front.
+                    stalled_until[*peer] = step.saturating_add(*steps);
+                },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
             next_event += 1;
         }
 
-        // Drive every peer in fixed order.
+        // Drive every peer in fixed order. A peer inside its stall window is
+        // frozen (a local hang): it does not poll, drain events, add input, or
+        // advance, and puts nothing on the wire until it resumes. Its state is
+        // still folded into the trace below so the digest stays uniform and the
+        // stall reproduces bit-for-bit.
         for (i, slot) in peers.iter_mut().enumerate() {
-            slot.session.poll_remote_clients();
+            // Confirmed frame after this step's drive (or the frozen value for a
+            // stalled peer): read exactly once and reused for both the trace
+            // fold and any probe snapshot.
+            let confirmed = if step >= stalled_until[i] {
+                slot.session.poll_remote_clients();
 
-            let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
-            for event in &events {
-                if let FortressEvent::DesyncDetected { frame, .. } = event {
-                    oracle.observe_desync_event(i, *frame);
+                let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
+                for event in &events {
+                    if let FortressEvent::DesyncDetected { frame, .. } = event {
+                        oracle.observe_desync_event(i, *frame);
+                    }
+                    fold_trace(&mut trace_hash, &format!("{event:?}"));
                 }
-                fold_trace(&mut trace_hash, &format!("{event:?}"));
-            }
 
-            if slot.session.current_state() == SessionState::Running {
-                for handle in slot.session.local_player_handles() {
-                    if let Err(error) = slot.session.add_local_input(handle, input_for(step, i)) {
-                        oracle.observe_advance_error(i, step, &error);
+                if slot.session.current_state() == SessionState::Running {
+                    for handle in slot.session.local_player_handles() {
+                        if let Err(error) = slot.session.add_local_input(handle, input_for(step, i))
+                        {
+                            oracle.observe_advance_error(i, step, &error);
+                        }
+                    }
+                    match slot.session.advance_frame() {
+                        Ok(requests) => slot.game.handle_requests(requests),
+                        Err(error) => oracle.observe_advance_error(i, step, &error),
                     }
                 }
-                match slot.session.advance_frame() {
-                    Ok(requests) => slot.game.handle_requests(requests),
-                    Err(error) => oracle.observe_advance_error(i, step, &error),
-                }
-            }
 
-            // Incrementally sample newly confirmed inputs (they evict).
-            let confirmed = slot.session.confirmed_frame();
-            if confirmed.is_valid() {
-                for frame in (slot.sampled_confirmed + 1)..=confirmed.as_i32() {
-                    match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
-                        Ok(inputs) => oracle.observe_confirmed_inputs(i, frame, &inputs),
-                        Err(error) => {
-                            oracle.observe_confirmed_unavailable(i, frame, &format!("{error:?}"));
-                        },
+                // Incrementally sample newly confirmed inputs (they evict).
+                let confirmed = slot.session.confirmed_frame();
+                if confirmed.is_valid() {
+                    for frame in (slot.sampled_confirmed + 1)..=confirmed.as_i32() {
+                        match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
+                            Ok(inputs) => oracle.observe_confirmed_inputs(i, frame, &inputs),
+                            Err(error) => {
+                                oracle.observe_confirmed_unavailable(
+                                    i,
+                                    frame,
+                                    &format!("{error:?}"),
+                                );
+                            },
+                        }
+                        slot.sampled_confirmed = frame;
                     }
-                    slot.sampled_confirmed = frame;
                 }
-            }
+                confirmed
+            } else {
+                // Frozen peer (local hang): no poll/advance, no wire traffic.
+                slot.session.confirmed_frame()
+            };
 
+            // Fold each peer's (possibly frozen) frame + confirmed state so the
+            // trace digest is defined every step, stalled or not.
             fold_trace(
                 &mut trace_hash,
                 &(step, i, slot.game.gs, confirmed.as_i32()),
             );
+
+            // Optional mid-run confirmation snapshot for recovery-dynamics
+            // tests, reusing the value already read for this peer above.
+            if options.probe_confirmed_at == Some(step) {
+                probe_confirmed.push(confirmed.as_i32());
+            }
         }
 
         if diagnose && step % 50 == 0 {
@@ -522,6 +607,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         verdict,
         trace_hash,
         final_confirmed,
+        probe_confirmed,
         net_stats: net.stats(),
         metrics,
         peer_wire,
