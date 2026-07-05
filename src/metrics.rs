@@ -803,7 +803,18 @@ impl Serialize for MessageKindCounts {
 /// behind [`NetworkStats`](crate::NetworkStats)) and count payload bytes only —
 /// they exclude the per-packet UDP/IP header that
 /// [`NetworkStats::kbps_sent`](crate::NetworkStats::kbps_sent) folds into its
-/// estimate.
+/// estimate. Sent bytes/packets are tallied when a message is enqueued for the
+/// socket (mirroring the pre-existing `bytes_sent` accounting), received ones
+/// when a message is delivered to the endpoint.
+///
+/// # Per-endpoint attribution
+///
+/// Every counter is scoped to **one endpoint** (one remote peer or spectator).
+/// In the unusual configuration where the same address is registered as both a
+/// remote player and a spectator, each is a distinct endpoint with its own
+/// snapshot, so a single datagram delivered to that address is counted once per
+/// endpoint. Read per-peer values individually; do not sum `bytes_received`
+/// across handles expecting a single "total bytes off the wire".
 ///
 /// This type is `#[non_exhaustive]`: future library versions may add fields
 /// without a breaking change, so match with `..`.
@@ -847,9 +858,10 @@ pub struct PeerMetrics {
     pub messages_received_by_kind: MessageKindCounts,
 
     /// Cumulative raw input bytes batched into `Input` packets **before**
-    /// delta/RLE compression. Divide
+    /// delta/RLE compression. When non-zero, dividing
     /// [`input_bytes_post_compression`](Self::input_bytes_post_compression) by
-    /// this for the realized compression ratio.
+    /// this gives the realized compression ratio (it stays 0 until the first
+    /// input is sent).
     pub input_bytes_pre_compression: u64,
 
     /// Cumulative encoded input bytes placed on the wire in `Input` packets
@@ -871,9 +883,12 @@ pub struct PeerMetrics {
     /// [`NetworkStats::ping`](crate::NetworkStats::ping)).
     pub ping_ms: u128,
 
-    /// **Gauge.** The peer's most recently reported frame advantage over the
-    /// local client (the same value as
-    /// [`NetworkStats::remote_frames_behind`](crate::NetworkStats::remote_frames_behind)).
+    /// **Gauge.** The peer's most recently reported frame-advantage value — the
+    /// same quantity [`NetworkStats::remote_frames_behind`] surfaces (the remote
+    /// player's own estimate of the local↔remote frame gap; see that field for
+    /// the sign convention).
+    ///
+    /// [`NetworkStats::remote_frames_behind`]: crate::NetworkStats::remote_frames_behind
     pub remote_frame_advantage: i32,
 }
 
