@@ -380,6 +380,13 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             schedule.config.steps
         );
     }
+    for &ppm in &schedule.config.clock_skew_ppm {
+        assert!(
+            ppm >= -1_000_000,
+            "clock_skew_ppm must be >= -1_000_000 (-100% = a frozen clock); a \
+             lower value would run time backwards (got {ppm})"
+        );
+    }
 
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -392,8 +399,21 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
             let observer = Arc::new(CollectingObserver::new());
+            // Per-peer clock: the exact base clock at 0 ppm (byte-identical to
+            // before), or a rate-skewed clock modeling an unsynchronized local
+            // clock (H-SKEW). A missing/short skew vector means "no skew".
+            let ppm = schedule.config.clock_skew_ppm.get(i).copied().unwrap_or(0);
+            let peer_clock = if ppm == 0 {
+                clock.as_protocol_clock()
+            } else {
+                // ratio (1e6 + ppm) / 1e6. `ppm == -1_000_000` (-100%) is a
+                // frozen clock (num = 0); anything below that would run time
+                // backwards and is rejected up front, so the fallback is unused.
+                let num = u64::try_from(1_000_000_i64 + i64::from(ppm)).unwrap_or(0);
+                clock.as_skewed_protocol_clock(num, 1_000_000)
+            };
             let protocol_config = ProtocolConfig {
-                clock: Some(clock.as_protocol_clock()),
+                clock: Some(peer_clock),
                 protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, i))),
                 ..ProtocolConfig::default()
             };

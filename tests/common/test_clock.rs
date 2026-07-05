@@ -114,6 +114,42 @@ impl TestClock {
         Arc::new(move || *current.lock().expect("TestClock mutex poisoned"))
     }
 
+    /// Creates a [`ClockFn`](fortress_rollback::ClockFn) whose *rate* is skewed
+    /// by the integer ratio `num/den` relative to this clock's shared base —
+    /// modeling a peer whose local clock runs fast (`num > den`) or slow
+    /// (`num < den`) while the network (the base clock) keeps real time. The
+    /// skew applies to *elapsed* time only: `skewed = base_start +
+    /// base_elapsed * num / den`, so every skewed clock shares one epoch.
+    ///
+    /// Integer arithmetic (`u128`, saturating) keeps it **deterministic across
+    /// platforms** — no float rounding. Capture the base epoch by creating each
+    /// peer's skewed clock *before* the first [`advance`](Self::advance).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `den == 0`. The returned closure panics if the internal mutex
+    /// is poisoned.
+    // Used only by the simulation harness; unused in other test binaries that
+    // also compile `tests/common`.
+    #[allow(dead_code)]
+    pub fn as_skewed_protocol_clock(
+        &self,
+        num: u64,
+        den: u64,
+    ) -> Arc<dyn Fn() -> Instant + Send + Sync> {
+        assert!(den != 0, "clock-skew denominator must be nonzero");
+        let current = Arc::clone(&self.current);
+        let base_start = *self.current.lock().expect("TestClock mutex poisoned");
+        Arc::new(move || {
+            let base_now = *current.lock().expect("TestClock mutex poisoned");
+            // `saturating_duration_since` (like `ping_millis`) — the base only
+            // advances, so `base_now >= base_start`, but stay defensive.
+            let elapsed_ms = base_now.saturating_duration_since(base_start).as_millis();
+            let skewed_ms = elapsed_ms.saturating_mul(u128::from(num)) / u128::from(den);
+            base_start + Duration::from_millis(u64::try_from(skewed_ms).unwrap_or(u64::MAX))
+        })
+    }
+
     /// Creates a clock function for [`ChaosSocket::with_clock()`](fortress_rollback::ChaosSocket::with_clock).
     ///
     /// On non-WASM targets, `web_time::Instant` is the same type as
@@ -283,5 +319,35 @@ mod tests {
         let t1 = clock.now();
 
         assert_eq!(t1 - t0, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn skewed_clock_scales_elapsed_by_the_integer_ratio() {
+        let clock = TestClock::new();
+        let start = clock.now();
+        // Create every skewed clock BEFORE advancing so they share the epoch.
+        let double = clock.as_skewed_protocol_clock(2, 1); // 2x rate
+        let half = clock.as_skewed_protocol_clock(1, 2); // half rate
+        let unit = clock.as_skewed_protocol_clock(1, 1); // real time
+        let frozen = clock.as_skewed_protocol_clock(0, 1); // stopped clock
+
+        clock.advance(Duration::from_millis(100));
+
+        assert_eq!(double().duration_since(start), Duration::from_millis(200));
+        assert_eq!(half().duration_since(start), Duration::from_millis(50));
+        assert_eq!(unit().duration_since(start), Duration::from_millis(100));
+        assert_eq!(frozen().duration_since(start), Duration::from_millis(0));
+
+        // Skew scales elapsed, not the epoch: a second advance compounds.
+        clock.advance(Duration::from_millis(100));
+        assert_eq!(double().duration_since(start), Duration::from_millis(400));
+        assert_eq!(frozen().duration_since(start), Duration::from_millis(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "denominator must be nonzero")]
+    fn skewed_clock_rejects_zero_denominator() {
+        let clock = TestClock::new();
+        let _ = clock.as_skewed_protocol_clock(1, 0);
     }
 }

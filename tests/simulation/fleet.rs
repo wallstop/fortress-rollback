@@ -1212,6 +1212,83 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
     }
 }
 
+/// Builds a clock-skew schedule: an `n`-mesh over clean links with a small
+/// symmetric delay (40ms each way, so RTT is non-zero and a skewed clock
+/// misreads it), and the given per-peer clock-rate skew in ppm. The delay holds
+/// for the whole run — no `HealAll`, so `heal_all` never removes it — keeping
+/// RTT non-zero throughout (constant conditions, unlike the heal-and-drain
+/// schedules).
+fn clock_skew_schedule(n: usize, skew: Vec<i32>) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        noise: BackgroundNoise::Clean,
+        clock_skew_ppm: skew,
+        ..SimConfig::smoke(n)
+    };
+    let delayed = LinkPolicy {
+        drop_rate: 0.0,
+        dup_rate: 0.0,
+        base_delay: Duration::from_millis(40),
+        jitter: Duration::ZERO,
+        burst_rate: 0.0,
+        burst_len: 0,
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, delayed.clone()));
+            }
+        }
+    }
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events: Vec::new(),
+        // Past the last step: nothing to heal, the delay is constant.
+        heal_at: 900,
+    }
+}
+
+/// M3 §6.6-pre.2 — per-peer clock skew (H-SKEW precondition). Peers whose local
+/// clocks run at different rates than the network's real time must not diverge
+/// the mesh: the game logic is driven by per-(step, peer) inputs, not the clock,
+/// so a bounded skew only perturbs *timing-gated* behavior (RTT measurement,
+/// quality-report/keepalive cadence, frame-advantage estimate) — the confirmed
+/// state prefix stays byte-identical. This pins that a skewed peer is tolerated.
+///
+/// Premise: a skewed peer's clock demonstrably alters execution (the trace
+/// differs from the all-exact run) while both pass the oracle; determinism holds.
+#[test]
+fn clock_skew_is_tolerated_and_alters_execution() {
+    for n in [2usize, 4] {
+        let exact = clock_skew_schedule(n, Vec::new());
+        // Peer 0's local clock runs 10% fast; the rest keep real time.
+        let mut skew = vec![0; n];
+        skew[0] = 100_000;
+        let skewed = clock_skew_schedule(n, skew);
+
+        let exact_report = run(&exact, &RunOptions::default());
+        exact_report.expect_pass(&exact);
+        let skewed_report = run(&skewed, &RunOptions::default());
+        skewed_report.expect_pass(&skewed);
+
+        let skewed_again = run(&skewed, &RunOptions::default());
+        assert_eq!(
+            skewed_report.trace_hash, skewed_again.trace_hash,
+            "a clock-skew schedule must reproduce its exact trace (n={n})"
+        );
+        assert_ne!(
+            exact_report.trace_hash, skewed_report.trace_hash,
+            "a skewed clock must alter timing-gated execution (n={n})"
+        );
+    }
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]
