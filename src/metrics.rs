@@ -215,6 +215,80 @@ impl Serialize for EventKindCounts {
     }
 }
 
+/// A histogram of rollback depths (the number of frames re-simulated per
+/// rollback), bucketed by depth.
+///
+/// Backed by a fixed-size array of [`BUCKETS`](Self::BUCKETS) slots: slot `i`
+/// (`0..=15`) counts rollbacks of depth `i + 1`, and the final slot counts every
+/// rollback deeper than 16. Read individual buckets with [`bucket`](Self::bucket)
+/// or the grand total with [`total`](Self::total). Serializes as a JSON object
+/// keyed by each bucket's depth label (`"1"..="16"`, then `"17_plus"`), so the
+/// wire form is self-describing and stable across counter values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollbackDepthHistogram([u64; Self::BUCKETS]);
+
+impl RollbackDepthHistogram {
+    /// The number of depth buckets: one per depth `1..=16` plus a final
+    /// catch-all for every rollback deeper than 16.
+    pub const BUCKETS: usize = 17;
+
+    /// The self-describing label for each bucket, in slot order. The final label
+    /// (`"17_plus"`) covers every rollback deeper than 16.
+    const LABELS: [&'static str; Self::BUCKETS] = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+        "17_plus",
+    ];
+
+    /// The slot a rollback of `depth` frames falls into. Depths at or below 1 map
+    /// to the first bucket; depths above 16 saturate into the final bucket.
+    fn bucket_index(depth: usize) -> usize {
+        // Clamp into `1..=BUCKETS`, then shift to a zero-based slot: depth 1 → 0,
+        // depth 16 → 15, depth ≥ 17 → 16 (the "17_plus" catch-all).
+        depth.clamp(1, Self::BUCKETS).saturating_sub(1)
+    }
+
+    /// Records one rollback of `depth` frames, saturating the bucket at
+    /// [`u64::MAX`]. A `depth` of 0 (not a real rollback) is ignored.
+    fn record(&mut self, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        if let Some(slot) = self.0.get_mut(Self::bucket_index(depth)) {
+            *slot = slot.saturating_add(1);
+        }
+    }
+
+    /// The count recorded in bucket `index` (see the type docs for the bucket
+    /// layout). Returns 0 for an out-of-range index.
+    #[must_use]
+    pub fn bucket(&self, index: usize) -> u64 {
+        self.0.get(index).copied().unwrap_or(0)
+    }
+
+    /// The total number of rollbacks recorded across every bucket.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.0.iter().copied().fold(0u64, u64::saturating_add)
+    }
+}
+
+impl Default for RollbackDepthHistogram {
+    fn default() -> Self {
+        Self([0; Self::BUCKETS])
+    }
+}
+
+impl Serialize for RollbackDepthHistogram {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(Self::BUCKETS))?;
+        for (index, label) in Self::LABELS.into_iter().enumerate() {
+            map.serialize_entry(label, &self.bucket(index))?;
+        }
+        map.end()
+    }
+}
+
 /// A cumulative snapshot of session-level metrics.
 ///
 /// In normal use you read a snapshot from [`P2PSession::metrics`] or
@@ -231,6 +305,7 @@ impl Serialize for EventKindCounts {
 /// # use fortress_rollback::metrics::SessionMetrics;
 /// let metrics = SessionMetrics::default();
 /// assert_eq!(metrics.events_discarded_total, 0);
+/// assert_eq!(metrics.frames_advanced, 0);
 /// ```
 ///
 /// [`P2PSession::metrics`]: crate::P2PSession::metrics
@@ -239,6 +314,96 @@ impl Serialize for EventKindCounts {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[must_use = "SessionMetrics should be inspected after being queried"]
 pub struct SessionMetrics {
+    /// Total frames the game state was stepped forward, counting **both** the
+    /// forward advances that produce a rendered frame
+    /// ([`visual_frames`](Self::visual_frames)) and the frames replayed during
+    /// rollbacks ([`resimulated_frames`](Self::resimulated_frames)). By
+    /// construction `frames_advanced == visual_frames + resimulated_frames`, so
+    /// the ratio `resimulated_frames / frames_advanced` is the fraction of
+    /// simulation work spent on rollback repair.
+    pub frames_advanced: u64,
+
+    /// The number of forward frame advances — one per
+    /// [`P2PSession::advance_frame`](crate::P2PSession::advance_frame) call that
+    /// steps the simulation to a new (never-before-simulated) frame. This is the
+    /// count of frames the application renders.
+    pub visual_frames: u64,
+
+    /// The number of frames re-simulated during rollbacks. Each rollback of
+    /// depth `d` re-simulates `d` frames, so this is the running sum of rollback
+    /// depths (see [`rollback_depth_histogram`](Self::rollback_depth_histogram)).
+    pub resimulated_frames: u64,
+
+    /// The number of rollbacks performed (a load-and-resimulate episode),
+    /// regardless of depth.
+    pub rollback_count: u64,
+
+    /// A histogram of rollback depths: how many rollbacks re-simulated 1 frame,
+    /// 2 frames, …, 16 frames, and more than 16 frames. Its
+    /// [`total`](RollbackDepthHistogram::total) equals
+    /// [`rollback_count`](Self::rollback_count).
+    pub rollback_depth_histogram: RollbackDepthHistogram,
+
+    /// The deepest single rollback observed (its number of re-simulated frames).
+    /// Stays 0 until the first rollback.
+    pub max_rollback_depth: u32,
+
+    /// The number of individual per-player prediction misses that triggered
+    /// rollback repair. One misprediction-driven rollback can count several
+    /// misses (one per player whose predicted input turned out wrong).
+    pub prediction_miss_count: u64,
+
+    /// The number of times an
+    /// [`advance_frame`](crate::P2PSession::advance_frame) call could not step
+    /// the simulation because the prediction window was already full (the session
+    /// is waiting for a slow or unreachable peer to confirm inputs). A rising
+    /// count means the local simulation is being throttled by the network.
+    pub stall_count: u64,
+
+    /// The number of [`FortressEvent::WaitRecommendation`] events emitted (the
+    /// session asked the application to slow down to let a peer catch up).
+    ///
+    /// [`FortressEvent::WaitRecommendation`]: crate::FortressEvent::WaitRecommendation
+    pub wait_recommendations: u64,
+
+    /// The most recently sampled confirmation lag: how many frames ahead of the
+    /// last confirmed frame the simulation was at the last forward advance. A
+    /// gauge, not a monotonic counter.
+    pub confirmation_lag_current: u64,
+
+    /// The maximum [`confirmation_lag_current`](Self::confirmation_lag_current)
+    /// observed over the life of the session.
+    pub confirmation_lag_max: u64,
+
+    /// The running sum of the per-advance confirmation lag samples. Divide by
+    /// [`visual_frames`](Self::visual_frames) for the mean confirmation lag.
+    pub confirmation_lag_sum: u64,
+
+    /// The number of confirmed-frame checksums compared against a peer's
+    /// checksum for desync detection. Zero unless
+    /// [`DesyncDetection`](crate::DesyncDetection) is enabled. Equals
+    /// [`checksums_matched`](Self::checksums_matched) `+`
+    /// [`checksums_mismatched`](Self::checksums_mismatched).
+    pub checksums_compared: u64,
+
+    /// How many compared checksums matched their peer's value.
+    pub checksums_matched: u64,
+
+    /// How many compared checksums disagreed with their peer's value (each also
+    /// emits a [`FortressEvent::DesyncDetected`]).
+    ///
+    /// [`FortressEvent::DesyncDetected`]: crate::FortressEvent::DesyncDetected
+    pub checksums_mismatched: u64,
+
+    /// The high-water mark of the event-queue length: the largest the bounded
+    /// event queue grew before the application drained it. Compare against the
+    /// configured event-queue size to see how close overflow (and the resulting
+    /// [`events_discarded_total`](Self::events_discarded_total)) came.
+    pub event_queue_high_water: u64,
+
+    /// The high-water mark of the local desync-checksum history length.
+    pub checksum_history_high_water: u64,
+
     /// Total number of queued [`FortressEvent`]s discarded because the bounded
     /// event queue overflowed before the application drained it.
     ///
@@ -271,6 +436,67 @@ impl SessionMetrics {
     pub(crate) fn record_event_discard(&mut self, kind: EventKind) {
         self.events_discarded_total = self.events_discarded_total.saturating_add(1);
         self.events_discarded_by_kind.record(kind);
+    }
+
+    /// Records one forward frame advance (a rendered/visual frame) and samples
+    /// the confirmation lag at that advance.
+    pub(crate) fn record_forward_advance(&mut self, confirmation_lag: u64) {
+        self.frames_advanced = self.frames_advanced.saturating_add(1);
+        self.visual_frames = self.visual_frames.saturating_add(1);
+        self.confirmation_lag_current = confirmation_lag;
+        self.confirmation_lag_max = self.confirmation_lag_max.max(confirmation_lag);
+        self.confirmation_lag_sum = self.confirmation_lag_sum.saturating_add(confirmation_lag);
+    }
+
+    /// Records one rollback that re-simulated `depth` frames.
+    pub(crate) fn record_rollback(&mut self, depth: usize) {
+        let depth_u64 = u64::try_from(depth).unwrap_or(u64::MAX);
+        self.rollback_count = self.rollback_count.saturating_add(1);
+        self.resimulated_frames = self.resimulated_frames.saturating_add(depth_u64);
+        self.frames_advanced = self.frames_advanced.saturating_add(depth_u64);
+        let depth_u32 = u32::try_from(depth).unwrap_or(u32::MAX);
+        self.max_rollback_depth = self.max_rollback_depth.max(depth_u32);
+        self.rollback_depth_histogram.record(depth);
+    }
+
+    /// Records `count` per-player prediction misses that triggered a rollback.
+    pub(crate) fn record_prediction_misses(&mut self, count: u64) {
+        self.prediction_miss_count = self.prediction_miss_count.saturating_add(count);
+    }
+
+    /// Records one prediction-window stall (an advance that could not step the
+    /// simulation because the prediction window was full).
+    pub(crate) fn record_stall(&mut self) {
+        self.stall_count = self.stall_count.saturating_add(1);
+    }
+
+    /// Records one emitted [`FortressEvent::WaitRecommendation`].
+    ///
+    /// [`FortressEvent::WaitRecommendation`]: crate::FortressEvent::WaitRecommendation
+    pub(crate) fn record_wait_recommendation(&mut self) {
+        self.wait_recommendations = self.wait_recommendations.saturating_add(1);
+    }
+
+    /// Records one confirmed-frame checksum comparison against a peer.
+    pub(crate) fn record_checksum_comparison(&mut self, matched: bool) {
+        self.checksums_compared = self.checksums_compared.saturating_add(1);
+        if matched {
+            self.checksums_matched = self.checksums_matched.saturating_add(1);
+        } else {
+            self.checksums_mismatched = self.checksums_mismatched.saturating_add(1);
+        }
+    }
+
+    /// Updates the event-queue high-water mark with an observed queue length.
+    pub(crate) fn observe_event_queue_len(&mut self, len: usize) {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        self.event_queue_high_water = self.event_queue_high_water.max(len);
+    }
+
+    /// Updates the checksum-history high-water mark with an observed length.
+    pub(crate) fn observe_checksum_history_len(&mut self, len: usize) {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        self.checksum_history_high_water = self.checksum_history_high_water.max(len);
     }
 
     /// Serializes this snapshot to a compact JSON string.
@@ -487,6 +713,113 @@ mod tests {
                 EventKind::PeerJoined
             );
         }
+    }
+
+    #[test]
+    fn rollback_histogram_buckets_depths_and_saturates_overflow() {
+        let mut hist = RollbackDepthHistogram::default();
+        assert_eq!(hist.total(), 0);
+        // depth 0 is not a real rollback and is ignored
+        hist.record(0);
+        assert_eq!(hist.total(), 0);
+        // depth d (1..=16) lands in slot d-1
+        for depth in 1..=16usize {
+            hist.record(depth);
+            assert_eq!(hist.bucket(depth - 1), 1, "depth {depth}");
+        }
+        // every depth > 16 saturates into the final "17_plus" bucket (index 16)
+        hist.record(17);
+        hist.record(100);
+        hist.record(usize::MAX);
+        assert_eq!(hist.bucket(16), 3);
+        assert_eq!(hist.total(), 16 + 3);
+        // out-of-range index reads as zero, never panics
+        assert_eq!(hist.bucket(RollbackDepthHistogram::BUCKETS), 0);
+        assert_eq!(hist.bucket(999), 0);
+    }
+
+    #[test]
+    fn record_rollback_keeps_frames_advanced_identity_and_max_depth() {
+        let mut m = SessionMetrics::new();
+        // Two forward advances and two rollbacks (depths 3 and 5).
+        m.record_forward_advance(1);
+        m.record_forward_advance(2);
+        m.record_rollback(3);
+        m.record_rollback(5);
+        assert_eq!(m.visual_frames, 2);
+        assert_eq!(m.resimulated_frames, 8);
+        // The core invariant: total simulation work = visual + resimulated.
+        assert_eq!(m.frames_advanced, m.visual_frames + m.resimulated_frames);
+        assert_eq!(m.frames_advanced, 10);
+        assert_eq!(m.rollback_count, 2);
+        assert_eq!(m.rollback_depth_histogram.total(), m.rollback_count);
+        assert_eq!(m.max_rollback_depth, 5);
+        assert_eq!(m.rollback_depth_histogram.bucket(2), 1); // depth 3
+        assert_eq!(m.rollback_depth_histogram.bucket(4), 1); // depth 5
+    }
+
+    #[test]
+    fn record_forward_advance_tracks_confirmation_lag_gauge_max_and_sum() {
+        let mut m = SessionMetrics::new();
+        m.record_forward_advance(5);
+        m.record_forward_advance(2);
+        m.record_forward_advance(9);
+        assert_eq!(m.confirmation_lag_current, 9); // gauge: last sample
+        assert_eq!(m.confirmation_lag_max, 9);
+        assert_eq!(m.confirmation_lag_sum, 16);
+        assert_eq!(m.visual_frames, 3);
+    }
+
+    #[test]
+    fn record_checksum_comparison_splits_matches_and_mismatches() {
+        let mut m = SessionMetrics::new();
+        m.record_checksum_comparison(true);
+        m.record_checksum_comparison(false);
+        m.record_checksum_comparison(true);
+        assert_eq!(m.checksums_compared, 3);
+        assert_eq!(m.checksums_matched, 2);
+        assert_eq!(m.checksums_mismatched, 1);
+        assert_eq!(
+            m.checksums_compared,
+            m.checksums_matched + m.checksums_mismatched
+        );
+    }
+
+    #[test]
+    fn high_water_marks_track_the_maximum_observed_length() {
+        let mut m = SessionMetrics::new();
+        m.observe_event_queue_len(3);
+        m.observe_event_queue_len(7);
+        m.observe_event_queue_len(4); // shrinking does not lower the mark
+        assert_eq!(m.event_queue_high_water, 7);
+        m.observe_checksum_history_len(10);
+        m.observe_checksum_history_len(2);
+        assert_eq!(m.checksum_history_high_water, 10);
+    }
+
+    #[test]
+    fn stall_prediction_miss_and_wait_recommendation_counters_saturate_up() {
+        let mut m = SessionMetrics::new();
+        m.record_stall();
+        m.record_stall();
+        m.record_prediction_misses(4);
+        m.record_prediction_misses(1);
+        m.record_wait_recommendation();
+        assert_eq!(m.stall_count, 2);
+        assert_eq!(m.prediction_miss_count, 5);
+        assert_eq!(m.wait_recommendations, 1);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn rollback_histogram_serializes_as_labeled_depth_map() {
+        let mut m = SessionMetrics::new();
+        m.record_rollback(1);
+        m.record_rollback(17);
+        let json = m.to_json().expect("json serialization succeeds");
+        assert!(json.contains(r#""1":1"#), "{json}");
+        assert!(json.contains(r#""17_plus":1"#), "{json}");
+        assert!(json.contains(r#""frames_advanced":18"#), "{json}");
     }
 
     #[cfg(feature = "json")]
