@@ -6,7 +6,7 @@
 //! proves nothing.
 
 use super::harness::schedule::{
-    generate, BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig,
+    generate, AppModel, BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{oracle::OracleFailure, run, RunOptions};
@@ -1110,6 +1110,106 @@ fn run_rejects_out_of_range_peer_kill() {
         .push((100, ScheduleEvent::PeerKill { peer: 9 }));
     schedule.events.sort_by_key(|(step, _)| *step);
     let _ = run(&schedule, &RunOptions::default());
+}
+
+/// Builds a schedule that reliably drives `WaitRecommendation`s: an `n`-mesh
+/// over clean links with **asymmetric one-way delay** (lower→higher index 20ms,
+/// the reverse 120ms). The asymmetry biases the RTT/2 frame-advantage estimate
+/// (defect D11), so a persistent advantage builds and the time-sync loop emits
+/// skip recommendations — a symmetric delay produces none (both peers lockstep).
+/// `app_model` selects whether the harness obeys them.
+fn wait_rec_schedule(n: usize, app_model: AppModel) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        noise: BackgroundNoise::Clean,
+        app_model,
+        ..SimConfig::smoke(n)
+    };
+    let link = |ms: u64| LinkPolicy {
+        drop_rate: 0.0,
+        dup_rate: 0.0,
+        base_delay: Duration::from_millis(ms),
+        jitter: Duration::ZERO,
+        burst_rate: 0.0,
+        burst_len: 0,
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                let ms = if from < to { 20 } else { 120 };
+                initial_links.push((from, to, link(ms)));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+/// M3 §6.6-pre.3 — the WaitRecommendation-obeying app model. The reference
+/// client and every prior fleet run *ignore* `WaitRecommendation`, leaving the
+/// time-sync control loop **open**, so oscillation (H-OSC) is unobservable.
+/// Obeying it (skip the recommended advances) closes the loop.
+///
+/// This is the H-OSC *precondition infra* plus an asymmetric-delay
+/// side-observation — **not** the full H-OSC experiment, which is symmetric
+/// delay + Obey (mutual-sleep contention, FM-3) and is still owed. Under this
+/// one-sided (asymmetric-delay) obedience the closed loop must stay consistent
+/// and live: every peer confirms a byte-identical *state* prefix whether obeying
+/// or ignoring (both pass the oracle), even though the execution *trace* differs
+/// (Obey paces the ahead peer differently). Obeying must not diverge or deadlock
+/// the mesh.
+///
+/// Premise: under Obey (the run whose obedience is under test) the schedule
+/// emits real `WaitRecommendation`s, and obeying vs ignoring produces different
+/// traces (the skips actually happened).
+#[test]
+fn app_model_obey_wait_recommendation_stays_consistent() {
+    for n in [2usize, 4] {
+        let ignore = wait_rec_schedule(n, AppModel::Ignore);
+        let obey = wait_rec_schedule(n, AppModel::Obey);
+
+        let ignore_report = run(&ignore, &RunOptions::default());
+        ignore_report.expect_pass(&ignore);
+        let obey_report = run(&obey, &RunOptions::default());
+        obey_report.expect_pass(&obey);
+
+        // The Obey run itself must emit WaitRecommendations, or there was
+        // nothing to obey (the H-OSC precondition — measured on the run under
+        // test, not the Ignore control).
+        let obey_wait_recs: u64 = obey_report
+            .metrics
+            .iter()
+            .map(|m| m.wait_recommendations)
+            .sum();
+        assert!(
+            obey_wait_recs > 0,
+            "the delayed schedule must emit WaitRecommendations under Obey to \
+             probe H-OSC (n={n}, got {obey_wait_recs})"
+        );
+
+        let obey_again = run(&obey, &RunOptions::default());
+        assert_eq!(
+            obey_report.trace_hash, obey_again.trace_hash,
+            "an Obey run must reproduce its exact trace (n={n})"
+        );
+        assert_ne!(
+            ignore_report.trace_hash, obey_report.trace_hash,
+            "obeying WaitRecommendation must change execution — the skips must \
+             actually happen (n={n})"
+        );
+    }
 }
 
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
