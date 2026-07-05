@@ -533,21 +533,28 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     fold_trace(&mut trace_hash, &format!("{event:?}"));
                 }
 
-                if wait_skip[i] > 0 {
-                    // Obeying a WaitRecommendation: poll/receive this step (done
-                    // above) but skip the advance so the ahead peer lets the
-                    // others catch up — the time-sync loop, now closed.
-                    wait_skip[i] -= 1;
-                } else if slot.session.current_state() == SessionState::Running {
-                    for handle in slot.session.local_player_handles() {
-                        if let Err(error) = slot.session.add_local_input(handle, input_for(step, i))
-                        {
-                            oracle.observe_advance_error(i, step, &error);
+                if slot.session.current_state() == SessionState::Running {
+                    if wait_skip[i] > 0 {
+                        // Obeying a WaitRecommendation: poll/receive this step
+                        // (done above) but skip the advance so the ahead peer
+                        // lets the others catch up. Count down only on steps that
+                        // would otherwise advance (i.e. while `Running`) — a peer
+                        // that briefly leaves `Running` mid-wait (transient
+                        // resync) must not silently consume its owed skips, or it
+                        // would stop obeying once it resumes.
+                        wait_skip[i] -= 1;
+                    } else {
+                        for handle in slot.session.local_player_handles() {
+                            if let Err(error) =
+                                slot.session.add_local_input(handle, input_for(step, i))
+                            {
+                                oracle.observe_advance_error(i, step, &error);
+                            }
                         }
-                    }
-                    match slot.session.advance_frame() {
-                        Ok(requests) => slot.game.handle_requests(requests),
-                        Err(error) => oracle.observe_advance_error(i, step, &error),
+                        match slot.session.advance_frame() {
+                            Ok(requests) => slot.game.handle_requests(requests),
+                            Err(error) => oracle.observe_advance_error(i, step, &error),
+                        }
                     }
                 }
 
