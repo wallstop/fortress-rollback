@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783232901696,
+  "lastUpdate": 1783235391762,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "40990d27e5dcf7510a611ee187da6317cb9dc72f",
-          "message": "Version updates (#86)\n\n## Description\n0.6.0 release\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->\n\n---------\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-02-07T08:12:49-08:00",
-          "tree_id": "03a9d3f9d7d1023bbe2f1ea45764485368d56440",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/40990d27e5dcf7510a611ee187da6317cb9dc72f"
-        },
-        "date": 1770481036436,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 156,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 437,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 672,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 993,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102437,
-            "range": "± 476",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27554,
-            "range": "± 887",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 67",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "42492249931c0c03f52a2557e93fa304c6ffd27a",
+          "message": "Hardening M2 §5.3 prep: per-peer wire-metrics aggregation in the DST harness (#194)\n\n## Summary\n\nFoundational step toward the M2 §5.3 baseline sweep, which needs a\nper-player **bandwidth ledger**. Today the simulation runner's\n`RunReport` carries only `SessionMetrics`; the wire-level counters\n(bytes/packets/by-kind) live on each session's per-remote `PeerMetrics`,\nwhich the harness consumes and drops.\n\nThis adds the aggregation and a fleet consumer — no production or\npublic-API change (test infrastructure only).\n\n## Change\n\n- **`RunReport.peer_wire: Vec<PeerWireTotals>`** — each peer's\nper-remote `PeerMetrics` folded into one per-player total: bytes/packets\nsent+received, per-`MessageKind` breakdown, and input\npre/post-compression bytes. Aggregation runs at end-of-run over the\npeer's remote handles (`PlayerHandle::new(j)` for `j != i`;\n`peer_metrics` succeeds for any remote handle regardless of sync state).\n- By-kind arrays are positional in `MessageKind::ALL` order (the\ncrate-private `MessageKind::index()` is unreachable from tests);\n`sent_by_kind` / `received_by_kind` read them by category. Instantaneous\ngauges (`pending_*`, `ping_ms`, `remote_frame_advantage`) are\ndeliberately dropped — they are not additive across links.\n- **Consumer:** `peer_wire_metrics_are_wired_across_smoke_fleet`\nasserts, per peer, the by-kind == packet-count identities (preserved by\naggregation) and that real **bidirectional** wire traffic flowed (Input\npackets each way). This exercises `P2PSession::peer_metrics` end-to-end\nunder randomized simulation — previously only covered by direct-call\nunit tests.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` —\nclean.\n- `cargo nextest run -E 'test(simulation::)'` — 27 passed; `--features\nhot-join` (17-variant `MessageKind`) — 27 passed. New test green both\nfeature sets.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nThe `peer_wire` field is deterministic and deliberately excluded from\n`trace_hash` (it's a metric, not a correctness invariant), so\nmeta-determinism is unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only harness and fleet assertions; no production or public API\nchanges.\n> \n> **Overview**\n> Adds a **per-player bandwidth ledger** to the deterministic simulation\nharness so upcoming M2 §5.3 baseline sweeps can read wire totals from\n`RunReport` instead of dropping per-remote `PeerMetrics`.\n> \n> **`RunReport.peer_wire`** holds one `PeerWireTotals` per peer, built\nat end-of-run by summing `P2PSession::peer_metrics` across every remote\nhandle (`j != i`). Totals include bytes/packets sent and received,\nper-`MessageKind` counts (via `MessageKind::ALL` layout), and input\npre/post-compression bytes; non-additive gauges (`pending_*`, ping,\nframe advantage) are omitted.\n> \n> **`peer_wire_metrics_are_wired_across_smoke_fleet`** runs the PR smoke\nfleet (2–4 players, fixed seeds) and checks aggregation invariants\n(by-kind sums match packet counts), bidirectional traffic, Input traffic\nboth ways, and non-zero compression byte counters—exercising\n`peer_metrics` end-to-end under randomized mesh sim. **`peer_wire` is\nnot folded into `trace_hash`**, so meta-determinism tests stay\nunchanged.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n88f7e691babd3876edbcc479a69a5ea75725daf4. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-07-05T00:05:12-07:00",
+          "tree_id": "4fceb32cb4352a663f444e67c637e34574592ac9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/42492249931c0c03f52a2557e93fa304c6ffd27a"
+        },
+        "date": 1783235390205,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 112,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 470,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 718,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1042,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 122351,
+            "range": "± 220",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45386,
+            "range": "± 1505",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 103",
             "unit": "ns/iter"
           },
           {
