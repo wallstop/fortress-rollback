@@ -9380,7 +9380,12 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Handle events received from the UDP endpoints. Most events are being forwarded to the user for notification, but some require action.
-    fn handle_event(
+    /// Handles a single protocol event. Wrapped by
+    /// [`handle_event`](Self::handle_event), which enforces the event-queue cap
+    /// after this method returns through *any* path (including its several early
+    /// returns), so no emitted event escapes the cap or the D9 discard
+    /// telemetry.
+    fn handle_event_inner(
         &mut self,
         event: Event<T>,
         player_handles: Arc<[PlayerHandle]>,
@@ -9667,8 +9672,23 @@ impl<T: Config> P2PSession<T> {
                 }
             },
         }
+    }
 
-        // check event queue size and discard oldest events if too big
+    /// Handles a protocol event and then enforces the event-queue cap.
+    ///
+    /// The cap (and its D9 overflow telemetry) is applied here, after
+    /// [`handle_event_inner`](Self::handle_event_inner) returns through *any*
+    /// path — including its early returns (e.g. an unresolvable disconnect that
+    /// emits `Disconnected` then returns) — so an event emitted just before an
+    /// early return cannot leave the queue above its configured size or defer
+    /// the discard accounting.
+    fn handle_event(
+        &mut self,
+        event: Event<T>,
+        player_handles: Arc<[PlayerHandle]>,
+        addr: T::Address,
+    ) {
+        self.handle_event_inner(event, player_handles, addr);
         self.trim_event_queue();
     }
 
@@ -10329,6 +10349,46 @@ mod tests {
         assert!(
             session.metrics().events_discarded_total > before,
             "the overflow discard from the DesyncDetected push must be counted"
+        );
+    }
+
+    /// `handle_event` has early-return paths that emit an event then return
+    /// before the handler's normal end (e.g. a `Disconnected` for an endpoint
+    /// with no resolvable handles). The cap must still hold: `handle_event`
+    /// wraps `handle_event_inner` and trims after **every** exit, so an
+    /// early-return emission cannot escape the cap or the D9 accounting.
+    #[test]
+    fn handle_event_early_return_emission_is_bounded_by_wrapper_trim() {
+        let mut session = create_two_player_session();
+
+        // Saturate the queue.
+        let filler = test_addr(9998);
+        for _ in 0..session.max_event_queue_size {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr: filler });
+        }
+        assert_eq!(session.event_queue.len(), session.max_event_queue_size);
+        let before = session.metrics().events_discarded_total;
+
+        // A `Disconnected` for an unregistered address with only a local handle
+        // resolves to no target, taking the early-return branch that pushes a
+        // `Disconnected` event and returns before the handler's normal end.
+        let unknown = test_addr(9997);
+        session.handle_event(
+            Event::Disconnected,
+            Arc::from([PlayerHandle::new(0)]),
+            unknown,
+        );
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "the wrapper trim must bound handle_event's early-return emission paths"
+        );
+        assert!(
+            session.metrics().events_discarded_total > before,
+            "the early-return emission's overflow discard must be counted"
         );
     }
 
