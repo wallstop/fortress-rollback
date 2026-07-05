@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783288981747,
+  "lastUpdate": 1783292114768,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "79ac7f2e3522988d59a9266d1685dba15885862b",
-          "message": "chore(deps): bump z3 from 0.19.8 to 0.19.9 (#98)\n\nBumps [z3](https://github.com/prove-rs/z3.rs) from 0.19.8 to 0.19.9.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/f5640a3e2b0889740a666aca79757629a0b548ab\"><code>f5640a3</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/497\">#497</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/d9542b0b12114c5ced1df987feea494cbc210464\"><code>d9542b0</code></a>\nchore: expand build flag documentation (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/499\">#499</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ce50a037a210d2f12f8fdc63cb38e2445dfc7fef\"><code>ce50a03</code></a>\nfix: add rerun-if-env-changed for Z3_SYS_BUNDLED_DIR_OVERRIDE (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/496\">#496</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.8...z3-v0.19.9\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.8&new-version=0.19.9)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-22T20:24:53-08:00",
-          "tree_id": "f4bad7736a900f4942c57a04d77eb40251dc403b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/79ac7f2e3522988d59a9266d1685dba15885862b"
-        },
-        "date": 1771821042251,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 121,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 168,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 457,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 727,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1055,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 97772,
-            "range": "± 13234",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 36492,
-            "range": "± 598",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1417,
-            "range": "± 29",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fabdf182ca95636ab4c91b7cb74e45f8f8e467c2",
+          "message": "Hardening M3 §6.6-pre.2: per-peer clock skew (H-SKEW precondition) (#202)\n\nAdds per-peer clock skew to the DST harness. Every prior fleet run shared one clock, so clock rate skew was unsimulatable (H-SKEW blind). Each session now gets a clock running at an integer-ratio rate relative to the network's real-time base — deterministic across platforms (u128 integer math, no float). Test-infra only.\n\n- test_clock.rs: TestClock::as_skewed_protocol_clock(num, den) — skewed = base_start + base_elapsed*num/den (saturating). Unit tests pin the scaling (2x/0.5x/1x/frozen) and reject den=0.\n- schedule.rs: SimConfig.clock_skew_ppm: Vec<i32> (#[serde(default)] empty = no skew; existing seeds bit-identical, no schema bump; serde-default test).\n- harness/mod.rs: per-peer clock injection (exact base at 0 ppm; frozen at -1_000_000; ppm < -1_000_000 rejected up front).\n- fleet.rs: clock_skew_is_tolerated_and_alters_execution (n in {2,4}) over a constant 40ms-delay mesh. Peer 0 at +10%: mesh stays byte-consistent (game logic is per-(step,peer), not clock-driven) while the skew alters timing-gated execution (red-verified premise); determinism holds.\n\nH-SKEW precondition infra + short-run tolerance observation; the 0.1%-over-an-hour drift experiment is a long-run probe, still owed. Also unblocks the symmetric H-OSC case (per-peer clock differences source the transient advantage symmetric delay alone doesn't).\n\nReviewed by an adversarial sub-agent (verdict: solid, determinism airtight, no underflow, no must-fix) + GitHub Copilot (2 rounds: frozen-clock semantics, scaling unit test) + Cursor Bugbot (SUCCESS).",
+          "timestamp": "2026-07-05T15:50:35-07:00",
+          "tree_id": "3001bfc89284622de87b05e7353689d1ee09fc14",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/fabdf182ca95636ab4c91b7cb74e45f8f8e467c2"
+        },
+        "date": 1783292113267,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 112,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 456,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 706,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1031,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 122377,
+            "range": "± 3854",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45262,
+            "range": "± 266",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 94",
             "unit": "ns/iter"
           },
           {
