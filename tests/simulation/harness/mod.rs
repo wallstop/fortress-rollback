@@ -419,7 +419,11 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     net.set_holding(addrs[*from], addrs[*to], *holding);
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
-                    debug_assert!(
+                    // Always-on (not `debug_assert!`): the nightly fleet builds
+                    // `--release` and replays serialized corpus schedules, so a
+                    // malformed `steps: 0` must fail loudly in every profile
+                    // rather than silently freezing nothing.
+                    assert!(
                         *steps > 0,
                         "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
                     );
@@ -492,14 +496,12 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 &mut trace_hash,
                 &(step, i, slot.game.gs, confirmed.as_i32()),
             );
-        }
 
-        // Optional mid-run confirmation snapshot for recovery-dynamics tests.
-        if options.probe_confirmed_at == Some(step) {
-            probe_confirmed = peers
-                .iter()
-                .map(|slot| slot.session.confirmed_frame().as_i32())
-                .collect();
+            // Optional mid-run confirmation snapshot for recovery-dynamics
+            // tests, reusing the value already read for this peer above.
+            if options.probe_confirmed_at == Some(step) {
+                probe_confirmed.push(confirmed.as_i32());
+            }
         }
 
         if diagnose && step % 50 == 0 {
