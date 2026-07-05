@@ -598,9 +598,17 @@ mod tests {
     fn config_without_app_model_field_defaults_to_ignore() {
         let schedule = generate(42, SimConfig::smoke(2));
         let mut value = serde_json::to_value(&schedule).unwrap();
-        if let Some(config) = value.get_mut("config").and_then(|c| c.as_object_mut()) {
-            config.remove("app_model");
-        }
+        let config = value
+            .get_mut("config")
+            .and_then(|c| c.as_object_mut())
+            .expect("a serialized schedule must have a `config` object");
+        // The field must actually be present to remove — otherwise the test
+        // would pass vacuously (a full config also deserializes fine) without
+        // ever exercising the missing-field default it exists to pin.
+        assert!(
+            config.remove("app_model").is_some(),
+            "config must serialize an `app_model` field for this test to remove"
+        );
         let back: Schedule = serde_json::from_value(value).unwrap();
         assert_eq!(
             back.config.app_model,
