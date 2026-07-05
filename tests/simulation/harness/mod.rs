@@ -501,9 +501,13 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 if j == i {
                     continue;
                 }
-                if let Ok(pm) = slot.session.peer_metrics(PlayerHandle::new(j)) {
-                    totals.add(&pm);
-                }
+                let pm = slot
+                    .session
+                    .peer_metrics(PlayerHandle::new(j))
+                    .unwrap_or_else(|e| {
+                        panic!("peer {i}: peer_metrics(handle={j}) failed unexpectedly: {e:?}")
+                    });
+                totals.add(&pm);
             }
             totals
         })
