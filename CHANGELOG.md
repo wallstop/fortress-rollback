@@ -144,6 +144,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Spectators expose the same per-host wire metrics via `SpectatorSession::peer_metrics(host_index)`, which
   returns `Option<PeerMetrics>` (`None` for an out-of-range index) — hosts are addressed by dense index in
   `0..num_hosts()` in builder-priority order, since a spectator has no player handles for its upstream hosts.
+- With the `hot-join` feature, `P2PSession::hot_join_metrics() -> Option<HotJoinMetrics>` reports a joiner's
+  hot-join handshake latency: `completed` (whether the joiner applied the host snapshot and reached
+  `Running`), `polls_to_running` (`poll_remote_clients` iterations spent `HotJoining`), and
+  `millis_to_running` (elapsed time on the injectable protocol clock, so it is deterministic under the
+  simulation harness). Returns `None` for any session that did not hot-join (a host, or a peer that
+  synchronized normally). `HotJoinMetrics` is `#[non_exhaustive]`, `Copy`, and offers `to_json()` /
+  `to_json_pretty()` under the `json` feature.
 
 ### Changed
 

@@ -549,6 +549,62 @@ impl SessionMetrics {
     }
 }
 
+/// Hot-join handshake timing for a session that joined an in-progress game via
+/// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session).
+///
+/// Read one with
+/// [`P2PSession::hot_join_metrics`](crate::P2PSession::hot_join_metrics), which
+/// returns `None` for any session that did not hot-join (a host, or a normally
+/// synchronized peer). Timings are measured on the session's injectable protocol
+/// clock, so they are deterministic under the simulation harness (no wall clock).
+///
+/// Only available with the `hot-join` feature.
+#[cfg(feature = "hot-join")]
+#[non_exhaustive]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[must_use = "HotJoinMetrics should be inspected after being queried"]
+pub struct HotJoinMetrics {
+    /// Whether the join has completed — the joiner applied the host snapshot and
+    /// reached [`SessionState::Running`](crate::SessionState::Running). While
+    /// `false`, [`polls_to_running`](Self::polls_to_running) is still climbing
+    /// and [`millis_to_running`](Self::millis_to_running) stays `0`.
+    pub completed: bool,
+
+    /// [`poll_remote_clients`](crate::P2PSession::poll_remote_clients) iterations
+    /// spent in [`HotJoining`](crate::SessionState::HotJoining) — how many polls
+    /// the join took (or has taken so far, when not yet
+    /// [`completed`](Self::completed)).
+    pub polls_to_running: u64,
+
+    /// Virtual milliseconds on the injected protocol clock from join start
+    /// (session construction) to reaching `Running`. `0` while not yet
+    /// [`completed`](Self::completed); once completed it is the measured latency,
+    /// which may itself be `0` if the clock did not advance between construction
+    /// and activation — read [`completed`](Self::completed), not this field, to
+    /// tell whether the join has finished.
+    pub millis_to_running: u64,
+}
+
+#[cfg(all(feature = "hot-join", feature = "json"))]
+impl HotJoinMetrics {
+    /// Serializes this snapshot to a compact JSON string.
+    ///
+    /// Returns `None` if serialization fails — not expected for a few integers,
+    /// but possible (for example, an allocation failure inside `serde_json`).
+    #[must_use]
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// Serializes this snapshot to a pretty-printed JSON string.
+    ///
+    /// Like [`to_json`](Self::to_json), but indented for readability.
+    #[must_use]
+    pub fn to_json_pretty(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
+    }
+}
+
 /// The category of a protocol message, independent of its payload.
 ///
 /// Mirrors the crate's internal wire-message variants one-to-one so per-peer
