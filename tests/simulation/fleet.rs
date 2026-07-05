@@ -820,12 +820,14 @@ fn run_rejects_out_of_range_peer_index() {
 }
 
 /// Builds an input-delay-change schedule: a clean `n`-mesh in which peer 1
-/// raises its local input delay from the smoke default (1) to `delay` frames at
-/// step 100 — a mid-session *increase*, which gap-fills the newly delayed
-/// frames with replicated confirmed inputs and flushes them to every remote (a
-/// reconfiguration path a fixed-delay fleet never exercises). `None` yields the
-/// identical schedule without the change, the control the premise compares to.
-fn input_delay_change_schedule(n: usize, delay: Option<usize>) -> Schedule {
+/// raises its local input delay by `increase` frames at step 100 — a mid-session
+/// *increase*, which gap-fills the newly delayed frames with replicated confirmed
+/// inputs and flushes them to every remote (a reconfiguration path a fixed-delay
+/// fleet never exercises). The new delay is `config.input_delay + increase`, so
+/// it is always a genuine increase regardless of the config default (never a
+/// silent no-op that would hollow out the premise). `None` yields the identical
+/// schedule without the change, the control the premise compares to.
+fn input_delay_change_schedule(n: usize, increase: Option<usize>) -> Schedule {
     let config = SimConfig {
         n_players: n,
         steps: 600,
@@ -842,7 +844,8 @@ fn input_delay_change_schedule(n: usize, delay: Option<usize>) -> Schedule {
     }
     let heal_at = 400;
     let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some(delay) = delay {
+    if let Some(increase) = increase {
+        let delay = config.input_delay + increase;
         events.push((100, ScheduleEvent::SetInputDelay { peer: 1, delay }));
     }
     events.sort_by_key(|(step, _)| *step);
@@ -873,7 +876,7 @@ fn input_delay_change_schedule(n: usize, delay: Option<usize>) -> Schedule {
 fn input_delay_increase_keeps_mesh_consistent() {
     for n in [2usize, 4] {
         let base = input_delay_change_schedule(n, None);
-        let changed = input_delay_change_schedule(n, Some(3));
+        let changed = input_delay_change_schedule(n, Some(2));
 
         let base_report = run(&base, &RunOptions::default());
         base_report.expect_pass(&base);
@@ -898,7 +901,7 @@ fn input_delay_increase_keeps_mesh_consistent() {
 /// delay — the reconfiguration path must not blind the oracle.
 #[test]
 fn oracle_catches_seeded_divergence_under_input_delay_change() {
-    let schedule = input_delay_change_schedule(4, Some(3));
+    let schedule = input_delay_change_schedule(4, Some(2));
     let options = RunOptions {
         corrupt_state_from: Some((0, 40)),
         ..RunOptions::default()
@@ -917,6 +920,22 @@ fn oracle_catches_seeded_divergence_under_input_delay_change() {
         "the oracle's state comparison must keep its teeth under a delay change: {:?}",
         report.verdict.failures
     );
+}
+
+/// A `SetInputDelay` naming a peer outside the mesh must fail loudly with the
+/// same clear message as the other events, not panic on a raw slice index — the
+/// per-event fail-loud contract of the up-front validation (parallels
+/// `run_rejects_out_of_range_peer_index`, since each event arm has its own
+/// message and would otherwise be unexercised).
+#[test]
+#[should_panic(expected = "out of range")]
+fn run_rejects_out_of_range_set_input_delay_peer() {
+    let mut schedule = input_delay_change_schedule(2, None);
+    schedule
+        .events
+        .push((100, ScheduleEvent::SetInputDelay { peer: 9, delay: 3 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    let _ = run(&schedule, &RunOptions::default());
 }
 
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
