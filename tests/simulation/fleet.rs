@@ -1359,10 +1359,19 @@ fn clock_skew_holds_consistency_over_a_long_run() {
     // skew-gated frame model had begun to reproduce the H-SKEW drift). In this
     // lockstep model it is 0; assert it stays within the prediction window.
     let confirmed = &report.final_confirmed;
-    let spread =
-        confirmed.iter().copied().max().unwrap_or(0) - confirmed.iter().copied().min().unwrap_or(0);
+    let max = confirmed
+        .iter()
+        .copied()
+        .max()
+        .expect("final_confirmed is non-empty");
+    let min = confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("final_confirmed is non-empty");
+    let spread = max - min;
     assert!(
-        spread <= schedule.config.max_prediction as i32,
+        (spread as usize) <= schedule.config.max_prediction,
         "skew must not drift the peers' confirmed frames apart (spread={spread}, \
          final_confirmed={confirmed:?})"
     );
