@@ -141,6 +141,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a payload-free mirror of the protocol's wire messages (`as_str()`, `ALL`, `COUNT`); `PeerMetrics` is
   `#[non_exhaustive]` and offers `to_json()` / `to_json_pretty()` under the `json` feature. Byte counts are
   payload-only (they exclude the per-packet UDP/IP header the `NetworkStats::kbps_sent` estimate folds in).
+  Spectators expose the same per-host wire metrics via `SpectatorSession::peer_metrics(host_index)`, which
+  returns `Option<PeerMetrics>` (`None` for an out-of-range index) — hosts are addressed by dense index in
+  `0..num_hosts()` in builder-priority order, since a spectator has no player handles for its upstream hosts.
 
 ### Changed
 

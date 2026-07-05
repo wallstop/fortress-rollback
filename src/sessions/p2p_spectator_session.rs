@@ -14,8 +14,8 @@ use crate::{
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
     GameStateCell, InputStatus, InputVec, InternalErrorKind, InvalidFrameReason,
-    InvalidRequestKind, NetworkStats, NonBlockingSocket, PlayerHandle, RequestVec, SessionMetrics,
-    SessionState,
+    InvalidRequestKind, NetworkStats, NonBlockingSocket, PeerMetrics, PlayerHandle, RequestVec,
+    SessionMetrics, SessionState,
 };
 
 /// The number of frames the spectator advances in a single step during normal operation.
@@ -603,6 +603,42 @@ impl<T: Config> SpectatorSession<T> {
     /// `wait_recommendation`) stay at zero here.
     pub fn metrics(&self) -> SessionMetrics {
         self.metrics
+    }
+
+    /// Returns a wire-exact [`PeerMetrics`] snapshot for the host at
+    /// `host_index`, or `None` if the index is out of range.
+    ///
+    /// Hosts are addressed by dense index below
+    /// [`num_hosts()`](Self::num_hosts),
+    /// in the builder-priority order passed to
+    /// [`start_spectator_session_multi`]. Unlike
+    /// [`P2PSession::peer_metrics`], which takes an opaque
+    /// [`PlayerHandle`], a spectator has no player handles for its upstream
+    /// hosts, so it uses the same index space as `num_hosts()` — and returns an
+    /// [`Option`] (à la [`slice::get`]) rather than a `Result`, since an
+    /// out-of-range index is the only failure mode.
+    ///
+    /// The returned counters (cumulative bytes/packets sent and received, the
+    /// per-[`MessageKind`](crate::metrics::MessageKind) breakdown, input
+    /// compression totals, and the connection gauges) are always-on and valid
+    /// from endpoint construction — the host need not be synchronized. See
+    /// [`P2PSession::peer_metrics`] for the field semantics.
+    ///
+    /// **Failover caveat:** when a host disconnects it is removed and the
+    /// remaining hosts are compacted (lower-priority survivors shift down to
+    /// fill the gap). A host endpoint is never rebuilt, so the counters at a
+    /// fixed `host_index` do not reset across a failover — they discontinuously
+    /// **jump** to the promoted survivor's own already-running totals. Per-index
+    /// rate math is therefore only meaningful between failovers; re-anchor after
+    /// [`num_hosts()`](Self::num_hosts) changes. This mirrors the documented
+    /// instability of [`network_stats`](Self::network_stats), which reports the
+    /// first host.
+    ///
+    /// [`P2PSession::peer_metrics`]: crate::P2PSession::peer_metrics
+    /// [`start_spectator_session_multi`]: crate::SessionBuilder::start_spectator_session_multi
+    #[must_use = "peer metrics should be inspected or logged"]
+    pub fn peer_metrics(&self, host_index: usize) -> Option<PeerMetrics> {
+        self.hosts.get(host_index).map(UdpProtocol::peer_metrics)
     }
 
     /// Returns a reference to the violation observer, if one was configured.
@@ -2490,6 +2526,99 @@ mod tests {
     fn spectator_session_creates_successfully() {
         let session = create_test_spectator_session();
         assert!(session.is_some());
+    }
+
+    // ==========================================
+    // peer_metrics Tests
+    // ==========================================
+
+    #[test]
+    fn spectator_peer_metrics_out_of_range_index_is_none() {
+        let session = create_test_spectator_session().expect("session builds");
+        assert_eq!(session.num_hosts(), 1);
+        // A valid index yields a snapshot even before any traffic (counters
+        // are valid from endpoint construction).
+        assert!(session.peer_metrics(0).is_some());
+        // Any index at or past `num_hosts()` is out of range.
+        assert!(session.peer_metrics(1).is_none());
+        assert!(session.peer_metrics(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn spectator_peer_metrics_are_isolated_and_count_received_host_traffic() {
+        use crate::metrics::MessageKind;
+
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7420), test_addr(7421)], DummySocket)
+            .expect("multi-host session builds");
+        assert_eq!(session.num_hosts(), 2);
+
+        // Both hosts start at zero received traffic.
+        for host in 0..2 {
+            let m = session.peer_metrics(host).expect("host exists");
+            assert_eq!(m.packets_received, 0);
+            assert_eq!(m.bytes_received, 0);
+        }
+
+        // Deliver two Input packets to host 1 only; `handle_message` tallies
+        // each received message's wire bytes/packets on that host's endpoint.
+        // (The pre-filter, state-independent nature of that tally is proven
+        // separately by `peer_metrics_receive_accounting_counts_every_message_before_filters`
+        // in the protocol module.)
+        let status = vec![ConnectionStatus::default(); 2];
+        queue_host_input(&mut session, 1, Frame::new(0), [7, 8], status.clone());
+        queue_host_input(&mut session, 1, Frame::new(1), [9, 10], status);
+
+        let h0 = session.peer_metrics(0).expect("host 0");
+        let h1 = session.peer_metrics(1).expect("host 1");
+
+        // Per-index addressing is per-host: host 0 saw nothing.
+        assert_eq!(h0.packets_received, 0, "host 0 received no traffic: {h0:?}");
+        assert_eq!(h0.bytes_received, 0);
+
+        // Host 1's counters reflect exactly the delivered traffic.
+        assert_eq!(h1.packets_received, 2, "host 1 traffic: {h1:?}");
+        assert!(h1.bytes_received > 0);
+        assert_eq!(h1.messages_received_by_kind.total(), h1.packets_received);
+        assert_eq!(h1.messages_received_by_kind.get(MessageKind::Input), 2);
+    }
+
+    /// Locks the documented failover caveat: hosts are never rebuilt, only
+    /// compacted, so the counters observed at a fixed index **jump** to the
+    /// promoted survivor's running totals rather than resetting.
+    #[test]
+    fn spectator_peer_metrics_index_follows_surviving_host_after_compaction() {
+        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session_multi(&[test_addr(7430), test_addr(7431)], DummySocket)
+            .expect("multi-host session builds");
+
+        // Give the two hosts distinct received-traffic counts (host 0: 1 packet,
+        // host 1: 2 packets) so we can tell which endpoint an index resolves to.
+        let status = vec![ConnectionStatus::default(); 2];
+        queue_host_input(&mut session, 0, Frame::new(0), [1, 2], status.clone());
+        queue_host_input(&mut session, 1, Frame::new(0), [3, 4], status.clone());
+        queue_host_input(&mut session, 1, Frame::new(1), [5, 6], status);
+        assert_eq!(session.peer_metrics(0).expect("host 0").packets_received, 1);
+        assert_eq!(session.peer_metrics(1).expect("host 1").packets_received, 2);
+
+        // Remove host 0 via the real compaction path; the former host 1 (2
+        // packets) shifts down into index 0.
+        session.remove_disconnected_hosts(vec![0]);
+
+        assert_eq!(session.num_hosts(), 1);
+        let promoted = session
+            .peer_metrics(0)
+            .expect("promoted survivor at index 0");
+        assert_eq!(
+            promoted.packets_received, 2,
+            "index 0 now resolves to the former host 1 with its accumulated \
+             counters (jumped, not reset): {promoted:?}"
+        );
+        assert!(session.peer_metrics(1).is_none());
     }
 
     /// Regression for defect D9 (PLAN.md §2) on the **spectator** session: its
