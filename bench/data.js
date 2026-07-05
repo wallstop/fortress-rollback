@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783235391762,
+  "lastUpdate": 1783238646084,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "a94e5f2d431be07e50182f79ff835120315d4922",
-          "message": "Fix test bugs (#87)\n\n## Description\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-02-07T11:03:07-08:00",
-          "tree_id": "0917efe481163df41a8f8887733599b32ac46bb4",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/a94e5f2d431be07e50182f79ff835120315d4922"
-        },
-        "date": 1770491256909,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 101,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 140,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 566,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 905,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1337,
-            "range": "± 46",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 95383,
-            "range": "± 280",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24186,
-            "range": "± 250",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 679,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 868,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 103",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "771ccee890c8dbb99041a705d269310f88f481ef",
+          "message": "Hardening M2 §5.3: baseline sweep cell runner + PR gate (#195)\n\n## Summary\n\nThe M2 §5.3 baseline sweep: **deterministic, virtual-time measurement**\nof steady-state protocol cost over a controlled loss × RTT × jitter\ngrid. Where the fleet layers randomized faults to *find* bugs, the sweep\nholds each cell's link conditions constant to *measure* — per-player\nbandwidth, rollback rate/depth, confirmation lag, and pacing pressure.\n\nBuilds directly on #194's `RunReport.peer_wire` bandwidth ledger. Each\ncell is a thin wrapper over the mesh runner with a uniform per-link\n`LinkPolicy` and no fault events, so a `CellReport` is a pure function\nof `(seed, params)` — zero runner noise.\n\n## Change (`tests/simulation/baseline_sweep.rs`)\n\n- **`run_cell(CellParams) -> CellReport`** (serde-serializable):\nper-player bytes/sec (pre/post compression), messages-by-kind,\nrollbacks/100-frames, rollback-depth p50/p99/max (nearest-rank over the\nmerged histogram), confirmation-lag mean/max, stalls/min, wait-recs, and\n`desync_incidents` (the load-bearing invariant — any nonzero fails).\n- **`sweep_pr_gate`** (PR test): 5 representative cells (2p\nlan/wifi/mobile, 4p wifi, 4p loss15/rtt200) assert `desync==0`, a\nliveness floor, non-zero bandwidth, percentile ordering + `p99<=max`\ncross-check, and **bit-for-bit reproducibility** (virtual time ⇒\nidentical replay).\n- **`full_matrix_sweep`** (`#[ignore]`): the 64-cell grid at 5000\nframes; offline capture via `FORTRESS_SWEEP_OUT` JSON Lines.\n\n## Data (thresholds set from measurement, not guessed)\n\n- Gate cells: `min_final_confirmed` 328–989 → liveness floor set to 50\n(~6.5× margin).\n- **Full 64-cell matrix ran locally in 48s — every cell `desync == 0`**,\nprogress 2004–4945 at 5000 steps. Bandwidth 4–16 KB/s/player; rollback\ndepth ≤7 (bounded by `max_prediction=8`); confirmation lag capped at 8;\nstalls scale with severity. The protocol holds clean across the entire\ngrid at N=2 and N=4.\n\nAll rate divisors are NaN-guarded (including `n==0`, since `schedule()`\nbuilds the `Schedule` directly and bypasses `generate`'s `n_players>=2`\nassert), keeping the `f64` `CellReport` reflexive for the determinism\nreplay.\n\n## Deferred (documented in PLAN.md §5.3)\n\n- Input-width axis {4,32}B (harness `StubConfig` fixes a 4-byte `u32`;\nneeds a generic-input refactor).\n- Checked-in exact-value baseline (`sweep-v1.json`) as M5's cost ledger.\n- Nightly full-matrix CI job.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` —\nclean.\n- `cargo nextest run -E 'test(simulation::)'` — 28 passed; `--features\nhot-join` — 28 passed.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nReviewed internally by an adversarial pass (confirmed the statistics,\ndeterminism, and desync signal correct; fixed a vacuous\n`p99<=max.max(BUCKETS)` assertion → real `p99<=max` cross-check, and the\n`n==0` NaN guard).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only additions with no production or harness API changes; CI\nimpact is a small fixed set of virtual-time simulation runs in\n`sweep_pr_gate`.\n> \n> **Overview**\n> Adds **M2 §5.3 baseline sweep** simulation tests: deterministic\nvirtual-time measurement of steady-state protocol cost (bandwidth,\nrollbacks, confirmation lag, stalls) over fixed loss × RTT × jitter\ncells, wired through the existing mesh harness with uniform `LinkPolicy`\nand no fault events.\n> \n> Introduces `run_cell` → serde **`CellReport`**, a PR\n**`sweep_pr_gate`** test over five representative cells\n(`desync_incidents == 0`, liveness floor, non-zero bandwidth, rollback\npercentile sanity, bit-for-bit replay), optional\n**`FORTRESS_SWEEP_OUT`** JSON Lines export, and an **`#[ignore]`** full\n64-cell matrix for offline runs. **`tests/simulation.rs`** registers the\nnew `baseline_sweep` module only.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n490bac634347b9547ada114bacef7263a0a16891. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-07-05T00:59:39-07:00",
+          "tree_id": "3eb66179b2fcb2b319feff9437f17f82a85ac3ee",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/771ccee890c8dbb99041a705d269310f88f481ef"
+        },
+        "date": 1783238645427,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 120,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 169,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 477,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 770,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1106,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 127608,
+            "range": "± 573",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 48480,
+            "range": "± 342",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
