@@ -1267,9 +1267,14 @@ impl<T: Config> P2PSession<T> {
                 "Prediction Threshold reached. Skipping on frame {}",
                 self.sync_layer.current_frame()
             );
-            // A stall: the prediction window is full, so the network is
+            // A prediction-window stall: the window is full, so the network is
             // throttling the local simulation (waiting on a peer to confirm).
-            self.metrics.record_stall();
+            // Lockstep mode waits for confirmed inputs by design — that is the
+            // mode's normal cadence, not a stall — so it is excluded to keep the
+            // counter's documented "prediction window was full" meaning exact.
+            if !lockstep {
+                self.metrics.record_stall();
+            }
         }
 
         Ok(requests)
