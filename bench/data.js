@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783243299154,
+  "lastUpdate": 1783246477447,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "05bcecb8927eb3581c04faaa3d79f2302da2cafb",
-          "message": "chore(deps): bump z3 from 0.19.7 to 0.19.8 (#92)\n\nBumps [z3](https://github.com/prove-rs/z3.rs) from 0.19.7 to 0.19.8.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/281c22f14cc12b314040799e12d64ed889cdc672\"><code>281c22f</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/492\">#492</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/d5d112ddbcc1d55435a4dc9eb9af53d217495116\"><code>d5d112d</code></a>\nfix: Z3_SYS_BUNDLED_DIR_OVERRIDE had extra z3 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/491\">#491</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.7...z3-v0.19.8\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.7&new-version=0.19.8)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-15T20:21:39-08:00",
-          "tree_id": "6ba2b5212c6c206954bc403f137888ce71620373",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/05bcecb8927eb3581c04faaa3d79f2302da2cafb"
-        },
-        "date": 1771215978336,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 159,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 441,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 684,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1015,
-            "range": "± 40",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102354,
-            "range": "± 447",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27338,
-            "range": "± 1115",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 100",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6281,6 +6155,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_serialize",
             "value": 48492,
             "range": "± 282",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9a6202cbf17ec0db7c60d2fe1c3df4313d8da45f",
+          "message": "Hardening M2 §5.3: checked-in sweep cost-ledger baseline + regression gate (#197)\n\n## Summary\n\nAdds the M2 §5.3 **cost ledger**: a checked-in baseline\n(`tests/simulation/baselines/sweep-v1.json`, blessed at 0.9.0 wire\nsizes) plus a regression comparison in `sweep_pr_gate`. Each gate cell's\ncost/behavior metrics are checked against the baseline within tolerance\n(plan §5.3: **bytes ±5%, rollbacks ±10%; `desync_incidents` exact 0**).\nAt M5, the +6 B/packet wire change surfaces here as a reviewed,\nover-tolerance delta — that's the ledger's purpose.\n\n## Change (`tests/simulation/baseline_sweep.rs`, test-only)\n\n- **`BaselineCell`** stores each cell's identity + measured cost\nmetrics. Volatile `version`/`git_sha` and the per-kind map are omitted\nso the JSON stays a stable, reviewable diff.\n- **`check_or_bless_baseline`**: compares the gate cells to the\nchecked-in file, or regenerates it when `FORTRESS_SWEEP_BLESS=1` is set\n(`FORTRESS_SWEEP_BLESS=1 cargo test --test simulation sweep_pr_gate`).\nThe refresh command is in the drift/missing-file panic message.\n- **`assert_close`** uses a relative + absolute-floor tolerance, so a\nnear-zero baseline (a LAN cell's tiny rollback rate) is not brittle\nunder a purely relative bound.\n\n## Why this is robust, not fragile\n\nThe metrics are a deterministic function of `(seed, params)` (virtual\ntime, integer PCG RNG, IEEE-correctly-rounded float ops), so\n**same-platform runs reproduce the baseline exactly** — the tolerances\nare pure cross-platform safety margin. This PR's **3-OS Build & Test CI\nvalidates cross-platform determinism directly** against the\nLinux-blessed file: if it passes on macOS/Windows, determinism holds;\nthe generous floors absorb any last-ULP noise. Intentional changes\nregenerate the baseline as a reviewed diff (the plan's model).\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` (incl.\n`-W clippy::nursery` spot-check) — clean.\n- `cargo nextest run -E 'test(simulation::)'` — 28 passed; `--features\nhot-join` — 28 passed. Gate passes against the blessed baseline; a fresh\nbless + compare round-trips exactly.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\n## Remaining §5.3 (follow-ups)\n\nThe input-width `{4,32}B` axis (a broad generic-input harness refactor)\nand the nightly full-matrix CI job remain — see PLAN.md §5.3.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only simulation harness and checked-in JSON; no production\nruntime or auth/data paths affected.\n> \n> **Overview**\n> Adds the M2 §5.3 **cost ledger**: a checked-in baseline at\n`tests/simulation/baselines/sweep-v1.json` and a comparison step wired\ninto **`sweep_pr_gate`**.\n> \n> **`BaselineCell`** captures each gate cell’s identity and steady-state\nmetrics (bandwidth, rollbacks, lag, etc.) while omitting volatile fields\nlike `version`/`git_sha` so baseline updates stay reviewable.\n**`check_or_bless_baseline`** loads that file and compares the five PR\ngate cells: cell labels and parameters must match exactly,\n**`desync_incidents`** must stay **0**, and cost metrics use\n**`assert_close`** (bytes ±5%, rollbacks ±10%, with small absolute\nfloors for near-zero LAN rollback rates). Setting\n**`FORTRESS_SWEEP_BLESS=1`** regenerates the JSON instead of failing on\ndrift.\n> \n> This extends the existing gate (desync, liveness, determinism) with\nregression detection for wire/rollback behavior—intentional wire-format\nchanges are expected to show up as a blessed baseline diff rather than\nsilent CI pass.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n1762e9d913dba21d92b2174cbac87f21e541e8f6. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-05T03:10:10-07:00",
+          "tree_id": "ae884b2ded053d85570aa64e134b4252baec837b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9a6202cbf17ec0db7c60d2fe1c3df4313d8da45f"
+        },
+        "date": 1783246476501,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 119,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 171,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 473,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 734,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1068,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 127349,
+            "range": "± 1157",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 48796,
+            "range": "± 277",
             "unit": "ns/iter"
           },
           {
