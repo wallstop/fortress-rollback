@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783292114768,
+  "lastUpdate": 1783295410358,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "24e89ba3426222b3881545a97f82358bc729d238",
-          "message": "chore(deps): bump z3 from 0.19.9 to 0.19.10 (#100)\n\nBumps [z3](https://github.com/prove-rs/z3.rs) from 0.19.9 to 0.19.10.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/97f57a99ac7057f38c6c8cdeac74f178ae2c2e7e\"><code>97f57a9</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/503\">#503</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/5631a0fd155e8babedf1cee4245a4d17cc5df7ae\"><code>5631a0f</code></a>\nchore: bump Z3 default version to 4.16.0 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/504\">#504</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/3d11d7449dad53a6327233909a3ca52ce9110f98\"><code>3d11d74</code></a>\nfeat: algebraic numbers, polynomials, enhanced floats, AST vectors, and\nquant...</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.9...z3-v0.19.10\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.9&new-version=0.19.10)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-24T20:23:59-08:00",
-          "tree_id": "54027f33a9df55249d13b5a5f7621a83330efb48",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/24e89ba3426222b3881545a97f82358bc729d238"
-        },
-        "date": 1771993733433,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 158,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 456,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 706,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1041,
-            "range": "± 24",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 105359,
-            "range": "± 1165",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27598,
-            "range": "± 1675",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1553,
-            "range": "± 65",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "493c54b1f61dae7d6ea2d22217fe4ef7c4999e54",
+          "message": "Hardening M3: clock-skew consistency probe + honest H-SKEW status (#203)\n\nA long-run clock-skew consistency probe, and an honest status update on hypothesis H-SKEW.\n\nWhat this validly shows: per-peer clock skew (peer 0 at +0.1% over 10k steps) does not break mesh state consistency or liveness — the skew shifts timing-gated behavior (RTT gauge, quality-report/keepalive cadence) and the mesh still confirms a byte-identical prefix, peers in step. Extends the short +10% clock_skew_is_tolerated_and_alters_execution observation to a realistic magnitude over a long run.\n\nH-SKEW is NOT executed here — it remains OWED. An earlier revision claimed to *falsify* H-SKEW; the adversarial review correctly rejected that. This harness advances every peer one frame per step (lockstep) and reads the clock only for timestamps, so H-SKEW's rate-drift mechanism (fast clock -> faster frame production -> ~43 frames/hour accumulation) is structurally absent: the frame-advantage delta floor(half_rtt*fps/1000) stays 1 from 0% through ~+11% skew, so average_frame_advantage never reaches MIN_RECOMMENDATION at any ppm. 'Zero recommendations' was a tautology, not a falsification. Testing H-SKEW needs a skew-gated frame model (advance each peer at a rate driven by its own skewed clock) — recorded in PLAN.md §13/§6.6-pre.2.\n\n- fleet.rs: clock_skew_long_run_schedule + clock_skew_holds_consistency_over_a_long_run (#[ignore]d). Asserts consistency+liveness and that the confirmed-frame spread stays bounded (the first sign skew ever leaked into frame production).\n\nReviewed by an adversarial sub-agent (which correctly rejected the original falsification claim) + GitHub Copilot (3 rounds) + Cursor Bugbot (SUCCESS).",
+          "timestamp": "2026-07-05T16:45:33-07:00",
+          "tree_id": "5fdeedfaf8fdf997fecb7b53d2885cdc8a7a92d5",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/493c54b1f61dae7d6ea2d22217fe4ef7c4999e54"
+        },
+        "date": 1783295409216,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 110,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 174,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 467,
+            "range": "± 21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 719,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1045,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 122234,
+            "range": "± 400",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45242,
+            "range": "± 504",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 89",
             "unit": "ns/iter"
           },
           {
