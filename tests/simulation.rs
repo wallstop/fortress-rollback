@@ -24,6 +24,7 @@ mod common;
 
 // Simulation test modules
 mod simulation {
+    pub mod baseline_sweep;
     pub mod fleet;
     pub mod harness;
 }
