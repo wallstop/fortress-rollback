@@ -51,8 +51,9 @@ impl From<DropPolicy> for DisconnectBehavior {
 ///   the bump.
 /// - `3`: adds [`ScheduleEvent::SetInputDelay`] (a mid-run input-delay change,
 ///   exercising the session's gap-fill/reconfiguration path).
-/// - `4`: adds [`ScheduleEvent::PeerKill`] (a peer crash — session dropped and
-///   detached from the fabric — modeled distinctly from a network black-hole).
+/// - `4`: adds [`ScheduleEvent::PeerKill`] (a peer crash — the harness stops
+///   driving the peer and detaches it from the fabric — modeled distinctly from
+///   a network black-hole).
 pub const SCHEDULE_SCHEMA_VERSION: u32 = 4;
 
 /// Background link-noise level applied to every directed link at start.
