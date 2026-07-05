@@ -146,9 +146,17 @@ impl Oracle {
         }
     }
 
-    /// Marks `peer` as killed (crashed): it is excluded from the end-of-run
-    /// checks in [`Self::finalize`]. Idempotent; out-of-range is a no-op.
+    /// Marks `peer` as killed (crashed): it is excluded from the liveness
+    /// checks in [`Self::finalize`]. Idempotent for in-range peers. An
+    /// out-of-range peer is a programming error — the runner validates every
+    /// event's peer index up front — so it panics loudly rather than silently
+    /// leaving the mask unset.
     pub fn mark_peer_dead(&mut self, peer: usize) {
+        assert!(
+            peer < self.dead.len(),
+            "mark_peer_dead: peer {peer} out of range (dead-mask len {})",
+            self.dead.len()
+        );
         if let Some(slot) = self.dead.get_mut(peer) {
             *slot = true;
         }
