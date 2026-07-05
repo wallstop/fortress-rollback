@@ -1756,6 +1756,9 @@ impl<T: Config> P2PSession<T> {
         // phases above are unaffected.
         self.poll_npeer_host_serve();
         self.poll_npeer_post_serve();
+        // JoinRequested/PeerJoined above are emitted during poll, outside
+        // `handle_event`'s trim; bound the queue (D9 telemetry must cover them).
+        self.trim_event_queue();
     }
 
     /// Returns the **survivor set** for a prospective N-peer serve: the
@@ -1976,6 +1979,8 @@ impl<T: Config> P2PSession<T> {
 
         self.event_queue
             .push_back(FortressEvent::JoinRequested { handle, addr });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Returns `true` while a freeze-frame convergence re-adjust whose forced
@@ -2388,6 +2393,8 @@ impl<T: Config> P2PSession<T> {
             handle,
             addr: joiner_addr,
         });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Concludes an N-peer serve unsuccessfully: announces `JoinAborted` to the
@@ -4923,6 +4930,8 @@ impl<T: Config> P2PSession<T> {
         // coordinator `Disconnected` as an idempotent teardown cue.
         self.event_queue
             .push_back(FortressEvent::Disconnected { addr: host_addr });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Post-apply late-sync backfill (S34 fix round 1, discovered finding
@@ -5409,13 +5418,17 @@ impl<T: Config> P2PSession<T> {
             }
             .into());
         }
-        self.disconnect_player_with_policy(
+        let result = self.disconnect_player_with_policy(
             player_handle,
             None,
             DisconnectBehavior::ContinueWithout,
             DisconnectEventPolicy::Emit,
             GracefulDropFailurePolicy::Abort,
-        )
+        );
+        // `remove_player` emits PeerDropped/Disconnected outside `handle_event`'s
+        // trim; bound the queue before returning control to the caller (D9).
+        self.trim_event_queue();
+        result
     }
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
@@ -5502,13 +5515,16 @@ impl<T: Config> P2PSession<T> {
                         kind: InternalErrorKind::DisconnectStatusNotFound { player_handle },
                     })?;
                 if !status.disconnected {
-                    return self.disconnect_player_with_policy(
+                    let result = self.disconnect_player_with_policy(
                         player_handle,
                         None,
                         DisconnectBehavior::Halt,
                         DisconnectEventPolicy::Suppress,
                         GracefulDropFailurePolicy::DisconnectAndHalt,
                     );
+                    // Emitted outside `handle_event`'s trim; bound the queue (D9).
+                    self.trim_event_queue();
+                    return result;
                 }
                 Err(InvalidRequestKind::AlreadyDisconnected {
                     handle: player_handle,
@@ -5518,6 +5534,7 @@ impl<T: Config> P2PSession<T> {
             // disconnecting spectators is simpler
             Some(PlayerType::Spectator(_)) => {
                 self.disconnect_player_at_frame(player_handle, Frame::NULL);
+                self.trim_event_queue();
                 Ok(())
             },
         }
@@ -9186,6 +9203,9 @@ impl<T: Config> P2PSession<T> {
             self.event_queue
                 .push_back(FortressEvent::WaitRecommendation { skip_frames });
         }
+        // This runs from `advance_frame`, outside `handle_event`'s trim, so bound
+        // the queue here too (D9: overflow must stay accounted + telemetered).
+        self.trim_event_queue();
     }
 
     fn check_last_saved_state(
@@ -9768,6 +9788,10 @@ impl<T: Config> P2PSession<T> {
             },
             DesyncDetection::Off => (),
         }
+        // The `DesyncDetected` pushes above run from `advance_frame`, outside
+        // `handle_event`'s trim; bound the queue so the overflow accounting and
+        // telemetry (D9) cover them too.
+        self.trim_event_queue();
     }
 
     fn check_checksum_send_interval(&mut self) {
@@ -10244,6 +10268,62 @@ mod tests {
             overflow_warnings(&observer),
             2,
             "a fresh drain must re-arm the overflow Warning"
+        );
+    }
+
+    /// Events emitted **outside** `handle_event` (here `DesyncDetected` from
+    /// `compare_local_checksums_against_peers`, which runs inside `advance_frame`)
+    /// must also honor the event-queue cap and its discard telemetry. Before the
+    /// fix, `trim_event_queue` ran only at the end of `handle_event`, so these
+    /// paths could push above the cap — and bypass the D9 accounting — until the
+    /// next inbound message happened to be handled.
+    #[test]
+    fn desync_detected_push_outside_handle_event_is_bounded_and_counted() {
+        let mut session = create_three_player_desync_session();
+        let addr_b = test_addr(8080);
+
+        // Make frame 0 comparable and force Running (DummySocket never syncs).
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+        session.state = SessionState::Running;
+
+        // Plant a mismatching confirmed-frame checksum so the next comparison
+        // emits a `DesyncDetected` event.
+        let frame = Frame::new(0);
+        session.local_checksum_history.insert(frame, 0xABCD_1234);
+        {
+            let b = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint exists");
+            b.pending_checksums.insert(frame, 0x0000_0001); // differs from local
+        }
+
+        // Saturate the event queue with benign events first.
+        let filler = test_addr(9999);
+        for _ in 0..session.max_event_queue_size {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr: filler });
+        }
+        assert_eq!(session.event_queue.len(), session.max_event_queue_size);
+        let before = session.metrics().events_discarded_total;
+
+        // Runs outside `handle_event`; must still enforce the cap + count the drop.
+        session.compare_local_checksums_against_peers();
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "the cap must hold for enqueues outside handle_event"
+        );
+        assert!(
+            session.metrics().events_discarded_total > before,
+            "the overflow discard from the DesyncDetected push must be counted"
         );
     }
 

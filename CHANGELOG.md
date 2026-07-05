@@ -295,8 +295,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time the application drains events), so a churn burst warns once rather than once per message. Previously the
   oldest event — even a safety-critical `Disconnected` or `DesyncDetected` — was dropped with no violation
   and no counter, so an application draining events slower than they arrive could miss a disconnect or a
-  desync with no way to detect the loss. Both `P2PSession` and `SpectatorSession` are covered. Drain events
-  every poll, or raise the event-queue size, to keep `events_discarded_total` at zero.
+  desync with no way to detect the loss. Both `P2PSession` and `SpectatorSession` are covered. The cap is
+  now enforced at **every** event-emission path — including events raised from `advance_frame` (wait
+  recommendations, desync detection), `remove_player`/`disconnect_player`, and the hot-join lifecycle —
+  not only when an inbound message is handled, so the queue can no longer sit above its configured size
+  (nor lose events untracked) between polls. Drain events every poll, or raise the event-queue size, to
+  keep `events_discarded_total` at zero.
 
 ## [0.8.1] - 2026-05-16
 
