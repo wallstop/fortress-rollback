@@ -501,6 +501,10 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 if j == i {
                     continue;
                 }
+                // Peer `i` registered `PlayerHandle::new(j)` as a remote for
+                // every `j != i` (see the builder loop above), so this MUST
+                // resolve. An error is a real invariant break — fail loudly
+                // rather than silently under-counting a bandwidth regression.
                 let pm = slot
                     .session
                     .peer_metrics(PlayerHandle::new(j))
