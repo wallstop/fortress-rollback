@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783223680804,
+  "lastUpdate": 1783229263222,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "780e549e652cfa6eff408d2c9e31ae05522e0f88",
-          "message": "v5 release (#82)\n\n## Description\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-02-05T16:45:01-08:00",
-          "tree_id": "e6c950519523e2e9a9b16bdce26da494d262c546",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/780e549e652cfa6eff408d2c9e31ae05522e0f88"
-        },
-        "date": 1770338969772,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 100,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 148,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 492,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 715,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1057,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102328,
-            "range": "± 590",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27459,
-            "range": "± 820",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 102",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1602,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "18cae7cd381870418f95fb43adcc1c1fd48bb793",
+          "message": "Hardening M2 §5.2: PeerMetrics per-peer wire-exact traffic + accessor (#192)\n\n## Summary\n\nM2 §5.2 continued: adds the **per-peer** metrics surface\n(`PeerMetrics`), the deferred §5.1 receive-side wire accounting, and the\n`P2PSession::peer_metrics(handle)` accessor. Every counter lands with a\nlive consuming site — no dead fields under `deny(warnings)`.\n\nBuilds on #189 (D1 wire-exact bandwidth), #190 (D9 event-discard\ntelemetry), #191 (SessionMetrics rollback/pacing counters).\n\n## What's new (public API)\n\n- **`PeerMetrics`** (`#[non_exhaustive]`, `Copy`, `Serialize`,\n`to_json`/`to_json_pretty` under `json`) — a per-peer snapshot read via\n`P2PSession::peer_metrics(handle)`:\n- **Cumulative counters:** `bytes_sent`/`bytes_received`,\n`packets_sent`/`packets_received` (wire-exact via\n`Message::encoded_len`),\n`messages_sent_by_kind`/`messages_received_by_kind`,\n`input_bytes_pre_compression`/`input_bytes_post_compression`.\n- **Instantaneous gauges:** `pending_output_len`,\n`pending_checksums_len`, `ping_ms`, `remote_frame_advantage`.\n- **`MessageKind`** — payload-free mirror of the wire message variants\n(`as_str()`/`ALL`/`COUNT`), the message analogue of `EventKind`.\n- **`MessageKindCounts`** — per-kind array counter with\n`get()`/`total()` and a self-describing labeled-map `Serialize`.\n\n## Wiring (single-site, always-on)\n\n| Counter(s) | Site |\n|---|---|\n| `messages_sent_by_kind` | `queue_message` (with the existing\n`bytes_sent`/`packets_sent`) |\n| `bytes_received`, `packets_received`, `messages_received_by_kind` |\ntop of `handle_message`, **before** any protocol-state filter |\n| `input_bytes_pre/post_compression` | `send_pending_output` compression\nsite |\n\nCounting receive before the shutdown/magic/state filters keeps\n`packets_received == messages_received_by_kind.total()` by construction\nand makes `bytes_received` a true wire-traffic meter (mirror of the send\nside). Verified there is exactly one production send site\n(`send_queue.push_back` in `queue_message`) and one production receive\nsite (`handle_message`, via the poll paths).\n\n## Design note\n\nDropped the plan's `PeerMetrics::send_queue_len`: it would collide in\nname with `NetworkStats::send_queue_len` (which actually reports\n`pending_output.len()`) while exposing only a transient internal flush\nbuffer. `pending_output_len` — the real backpressure gauge — is kept.\n\n## Tests\n\n- `metrics`: `MessageKind`/`MessageKindCounts` structural + JSON tests,\n`PeerMetrics` default/serialization.\n- `messages`: `message_body_kind_maps_every_variant` (all variants +\n`Message::kind()` delegation).\n- `protocol`: exact send byte/kind identity,\nreceive-counts-before-filters (incl. a Shutdown endpoint),\ninput-compression bytes, connection gauges.\n- `tests/network/peer_metrics.rs`: end-to-end 2-session routing\npopulates the counters via the public accessor, per-kind totals equal\npacket counters, metrics are **bit-identical across runs** (no\nwall-clock leakage), and the accessor rejects local/unknown handles.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features\ntokio,json[,hot-join]` clean\n- `cargo nextest run --features tokio,json` → 2373 passed; `+hot-join` →\n2611 passed\n- Rustdoc `--document-private-items` clean; `cargo test --doc` 159\npassed\n- `agent-preflight.py --auto-fix` all green (changelog-unreleased,\nversion-sync, link-check, doc-claims, typos, …)\n\n## Follow-ups (M2 §5.2 remainder)\n\n- `SpectatorSession::peer_metrics()` subset and `HotJoinMetrics` (each\nwith its own consuming site).\n- §5.3 baseline sweep.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Observability-only additions on existing send/receive paths; no\nwire-format or session-behavior changes. Handle validation errors are\nexplicit for non-remote handles.\n> \n> **Overview**\n> This PR extends session metrics with a **per-peer** surface:\n**`PeerMetrics`** (via **`P2PSession::peer_metrics(handle)`**) plus\n**`MessageKind`** / **`MessageKindCounts`** for labeled traffic\nbreakdowns. Snapshots include cumulative payload bytes and packets\n(send/receive), per-kind counts, input pre/post-compression totals, and\ngauges (`pending_output_len`, `pending_checksums_len`, `ping_ms`,\n`remote_frame_advantage`). Unlike **`network_stats`**, peer metrics do\nnot require synchronization.\n> \n> Protocol endpoints now increment receive counters at the **start** of\n**`handle_message`** (before magic/shutdown filters), send-side kind\ntallies in **`queue_message`**, and compression byte totals when\nflushing **`Input`** batches. **`MessageBody::kind()`** /\n**`Message::kind()`** tie wire messages to **`MessageKind`**.\n> \n> New unit and integration tests cover kind mapping, accounting\ninvariants, and deterministic two-session **`peer_metrics`** behavior;\nthe changelog documents the public API.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n441ce79e6ac7208b3c5cdb7236ae0045efa23fcb. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-04T22:23:00-07:00",
+          "tree_id": "c43fdb5832d37b68012c1a297a06f6de3785d588",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/18cae7cd381870418f95fb43adcc1c1fd48bb793"
+        },
+        "date": 1783229262154,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 111,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 161,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 469,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 708,
+            "range": "± 31",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1048,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 126048,
+            "range": "± 621",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45460,
+            "range": "± 394",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1245,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 106",
             "unit": "ns/iter"
           },
           {
