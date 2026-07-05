@@ -409,10 +409,13 @@ fn baseline_path() -> std::path::PathBuf {
 }
 
 /// Asserts `actual` is within `rel` (relative) plus `abs_floor` (absolute) of
-/// `expected`. The absolute floor keeps a near-zero baseline (e.g. a LAN cell's
-/// tiny rollback rate) from being brittle under a purely relative bound; the
-/// values are otherwise deterministic (virtual time), so same-platform runs
-/// reproduce exactly and the tolerance only absorbs cross-platform float noise.
+/// `expected`. Every compared column is derived from integer counters over a
+/// deterministic (virtual-time, integer-RNG) run, so it reproduces **exactly** —
+/// same-platform and, as the 3-OS CI confirms, cross-platform. The tolerances
+/// therefore only need to (a) keep the gate stable across trivial float noise
+/// and (b) keep a near-zero baseline (a LAN cell's ~0.1 rollback rate) from
+/// being brittle under a purely relative bound; the floors are kept small so the
+/// gate still catches a real regression on a low-rollback cell.
 fn assert_close(cell: &str, field: &str, actual: f64, expected: f64, rel: f64, abs_floor: f64) {
     let allowed = expected.abs().mul_add(rel, abs_floor);
     let diff = (actual - expected).abs();
@@ -459,6 +462,28 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             cur.label, base.label,
             "gate cell order/label changed — re-bless the baseline"
         );
+        // The cell identity must match the baseline exactly: a reparametrization
+        // (different players/loss/rtt/jitter/steps under the same label) changes
+        // what the metrics mean, so it must re-bless rather than slip through the
+        // metric tolerances below.
+        assert_eq!(
+            (
+                cur.n_players,
+                cur.loss_pct,
+                cur.rtt_ms,
+                cur.jitter_ms,
+                cur.steps,
+            ),
+            (
+                base.n_players,
+                base.loss_pct,
+                base.rtt_ms,
+                base.jitter_ms,
+                base.steps,
+            ),
+            "cell {} parameters changed — re-bless the baseline",
+            cur.label
+        );
         // Correctness is exact both ways: a clean cell never desyncs.
         assert_eq!(cur.desync_incidents, 0, "cell {} desynced", cur.label);
         assert_eq!(
@@ -472,7 +497,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             cur.bytes_sent_per_player_per_sec,
             base.bytes_sent_per_player_per_sec,
             0.05,
-            50.0,
+            0.5,
         );
         assert_close(
             &cur.label,
@@ -480,7 +505,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             cur.input_bytes_post_compression_per_player_per_sec,
             base.input_bytes_post_compression_per_player_per_sec,
             0.05,
-            20.0,
+            0.5,
         );
         assert_close(
             &cur.label,
@@ -488,7 +513,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             cur.rollbacks_per_100_frames,
             base.rollbacks_per_100_frames,
             0.10,
-            3.0,
+            0.05,
         );
     }
 }
