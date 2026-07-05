@@ -22,7 +22,7 @@ use super::harness::schedule::{Schedule, SimConfig, SCHEDULE_SCHEMA_VERSION};
 use super::harness::{run, PeerWireTotals, RunOptions, RunReport};
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::{MessageKind, RollbackDepthHistogram, SessionMetrics};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -351,6 +351,173 @@ fn write_jsonl(reports: &[CellReport]) {
     file.write_all(buf.as_bytes()).expect("sweep output writes");
 }
 
+/// A checked-in baseline snapshot of one gate cell — the M5 wire-cost ledger.
+/// Stores the cell's identity plus its measured cost/behavior metrics; the
+/// volatile `version`/`git_sha` and the per-kind map are intentionally omitted
+/// so the JSON stays a stable, reviewable diff. Regenerate with
+/// `FORTRESS_SWEEP_BLESS=1` (see [`sweep_pr_gate`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BaselineCell {
+    label: String,
+    n_players: usize,
+    loss_pct: f64,
+    rtt_ms: u64,
+    jitter_ms: u64,
+    steps: u32,
+    bytes_sent_per_player_per_sec: f64,
+    input_bytes_post_compression_per_player_per_sec: f64,
+    rollbacks_per_100_frames: f64,
+    rollback_depth_p50: u32,
+    rollback_depth_p99: u32,
+    rollback_depth_max: u32,
+    confirmation_lag_mean: f64,
+    confirmation_lag_max: u64,
+    stalls_per_min: f64,
+    min_final_confirmed: i32,
+    desync_incidents: u64,
+}
+
+impl BaselineCell {
+    fn from_report(r: &CellReport) -> Self {
+        Self {
+            label: r.label.clone(),
+            n_players: r.n_players,
+            loss_pct: r.loss_pct,
+            rtt_ms: r.rtt_ms,
+            jitter_ms: r.jitter_ms,
+            steps: r.steps,
+            bytes_sent_per_player_per_sec: r.bytes_sent_per_player_per_sec,
+            input_bytes_post_compression_per_player_per_sec: r
+                .input_bytes_post_compression_per_player_per_sec,
+            rollbacks_per_100_frames: r.rollbacks_per_100_frames,
+            rollback_depth_p50: r.rollback_depth_p50,
+            rollback_depth_p99: r.rollback_depth_p99,
+            rollback_depth_max: r.rollback_depth_max,
+            confirmation_lag_mean: r.confirmation_lag_mean,
+            confirmation_lag_max: r.confirmation_lag_max,
+            stalls_per_min: r.stalls_per_min,
+            min_final_confirmed: r.min_final_confirmed,
+            desync_incidents: r.desync_incidents,
+        }
+    }
+}
+
+/// Path to the checked-in gate baseline.
+fn baseline_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/simulation/baselines/sweep-v1.json")
+}
+
+/// Asserts `actual` is within `rel` (relative) plus `abs_floor` (absolute) of
+/// `expected`. Every compared column is derived from integer counters over a
+/// deterministic (virtual-time, integer-RNG) run, so it reproduces **exactly** —
+/// same-platform and, as the 3-OS CI confirms, cross-platform. The tolerances
+/// therefore only need to (a) keep the gate stable across trivial float noise
+/// and (b) keep a near-zero baseline (a LAN cell's ~0.1 rollback rate) from
+/// being brittle under a purely relative bound; the floors are kept small so the
+/// gate still catches a real regression on a low-rollback cell.
+fn assert_close(cell: &str, field: &str, actual: f64, expected: f64, rel: f64, abs_floor: f64) {
+    let allowed = expected.abs().mul_add(rel, abs_floor);
+    let diff = (actual - expected).abs();
+    assert!(
+        diff <= allowed,
+        "baseline drift in cell {cell}: {field} = {actual}, baseline {expected} \
+         (allowed ±{allowed:.3}). If intended, refresh with \
+         `FORTRESS_SWEEP_BLESS=1 cargo test --test simulation sweep_pr_gate`."
+    );
+}
+
+/// Compares the gate cells to the checked-in [`baseline_path`] ledger, or
+/// regenerates it when `FORTRESS_SWEEP_BLESS` is set. Correctness columns
+/// (`desync_incidents`) are exact; cost/behavior columns compare within
+/// tolerance (plan §5.3: bytes ±5%, rollbacks ±10%), since a wire-format change
+/// (M5's +6 B/packet) shows up here as a reviewed, over-tolerance delta.
+fn check_or_bless_baseline(reports: &[CellReport]) {
+    let current: Vec<BaselineCell> = reports.iter().map(BaselineCell::from_report).collect();
+    let path = baseline_path();
+
+    if std::env::var("FORTRESS_SWEEP_BLESS").is_ok() {
+        let json = serde_json::to_string_pretty(&current).expect("baseline serializes");
+        std::fs::create_dir_all(path.parent().expect("baseline path has a parent"))
+            .expect("create baselines dir");
+        std::fs::write(&path, format!("{json}\n")).expect("write baseline");
+        return;
+    }
+
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read sweep baseline {}: {e}\nGenerate it with \
+             `FORTRESS_SWEEP_BLESS=1 cargo test --test simulation sweep_pr_gate`.",
+            path.display()
+        )
+    });
+    let baseline: Vec<BaselineCell> = serde_json::from_str(&raw).expect("baseline parses");
+    assert_eq!(
+        baseline.len(),
+        current.len(),
+        "gate cell count changed — re-bless the baseline (FORTRESS_SWEEP_BLESS=1)"
+    );
+    for (cur, base) in current.iter().zip(&baseline) {
+        assert_eq!(
+            cur.label, base.label,
+            "gate cell order/label changed — re-bless the baseline"
+        );
+        // The cell identity must match the baseline exactly: a reparameterization
+        // (different players/loss/rtt/jitter/steps under the same label) changes
+        // what the metrics mean, so it must re-bless rather than slip through the
+        // metric tolerances below.
+        assert_eq!(
+            (
+                cur.n_players,
+                cur.loss_pct,
+                cur.rtt_ms,
+                cur.jitter_ms,
+                cur.steps,
+            ),
+            (
+                base.n_players,
+                base.loss_pct,
+                base.rtt_ms,
+                base.jitter_ms,
+                base.steps,
+            ),
+            "cell {} parameters changed — re-bless the baseline",
+            cur.label
+        );
+        // Correctness is exact both ways: a clean cell never desyncs.
+        assert_eq!(cur.desync_incidents, 0, "cell {} desynced", cur.label);
+        assert_eq!(
+            base.desync_incidents, 0,
+            "baseline cell {} has a desync",
+            base.label
+        );
+        assert_close(
+            &cur.label,
+            "bytes_sent_per_player_per_sec",
+            cur.bytes_sent_per_player_per_sec,
+            base.bytes_sent_per_player_per_sec,
+            0.05,
+            0.5,
+        );
+        assert_close(
+            &cur.label,
+            "input_bytes_post_compression_per_player_per_sec",
+            cur.input_bytes_post_compression_per_player_per_sec,
+            base.input_bytes_post_compression_per_player_per_sec,
+            0.05,
+            0.5,
+        );
+        assert_close(
+            &cur.label,
+            "rollbacks_per_100_frames",
+            cur.rollbacks_per_100_frames,
+            base.rollbacks_per_100_frames,
+            0.10,
+            0.05,
+        );
+    }
+}
+
 /// The representative cells the PR gate checks (a fast subset of the full
 /// matrix): LAN, wifi, and mobile 2-player profiles plus 4-player wifi and a
 /// 4-player heavy-loss/high-RTT stress cell.
@@ -455,6 +622,9 @@ fn sweep_pr_gate() {
     assert_eq!(*first, replay, "cell is not reproducible: {}", first.label);
 
     write_jsonl(&reports);
+
+    // Regression gate against the checked-in cost ledger (M5 baseline).
+    check_or_bless_baseline(&reports);
 }
 
 /// The full baseline matrix. `#[ignore]`d: it runs 5000-frame cells across the
