@@ -104,6 +104,8 @@ pub use error::{
 /// ```
 pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 
+#[cfg(feature = "hot-join")]
+pub use metrics::HotJoinMetrics;
 pub use metrics::{
     EventKind, EventKindCounts, MessageKind, MessageKindCounts, PeerMetrics,
     RollbackDepthHistogram, SessionMetrics,

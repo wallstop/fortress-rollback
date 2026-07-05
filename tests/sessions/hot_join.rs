@@ -229,6 +229,96 @@ fn drain_events(sess: &mut P2PSession<StubConfig>) -> Vec<FortressEvent<StubConf
     sess.events().collect()
 }
 
+/// Drives a 2-peer join to completion and asserts `hot_join_metrics()` captures
+/// the joiner's latency on the injectable clock: `None` for the host, present
+/// but incomplete while `HotJoining`, then completed with a positive
+/// poll/millisecond latency once the joiner reaches `Running`.
+#[test]
+fn hot_join_metrics_records_joiner_latency() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    // A host never hot-joins, so it has no hot-join metrics.
+    assert_eq!(host.hot_join_metrics(), None);
+
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+    assert_eq!(joiner.current_state(), SessionState::HotJoining);
+
+    // While HotJoining the metrics exist but the join is not yet complete.
+    let before = joiner
+        .hot_join_metrics()
+        .expect("a joiner has hot-join metrics");
+    assert!(!before.completed, "join not complete yet: {before:?}");
+    assert_eq!(before.millis_to_running, 0);
+
+    let mut host_stub = GameStub::new();
+    for _ in 0..200 {
+        host.poll_remote_clients();
+        if host.current_state() == SessionState::Running {
+            // The host is paused (returns `NotSynchronized`) while serving the
+            // joiner's snapshot; tolerate that, but surface any other error.
+            match advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 7) {
+                Ok(()) | Err(FortressError::NotSynchronized) => {},
+                Err(e) => return Err(e),
+            }
+        }
+        joiner.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if joiner.current_state() == SessionState::Running {
+            break;
+        }
+    }
+    assert_eq!(
+        joiner.current_state(),
+        SessionState::Running,
+        "joiner should complete the join within the poll budget"
+    );
+
+    let after = joiner
+        .hot_join_metrics()
+        .expect("a joiner has hot-join metrics");
+    assert!(
+        after.completed,
+        "join should be marked completed: {after:?}"
+    );
+    // A 2-peer join spans multiple polls (sync handshake, then snapshot serve
+    // and ack on later polls), and the clock advances each poll — so the latency
+    // is a positive multiple of the poll step. Asserting `polls > 1` makes that
+    // precondition explicit rather than relying on `millis > 0` directly (which
+    // the type documents can be 0 for a hypothetical <=1-poll join).
+    assert!(
+        after.polls_to_running > 1,
+        "a 2-peer join should span multiple HotJoining polls: {after:?}"
+    );
+    assert!(
+        after.millis_to_running > 0,
+        "the clock advanced across those polls, so latency is positive: {after:?}"
+    );
+
+    // The completed metric is stable — later polls/reads do not move it.
+    joiner.poll_remote_clients();
+    clock.advance(POLL_INTERVAL_DETERMINISTIC);
+    assert_eq!(
+        joiner.hot_join_metrics().expect("metrics"),
+        after,
+        "a completed hot-join metric must not change on later polls"
+    );
+
+    Ok(())
+}
+
 // ============================================================================
 // Checkpoint A: host with a reserved slot runs solo
 // ============================================================================

@@ -1,5 +1,7 @@
 use crate::error::{allocation_failed, FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
+#[cfg(feature = "hot-join")]
+use crate::metrics::HotJoinMetrics;
 use crate::metrics::{PeerMetrics, SessionMetrics};
 use crate::network::messages::ConnectionStatus;
 #[cfg(feature = "hot-join")]
@@ -8,6 +10,8 @@ use crate::network::network_stats::NetworkStats;
 use crate::network::protocol::UdpProtocol;
 use crate::replay::{Replay, ReplayRecorder};
 use crate::safe_frame_sub;
+#[cfg(feature = "hot-join")]
+use crate::sessions::config::ClockFn;
 use crate::sessions::config::{DisconnectBehavior, ProtocolConfig, SaveMode};
 use crate::sessions::player_registry::PlayerRegistry;
 use crate::sessions::session_trait::Session;
@@ -238,6 +242,42 @@ where
     /// Feature-gated behind `hot-join`; absent (and zero-cost) otherwise.
     #[cfg(feature = "hot-join")]
     hot_join: HotJoinState<T>,
+
+    /// Joiner-side hot-join handshake timing (surfaced via
+    /// [`hot_join_metrics`](P2PSession::hot_join_metrics)). Inert on a host or a
+    /// normally-synchronized session (`join_started_at` is `None`).
+    #[cfg(feature = "hot-join")]
+    hot_join_timing: HotJoinTiming,
+}
+
+/// Joiner-side hot-join handshake timing, measured on the injectable protocol
+/// clock. Populated only on a session built via
+/// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session);
+/// backs [`P2PSession::hot_join_metrics`].
+#[cfg(feature = "hot-join")]
+#[derive(Debug, Default, Clone, Copy)]
+struct HotJoinTiming {
+    /// When the joiner session was constructed (entered `HotJoining`). `None` on
+    /// a non-joiner, which is how [`hot_join_metrics`](P2PSession::hot_join_metrics)
+    /// distinguishes "did not hot-join" from "join in progress".
+    join_started_at: Option<web_time::Instant>,
+    /// When the joiner first reached `Running` (snapshot applied, activated).
+    /// `None` until then.
+    became_running_at: Option<web_time::Instant>,
+    /// `poll_remote_clients` iterations observed while still `HotJoining`.
+    polls_while_joining: u64,
+}
+
+/// Reads the current instant from the injected protocol clock, falling back to
+/// the system clock when none is configured — the same rule the protocol
+/// endpoints use, so session-level and endpoint-level timings share a basis and
+/// stay deterministic under the simulation harness.
+#[cfg(feature = "hot-join")]
+fn clock_now(clock: Option<&ClockFn>) -> web_time::Instant {
+    match clock {
+        Some(clock_fn) => clock_fn(),
+        None => web_time::Instant::now(),
+    }
 }
 
 /// Per-session hot-join orchestration state.
@@ -832,6 +872,19 @@ impl<T: Config> P2PSession<T> {
             state
         };
 
+        // Stamp the join-start time for a joiner (read the injected clock before
+        // `protocol_config` is moved into the session below). `None` on any
+        // non-joiner marks "did not hot-join" for `hot_join_metrics`.
+        #[cfg(feature = "hot-join")]
+        let hot_join_timing = HotJoinTiming {
+            join_started_at: hot_join
+                .joiner
+                .is_some()
+                .then(|| clock_now(protocol_config.clock.as_ref())),
+            became_running_at: None,
+            polls_while_joining: 0,
+        };
+
         // For each reserved (but not-yet-joined) slot, freeze its input queue and
         // mark it disconnected so it behaves exactly like a Feature-5 dropped slot
         // from frame 0: frozen default input, ignored by `confirmed_frame`. The
@@ -937,6 +990,8 @@ impl<T: Config> P2PSession<T> {
                 pending_reactivation: None,
                 npeer_closed_attempt_frames: BTreeMap::new(),
             },
+            #[cfg(feature = "hot-join")]
+            hot_join_timing,
         })
     }
 
@@ -1284,6 +1339,14 @@ impl<T: Config> P2PSession<T> {
     /// Fortress Rollback will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
     pub fn poll_remote_clients(&mut self) {
         let _violation_scope = self.scoped_violation_observer();
+        // Hot-join joiner latency: count every poll spent still `HotJoining`.
+        // Only a joiner is ever `HotJoining` (a host never is), so this needs no
+        // further guard. Placed before the body so early returns cannot skip it.
+        #[cfg(feature = "hot-join")]
+        if self.state == SessionState::HotJoining {
+            self.hot_join_timing.polls_while_joining =
+                self.hot_join_timing.polls_while_joining.saturating_add(1);
+        }
         // Get all packets and distribute them to associated endpoints.
         // The endpoints will handle their packets, which will trigger both events and UPD replies.
         for (from_addr, msg) in &self.socket.receive_all_messages() {
@@ -4399,6 +4462,7 @@ impl<T: Config> P2PSession<T> {
             joiner.ack_resends_remaining = ack_resends;
         }
         self.state = SessionState::Running;
+        self.record_hot_join_activation();
     }
 
     /// Re-roots the joiner's checksum-send anchor onto the host grid at apply
@@ -5286,6 +5350,7 @@ impl<T: Config> P2PSession<T> {
             joiner.pending_backfill = pending_backfill;
         }
         self.state = SessionState::Running;
+        self.record_hot_join_activation();
     }
 
     /// Returns the configured [`DisconnectBehavior`] for this session.
@@ -5652,6 +5717,52 @@ impl<T: Config> P2PSession<T> {
             }
             .into()),
         }
+    }
+
+    /// The current instant on this session's injectable protocol clock (or the
+    /// system clock if none was configured). Deterministic under the DST harness.
+    #[cfg(feature = "hot-join")]
+    fn now(&self) -> web_time::Instant {
+        clock_now(self.protocol_config.clock.as_ref())
+    }
+
+    /// Records that a hot-join joiner has reached `Running`, stamping the
+    /// activation time on the first call. Idempotent, and a no-op on any session
+    /// that did not hot-join (`join_started_at` is `None`), so it is safe to call
+    /// from every joiner-activation site.
+    #[cfg(feature = "hot-join")]
+    fn record_hot_join_activation(&mut self) {
+        if self.hot_join_timing.join_started_at.is_some()
+            && self.hot_join_timing.became_running_at.is_none()
+        {
+            self.hot_join_timing.became_running_at = Some(self.now());
+        }
+    }
+
+    /// Returns hot-join handshake timing for a session that joined an
+    /// in-progress game, or `None` for any session that did not hot-join (a
+    /// host, or a peer that synchronized normally).
+    ///
+    /// The timings are measured on the injectable protocol clock (the
+    /// `clock` field of [`ProtocolConfig`]), so they are deterministic under the
+    /// simulation harness. Available only with the `hot-join` feature.
+    #[cfg(feature = "hot-join")]
+    #[must_use]
+    pub fn hot_join_metrics(&self) -> Option<HotJoinMetrics> {
+        let started = self.hot_join_timing.join_started_at?;
+        let (completed, millis_to_running) = match self.hot_join_timing.became_running_at {
+            Some(end) => (
+                true,
+                u64::try_from(end.saturating_duration_since(started).as_millis())
+                    .unwrap_or(u64::MAX),
+            ),
+            None => (false, 0),
+        };
+        Some(HotJoinMetrics {
+            completed,
+            polls_to_running: self.hot_join_timing.polls_while_joining,
+            millis_to_running,
+        })
     }
 
     /// Populates the checksum-related fields in NetworkStats.
@@ -7759,6 +7870,13 @@ impl<T: Config> P2PSession<T> {
 
         // everyone is synchronized, so we can change state and accept input
         self.state = SessionState::Running;
+        // A hot-join joiner that was fail-closed to `Synchronizing` mid-handshake
+        // (before applying a snapshot) resumes to `Running` here rather than via
+        // the snapshot-apply sites — instrument this path too so a joiner's
+        // `hot_join_metrics().completed` is never stuck false while `Running`.
+        // Idempotent and a no-op for a non-joiner.
+        #[cfg(feature = "hot-join")]
+        self.record_hot_join_activation();
     }
 
     /// Roll back to `min_confirmed` frame and resimulate the game with most up-to-date input data.
