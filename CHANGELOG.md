@@ -130,7 +130,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `confirmation_lag_current` / `_max` / `_sum` (per-advance samples of how far ahead of the confirmed frame
   the simulation runs), `checksums_compared` / `checksums_matched` / `checksums_mismatched` (desync-detection
   comparisons), and the `event_queue_high_water` / `checksum_history_high_water` container high-water marks.
-  All counters are always-on, allocation-free, and updated inline on the paths they measure.
+  All counters are always-on, allocation-free, and updated inline on the paths they measure. A companion
+  **per-peer** snapshot, `PeerMetrics` (read via `P2PSession::peer_metrics(handle)`), carries wire-exact
+  traffic counters for one remote peer or spectator: cumulative `bytes_sent` / `bytes_received` and
+  `packets_sent` / `packets_received`, a per-`MessageKind` breakdown of each direction
+  (`messages_sent_by_kind` / `messages_received_by_kind`, both `MessageKindCounts` serializing as a
+  self-describing label map, with `total()` equal to the matching packet counter), input
+  `input_bytes_pre_compression` / `input_bytes_post_compression` totals, and the instantaneous
+  `pending_output_len`, `pending_checksums_len`, `ping_ms`, and `remote_frame_advantage` gauges. `MessageKind`
+  is a payload-free mirror of the protocol's wire messages (`as_str()`, `ALL`, `COUNT`); `PeerMetrics` is
+  `#[non_exhaustive]` and offers `to_json()` / `to_json_pretty()` under the `json` feature. Byte counts are
+  payload-only (they exclude the per-packet UDP/IP header the `NetworkStats::kbps_sent` estimate folds in).
 
 ### Changed
 

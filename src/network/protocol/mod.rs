@@ -13,6 +13,7 @@ pub use state::ProtocolState;
 
 use crate::error::{allocation_failed, SerializationErrorKind};
 use crate::frame_info::PlayerInput;
+use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
@@ -225,6 +226,20 @@ where
     // ~4 GiB of cumulative traffic and corrupt `network_stats()`.
     packets_sent: u64,
     bytes_sent: u64,
+    // Per-peer receive accounting mirroring `packets_sent`/`bytes_sent`, surfaced
+    // (with the send counters) via `peer_metrics()`. Wire-exact through
+    // `Message::encoded_len`; same `u64` 32-bit-safety rationale as the send side.
+    packets_received: u64,
+    bytes_received: u64,
+    // Per-`MessageKind` send/receive tallies. Each stays in lockstep with the
+    // matching packet counter (one bucket increment per counted packet), so
+    // `messages_*_by_kind.total() == packets_*` by construction.
+    messages_sent_by_kind: MessageKindCounts,
+    messages_received_by_kind: MessageKindCounts,
+    // Cumulative raw (pre-compression) and encoded (post-compression) input bytes
+    // batched into `Input` packets, for realized-compression accounting.
+    input_bytes_pre_compression: u64,
+    input_bytes_post_compression: u64,
     round_trip_time: u128,
     /// Origin instant for quality-report `ping` timestamps, captured from the
     /// protocol clock at endpoint construction. The peer echoes `ping` back
@@ -722,6 +737,12 @@ impl<T: Config> UdpProtocol<T> {
             stats_start_time: now,
             packets_sent: 0,
             bytes_sent: 0,
+            packets_received: 0,
+            bytes_received: 0,
+            messages_sent_by_kind: MessageKindCounts::default(),
+            messages_received_by_kind: MessageKindCounts::default(),
+            input_bytes_pre_compression: 0,
+            input_bytes_post_compression: 0,
             round_trip_time: 0,
             ping_epoch_base: now,
             last_send_time: now,
@@ -854,6 +875,29 @@ impl<T: Config> UdpProtocol<T> {
             remote_checksum: None,
             checksums_match: None,
         })
+    }
+
+    /// A [`PeerMetrics`] snapshot for this endpoint.
+    ///
+    /// Unlike [`network_stats`](Self::network_stats), this never fails and is
+    /// valid from construction: the byte / packet / message-kind / compression
+    /// fields are always-on cumulative counters, and the remaining fields read
+    /// current endpoint state as instantaneous gauges.
+    pub(crate) fn peer_metrics(&self) -> PeerMetrics {
+        PeerMetrics {
+            bytes_sent: self.bytes_sent,
+            bytes_received: self.bytes_received,
+            packets_sent: self.packets_sent,
+            packets_received: self.packets_received,
+            messages_sent_by_kind: self.messages_sent_by_kind,
+            messages_received_by_kind: self.messages_received_by_kind,
+            input_bytes_pre_compression: self.input_bytes_pre_compression,
+            input_bytes_post_compression: self.input_bytes_post_compression,
+            pending_output_len: u64::try_from(self.pending_output.len()).unwrap_or(u64::MAX),
+            pending_checksums_len: u64::try_from(self.pending_checksums.len()).unwrap_or(u64::MAX),
+            ping_ms: self.round_trip_time,
+            remote_frame_advantage: self.remote_frame_advantage,
+        }
     }
 
     pub(crate) fn handles(&self) -> Arc<[PlayerHandle]> {
@@ -1565,16 +1609,24 @@ impl<T: Config> UdpProtocol<T> {
                     return;
                 },
             };
+            // Input-compression accounting (always-on): the pre-compression size
+            // is the sum of the raw per-frame input bytes batched into this send;
+            // the post size is the delta/RLE-encoded `body.bytes`. Their ratio is
+            // the realized compression, surfaced via `peer_metrics()`.
+            let pre_compression_bytes: usize = self
+                .pending_output
+                .iter()
+                .take(batch_len)
+                .map(|gi| gi.bytes.len())
+                .sum();
+            self.input_bytes_pre_compression = self
+                .input_bytes_pre_compression
+                .saturating_add(pre_compression_bytes as u64);
+            self.input_bytes_post_compression = self
+                .input_bytes_post_compression
+                .saturating_add(body.bytes.len() as u64);
             trace!(
-                "Encoded {} bytes from {} of {} pending output(s) into {} bytes",
-                {
-                    let mut sum = 0;
-                    for gi in self.pending_output.iter().take(batch_len) {
-                        sum += gi.bytes.len();
-                    }
-                    sum
-                },
-                batch_len,
+                "Encoded {pre_compression_bytes} bytes from {batch_len} of {} pending output(s) into {} bytes",
                 self.pending_output.len(),
                 body.bytes.len()
             );
@@ -1799,6 +1851,9 @@ impl<T: Config> UdpProtocol<T> {
         // Saturating so the lifetime counter degrades to a ceiling rather than
         // wrapping (or panicking under overflow-checks) on any target.
         self.bytes_sent = self.bytes_sent.saturating_add(msg.encoded_len() as u64);
+        // Per-kind send tally: one bucket per packet keeps
+        // `messages_sent_by_kind.total() == packets_sent`.
+        self.messages_sent_by_kind.record(msg.kind());
 
         // add the packet to the back of the send queue
         self.send_queue.push_back(msg);
@@ -1810,6 +1865,16 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn handle_message(&mut self, msg: &Message) {
         trace!("Handling message from {:?}: {:?}", self.peer_addr, msg);
+
+        // Per-peer receive accounting (always-on, wire-exact). Counted for every
+        // message delivered to this endpoint *before* any protocol-state filter
+        // below, so `bytes_received` reflects all traffic that arrived from this
+        // peer and `packets_received == messages_received_by_kind.total()` holds
+        // by construction (the send-side mirror of `queue_message`). Saturating so
+        // the lifetime counters degrade to a ceiling rather than wrapping.
+        self.packets_received = self.packets_received.saturating_add(1);
+        self.bytes_received = self.bytes_received.saturating_add(msg.encoded_len() as u64);
+        self.messages_received_by_kind.record(msg.kind());
 
         // don't handle messages if shutdown
         if self.state == ProtocolState::Shutdown {
@@ -4763,6 +4828,161 @@ mod tests {
         // This will likely fail because no time has passed
         // The actual behavior depends on timing
         assert!(result.is_ok() || matches!(result, Err(FortressError::NotSynchronized)));
+    }
+
+    // ==========================================
+    // Peer Metrics Tests (M2 §5.2)
+    // ==========================================
+
+    #[test]
+    fn peer_metrics_send_accounting_matches_wire_bytes_and_kinds() {
+        use crate::metrics::MessageKind;
+
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        let bodies = [
+            MessageBody::KeepAlive,
+            MessageBody::QualityReply(QualityReply { pong: 7 }),
+            MessageBody::InputAck(InputAck {
+                ack_frame: Frame::new(3),
+            }),
+            MessageBody::KeepAlive,
+        ];
+        let mut expected_bytes = 0u64;
+        for body in &bodies {
+            // `queue_message` stamps the header magic itself; recompute the same
+            // wire size independently (magic does not affect `encoded_len`).
+            let msg = Message {
+                header: MessageHeader {
+                    magic: protocol.magic,
+                },
+                body: body.clone(),
+            };
+            expected_bytes += msg.encoded_len() as u64;
+            protocol.queue_message(body.clone());
+        }
+
+        let m = protocol.peer_metrics();
+        assert_eq!(m.packets_sent, bodies.len() as u64);
+        assert_eq!(m.bytes_sent, expected_bytes);
+        // One kind bucket per packet: the total equals the packet counter.
+        assert_eq!(m.messages_sent_by_kind.total(), m.packets_sent);
+        assert_eq!(m.messages_sent_by_kind.get(MessageKind::KeepAlive), 2);
+        assert_eq!(m.messages_sent_by_kind.get(MessageKind::QualityReply), 1);
+        assert_eq!(m.messages_sent_by_kind.get(MessageKind::InputAck), 1);
+        assert_eq!(m.messages_sent_by_kind.get(MessageKind::Input), 0);
+        // Nothing received yet.
+        assert_eq!(m.packets_received, 0);
+        assert_eq!(m.bytes_received, 0);
+    }
+
+    #[test]
+    fn peer_metrics_receive_accounting_counts_every_message_before_filters() {
+        use crate::metrics::MessageKind;
+
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        // A magic mismatch (and, below, the Shutdown state) drops the message for
+        // handling — but receive accounting is counted first, so the byte/packet
+        // counters still advance. Pin the remote magic so the filter is active.
+        protocol.remote_magic = 999;
+
+        let bodies = [
+            MessageBody::KeepAlive,
+            MessageBody::QualityReport(QualityReport {
+                frame_advantage: 0,
+                ping: 5,
+            }),
+            MessageBody::KeepAlive,
+        ];
+        let mut expected_bytes = 0u64;
+        for body in &bodies {
+            let msg = Message {
+                header: MessageHeader { magic: 123 }, // wrong magic: filtered after counting
+                body: body.clone(),
+            };
+            expected_bytes += msg.encoded_len() as u64;
+            protocol.handle_message(&msg);
+        }
+
+        let m = protocol.peer_metrics();
+        assert_eq!(m.packets_received, bodies.len() as u64);
+        assert_eq!(m.bytes_received, expected_bytes);
+        assert_eq!(m.messages_received_by_kind.total(), m.packets_received);
+        assert_eq!(m.messages_received_by_kind.get(MessageKind::KeepAlive), 2);
+        assert_eq!(
+            m.messages_received_by_kind.get(MessageKind::QualityReport),
+            1
+        );
+
+        // Even a Shutdown endpoint (which returns before handling) counts the
+        // arriving traffic — the accounting is unconditional and precedes every
+        // protocol-state filter.
+        protocol.state = ProtocolState::Shutdown;
+        protocol.handle_message(&Message {
+            header: MessageHeader { magic: 999 },
+            body: MessageBody::KeepAlive,
+        });
+        assert_eq!(
+            protocol.peer_metrics().packets_received,
+            bodies.len() as u64 + 1
+        );
+    }
+
+    #[test]
+    fn peer_metrics_records_input_compression_bytes() {
+        // The endpoint serializes one local player of `u32` input, so the
+        // zeroed reference width is 4 bytes; pushed frames must match it.
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![1, 2, 3, 4],
+        });
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(1),
+            bytes: vec![5, 6, 7, 8],
+        });
+
+        // Flush the batch: it is delta/RLE-encoded into one `Input` packet.
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        protocol.send_pending_output(&connect_status);
+
+        let m = protocol.peer_metrics();
+        // Two 4-byte frames of raw input were batched before compression.
+        assert_eq!(
+            m.input_bytes_pre_compression, 8,
+            "pre-compression input bytes: {m:?}"
+        );
+        assert!(
+            m.input_bytes_post_compression > 0,
+            "no post-compression input bytes recorded: {m:?}"
+        );
+        // Exactly one Input packet went out, tallied by kind.
+        assert!(m.packets_sent > 0);
+        assert!(
+            m.messages_sent_by_kind
+                .get(crate::metrics::MessageKind::Input)
+                > 0
+        );
+        assert_eq!(m.messages_sent_by_kind.total(), m.packets_sent);
+    }
+
+    #[test]
+    fn peer_metrics_snapshot_reports_connection_gauges() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.round_trip_time = 42;
+        protocol.remote_frame_advantage = -3;
+        protocol.pending_checksums.insert(Frame::new(1), 0xABCD);
+        protocol.pending_checksums.insert(Frame::new(2), 0x1234);
+
+        let m = protocol.peer_metrics();
+        assert_eq!(m.ping_ms, 42);
+        assert_eq!(m.remote_frame_advantage, -3);
+        assert_eq!(m.pending_checksums_len, 2);
+        assert_eq!(m.pending_output_len, protocol.pending_output.len() as u64);
     }
 
     // ==========================================
