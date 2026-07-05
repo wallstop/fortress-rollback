@@ -275,8 +275,10 @@ impl SessionMetrics {
 
     /// Serializes this snapshot to a compact JSON string.
     ///
-    /// Returns `None` if serialization fails (which cannot happen for this
-    /// plain-integer type in practice).
+    /// Returns `None` if serialization fails. This type is a small set of
+    /// integer counters, so failure is not expected in normal operation, but it
+    /// is not impossible (for example, an allocation failure inside
+    /// `serde_json`).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {

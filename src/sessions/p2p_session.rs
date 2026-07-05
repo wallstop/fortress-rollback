@@ -9161,6 +9161,11 @@ impl<T: Config> P2PSession<T> {
                 self.enter_fail_closed_disconnect_state();
             }
         }
+        // Propagated auto-disconnects (disconnect_timeout + ContinueWithout) emit
+        // PeerDropped/Disconnected here, inside `advance_frame` and outside
+        // `handle_event`'s trim; bound the queue so they can't exceed the cap
+        // (or defer the D9 discard telemetry) before the next poll.
+        self.trim_event_queue();
     }
 
     /// Gather average frame advantage from each remote player endpoint and return the maximum.
