@@ -157,9 +157,7 @@ impl Oracle {
             "mark_peer_dead: peer {peer} out of range (dead-mask len {})",
             self.dead.len()
         );
-        if let Some(slot) = self.dead.get_mut(peer) {
-            *slot = true;
-        }
+        self.dead[peer] = true;
     }
 
     /// Whether `peer` was killed mid-run.
