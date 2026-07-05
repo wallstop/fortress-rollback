@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783189596418,
+  "lastUpdate": 1783219707808,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "4e4a11d6cface7021090969cbd9d15a1974f713f",
-          "message": "chore(deps): bump criterion from 0.8.1 to 0.8.2 (#79)\n\nBumps [criterion](https://github.com/criterion-rs/criterion.rs) from\n0.8.1 to 0.8.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/criterion-rs/criterion.rs/releases\">criterion's\nreleases</a>.</em></p>\n<blockquote>\n<h2>criterion-plot-v0.8.2</h2>\n<h3>Other</h3>\n<ul>\n<li>Update Readme</li>\n</ul>\n<h2>criterion-v0.8.2</h2>\n<h3>Fixed</h3>\n<ul>\n<li>don't build alloca on unsupported targets</li>\n</ul>\n<h3>Other</h3>\n<ul>\n<li><em>(deps)</em> bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li>Fix panic with uniform iteration durations in benchmarks</li>\n<li>Update Readme</li>\n<li>Exclude development scripts from published package</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/criterion-rs/criterion.rs/blob/master/CHANGELOG.md\">criterion's\nchangelog</a>.</em></p>\n<blockquote>\n<h2><a\nhref=\"https://github.com/criterion-rs/criterion.rs/compare/criterion-v0.8.1...criterion-v0.8.2\">0.8.2</a>\n- 2026-02-04</h2>\n<h3>Fixed</h3>\n<ul>\n<li>don't build alloca on unsupported targets</li>\n</ul>\n<h3>Other</h3>\n<ul>\n<li><em>(deps)</em> bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li>Fix panic with uniform iteration durations in benchmarks</li>\n<li>Update Readme</li>\n<li>Exclude development scripts from published package</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/7f0d745532e3c7b2e11bbf9de9b911f91790d3b1\"><code>7f0d745</code></a>\nchore: release v0.8.2</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/4a467ce964052ae9bd9266c0706b470b817613e0\"><code>4a467ce</code></a>\nchore(deps): bump crate-ci/typos from 1.40.0 to 1.43.0</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/b277a751453cf9ce0595e41bddf819210a6d6e47\"><code>b277a75</code></a>\nFix panic with uniform iteration durations in benchmarks</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/828af1450d648c599a92a077b75e292747761d99\"><code>828af14</code></a>\nfix: don't build alloca on unsupported targets</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/b01316b76e42028f3b1cf3731f643bea7f354f39\"><code>b01316b</code></a>\nUpdate Readme</li>\n<li><a\nhref=\"https://github.com/criterion-rs/criterion.rs/commit/4c02a3b4e560fe1f296c0ed1e9b53e3154a3cac6\"><code>4c02a3b</code></a>\nExclude development scripts from published package</li>\n<li>See full diff in <a\nhref=\"https://github.com/criterion-rs/criterion.rs/compare/criterion-v0.8.1...criterion-v0.8.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=criterion&package-manager=cargo&previous-version=0.8.1&new-version=0.8.2)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-04T20:23:48-08:00",
-          "tree_id": "fc4ac105479c5f9730ec6261cac803dcb5bb96a4",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/4e4a11d6cface7021090969cbd9d15a1974f713f"
-        },
-        "date": 1770265777718,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 99,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 149,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 502,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 720,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1092,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103952,
-            "range": "± 439",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27627,
-            "range": "± 1025",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1242,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 70",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "56db89d456c26258ea01499db2e5837fdc2a96d3",
+          "message": "Hardening M2 §5.4: SessionMetrics + D9 event-discard telemetry (#190)\n\n## Summary\n\nAdds an always-on, pull-based **session metrics layer**\n(`src/metrics.rs`) and uses its first counter surface to fix defect\n**D9**: event-queue overflow no longer discards undrained events\nsilently.\n\nThis is the next increment of the M2 milestone (metrics + baseline\nsweep) after M2 §5.1 (D1, #189). It ships the metrics-module foundation\nplus the event-queue-overflow accounting that closes D9's telemetry gap.\n`PeerMetrics`, the rollback/stall/confirmation-lag counters, and the\nbaseline sweep are follow-up PRs — every field lands with a consuming\nsite so nothing is dead code under `deny(warnings)`, and\n`SessionMetrics` is `#[non_exhaustive]` so those are additive.\n\n## The defect (D9)\n\nBoth session types bounded the event queue with `while event_queue.len()\n> max { pop_front() }` — dropping the **oldest** event with **zero**\ntelemetry (no violation, no counter). A slow-draining app during a churn\nburst could silently lose a safety-critical `Disconnected` or\n`DesyncDetected`. A red-doc test pinned the silence; this PR flips it\ngreen.\n\n## What's new\n\n- **`SessionMetrics`** — `#[non_exhaustive]`, `Copy`,\n`serde::Serialize`, `to_json()`/`to_json_pretty()` under `json`. First\nfields: `events_discarded_total` + `events_discarded_by_kind`\n(per-`EventKind`). Plain integers updated inline — no timers, no alloc,\nno `Instant` — so reads are deterministic and WASM-safe.\n- **`EventKind`** — a payload-free mirror of every `FortressEvent`\nvariant (`as_str()`/`ALL`/`COUNT`), plus **`FortressEvent::kind()`**.\nThe events analogue of the planned `MessageKind`.\n- **`P2PSession::metrics()` / `SpectatorSession::metrics()`** accessors.\n`trim_event_queue` now records every discarded event's kind and emits\n**one** rate-limited `Warning`/`NetworkProtocol` violation per overflow\n**episode** — re-armed on each `events()` drain, so a churn burst warns\nonce, not once per message. **Retention is unchanged** (still drops\noldest); the policy change is deferred to M4.\n\n## Red → green\n\n- Rewrote the red-doc test →\n`event_queue_overflow_records_discard_telemetry`.\n- Verified RED by temporarily neutralizing the fix (silent trim):\n`overflow must count discarded events; got 0`.\n- GREEN: the `Disconnected` canary is attributed to its kind,\n`events_discarded_total >= 1`, and a rate-limited `Warning` fires.\n- New regressions: P2P + spectator rate-limit-per-drain-gap tests,\nspectator discard test, and `metrics::tests` (index↔ALL↔as_str\nbijection, exhaustive `kind()` mapping over all variants, labeled-map\nJSON).\n\n## Validation\n\n- `cargo fmt` + `cargo clippy --workspace --all-targets` clean under\n`tokio,json` and `tokio,json,hot-join`.\n- `cargo nextest run`: **2349** passed (`tokio,json`), **2587** passed\n(`+hot-join`).\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps` clean (both feature\nsets).\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nAn adversarial review pass verified the core (index/ALL/as_str\nbijection, `kind()` totality, custom-Serialize stability) and confirmed\nthe counter has no bypass: the only `pop_front` on the event queue is in\n`trim_event_queue`, and the only `drain(..)` is in `events()` (which\nre-arms the rate limiter).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches all event-queue emission paths in P2P and spectator sessions;\nmiscounted or missed trims could still hide lost\nDisconnected/DesyncDetected events, though regressions target that\nbehavior.\n> \n> **Overview**\n> Introduces **`SessionMetrics`** (`src/metrics.rs`) with\n**`P2PSession::metrics()`** and **`SpectatorSession::metrics()`**, plus\n**`EventKind`**, **`EventKindCounts`**, and **`FortressEvent::kind()`**\nso overflow drops can be counted by category. Optional **`to_json()`** /\n**`to_json_pretty()`** when the `json` feature is enabled.\n> \n> **D9 fix:** bounded event-queue overflow still drops oldest events,\nbut each discard increments **`events_discarded_total`** and\n**`events_discarded_by_kind`**, and emits one rate-limited\n**`Warning`/`NetworkProtocol`** violation per overflow episode (re-armed\nwhen **`events()`** drains). **`handle_event`** is split so\n**`trim_event_queue`** runs after every emission path—including\n**`advance_frame`**, disconnect/hot-join, and early returns—not only\ninbound protocol handling.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n216e135095895b2b1af686d029057b136906415a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-04T19:43:49-07:00",
+          "tree_id": "c32a03069576a8b1d1b047b3da4b724d55778c4e",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/56db89d456c26258ea01499db2e5837fdc2a96d3"
+        },
+        "date": 1783219707035,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 120,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 177,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 519,
+            "range": "± 44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 830,
+            "range": "± 68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1174,
+            "range": "± 103",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 128188,
+            "range": "± 2030",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 49203,
+            "range": "± 649",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 8",
             "unit": "ns/iter"
           },
           {
