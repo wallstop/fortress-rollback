@@ -589,4 +589,23 @@ mod tests {
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerKill { peer: 2 })));
     }
+
+    /// A corpus artifact predating the `app_model` axis (its `config` object has
+    /// no such field) must deserialize to `Ignore` — the open-loop behavior every
+    /// earlier run used — so old schedules replay bit-identically. This pins the
+    /// `#[serde(default)]` contract the "no schema bump" claim rests on.
+    #[test]
+    fn config_without_app_model_field_defaults_to_ignore() {
+        let schedule = generate(42, SimConfig::smoke(2));
+        let mut value = serde_json::to_value(&schedule).unwrap();
+        if let Some(config) = value.get_mut("config").and_then(|c| c.as_object_mut()) {
+            config.remove("app_model");
+        }
+        let back: Schedule = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            back.config.app_model,
+            AppModel::Ignore,
+            "a pre-axis config (no app_model) must default to Ignore"
+        );
+    }
 }

@@ -1157,17 +1157,23 @@ fn wait_rec_schedule(n: usize, app_model: AppModel) -> Schedule {
     }
 }
 
-/// M3 §6.6-pre.3 — the WaitRecommendation-obeying app model (H-OSC precondition).
-/// The reference client and every prior fleet run *ignore* `WaitRecommendation`,
-/// leaving the time-sync loop open. Obeying it (skip the recommended advances)
-/// closes the loop; the question H-OSC asks is whether the closed loop stays
-/// damped or oscillates. Here it must stay **consistent and live** under
-/// symmetric delay: the mesh confirms a byte-identical prefix whether obeying or
-/// ignoring, so obeying does not diverge or deadlock it.
+/// M3 §6.6-pre.3 — the WaitRecommendation-obeying app model. The reference
+/// client and every prior fleet run *ignore* `WaitRecommendation`, leaving the
+/// time-sync control loop **open**, so oscillation (H-OSC) is unobservable.
+/// Obeying it (skip the recommended advances) closes the loop.
 ///
-/// Premise: the same delayed schedule generates real `WaitRecommendation`s
-/// (asserted via metrics), and obeying vs ignoring produces different execution
-/// traces (the skips actually happened) — while both pass the oracle.
+/// This is the H-OSC *precondition infra* plus an asymmetric-delay
+/// side-observation — **not** the full H-OSC experiment, which is symmetric
+/// delay + Obey (mutual-sleep contention, FM-3) and is still owed. Under this
+/// one-sided (asymmetric-delay) obedience the closed loop must stay consistent
+/// and live: every peer confirms a byte-identical *state* prefix whether obeying
+/// or ignoring (both pass the oracle), even though the execution *trace* differs
+/// (Obey paces the ahead peer differently). Obeying must not diverge or deadlock
+/// the mesh.
+///
+/// Premise: under Obey (the run whose obedience is under test) the schedule
+/// emits real `WaitRecommendation`s, and obeying vs ignoring produces different
+/// traces (the skips actually happened).
 #[test]
 fn app_model_obey_wait_recommendation_stays_consistent() {
     for n in [2usize, 4] {
@@ -1179,17 +1185,18 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
         let obey_report = run(&obey, &RunOptions::default());
         obey_report.expect_pass(&obey);
 
-        // The schedule must actually generate WaitRecommendations, or the app
-        // model has nothing to obey (the H-OSC precondition).
-        let total_wait_recs: u64 = ignore_report
+        // The Obey run itself must emit WaitRecommendations, or there was
+        // nothing to obey (the H-OSC precondition — measured on the run under
+        // test, not the Ignore control).
+        let obey_wait_recs: u64 = obey_report
             .metrics
             .iter()
             .map(|m| m.wait_recommendations)
             .sum();
         assert!(
-            total_wait_recs > 0,
-            "the delayed schedule must emit WaitRecommendations to probe H-OSC \
-             (n={n}, got {total_wait_recs})"
+            obey_wait_recs > 0,
+            "the delayed schedule must emit WaitRecommendations under Obey to \
+             probe H-OSC (n={n}, got {obey_wait_recs})"
         );
 
         let obey_again = run(&obey, &RunOptions::default());
