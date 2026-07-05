@@ -392,8 +392,18 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
             let observer = Arc::new(CollectingObserver::new());
+            // Per-peer clock: the exact base clock at 0 ppm (byte-identical to
+            // before), or a rate-skewed clock modeling an unsynchronized local
+            // clock (H-SKEW). A missing/short skew vector means "no skew".
+            let ppm = schedule.config.clock_skew_ppm.get(i).copied().unwrap_or(0);
+            let peer_clock = if ppm == 0 {
+                clock.as_protocol_clock()
+            } else {
+                let num = u64::try_from((1_000_000_i64 + i64::from(ppm)).max(1)).unwrap_or(1);
+                clock.as_skewed_protocol_clock(num, 1_000_000)
+            };
             let protocol_config = ProtocolConfig {
-                clock: Some(clock.as_protocol_clock()),
+                clock: Some(peer_clock),
                 protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, i))),
                 ..ProtocolConfig::default()
             };

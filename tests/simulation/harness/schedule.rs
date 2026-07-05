@@ -115,6 +115,14 @@ pub struct SimConfig {
     /// used) keeps pre-existing corpus artifacts replayable without a bump.
     #[serde(default)]
     pub app_model: AppModel,
+    /// Per-peer clock-rate skew in parts-per-million (peer `i` reads
+    /// `clock_skew_ppm[i]`; a missing/short entry means 0 = no skew). The
+    /// peer's local clock runs `ppm` faster (positive) or slower (negative)
+    /// than the network's real-time base, modeling unsynchronized clocks
+    /// (H-SKEW). `#[serde(default)]` (empty = every clock exact) keeps existing
+    /// corpus artifacts replayable without a bump.
+    #[serde(default)]
+    pub clock_skew_ppm: Vec<i32>,
 }
 
 impl SimConfig {
@@ -135,6 +143,7 @@ impl SimConfig {
             noise: BackgroundNoise::Mild,
             disconnect_behavior: DropPolicy::default(),
             app_model: AppModel::default(),
+            clock_skew_ppm: Vec::new(),
         }
     }
 
@@ -590,30 +599,37 @@ mod tests {
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerKill { peer: 2 })));
     }
 
-    /// A corpus artifact predating the `app_model` axis (its `config` object has
-    /// no such field) must deserialize to `Ignore` — the open-loop behavior every
-    /// earlier run used — so old schedules replay bit-identically. This pins the
-    /// `#[serde(default)]` contract the "no schema bump" claim rests on.
+    /// A corpus artifact predating the `#[serde(default)]` config axes (its
+    /// `config` object lacks those fields) must deserialize to their defaults —
+    /// `app_model = Ignore` (open-loop) and `clock_skew_ppm = []` (no skew) —
+    /// so old schedules replay bit-identically. This pins the "no schema bump"
+    /// claim. Each field is asserted present-and-removed so the test can't pass
+    /// vacuously (a full config also deserializes fine).
     #[test]
-    fn config_without_app_model_field_defaults_to_ignore() {
+    fn config_without_serde_default_fields_uses_defaults() {
         let schedule = generate(42, SimConfig::smoke(2));
         let mut value = serde_json::to_value(&schedule).unwrap();
         let config = value
             .get_mut("config")
             .and_then(|c| c.as_object_mut())
             .expect("a serialized schedule must have a `config` object");
-        // The field must actually be present to remove — otherwise the test
-        // would pass vacuously (a full config also deserializes fine) without
-        // ever exercising the missing-field default it exists to pin.
         assert!(
             config.remove("app_model").is_some(),
             "config must serialize an `app_model` field for this test to remove"
+        );
+        assert!(
+            config.remove("clock_skew_ppm").is_some(),
+            "config must serialize a `clock_skew_ppm` field for this test to remove"
         );
         let back: Schedule = serde_json::from_value(value).unwrap();
         assert_eq!(
             back.config.app_model,
             AppModel::Ignore,
             "a pre-axis config (no app_model) must default to Ignore"
+        );
+        assert!(
+            back.config.clock_skew_ppm.is_empty(),
+            "a pre-axis config (no clock_skew_ppm) must default to no skew"
         );
     }
 }
