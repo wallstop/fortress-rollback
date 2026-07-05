@@ -5744,9 +5744,8 @@ impl<T: Config> P2PSession<T> {
     /// host, or a peer that synchronized normally).
     ///
     /// The timings are measured on the injectable protocol clock (the
-    /// `clock` field of [`ProtocolConfig`](crate::ProtocolConfig)), so they are
-    /// deterministic under the simulation harness. Available only with the
-    /// `hot-join` feature.
+    /// `clock` field of [`ProtocolConfig`]), so they are deterministic under the
+    /// simulation harness. Available only with the `hot-join` feature.
     #[cfg(feature = "hot-join")]
     #[must_use]
     pub fn hot_join_metrics(&self) -> Option<HotJoinMetrics> {
