@@ -1214,7 +1214,10 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
 
 /// Builds a clock-skew schedule: an `n`-mesh over clean links with a small
 /// symmetric delay (40ms each way, so RTT is non-zero and a skewed clock
-/// misreads it), and the given per-peer clock-rate skew in ppm.
+/// misreads it), and the given per-peer clock-rate skew in ppm. The delay holds
+/// for the whole run — no `HealAll`, so `heal_all` never removes it — keeping
+/// RTT non-zero throughout (constant conditions, unlike the heal-and-drain
+/// schedules).
 fn clock_skew_schedule(n: usize, skew: Vec<i32>) -> Schedule {
     let config = SimConfig {
         n_players: n,
@@ -1239,17 +1242,15 @@ fn clock_skew_schedule(n: usize, skew: Vec<i32>) -> Schedule {
             }
         }
     }
-    let heal_at = 650;
-    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    events.sort_by_key(|(step, _)| *step);
     Schedule {
         schema_version: SCHEDULE_SCHEMA_VERSION,
         seed: 0,
         link_seed: 0,
         config,
         initial_links,
-        events,
-        heal_at,
+        events: Vec::new(),
+        // Past the last step: nothing to heal, the delay is constant.
+        heal_at: 900,
     }
 }
 
