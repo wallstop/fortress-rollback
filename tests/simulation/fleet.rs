@@ -1289,6 +1289,94 @@ fn clock_skew_is_tolerated_and_alters_execution() {
     }
 }
 
+/// Builds a long-run clock-skew schedule: a 2-mesh over clean 30ms-delay links
+/// where peer 0's clock runs `ppm` fast for `steps` steps, app model `Ignore`.
+/// The harness advances every peer one frame per step (lockstep) and reads the
+/// clock only for timestamps, so the skew perturbs timing-gated behavior (the
+/// RTT gauge, quality-report/keepalive cadence) but does NOT gate frame
+/// production — see the probe below for why this bounds what it can test.
+fn clock_skew_long_run_schedule(steps: u32, ppm: i32) -> Schedule {
+    let config = SimConfig {
+        n_players: 2,
+        steps,
+        noise: BackgroundNoise::Clean,
+        clock_skew_ppm: vec![ppm, 0],
+        ..SimConfig::smoke(2)
+    };
+    let delayed = LinkPolicy {
+        drop_rate: 0.0,
+        dup_rate: 0.0,
+        base_delay: Duration::from_millis(30),
+        jitter: Duration::ZERO,
+        burst_rate: 0.0,
+        burst_len: 0,
+    };
+    let initial_links = vec![(0, 1, delayed.clone()), (1, 0, delayed)];
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events: Vec::new(),
+        heal_at: steps,
+    }
+}
+
+/// Clock-skew consistency over a long run — the floor a real H-SKEW experiment
+/// would build on, plus an honest note on why this harness cannot yet run that
+/// experiment.
+///
+/// **What this validly shows:** per-peer clock skew (peer 0 at +0.1% over 10k
+/// steps) does not break mesh **state consistency or liveness**. The skew shifts
+/// timing-gated behavior (the RTT gauge, quality-report/keepalive cadence), and
+/// the mesh still confirms a byte-identical prefix — the peers stay in step. It
+/// extends the short +10% `clock_skew_is_tolerated_and_alters_execution`
+/// observation to a realistic magnitude over a long run.
+///
+/// **What it does NOT do — H-SKEW (PLAN.md §13) is NOT executed here.** H-SKEW
+/// predicts a *rate* effect: a clock running 0.1% fast drives the frame loop
+/// 0.1% faster in wall-clock time, so the fast peer produces ~43 more frames/hour
+/// than the network confirms and `local_frame_advantage` accumulates. This
+/// harness advances **every peer exactly one frame per step** (`harness/mod.rs`,
+/// lockstep) and reads the clock only for timestamps, so that accumulation is
+/// **structurally absent**: the frame-advantage delta `floor(half_rtt*fps/1000)`
+/// stays 1 from 0% through ~+11% skew, so `average_frame_advantage` never reaches
+/// `MIN_RECOMMENDATION` at *any* ppm or run length. Asserting "no lag creep / no
+/// recommendations" here would be a tautology, not a falsification. **H-SKEW's
+/// lag-creep and one-sided-recommendation fears remain OWED**, blocked on a
+/// skew-gated frame model (advancing each peer at a rate driven by its own
+/// skewed clock).
+#[test]
+#[ignore = "long-run consistency probe; run manually / in nightly"]
+fn clock_skew_holds_consistency_over_a_long_run() {
+    let schedule = clock_skew_long_run_schedule(10_000, 1_000); // peer 0 at +0.1%
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule); // state consistency + liveness over 10k steps
+
+    // The peers must stay in step: a spread in their confirmed frames would be
+    // the *first* sign the skew leaked into frame production (i.e. that a future
+    // skew-gated frame model had begun to reproduce the H-SKEW drift). In this
+    // lockstep model it is 0; assert it stays within the prediction window.
+    let confirmed = &report.final_confirmed;
+    let max = confirmed
+        .iter()
+        .copied()
+        .max()
+        .expect("final_confirmed is non-empty");
+    let min = confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("final_confirmed is non-empty");
+    let spread = max - min;
+    assert!(
+        (spread as usize) <= schedule.config.max_prediction,
+        "skew must not drift the peers' confirmed frames apart (spread={spread}, \
+         final_confirmed={confirmed:?})"
+    );
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]
