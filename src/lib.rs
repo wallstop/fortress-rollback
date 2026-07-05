@@ -104,6 +104,7 @@ pub use error::{
 /// ```
 pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 
+pub use metrics::{EventKind, EventKindCounts, SessionMetrics};
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
 pub use network::network_stats::NetworkStats;
@@ -218,6 +219,8 @@ pub mod frame_info;
 pub mod hash;
 #[doc(hidden)]
 pub mod input_queue;
+/// Always-on, pull-based session metrics ([`SessionMetrics`]).
+pub mod metrics;
 /// Internal `Vec` replacement that swaps to a stack-backed inline buffer under
 /// Kani to keep CBMC tractable (zero effect on non-Kani builds).
 pub(crate) mod proof_vec;
@@ -1713,6 +1716,37 @@ where
         /// Address of the joined peer.
         addr: T::Address,
     },
+}
+
+impl<T: Config> FortressEvent<T> {
+    /// The [`EventKind`] category of this event, independent of its payload.
+    ///
+    /// Useful for counting, filtering, or labeling events without matching on
+    /// every variant's payload fields.
+    ///
+    /// [`EventKind`]: crate::metrics::EventKind
+    #[must_use]
+    pub const fn kind(&self) -> crate::metrics::EventKind {
+        use crate::metrics::EventKind;
+        match self {
+            Self::Synchronizing { .. } => EventKind::Synchronizing,
+            Self::Synchronized { .. } => EventKind::Synchronized,
+            Self::Disconnected { .. } => EventKind::Disconnected,
+            Self::NetworkInterrupted { .. } => EventKind::NetworkInterrupted,
+            Self::NetworkResumed { .. } => EventKind::NetworkResumed,
+            Self::WaitRecommendation { .. } => EventKind::WaitRecommendation,
+            Self::DesyncDetected { .. } => EventKind::DesyncDetected,
+            Self::SyncTimeout { .. } => EventKind::SyncTimeout,
+            Self::ReplayDesync { .. } => EventKind::ReplayDesync,
+            Self::SpectatorDivergence { .. } => EventKind::SpectatorDivergence,
+            Self::InputDelayRecommendation { .. } => EventKind::InputDelayRecommendation,
+            Self::PeerDropped { .. } => EventKind::PeerDropped,
+            #[cfg(feature = "hot-join")]
+            Self::JoinRequested { .. } => EventKind::JoinRequested,
+            #[cfg(feature = "hot-join")]
+            Self::PeerJoined { .. } => EventKind::PeerJoined,
+        }
+    }
 }
 
 impl<T: Config> std::fmt::Display for FortressEvent<T>

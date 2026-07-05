@@ -1,5 +1,6 @@
 use crate::error::{allocation_failed, FortressError, InternalErrorKind, InvalidRequestKind};
 use crate::frame_info::PlayerInput;
+use crate::metrics::SessionMetrics;
 use crate::network::messages::ConnectionStatus;
 #[cfg(feature = "hot-join")]
 use crate::network::messages::StateSnapshot;
@@ -223,6 +224,14 @@ where
     /// Controls how the session reacts when a peer disconnects.
     /// See [`DisconnectBehavior`] for options.
     disconnect_behavior: DisconnectBehavior,
+
+    /// Cumulative, always-on session metrics (see [`P2PSession::metrics`]).
+    metrics: SessionMetrics,
+    /// Whether an event-queue-overflow `Warning` has already been reported since
+    /// the last [`events`](P2PSession::events) drain. Rate-limits the overflow
+    /// violation to one per overflow episode; the counters in `metrics` keep the
+    /// full history regardless.
+    event_discard_warned: bool,
 
     /// Hot-join state (host and joiner orchestration).
     ///
@@ -900,6 +909,8 @@ impl<T: Config> P2PSession<T> {
             recording: recording.then(|| ReplayRecorder::new(num_players)),
             last_recorded_frame: Frame::NULL,
             disconnect_behavior,
+            metrics: SessionMetrics::new(),
+            event_discard_warned: false,
             #[cfg(feature = "hot-join")]
             hot_join: HotJoinState {
                 reserved_slots: hot_join.reserved_slots,
@@ -1745,6 +1756,9 @@ impl<T: Config> P2PSession<T> {
         // phases above are unaffected.
         self.poll_npeer_host_serve();
         self.poll_npeer_post_serve();
+        // JoinRequested/PeerJoined above are emitted during poll, outside
+        // `handle_event`'s trim; bound the queue (D9 telemetry must cover them).
+        self.trim_event_queue();
     }
 
     /// Returns the **survivor set** for a prospective N-peer serve: the
@@ -1965,6 +1979,8 @@ impl<T: Config> P2PSession<T> {
 
         self.event_queue
             .push_back(FortressEvent::JoinRequested { handle, addr });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Returns `true` while a freeze-frame convergence re-adjust whose forced
@@ -2377,6 +2393,8 @@ impl<T: Config> P2PSession<T> {
             handle,
             addr: joiner_addr,
         });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Concludes an N-peer serve unsuccessfully: announces `JoinAborted` to the
@@ -4912,6 +4930,8 @@ impl<T: Config> P2PSession<T> {
         // coordinator `Disconnected` as an idempotent teardown cue.
         self.event_queue
             .push_back(FortressEvent::Disconnected { addr: host_addr });
+        // Runs during poll outside `handle_event`'s trim; bound the queue.
+        self.trim_event_queue();
     }
 
     /// Post-apply late-sync backfill (S34 fix round 1, discovered finding
@@ -5398,13 +5418,17 @@ impl<T: Config> P2PSession<T> {
             }
             .into());
         }
-        self.disconnect_player_with_policy(
+        let result = self.disconnect_player_with_policy(
             player_handle,
             None,
             DisconnectBehavior::ContinueWithout,
             DisconnectEventPolicy::Emit,
             GracefulDropFailurePolicy::Abort,
-        )
+        );
+        // `remove_player` emits PeerDropped/Disconnected outside `handle_event`'s
+        // trim; bound the queue before returning control to the caller (D9).
+        self.trim_event_queue();
+        result
     }
 
     /// Disconnects a remote player and all other remote players with the same address from the session.
@@ -5491,13 +5515,16 @@ impl<T: Config> P2PSession<T> {
                         kind: InternalErrorKind::DisconnectStatusNotFound { player_handle },
                     })?;
                 if !status.disconnected {
-                    return self.disconnect_player_with_policy(
+                    let result = self.disconnect_player_with_policy(
                         player_handle,
                         None,
                         DisconnectBehavior::Halt,
                         DisconnectEventPolicy::Suppress,
                         GracefulDropFailurePolicy::DisconnectAndHalt,
                     );
+                    // Emitted outside `handle_event`'s trim; bound the queue (D9).
+                    self.trim_event_queue();
+                    return result;
                 }
                 Err(InvalidRequestKind::AlreadyDisconnected {
                     handle: player_handle,
@@ -5507,6 +5534,7 @@ impl<T: Config> P2PSession<T> {
             // disconnecting spectators is simpler
             Some(PlayerType::Spectator(_)) => {
                 self.disconnect_player_at_frame(player_handle, Frame::NULL);
+                self.trim_event_queue();
                 Ok(())
             },
         }
@@ -5834,7 +5862,33 @@ impl<T: Config> P2PSession<T> {
     /// oldest events will be discarded.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
+        // Draining starts a new overflow episode: re-arm the rate-limited
+        // event-queue-overflow warning (see `trim_event_queue`).
+        self.event_discard_warned = false;
         EventDrain::from_drain(self.event_queue.drain(..))
+    }
+
+    /// Returns a snapshot of this session's cumulative [`SessionMetrics`].
+    ///
+    /// Counters are always-on, monotonic for the life of the session, and cheap
+    /// to read (the returned value is `Copy`). The first surface is event-queue
+    /// overflow accounting: a non-zero
+    /// [`events_discarded_total`](SessionMetrics::events_discarded_total) means
+    /// the application is draining [`events`](Self::events) slower than they
+    /// arrive and has lost notifications — see
+    /// [`events_discarded_by_kind`](SessionMetrics::events_discarded_by_kind)
+    /// for the per-category breakdown.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let metrics = session.metrics();
+    /// if metrics.events_discarded_total > 0 {
+    ///     // The app is not draining events fast enough; some were lost.
+    /// }
+    /// ```
+    pub fn metrics(&self) -> SessionMetrics {
+        self.metrics
     }
 
     /// Returns the confirmed inputs for all players at a specific frame.
@@ -9107,6 +9161,11 @@ impl<T: Config> P2PSession<T> {
                 self.enter_fail_closed_disconnect_state();
             }
         }
+        // Propagated auto-disconnects (disconnect_timeout + ContinueWithout) emit
+        // PeerDropped/Disconnected here, inside `advance_frame` and outside
+        // `handle_event`'s trim; bound the queue so they can't exceed the cap
+        // (or defer the D9 discard telemetry) before the next poll.
+        self.trim_event_queue();
     }
 
     /// Gather average frame advantage from each remote player endpoint and return the maximum.
@@ -9149,6 +9208,9 @@ impl<T: Config> P2PSession<T> {
             self.event_queue
                 .push_back(FortressEvent::WaitRecommendation { skip_frames });
         }
+        // This runs from `advance_frame`, outside `handle_event`'s trim, so bound
+        // the queue here too (D9: overflow must stay accounted + telemetered).
+        self.trim_event_queue();
     }
 
     fn check_last_saved_state(
@@ -9318,7 +9380,12 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Handle events received from the UDP endpoints. Most events are being forwarded to the user for notification, but some require action.
-    fn handle_event(
+    /// Handles a single protocol event. Wrapped by
+    /// [`handle_event`](Self::handle_event), which enforces the event-queue cap
+    /// after this method returns through *any* path (including its several early
+    /// returns), so no emitted event escapes the cap or the D9 discard
+    /// telemetry.
+    fn handle_event_inner(
         &mut self,
         event: Event<T>,
         player_handles: Arc<[PlayerHandle]>,
@@ -9605,10 +9672,63 @@ impl<T: Config> P2PSession<T> {
                 }
             },
         }
+    }
 
-        // check event queue size and discard oldest events if too big
+    /// Handles a protocol event and then enforces the event-queue cap.
+    ///
+    /// The cap (and its D9 overflow telemetry) is applied here, after
+    /// [`handle_event_inner`](Self::handle_event_inner) returns through *any*
+    /// path — including its early returns (e.g. an unresolvable disconnect that
+    /// emits `Disconnected` then returns) — so an event emitted just before an
+    /// early return cannot leave the queue above its configured size or defer
+    /// the discard accounting.
+    fn handle_event(
+        &mut self,
+        event: Event<T>,
+        player_handles: Arc<[PlayerHandle]>,
+        addr: T::Address,
+    ) {
+        self.handle_event_inner(event, player_handles, addr);
+        self.trim_event_queue();
+    }
+
+    /// Bounds the event queue to `max_event_queue_size`, dropping the oldest
+    /// events first.
+    ///
+    /// Overflow means the application is draining events slower than they
+    /// arrive; the dropped events are lost. This used to happen silently
+    /// (defect D9) — a discarded [`FortressEvent::Disconnected`] or
+    /// [`FortressEvent::DesyncDetected`] left no trace. Every drop is now
+    /// recorded in [`SessionMetrics`] (total + per-[`EventKind`](crate::metrics::EventKind)),
+    /// and one rate-limited `Warning` violation is reported per overflow episode so the
+    /// loss is observable via the metrics snapshot and any registered violation
+    /// observer.
+    ///
+    /// The `Warning` is rate-limited to at most once between drains: the flag is
+    /// cleared in [`events`](Self::events), so a churn burst that overflows on
+    /// many messages within one poll produces a single `Warning`, not one per
+    /// message, while the always-incrementing counters keep the full history.
+    fn trim_event_queue(&mut self) {
+        let mut discarded = 0u64;
         while self.event_queue.len() > self.max_event_queue_size {
-            self.event_queue.pop_front();
+            if let Some(dropped) = self.event_queue.pop_front() {
+                self.metrics.record_event_discard(dropped.kind());
+                discarded += 1;
+            } else {
+                break;
+            }
+        }
+        if discarded > 0 && !self.event_discard_warned {
+            self.event_discard_warned = true;
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "event queue overflow: discarding undrained event(s) (queue cap {}); \
+                 drain events every poll or raise the event-queue size to avoid losing \
+                 notifications (possibly Disconnected/DesyncDetected). See \
+                 SessionMetrics::events_discarded_total for the running count",
+                self.max_event_queue_size
+            );
         }
     }
 
@@ -9693,6 +9813,10 @@ impl<T: Config> P2PSession<T> {
             },
             DesyncDetection::Off => (),
         }
+        // The `DesyncDetected` pushes above run from `advance_frame`, outside
+        // `handle_event`'s trim; bound the queue so the overflow accounting and
+        // telemetry (D9) cover them too.
+        self.trim_event_queue();
     }
 
     fn check_checksum_send_interval(&mut self) {
@@ -10022,23 +10146,30 @@ mod tests {
         assert_eq!(DEFAULT_MAX_EVENT_QUEUE_SIZE, 100);
     }
 
-    /// Red-documentation test for defect D9 (PLAN.md §2): event-queue
-    /// overflow silently discards the oldest event — even a safety-critical
-    /// `Disconnected` — with **zero** telemetry: no violation, no counter,
-    /// nothing an application could use to learn an event was lost.
+    /// Regression for defect D9 (PLAN.md §2): event-queue overflow used to
+    /// discard the oldest event — even a safety-critical `Disconnected` — with
+    /// **zero** telemetry (no violation, no counter, nothing an application
+    /// could use to learn an event was lost). The M2 metrics layer makes the
+    /// loss observable: every discarded event increments [`SessionMetrics`]
+    /// (total + per-[`EventKind`](crate::metrics::EventKind)) and the session
+    /// reports one rate-limited `Warning` violation per overflow episode.
     ///
-    /// This pins today's defective behavior so the defect is executable, not
-    /// just documented. When the M2 discard telemetry lands (rate-limited
-    /// Warning violation + `events_discarded_total` counter), the final
-    /// assertion flips to expect the violation instead.
+    /// This is the green successor to the red-documentation test that pinned
+    /// the silent behavior (PLAN.md §21.3): the final assertions flipped from
+    /// "no telemetry" to "telemetry recorded" once the fix landed.
     #[test]
-    fn event_queue_overflow_discards_disconnected_event_with_zero_telemetry() {
+    fn event_queue_overflow_records_discard_telemetry() {
+        use crate::metrics::EventKind;
+
         let mut session = create_two_player_session();
         let addr = test_addr(8080);
         let observer = Arc::new(crate::telemetry::CollectingObserver::new());
         let _guard = crate::telemetry::push_violation_observer(
             Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
         );
+
+        // Nothing discarded before the overflow.
+        assert_eq!(session.metrics().events_discarded_total, 0);
 
         // Canary: an undrained Disconnected event at the front of the queue.
         session
@@ -10074,11 +10205,190 @@ mod tests {
             !disconnected_still_queued,
             "the Disconnected canary must have been evicted by the overflow trim"
         );
-        // RED (defect D9): the loss is completely silent today.
+
+        // GREEN (D9 fixed): the loss is recorded, not silent.
+        let metrics = session.metrics();
         assert!(
-            observer.violations().is_empty(),
-            "expected today's defective silent discard (no telemetry); observed violations: {:?}",
-            observer.violations()
+            metrics.events_discarded_total >= 1,
+            "overflow must count discarded events; got {}",
+            metrics.events_discarded_total
+        );
+        assert_eq!(
+            metrics
+                .events_discarded_by_kind
+                .get(EventKind::Disconnected),
+            1,
+            "the safety-critical Disconnected canary must be attributed to its kind"
+        );
+        // And a rate-limited Warning/NetworkProtocol violation was reported.
+        let violations = observer.violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.severity == ViolationSeverity::Warning
+                    && v.kind == ViolationKind::NetworkProtocol
+                    && v.message.contains("event queue overflow")),
+            "expected a rate-limited overflow Warning; observed: {violations:?}"
+        );
+    }
+
+    /// The overflow `Warning` is rate-limited to one per overflow episode: a
+    /// churn burst that discards on many messages within one drain gap produces
+    /// a single `Warning` (not one per message), and draining events
+    /// (`events()`) re-arms it so a subsequent overflow warns again. The
+    /// per-kind counters keep incrementing regardless.
+    #[test]
+    fn event_queue_overflow_warning_is_rate_limited_per_drain_gap() {
+        let mut session = create_two_player_session();
+        let addr = test_addr(8081);
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _guard = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+
+        // Overflow the queue on many separate messages (each `handle_event`
+        // trims), all within a single drain gap.
+        let burst = |session: &mut P2PSession<TestConfig>| {
+            for _ in 0..(session.max_event_queue_size + 5) {
+                session.handle_event(
+                    Event::Synchronizing {
+                        total: 10,
+                        count: 1,
+                        total_requests_sent: 1,
+                        elapsed_ms: 5,
+                    },
+                    Arc::from([PlayerHandle::new(1)]),
+                    addr,
+                );
+            }
+        };
+        let overflow_warnings = |observer: &crate::telemetry::CollectingObserver| {
+            observer
+                .violations()
+                .iter()
+                .filter(|v| {
+                    v.severity == ViolationSeverity::Warning
+                        && v.kind == ViolationKind::NetworkProtocol
+                        && v.message.contains("event queue overflow")
+                })
+                .count()
+        };
+
+        burst(&mut session);
+        assert!(
+            session.metrics().events_discarded_total >= 5,
+            "the burst must discard on many messages; got {}",
+            session.metrics().events_discarded_total
+        );
+        assert_eq!(
+            overflow_warnings(&observer),
+            1,
+            "many discards within one drain gap must yield a single Warning"
+        );
+
+        // Draining re-arms the rate limiter.
+        let _ = session.events();
+        burst(&mut session);
+        assert_eq!(
+            overflow_warnings(&observer),
+            2,
+            "a fresh drain must re-arm the overflow Warning"
+        );
+    }
+
+    /// Events emitted **outside** `handle_event` (here `DesyncDetected` from
+    /// `compare_local_checksums_against_peers`, which runs inside `advance_frame`)
+    /// must also honor the event-queue cap and its discard telemetry. Before the
+    /// fix, `trim_event_queue` ran only at the end of `handle_event`, so these
+    /// paths could push above the cap — and bypass the D9 accounting — until the
+    /// next inbound message happened to be handled.
+    #[test]
+    fn desync_detected_push_outside_handle_event_is_bounded_and_counted() {
+        let mut session = create_three_player_desync_session();
+        let addr_b = test_addr(8080);
+
+        // Make frame 0 comparable and force Running (DummySocket never syncs).
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+        session.state = SessionState::Running;
+
+        // Plant a mismatching confirmed-frame checksum so the next comparison
+        // emits a `DesyncDetected` event.
+        let frame = Frame::new(0);
+        session.local_checksum_history.insert(frame, 0xABCD_1234);
+        {
+            let b = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_b)
+                .expect("B endpoint exists");
+            b.pending_checksums.insert(frame, 0x0000_0001); // differs from local
+        }
+
+        // Saturate the event queue with benign events first.
+        let filler = test_addr(9999);
+        for _ in 0..session.max_event_queue_size {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr: filler });
+        }
+        assert_eq!(session.event_queue.len(), session.max_event_queue_size);
+        let before = session.metrics().events_discarded_total;
+
+        // Runs outside `handle_event`; must still enforce the cap + count the drop.
+        session.compare_local_checksums_against_peers();
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "the cap must hold for enqueues outside handle_event"
+        );
+        assert!(
+            session.metrics().events_discarded_total > before,
+            "the overflow discard from the DesyncDetected push must be counted"
+        );
+    }
+
+    /// `handle_event` has early-return paths that emit an event then return
+    /// before the handler's normal end (e.g. a `Disconnected` for an endpoint
+    /// with no resolvable handles). The cap must still hold: `handle_event`
+    /// wraps `handle_event_inner` and trims after **every** exit, so an
+    /// early-return emission cannot escape the cap or the D9 accounting.
+    #[test]
+    fn handle_event_early_return_emission_is_bounded_by_wrapper_trim() {
+        let mut session = create_two_player_session();
+
+        // Saturate the queue.
+        let filler = test_addr(9998);
+        for _ in 0..session.max_event_queue_size {
+            session
+                .event_queue
+                .push_back(FortressEvent::NetworkResumed { addr: filler });
+        }
+        assert_eq!(session.event_queue.len(), session.max_event_queue_size);
+        let before = session.metrics().events_discarded_total;
+
+        // A `Disconnected` for an unregistered address with only a local handle
+        // resolves to no target, taking the early-return branch that pushes a
+        // `Disconnected` event and returns before the handler's normal end.
+        let unknown = test_addr(9997);
+        session.handle_event(
+            Event::Disconnected,
+            Arc::from([PlayerHandle::new(0)]),
+            unknown,
+        );
+
+        assert_eq!(
+            session.event_queue.len(),
+            session.max_event_queue_size,
+            "the wrapper trim must bound handle_event's early-return emission paths"
+        );
+        assert!(
+            session.metrics().events_discarded_total > before,
+            "the early-return emission's overflow discard must be counted"
         );
     }
 
