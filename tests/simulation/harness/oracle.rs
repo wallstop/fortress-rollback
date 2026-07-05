@@ -86,6 +86,10 @@ pub enum OracleFailure {
         confirmed: i32,
         required: i32,
     },
+    /// Every peer was killed: there is nothing left to verify, so the run is a
+    /// vacuous pass unless flagged. A schedule that crashes the whole mesh
+    /// proves no correctness property and must not report success.
+    NoLivePeers { n_players: usize },
 }
 
 /// Final verdict of a run.
@@ -273,6 +277,15 @@ impl Oracle {
                     required: MIN_END_CONFIRMED,
                 });
             }
+        }
+
+        // Guard against a vacuous pass: if every peer was killed, the excluded
+        // end-checks below all skip and the run would report success with
+        // nothing verified. A whole-mesh crash proves no property.
+        if self.n_players > 0 && (0..self.n_players).all(|peer| self.is_dead(peer)) {
+            self.push_failure(OracleFailure::NoLivePeers {
+                n_players: self.n_players,
+            });
         }
 
         // (b) state agreement over the globally confirmed prefix. The prefix is
@@ -487,6 +500,29 @@ mod tests {
                 .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
             "a live peer with the same shortfall must fail: {:?}",
             control.failures
+        );
+    }
+
+    /// Killing *every* peer must not be a vacuous pass: with no live peer left,
+    /// the excluded end-checks all skip, so the oracle flags `NoLivePeers`
+    /// rather than reporting success for a mesh that proved nothing.
+    #[test]
+    fn oracle_flags_all_peers_killed_as_no_live_peers() {
+        let mut oracle = Oracle::new(2);
+        oracle.mark_peer_dead(0);
+        oracle.mark_peer_dead(1);
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::NoLivePeers { n_players: 2 })),
+            "an all-crashed mesh must fail, not vacuously pass: {:?}",
+            verdict.failures
         );
     }
 

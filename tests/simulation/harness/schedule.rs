@@ -170,6 +170,14 @@ pub enum ScheduleEvent {
     /// Distinct from a network black-hole (`Block`), where the peer keeps
     /// running and observing. `HealAll` does not revive it.
     ///
+    /// Survivor byte-consistency after a kill is a property of
+    /// `DisconnectBehavior::ContinueWithout` over a clean-enough link (the
+    /// freeze-convergence path). Under `Halt` the mesh instead halts with
+    /// fabricated frames (defect D13), and under heavy loss a survivor could
+    /// confirm a fabricated slot value the dead peer had already contributed —
+    /// so the oracle's unmasked confirmed-input agreement is only sound for the
+    /// `ContinueWithout` case the planted tests use.
+    ///
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     PeerKill { peer: usize },
     /// Reset every link to clean and release all held traffic.

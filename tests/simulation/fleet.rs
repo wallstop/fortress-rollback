@@ -1037,11 +1037,14 @@ fn peer_kill_survivors_converge_under_continue_without() {
 fn oracle_catches_seeded_divergence_under_peer_kill() {
     let schedule = peer_kill_schedule(Some(1));
     // Corrupt peer 0 (a survivor) from frame 300 — *after* the crash at step
-    // 100. This specifically exercises the alive-mask: the state-agreement check
-    // spans the globally-confirmed prefix, and without excluding the crashed
-    // peer that prefix would be pinned at its frozen frame (~99), hiding every
-    // post-crash survivor divergence. Excluding it lets the check reach frame
-    // 300 and catch the corruption.
+    // 100. This exercises the alive-mask's effect on the recorded-state
+    // comparison (b): that check spans the globally-confirmed prefix, and
+    // without excluding the crashed peer the prefix would be pinned at its
+    // frozen frame (~99), so (b) would never reach frame 300. The in-band desync
+    // detector still catches the corruption independently (so the *run* fails
+    // either way) — the mask is what keeps the oracle's own state-agreement
+    // signal from going blind past the crash. Assert `StateDivergence`
+    // specifically, the class the mask restores.
     let options = RunOptions {
         corrupt_state_from: Some((0, 300)),
         ..RunOptions::default()
@@ -1057,8 +1060,8 @@ fn oracle_catches_seeded_divergence_under_peer_kill() {
             .failures
             .iter()
             .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
-        "the oracle's state comparison must reach the post-crash survivor prefix \
-         (alive-mask) and catch the divergence: {:?}",
+        "the state comparison (b) must reach the post-crash survivor prefix via \
+         the alive-mask and flag StateDivergence (not just the in-band detector): {:?}",
         report.verdict.failures
     );
 }
