@@ -473,7 +473,7 @@ mod tests {
         )));
     }
 
-    /// A killed peer is excluded from the end-of-run checks: it cannot fail
+    /// A killed peer is excluded from the liveness checks: it cannot fail
     /// end-progress (crashed, so never `Running`), while the *same* shortfall on
     /// a live peer still fails — the alive-mask must exclude only the dead.
     #[test]

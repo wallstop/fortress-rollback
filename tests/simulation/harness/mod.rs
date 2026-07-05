@@ -488,9 +488,9 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 ScheduleEvent::PeerKill { peer } => {
                     // Crash the peer: stop driving it, discard its inbox (so
                     // further traffic to it is dropped under the default
-                    // `UnattachedPolicy::Drop`), and exclude it from the oracle.
-                    // Its remaining mesh survives per the configured
-                    // `DisconnectBehavior`. Idempotent.
+                    // `UnattachedPolicy::Drop`), and exclude it from the oracle's
+                    // liveness checks. Its remaining mesh survives per the
+                    // configured `DisconnectBehavior`. Idempotent.
                     dead[*peer] = true;
                     net.detach(addrs[*peer]);
                     oracle.mark_peer_dead(*peer);

@@ -983,7 +983,8 @@ fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
 /// Under `ContinueWithout`, crashing one peer must degrade gracefully: the three
 /// survivors converge on dropping it (freeze its slot to an agreed value) and
 /// keep confirming *together* — no fork among them. The crashed peer is excluded
-/// from the oracle (it can't be `Running`), which is the alive-mask this op adds.
+/// from the oracle's liveness checks (it can't be `Running`), which is the
+/// alive-mask this op adds.
 ///
 /// This is the green half — a clean single-peer removal is not a partition, so
 /// the survivors must stay byte-consistent (contrast the symmetric split-brain,
