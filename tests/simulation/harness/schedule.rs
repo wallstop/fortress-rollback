@@ -166,8 +166,9 @@ pub enum ScheduleEvent {
     /// Permanently kill peer `peer`: the harness stops driving its session and
     /// detaches it from the fabric (its inbox is discarded; further traffic to
     /// it is dropped). Models a **crash** — the peer is gone for good and, being
-    /// no longer observable, is excluded from the oracle's end-of-run checks
-    /// (its remaining mesh survives per the configured `DisconnectBehavior`).
+    /// no longer observable, is excluded from the oracle's *liveness* checks
+    /// (its pre-death observations still count for agreement; its remaining mesh
+    /// survives per the configured `DisconnectBehavior`).
     /// Distinct from a network black-hole (`Block`), where the peer keeps
     /// running and observing. `HealAll` does not revive it.
     ///

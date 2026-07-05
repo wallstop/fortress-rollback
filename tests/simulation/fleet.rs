@@ -942,9 +942,9 @@ fn run_rejects_out_of_range_set_input_delay_peer() {
 /// 1 crashes at step 100 — the harness stops driving it and detaches it from the
 /// fabric, so it never returns (not even after `HealAll`). Under `ContinueWithout`
 /// the three survivors time it out, freeze its slot, and keep confirming together
-/// on their own timeline; the crashed peer is excluded from the oracle. `None`
-/// yields the identical schedule without the kill, the control the premise
-/// compares to.
+/// on their own timeline; the crashed peer is excluded from the oracle's
+/// liveness checks. `None` yields the identical schedule without the kill, the
+/// control the premise compares to.
 fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
     let n = 4;
     let config = SimConfig {
@@ -1012,7 +1012,8 @@ fn peer_kill_survivors_converge_under_continue_without() {
     );
 
     // The three survivors kept confirming; the crashed peer stayed frozen far
-    // behind them (and was excluded from the oracle, so the run still passed).
+    // behind them (excluded from the oracle's liveness checks, so it does not
+    // fail end-progress and the run still passes).
     let confirmed = &killed_report.final_confirmed;
     for (peer, &c) in confirmed.iter().enumerate() {
         if peer == 1 {

@@ -449,7 +449,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // sets it to `step + steps`.
     let mut stalled_until: Vec<u32> = vec![0; n];
     // Peers killed by a `PeerKill` event: no longer driven, detached from the
-    // fabric, and excluded from the oracle's end-of-run checks.
+    // fabric, and excluded from the oracle's liveness checks (their pre-death
+    // observations still count for agreement).
     let mut dead: Vec<bool> = vec![false; n];
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
