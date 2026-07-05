@@ -46,7 +46,8 @@ pub struct RunOptions {
     /// If set, snapshot every peer's confirmed frame at this step into
     /// [`RunReport::probe_confirmed`]. Lets a test observe mid-run confirmation
     /// (frozen during a hitch, converged after heal) — end-of-run state alone
-    /// hides recovery dynamics because a clean drain always converges.
+    /// hides recovery dynamics because a clean drain always converges. Must be
+    /// within `0..steps` (asserted up front, so a requested probe always fires).
     pub probe_confirmed_at: Option<u32>,
 }
 
@@ -332,6 +333,46 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
 
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+
+    // Validate every peer index up front so a malformed or hand-edited corpus
+    // schedule fails loudly with a clear message instead of panicking on a raw
+    // slice index deep in the run (or, for `PeerStall` steps, silently in a
+    // release build). Covers initial links, every event, and the probe step.
+    for (from, to, _) in &schedule.initial_links {
+        assert!(
+            *from < n && *to < n,
+            "initial link ({from} -> {to}) out of range for a {n}-peer mesh"
+        );
+    }
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::SetLink { from, to, .. }
+            | ScheduleEvent::Block { from, to, .. }
+            | ScheduleEvent::Hold { from, to, .. } => assert!(
+                *from < n && *to < n,
+                "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
+            ),
+            ScheduleEvent::PeerStall { peer, steps } => {
+                assert!(
+                    *peer < n,
+                    "PeerStall peer {peer} out of range for a {n}-peer mesh"
+                );
+                assert!(
+                    *steps > 0,
+                    "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
+                );
+            },
+            ScheduleEvent::HealAll => {},
+        }
+    }
+    if let Some(probe) = options.probe_confirmed_at {
+        assert!(
+            probe < schedule.config.steps,
+            "probe_confirmed_at ({probe}) is outside the run (0..{})",
+            schedule.config.steps
+        );
+    }
+
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
     }
@@ -419,14 +460,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     net.set_holding(addrs[*from], addrs[*to], *holding);
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
-                    // Always-on (not `debug_assert!`): the nightly fleet builds
-                    // `--release` and replays serialized corpus schedules, so a
-                    // malformed `steps: 0` must fail loudly in every profile
-                    // rather than silently freezing nothing.
-                    assert!(
-                        *steps > 0,
-                        "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
-                    );
+                    // `peer` in range and `steps > 0` are validated up front.
                     stalled_until[*peer] = step.saturating_add(*steps);
                 },
                 ScheduleEvent::HealAll => net.heal_all(),

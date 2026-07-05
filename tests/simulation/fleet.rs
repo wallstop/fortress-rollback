@@ -804,6 +804,21 @@ fn oracle_catches_seeded_divergence_under_peer_hitch() {
     );
 }
 
+/// A malformed schedule (here: a `PeerStall` naming a peer outside the mesh, as
+/// a hand-edited or corrupt corpus artifact might) must fail loudly with a
+/// clear message, not panic on a raw slice index — the fail-loud contract the
+/// harness's up-front validation enforces for corpus replay.
+#[test]
+#[should_panic(expected = "out of range")]
+fn run_rejects_out_of_range_peer_index() {
+    let mut schedule = peer_hitch_schedule(2, None);
+    schedule
+        .events
+        .push((100, ScheduleEvent::PeerStall { peer: 9, steps: 10 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    let _ = run(&schedule, &RunOptions::default());
+}
+
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50
 /// steps. `#[ignore]`d — run manually while investigating a repro.
 #[test]
