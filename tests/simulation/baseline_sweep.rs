@@ -1,0 +1,494 @@
+//! M2 §5.3 baseline sweep: deterministic, virtual-time bandwidth/rollback
+//! measurement over a controlled loss × RTT × jitter grid.
+//!
+//! Unlike the fleet (which layers randomized storyline faults to *find* bugs),
+//! the sweep holds each cell's link conditions constant to *measure* steady-state
+//! cost: per-player wire bandwidth, rollback rate/depth, confirmation lag, and
+//! pacing pressure (stalls / wait-recommendations). Every cell is a thin wrapper
+//! over the mesh runner ([`run`]) with a uniform per-link [`LinkPolicy`], so the
+//! output is a pure function of `(seed, cell params)` — zero runner noise.
+//!
+//! One [`CellReport`] is produced per cell; the PR gate ([`sweep_pr_gate`])
+//! checks a handful of representative cells for the load-bearing invariant
+//! (`desync_incidents == 0`), liveness, and non-zero bandwidth, and that a cell
+//! is bit-for-bit reproducible. `FORTRESS_SWEEP_OUT`, if set, receives the
+//! reports as JSON Lines for offline analysis.
+//!
+//! Deferred to a follow-up (see PLAN.md §5.3): the input-width axis (the harness
+//! `StubConfig` fixes a 4-byte input), a checked-in exact-value baseline as M5's
+//! cost ledger, and the nightly full-matrix CI job.
+
+use super::harness::schedule::{Schedule, SimConfig, SCHEDULE_SCHEMA_VERSION};
+use super::harness::{run, PeerWireTotals, RunOptions, RunReport};
+use crate::common::sim_net::LinkPolicy;
+use fortress_rollback::{MessageKind, RollbackDepthHistogram, SessionMetrics};
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// The fixed per-player input width the harness stub serializes (`u32`). The
+/// `{4, 32}` B width axis from the plan needs a generic-input harness refactor
+/// and is deferred; recorded here so the JSON is self-describing.
+const INPUT_WIDTH_BYTES: u32 = 4;
+
+/// One sweep cell: a mesh size under constant link conditions.
+#[derive(Clone, Copy, Debug)]
+pub struct CellParams {
+    pub label: &'static str,
+    pub n_players: usize,
+    pub loss_pct: f64,
+    /// Round-trip time; split evenly as `rtt_ms / 2` one-way delay per direction
+    /// (integer division — an odd `rtt_ms` truncates by 1ms one-way).
+    pub rtt_ms: u64,
+    pub jitter_ms: u64,
+    pub steps: u32,
+    pub seed: u64,
+}
+
+impl CellParams {
+    /// One-way link delay (half the RTT).
+    fn one_way_delay(self) -> Duration {
+        Duration::from_millis(self.rtt_ms / 2)
+    }
+
+    /// The uniform per-directed-link policy for this cell's constant conditions.
+    fn link_policy(self) -> LinkPolicy {
+        LinkPolicy {
+            drop_rate: self.loss_pct / 100.0,
+            dup_rate: 0.0,
+            base_delay: self.one_way_delay(),
+            jitter: Duration::from_millis(self.jitter_ms),
+            burst_rate: 0.0,
+            burst_len: 0,
+        }
+    }
+
+    /// A materialized [`Schedule`] with constant conditions: the cell's uniform
+    /// policy on every directed link and an empty event list (no fault events,
+    /// no `HealAll`). The `heal_at` field is present in the struct but inert —
+    /// it has no effect without a corresponding `HealAll` in `events`.
+    fn schedule(self) -> Schedule {
+        let config = SimConfig {
+            n_players: self.n_players,
+            steps: self.steps,
+            ..SimConfig::smoke(self.n_players)
+        };
+        let policy = self.link_policy();
+        let mut initial_links = Vec::new();
+        for from in 0..self.n_players {
+            for to in 0..self.n_players {
+                if from != to {
+                    initial_links.push((from, to, policy.clone()));
+                }
+            }
+        }
+        Schedule {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            seed: self.seed,
+            // Domain-separated from `seed` so link-noise rolls are an
+            // independent stream (same convention as `schedule::generate()`).
+            link_seed: self.seed ^ 0x1111_2222_3333_4444,
+            config,
+            initial_links,
+            // No storyline events; heal_at is inert (no HealAll in `events`).
+            events: Vec::new(),
+            heal_at: self.steps,
+        }
+    }
+}
+
+/// The measured, serializable result for one cell. All rate columns are derived
+/// from cumulative counters over the cell's virtual duration, so the value is a
+/// deterministic function of `(seed, params)`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CellReport {
+    pub schema: u32,
+    pub label: String,
+    pub version: String,
+    pub git_sha: String,
+    pub n_players: usize,
+    pub loss_pct: f64,
+    pub rtt_ms: u64,
+    pub jitter_ms: u64,
+    pub input_width_bytes: u32,
+    pub steps: u32,
+    pub seed: u64,
+    /// Lowest final confirmed frame across peers (liveness floor).
+    pub min_final_confirmed: i32,
+    /// Mean per-player payload bytes sent per virtual second (pre-header). Each
+    /// player's figure is summed across its `n_players - 1` remote links, so this
+    /// grows ~linearly with mesh size — it is per-player, not per-link.
+    pub bytes_sent_per_player_per_sec: f64,
+    /// Mean per-player pre/post-compression input bytes per virtual second.
+    pub input_bytes_pre_compression_per_player_per_sec: f64,
+    pub input_bytes_post_compression_per_player_per_sec: f64,
+    /// Mesh-total sent messages by kind (snake_case label → count).
+    pub messages_sent_by_kind: BTreeMap<String, u64>,
+    pub rollbacks_per_100_frames: f64,
+    pub rollback_depth_p50: u32,
+    pub rollback_depth_p99: u32,
+    pub rollback_depth_max: u32,
+    pub confirmation_lag_mean: f64,
+    pub confirmation_lag_max: u64,
+    pub stalls_per_min: f64,
+    pub wait_recommendations: u64,
+    /// Confirmed-frame checksum mismatches — the load-bearing invariant. **Any
+    /// nonzero value is a real desync and fails the sweep.**
+    pub desync_incidents: u64,
+}
+
+/// Sums one bucket-aligned rollback-depth histogram across peers.
+fn merge_depth_histogram(metrics: &[SessionMetrics]) -> [u64; RollbackDepthHistogram::BUCKETS] {
+    let mut merged = [0u64; RollbackDepthHistogram::BUCKETS];
+    for m in metrics {
+        for (slot, bucket) in merged.iter_mut().enumerate() {
+            *bucket = bucket.saturating_add(m.rollback_depth_histogram.bucket(slot));
+        }
+    }
+    merged
+}
+
+/// The `p`-quantile (`p` in `(0, 1]`) rollback depth from a merged histogram.
+/// Bucket `i` covers depth `i + 1`; the final bucket (index 16) is reported as
+/// depth 17 (the ">16" catch-all). Returns 0 when no rollbacks were recorded.
+fn depth_percentile(hist: &[u64; RollbackDepthHistogram::BUCKETS], p: f64) -> u32 {
+    let total: u64 = hist.iter().copied().fold(0u64, u64::saturating_add);
+    if total == 0 {
+        return 0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let threshold = (p * total as f64).ceil() as u64;
+    let mut cumulative = 0u64;
+    for (i, &count) in hist.iter().enumerate() {
+        cumulative = cumulative.saturating_add(count);
+        if cumulative >= threshold {
+            return u32::try_from(i + 1).unwrap_or(u32::MAX);
+        }
+    }
+    u32::try_from(RollbackDepthHistogram::BUCKETS).unwrap_or(u32::MAX)
+}
+
+/// Mesh-total sent-by-kind counts, keyed by the message-kind label.
+fn messages_sent_by_kind(peer_wire: &[PeerWireTotals]) -> BTreeMap<String, u64> {
+    let mut map = BTreeMap::new();
+    for kind in MessageKind::ALL {
+        let total = peer_wire
+            .iter()
+            .map(|w| w.sent_by_kind(kind))
+            .fold(0u64, u64::saturating_add);
+        map.insert(kind.as_str().to_owned(), total);
+    }
+    map
+}
+
+/// A cumulative `total` (summed over peers) as a mean per-player per-second
+/// rate. `per_players` is always `>= 1` — the harness builds real sessions via
+/// `SessionBuilder::with_num_players`, which rejects zero players at
+/// construction — so only the virtual duration needs a divide-by-zero guard
+/// (reachable via a degenerate `steps == 0` cell).
+#[allow(clippy::cast_precision_loss)]
+fn sum_to_rate_per_sec(total: u64, per_players: usize, virtual_secs: f64) -> f64 {
+    if virtual_secs <= 0.0 {
+        return 0.0;
+    }
+    (total as f64) / (per_players as f64) / virtual_secs
+}
+
+/// Runs one cell to completion and folds its per-peer metrics into a
+/// [`CellReport`]. Deterministic: identical `(seed, params)` ⇒ identical report.
+#[must_use]
+pub fn run_cell(params: CellParams) -> CellReport {
+    let schedule = params.schedule();
+    let report: RunReport = run(&schedule, &RunOptions::default());
+
+    #[allow(clippy::cast_precision_loss)]
+    let virtual_secs = f64::from(params.steps) * (schedule.config.step_dt_ms as f64) / 1000.0;
+    let virtual_minutes = virtual_secs / 60.0;
+
+    let metrics = &report.metrics;
+    let n = params.n_players;
+
+    let total_bytes_sent: u64 = report
+        .peer_wire
+        .iter()
+        .map(|w| w.bytes_sent)
+        .fold(0u64, u64::saturating_add);
+    let total_input_pre: u64 = report
+        .peer_wire
+        .iter()
+        .map(|w| w.input_bytes_pre_compression)
+        .fold(0u64, u64::saturating_add);
+    let total_input_post: u64 = report
+        .peer_wire
+        .iter()
+        .map(|w| w.input_bytes_post_compression)
+        .fold(0u64, u64::saturating_add);
+
+    let total_rollbacks: u64 = metrics
+        .iter()
+        .map(|m| m.rollback_count)
+        .fold(0u64, u64::saturating_add);
+    let total_visual: u64 = metrics
+        .iter()
+        .map(|m| m.visual_frames)
+        .fold(0u64, u64::saturating_add);
+    let total_lag_sum: u64 = metrics
+        .iter()
+        .map(|m| m.confirmation_lag_sum)
+        .fold(0u64, u64::saturating_add);
+    let total_stalls: u64 = metrics
+        .iter()
+        .map(|m| m.stall_count)
+        .fold(0u64, u64::saturating_add);
+    let total_wait_recs: u64 = metrics
+        .iter()
+        .map(|m| m.wait_recommendations)
+        .fold(0u64, u64::saturating_add);
+    let desync_incidents: u64 = metrics
+        .iter()
+        .map(|m| m.checksums_mismatched)
+        .fold(0u64, u64::saturating_add);
+    let confirmation_lag_max: u64 = metrics
+        .iter()
+        .map(|m| m.confirmation_lag_max)
+        .max()
+        .unwrap_or(0);
+    let rollback_depth_max: u32 = metrics
+        .iter()
+        .map(|m| m.max_rollback_depth)
+        .max()
+        .unwrap_or(0);
+
+    let hist = merge_depth_histogram(metrics);
+
+    #[allow(clippy::cast_precision_loss)]
+    let rollbacks_per_100_frames = if total_visual == 0 {
+        0.0
+    } else {
+        100.0 * (total_rollbacks as f64) / (total_visual as f64)
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let confirmation_lag_mean = if total_visual == 0 {
+        0.0
+    } else {
+        (total_lag_sum as f64) / (total_visual as f64)
+    };
+    // As in `sum_to_rate_per_sec`, `n >= 1` is guaranteed upstream (the harness
+    // rejects zero players at session construction), so only the virtual
+    // duration needs a divide-by-zero guard.
+    #[allow(clippy::cast_precision_loss)]
+    let stalls_per_min = if virtual_minutes <= 0.0 {
+        0.0
+    } else {
+        (total_stalls as f64) / (f64::from(u32::try_from(n).unwrap_or(u32::MAX))) / virtual_minutes
+    };
+
+    let min_final_confirmed = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(i32::MIN);
+
+    CellReport {
+        schema: 1,
+        label: params.label.to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: option_env!("FORTRESS_SWEEP_GIT_SHA")
+            .unwrap_or("unknown")
+            .to_owned(),
+        n_players: n,
+        loss_pct: params.loss_pct,
+        rtt_ms: params.rtt_ms,
+        jitter_ms: params.jitter_ms,
+        input_width_bytes: INPUT_WIDTH_BYTES,
+        steps: params.steps,
+        seed: params.seed,
+        min_final_confirmed,
+        bytes_sent_per_player_per_sec: sum_to_rate_per_sec(total_bytes_sent, n, virtual_secs),
+        input_bytes_pre_compression_per_player_per_sec: sum_to_rate_per_sec(
+            total_input_pre,
+            n,
+            virtual_secs,
+        ),
+        input_bytes_post_compression_per_player_per_sec: sum_to_rate_per_sec(
+            total_input_post,
+            n,
+            virtual_secs,
+        ),
+        messages_sent_by_kind: messages_sent_by_kind(&report.peer_wire),
+        rollbacks_per_100_frames,
+        rollback_depth_p50: depth_percentile(&hist, 0.50),
+        rollback_depth_p99: depth_percentile(&hist, 0.99),
+        rollback_depth_max,
+        confirmation_lag_mean,
+        confirmation_lag_max,
+        stalls_per_min,
+        wait_recommendations: total_wait_recs,
+        desync_incidents,
+    }
+}
+
+/// Writes the reports to `FORTRESS_SWEEP_OUT` as JSON Lines, if that env var is
+/// set. A best-effort artifact hook; failures are surfaced via `panic!` (test
+/// context) so a misconfigured path is never silently dropped.
+fn write_jsonl(reports: &[CellReport]) {
+    let Ok(path) = std::env::var("FORTRESS_SWEEP_OUT") else {
+        return;
+    };
+    use std::io::Write as _;
+    let mut buf = String::new();
+    for r in reports {
+        let line = serde_json::to_string(r).expect("CellReport serializes");
+        buf.push_str(&line);
+        buf.push('\n');
+    }
+    let mut file = std::fs::File::create(&path).expect("FORTRESS_SWEEP_OUT is writable");
+    file.write_all(buf.as_bytes()).expect("sweep output writes");
+}
+
+/// The representative cells the PR gate checks (a fast subset of the full
+/// matrix): LAN, wifi, and mobile 2-player profiles plus 4-player wifi and a
+/// 4-player heavy-loss/high-RTT stress cell.
+fn pr_gate_cells() -> Vec<CellParams> {
+    const GATE_STEPS: u32 = 1000;
+    const SEED: u64 = 1;
+    vec![
+        CellParams {
+            label: "2p-lan",
+            n_players: 2,
+            loss_pct: 0.0,
+            rtt_ms: 10,
+            jitter_ms: 0,
+            steps: GATE_STEPS,
+            seed: SEED,
+        },
+        CellParams {
+            label: "2p-wifi",
+            n_players: 2,
+            loss_pct: 1.0,
+            rtt_ms: 50,
+            jitter_ms: 20,
+            steps: GATE_STEPS,
+            seed: SEED,
+        },
+        CellParams {
+            label: "2p-mobile",
+            n_players: 2,
+            loss_pct: 5.0,
+            rtt_ms: 100,
+            jitter_ms: 20,
+            steps: GATE_STEPS,
+            seed: SEED,
+        },
+        CellParams {
+            label: "4p-wifi",
+            n_players: 4,
+            loss_pct: 1.0,
+            rtt_ms: 50,
+            jitter_ms: 20,
+            steps: GATE_STEPS,
+            seed: SEED,
+        },
+        CellParams {
+            label: "4p-loss15-rtt200",
+            n_players: 4,
+            loss_pct: 15.0,
+            rtt_ms: 200,
+            jitter_ms: 20,
+            steps: GATE_STEPS,
+            seed: SEED,
+        },
+    ]
+}
+
+#[test]
+fn sweep_pr_gate() {
+    let cells = pr_gate_cells();
+    let reports: Vec<CellReport> = cells.iter().copied().map(run_cell).collect();
+
+    for r in &reports {
+        let ctx = || format!("cell {}: {r:?}", r.label);
+        // The load-bearing invariant: constant-conditions meshes never desync.
+        assert_eq!(r.desync_incidents, 0, "desync in a clean cell — {}", ctx());
+        // Liveness: every cell confirms real frames (a stalled mesh would pin
+        // near frame 0). 1000 steps ≈ 16 virtual seconds even at loss15/rtt200.
+        assert!(
+            r.min_final_confirmed >= 50,
+            "cell made too little progress — {}",
+            ctx()
+        );
+        // Real wire traffic flowed, and the per-kind map covers every kind.
+        assert!(
+            r.bytes_sent_per_player_per_sec > 0.0,
+            "no bandwidth recorded — {}",
+            ctx()
+        );
+        assert_eq!(
+            r.messages_sent_by_kind.len(),
+            MessageKind::COUNT,
+            "by-kind map missing categories — {}",
+            ctx()
+        );
+        // Rollback-depth percentiles are ordered and bounded by the observed
+        // max — a real cross-check between the histogram (percentile source)
+        // and the independently-tracked `max_rollback_depth`.
+        assert!(
+            r.rollback_depth_p50 <= r.rollback_depth_p99,
+            "p50 > p99 — {}",
+            ctx()
+        );
+        assert!(
+            r.rollback_depth_p99 <= r.rollback_depth_max,
+            "p99 exceeds max — {}",
+            ctx()
+        );
+    }
+
+    // Determinism: virtual time ⇒ a cell is bit-for-bit reproducible.
+    let first = &reports[0];
+    let replay = run_cell(pr_gate_cells()[0]);
+    assert_eq!(*first, replay, "cell is not reproducible: {}", first.label);
+
+    write_jsonl(&reports);
+}
+
+/// The full baseline matrix. `#[ignore]`d: it runs 5000-frame cells across the
+/// loss × RTT × jitter grid and is intended for offline capture via
+/// `FORTRESS_SWEEP_OUT`, not PR CI. (Nightly CI wiring is a follow-up; see
+/// PLAN.md §5.3.)
+#[test]
+#[ignore = "full matrix; run offline with FORTRESS_SWEEP_OUT set"]
+fn full_matrix_sweep() {
+    const STEPS: u32 = 5000;
+    const SEED: u64 = 1;
+    let losses = [0.0, 1.0, 5.0, 15.0];
+    let rtts = [10u64, 50, 100, 200];
+    let jitters = [0u64, 20];
+    let mut reports = Vec::new();
+    for &n_players in &[2usize, 4] {
+        for &loss_pct in &losses {
+            for &rtt_ms in &rtts {
+                for &jitter_ms in &jitters {
+                    reports.push(run_cell(CellParams {
+                        label: "matrix",
+                        n_players,
+                        loss_pct,
+                        rtt_ms,
+                        jitter_ms,
+                        steps: STEPS,
+                        seed: SEED,
+                    }));
+                }
+            }
+        }
+    }
+    for r in &reports {
+        assert_eq!(r.desync_incidents, 0, "desync in matrix cell: {r:?}");
+    }
+    write_jsonl(&reports);
+}
