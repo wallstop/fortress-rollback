@@ -267,7 +267,12 @@ fn hot_join_metrics_records_joiner_latency() -> Result<(), FortressError> {
     for _ in 0..200 {
         host.poll_remote_clients();
         if host.current_state() == SessionState::Running {
-            let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 7);
+            // The host is paused (returns `NotSynchronized`) while serving the
+            // joiner's snapshot; tolerate that, but surface any other error.
+            match advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 7) {
+                Ok(()) | Err(FortressError::NotSynchronized) => {},
+                Err(e) => return Err(e),
+            }
         }
         joiner.poll_remote_clients();
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
@@ -288,15 +293,18 @@ fn hot_join_metrics_records_joiner_latency() -> Result<(), FortressError> {
         after.completed,
         "join should be marked completed: {after:?}"
     );
+    // A 2-peer join spans multiple polls (sync handshake, then snapshot serve
+    // and ack on later polls), and the clock advances each poll — so the latency
+    // is a positive multiple of the poll step. Asserting `polls > 1` makes that
+    // precondition explicit rather than relying on `millis > 0` directly (which
+    // the type documents can be 0 for a hypothetical <=1-poll join).
     assert!(
-        after.polls_to_running > 0,
-        "should have counted HotJoining polls: {after:?}"
+        after.polls_to_running > 1,
+        "a 2-peer join should span multiple HotJoining polls: {after:?}"
     );
-    // The clock advanced by 50ms per poll during the join, so latency is
-    // positive and a multiple of that step (deterministic virtual time).
     assert!(
         after.millis_to_running > 0,
-        "clock advanced during the join, so latency must be positive: {after:?}"
+        "the clock advanced across those polls, so latency is positive: {after:?}"
     );
 
     // The completed metric is stable — later polls/reads do not move it.
