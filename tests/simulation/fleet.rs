@@ -54,6 +54,11 @@ fn session_metrics_are_wired_across_smoke_fleet() {
     let mut total_prediction_misses = 0u64;
     let mut total_checksum_comparisons = 0u64;
     let mut total_checksum_mismatches = 0u64;
+    let mut total_stalls = 0u64;
+    let mut total_wait_recs = 0u64;
+    let mut max_confirmation_lag = 0u64;
+    let mut max_event_queue_hw = 0u64;
+    let mut max_checksum_hw = 0u64;
 
     for n_players in [2usize, 3, 4] {
         for seed in PR_SMOKE_SEEDS {
@@ -100,6 +105,11 @@ fn session_metrics_are_wired_across_smoke_fleet() {
                 total_prediction_misses += m.prediction_miss_count;
                 total_checksum_comparisons += m.checksums_compared;
                 total_checksum_mismatches += m.checksums_mismatched;
+                total_stalls += m.stall_count;
+                total_wait_recs += m.wait_recommendations;
+                max_confirmation_lag = max_confirmation_lag.max(m.confirmation_lag_max);
+                max_event_queue_hw = max_event_queue_hw.max(m.event_queue_high_water);
+                max_checksum_hw = max_checksum_hw.max(m.checksum_history_high_water);
             }
         }
     }
@@ -117,6 +127,31 @@ fn session_metrics_are_wired_across_smoke_fleet() {
     assert_eq!(
         total_checksum_mismatches, 0,
         "clean fleet must have zero checksum mismatches"
+    );
+    // Wiring coverage for the pacing / high-water counters: mild loss over 600
+    // frames reliably drives prediction-window stalls and wait recommendations,
+    // runs the simulation ahead of confirmation, and fills the event queue and
+    // checksum history — so every one of these sites is proven reachable, not
+    // merely exercised by the direct-call unit tests.
+    assert!(
+        total_stalls > 0,
+        "fleet recorded no prediction-window stalls"
+    );
+    assert!(
+        total_wait_recs > 0,
+        "fleet recorded no wait recommendations"
+    );
+    assert!(
+        max_confirmation_lag > 0,
+        "fleet never sampled a non-zero confirmation lag"
+    );
+    assert!(
+        max_event_queue_hw > 0,
+        "fleet never recorded an event-queue high-water mark"
+    );
+    assert!(
+        max_checksum_hw > 0,
+        "fleet never recorded a checksum-history high-water mark"
     );
 }
 

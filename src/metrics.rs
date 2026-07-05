@@ -299,6 +299,17 @@ impl Serialize for RollbackDepthHistogram {
 /// without a breaking change, so it cannot be built with a struct literal
 /// outside this crate — match with `..`.
 ///
+/// # Which counters each session type populates
+///
+/// The rollback and pacing counters (everything except the
+/// `events_discarded_*` family) are populated by [`P2PSession`]. A
+/// [`SpectatorSession`] shares this type but currently records only the
+/// event-discard counters (plus its own `frames_behind_host`, exposed
+/// separately); its rollback/pacing counters stay at their default `0`.
+///
+/// [`P2PSession`]: crate::P2PSession
+/// [`SpectatorSession`]: crate::SpectatorSession
+///
 /// # Example
 ///
 /// ```
@@ -321,6 +332,10 @@ pub struct SessionMetrics {
     /// construction `frames_advanced == visual_frames + resimulated_frames`, so
     /// the ratio `resimulated_frames / frames_advanced` is the fraction of
     /// simulation work spent on rollback repair.
+    ///
+    /// The one-time `AdvanceFrame` a hot-join joiner runs to bridge a loaded
+    /// snapshot up to its activation frame is a state-restoration step, not
+    /// steady-state simulation, and is deliberately not counted here.
     pub frames_advanced: u64,
 
     /// The number of forward frame advances — one per

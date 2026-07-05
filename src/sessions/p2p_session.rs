@@ -7841,7 +7841,6 @@ impl<T: Config> P2PSession<T> {
         let count = current_frame - load_target;
 
         if let Ok(depth) = usize::try_from(count) {
-            self.metrics.record_rollback(depth);
             if let Some(telemetry) = &self.telemetry {
                 telemetry.on_rollback(depth, load_target);
             }
@@ -7905,6 +7904,13 @@ impl<T: Config> P2PSession<T> {
             // advance the frame
             self.sync_layer.advance_frame();
             requests.push(FortressRequest::AdvanceFrame { inputs });
+        }
+        // Record the rollback only after every re-simulated frame was actually
+        // advanced. A mid-loop internal error returns above without recording,
+        // so `resimulated_frames`/`frames_advanced` can never over-count the
+        // frames the application actually stepped.
+        if let Ok(depth) = usize::try_from(count) {
+            self.metrics.record_rollback(depth);
         }
         // after all this, we should have arrived at the same frame where we started
         let final_frame = self.sync_layer.current_frame();
