@@ -49,7 +49,9 @@ impl From<DropPolicy> for DisconnectBehavior {
 ///   link). A v1 reader cannot interpret a v2 schedule carrying a `PeerStall`,
 ///   so the format capability — not just this generator's output — dictates
 ///   the bump.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 2;
+/// - `3`: adds [`ScheduleEvent::SetInputDelay`] (a mid-run input-delay change,
+///   exercising the session's gap-fill/reconfiguration path).
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 3;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +150,16 @@ pub enum ScheduleEvent {
     /// not a drop; the random generator does not emit this event yet (it lands
     /// with the M3 storyline overhaul, which re-blesses seed baselines).
     PeerStall { peer: usize, steps: u32 },
+    /// Set peer `peer`'s local input delay to `delay` frames mid-run
+    /// (`P2PSession::set_input_delay`). A mid-session *increase* is the
+    /// interesting case: it gap-fills the newly delayed frames with replicated
+    /// confirmed inputs and flushes them to every remote — a reconfiguration
+    /// path a fixed-delay fleet never exercises. Values are per-peer local, so
+    /// the mesh must still agree on every confirmed frame across the change.
+    ///
+    /// Like `PeerStall`, this is planted by lifecycle tests, not yet emitted by
+    /// the random generator (that lands with the §6.1 storyline overhaul).
+    SetInputDelay { peer: usize, delay: usize },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
@@ -494,22 +506,32 @@ mod tests {
         );
     }
 
-    /// The lifecycle-vocabulary event must serialize losslessly — a corpus
-    /// artifact carrying a `PeerStall` has to replay the same hitch. The
-    /// generator does not yet emit it, so plant one explicitly.
+    /// The lifecycle-vocabulary events must serialize losslessly — a corpus
+    /// artifact carrying them has to replay the same faults. The generator does
+    /// not yet emit them, so plant them explicitly.
     #[test]
-    fn peer_stall_event_round_trips_through_json() {
+    fn lifecycle_events_round_trip_through_json() {
         let mut schedule = generate(42, SimConfig::smoke(3));
         schedule
             .events
             .push((200, ScheduleEvent::PeerStall { peer: 1, steps: 40 }));
+        schedule
+            .events
+            .push((250, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
         let back: Schedule = serde_json::from_str(&json).unwrap();
-        assert_eq!(schedule, back, "PeerStall must round-trip losslessly");
+        assert_eq!(
+            schedule, back,
+            "lifecycle events must round-trip losslessly"
+        );
         assert!(back
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerStall { peer: 1, steps: 40 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 })));
     }
 }

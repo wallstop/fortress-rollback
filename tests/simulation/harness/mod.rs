@@ -362,6 +362,10 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
                 );
             },
+            ScheduleEvent::SetInputDelay { peer, .. } => assert!(
+                *peer < n,
+                "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
+            ),
             ScheduleEvent::HealAll => {},
         }
     }
@@ -462,6 +466,16 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
                     stalled_until[*peer] = step.saturating_add(*steps);
+                },
+                ScheduleEvent::SetInputDelay { peer, delay } => {
+                    // Reconfigure the peer's own local input delay mid-run. A
+                    // mid-session increase gap-fills and flushes to remotes; a
+                    // failure (e.g. pending-output full) is a real error the
+                    // oracle must surface, not swallow.
+                    let handle = PlayerHandle::new(*peer);
+                    if let Err(error) = peers[*peer].session.set_input_delay(handle, *delay) {
+                        oracle.observe_advance_error(*peer, step, &error);
+                    }
                 },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
