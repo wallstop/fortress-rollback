@@ -24,7 +24,8 @@ use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::telemetry::{CollectingObserver, ViolationSeverity};
 use fortress_rollback::{
     DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputVec, Message,
-    P2PSession, PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState,
+    MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
+    SessionBuilder, SessionState,
 };
 use oracle::{Oracle, Verdict};
 use schedule::{Schedule, ScheduleEvent};
@@ -56,6 +57,102 @@ pub struct RunReport {
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
+    /// Each peer's wire-traffic totals, aggregated over all of that peer's
+    /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
+    /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
+    pub peer_wire: Vec<PeerWireTotals>,
+}
+
+/// One peer's cumulative wire traffic, summed across every remote link it holds.
+///
+/// The mesh runner reads each peer session's per-remote [`PeerMetrics`] at
+/// end-of-run and folds them into these totals, so a single value describes how
+/// much a player put on / took off the wire regardless of mesh size. Byte counts
+/// are wire-exact and payload-only (they match `PeerMetrics`, excluding UDP/IP
+/// headers). The `messages_{sent,received}_by_kind` arrays are positional in
+/// [`MessageKind::ALL`] order; read them by category with
+/// [`sent_by_kind`](Self::sent_by_kind) / [`received_by_kind`](Self::received_by_kind).
+#[derive(Clone, Debug, Default)]
+pub struct PeerWireTotals {
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub messages_sent_by_kind: [u64; MessageKind::COUNT],
+    pub messages_received_by_kind: [u64; MessageKind::COUNT],
+    pub input_bytes_pre_compression: u64,
+    pub input_bytes_post_compression: u64,
+}
+
+impl PeerWireTotals {
+    /// Folds one remote link's [`PeerMetrics`] snapshot into these totals.
+    ///
+    /// Cumulative counters add; the trailing gauges (`pending_*`, `ping_ms`,
+    /// `remote_frame_advantage`) are deliberately dropped — an instantaneous
+    /// gauge is not additive across links.
+    fn add(&mut self, m: &PeerMetrics) {
+        self.bytes_sent = self.bytes_sent.saturating_add(m.bytes_sent);
+        self.bytes_received = self.bytes_received.saturating_add(m.bytes_received);
+        self.packets_sent = self.packets_sent.saturating_add(m.packets_sent);
+        self.packets_received = self.packets_received.saturating_add(m.packets_received);
+        // Both arrays are laid out in `MessageKind::ALL` order (the same order
+        // used to read them back), independent of the crate-private
+        // `MessageKind::index`.
+        for (slot, kind) in self.messages_sent_by_kind.iter_mut().zip(MessageKind::ALL) {
+            *slot = slot.saturating_add(m.messages_sent_by_kind.get(kind));
+        }
+        for (slot, kind) in self
+            .messages_received_by_kind
+            .iter_mut()
+            .zip(MessageKind::ALL)
+        {
+            *slot = slot.saturating_add(m.messages_received_by_kind.get(kind));
+        }
+        self.input_bytes_pre_compression = self
+            .input_bytes_pre_compression
+            .saturating_add(m.input_bytes_pre_compression);
+        self.input_bytes_post_compression = self
+            .input_bytes_post_compression
+            .saturating_add(m.input_bytes_post_compression);
+    }
+
+    /// Messages of `kind` sent, summed across links.
+    #[must_use]
+    pub fn sent_by_kind(&self, kind: MessageKind) -> u64 {
+        MessageKind::ALL
+            .iter()
+            .position(|k| *k == kind)
+            .and_then(|i| self.messages_sent_by_kind.get(i).copied())
+            .unwrap_or(0)
+    }
+
+    /// Messages of `kind` received, summed across links.
+    #[must_use]
+    pub fn received_by_kind(&self, kind: MessageKind) -> u64 {
+        MessageKind::ALL
+            .iter()
+            .position(|k| *k == kind)
+            .and_then(|i| self.messages_received_by_kind.get(i).copied())
+            .unwrap_or(0)
+    }
+
+    /// Total messages sent across all kinds (equals [`Self::packets_sent`]).
+    #[must_use]
+    pub fn sent_by_kind_total(&self) -> u64 {
+        self.messages_sent_by_kind
+            .iter()
+            .copied()
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Total messages received across all kinds (equals [`Self::packets_received`]).
+    #[must_use]
+    pub fn received_by_kind_total(&self) -> u64 {
+        self.messages_received_by_kind
+            .iter()
+            .copied()
+            .fold(0u64, u64::saturating_add)
+    }
 }
 
 impl RunReport {
@@ -390,6 +487,36 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     let metrics: Vec<fortress_rollback::SessionMetrics> =
         peers.iter().map(|slot| slot.session.metrics()).collect();
 
+    // Aggregate each peer's per-remote wire metrics into one per-player total.
+    // Peer `i` holds a remote handle `PlayerHandle::new(j)` for every `j != i`
+    // (see the builder loop above); `peer_metrics` succeeds for any remote
+    // handle regardless of sync state.
+    let n_players = schedule.config.n_players;
+    let peer_wire: Vec<PeerWireTotals> = peers
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let mut totals = PeerWireTotals::default();
+            for j in 0..n_players {
+                if j == i {
+                    continue;
+                }
+                // Peer `i` registered `PlayerHandle::new(j)` as a remote for
+                // every `j != i` (see the builder loop above), so this MUST
+                // resolve. An error is a real invariant break — fail loudly
+                // rather than silently under-counting a bandwidth regression.
+                let pm = slot
+                    .session
+                    .peer_metrics(PlayerHandle::new(j))
+                    .unwrap_or_else(|e| {
+                        panic!("peer {i}: peer_metrics(handle={j}) failed unexpectedly: {e:?}")
+                    });
+                totals.add(&pm);
+            }
+            totals
+        })
+        .collect();
+
     let verdict = oracle.finalize(&recorded, &end_confirmed, &end_state);
     RunReport {
         verdict,
@@ -397,5 +524,6 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         final_confirmed,
         net_stats: net.stats(),
         metrics,
+        peer_wire,
     }
 }
