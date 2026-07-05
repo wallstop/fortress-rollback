@@ -1116,13 +1116,15 @@ impl<T: Config> P2PSession<T> {
                 .check_simulation_consistency(self.disconnect_frame);
             // if we have an incorrect frame, then we need to rollback
             if first_incorrect != Frame::NULL {
-                let misses = self
-                    .sync_layer
-                    .players_with_incorrect_predictions(self.disconnect_frame);
-                self.metrics
-                    .record_prediction_misses(u64::try_from(misses.len()).unwrap_or(u64::MAX));
+                self.metrics.record_prediction_misses(
+                    self.sync_layer
+                        .count_players_with_incorrect_predictions(self.disconnect_frame),
+                );
                 if let Some(telemetry) = &self.telemetry {
-                    for (player, frame) in misses {
+                    for (player, frame) in self
+                        .sync_layer
+                        .players_with_incorrect_predictions(self.disconnect_frame)
+                    {
                         telemetry.on_prediction_miss(player, frame);
                     }
                 }
@@ -2647,13 +2649,15 @@ impl<T: Config> P2PSession<T> {
             .sync_layer
             .check_simulation_consistency(self.disconnect_frame);
         if !first_incorrect.is_null() {
-            let misses = self
-                .sync_layer
-                .players_with_incorrect_predictions(self.disconnect_frame);
-            self.metrics
-                .record_prediction_misses(u64::try_from(misses.len()).unwrap_or(u64::MAX));
+            self.metrics.record_prediction_misses(
+                self.sync_layer
+                    .count_players_with_incorrect_predictions(self.disconnect_frame),
+            );
             if let Some(telemetry) = &self.telemetry {
-                for (player, frame) in misses {
+                for (player, frame) in self
+                    .sync_layer
+                    .players_with_incorrect_predictions(self.disconnect_frame)
+                {
                     telemetry.on_prediction_miss(player, frame);
                 }
             }

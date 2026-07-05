@@ -1508,6 +1508,20 @@ impl<T: Config> SyncLayer<T> {
         first_incorrect
     }
 
+    /// Returns the number of players that have incorrect predictions at or before
+    /// `disconnect_frame`, without allocating. Used by always-on metrics counters.
+    pub(crate) fn count_players_with_incorrect_predictions(&self, disconnect_frame: Frame) -> u64 {
+        let mut count: u64 = 0;
+        for queue in self.input_queues.iter() {
+            let incorrect = queue.first_incorrect_frame();
+            if !incorrect.is_null() && (disconnect_frame.is_null() || incorrect <= disconnect_frame)
+            {
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
     /// Returns the player handles that have incorrect predictions at or before `disconnect_frame`.
     /// Used by telemetry to identify which players' inputs were mispredicted.
     pub(crate) fn players_with_incorrect_predictions(

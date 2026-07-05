@@ -465,6 +465,13 @@ impl SessionMetrics {
 
     /// Records one rollback that re-simulated `depth` frames.
     pub(crate) fn record_rollback(&mut self, depth: usize) {
+        debug_assert!(
+            depth > 0,
+            "record_rollback called with depth 0 — not a real rollback"
+        );
+        if depth == 0 {
+            return;
+        }
         let depth_u64 = u64::try_from(depth).unwrap_or(u64::MAX);
         self.rollback_count = self.rollback_count.saturating_add(1);
         self.resimulated_frames = self.resimulated_frames.saturating_add(depth_u64);
