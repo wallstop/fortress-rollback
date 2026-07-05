@@ -185,9 +185,14 @@ fn messages_sent_by_kind(peer_wire: &[PeerWireTotals]) -> BTreeMap<String, u64> 
     map
 }
 
+/// A cumulative `total` (summed over peers) as a mean per-player per-second
+/// rate. `per_players` is always `>= 1` — the harness builds real sessions via
+/// `SessionBuilder::with_num_players`, which rejects zero players at
+/// construction — so only the virtual duration needs a divide-by-zero guard
+/// (reachable via a degenerate `steps == 0` cell).
 #[allow(clippy::cast_precision_loss)]
 fn sum_to_rate_per_sec(total: u64, per_players: usize, virtual_secs: f64) -> f64 {
-    if virtual_secs <= 0.0 || per_players == 0 {
+    if virtual_secs <= 0.0 {
         return 0.0;
     }
     (total as f64) / (per_players as f64) / virtual_secs
@@ -272,11 +277,11 @@ pub fn run_cell(params: CellParams) -> CellReport {
     } else {
         (total_lag_sum as f64) / (total_visual as f64)
     };
-    // Guard `virtual_minutes <= 0.0` and `n == 0` for consistency with the
-    // sibling `sum_to_rate_per_sec` helper (which also guards zero players),
-    // keeping the rate well-defined even for degenerate inputs.
+    // As in `sum_to_rate_per_sec`, `n >= 1` is guaranteed upstream (the harness
+    // rejects zero players at session construction), so only the virtual
+    // duration needs a divide-by-zero guard.
     #[allow(clippy::cast_precision_loss)]
-    let stalls_per_min = if virtual_minutes <= 0.0 || n == 0 {
+    let stalls_per_min = if virtual_minutes <= 0.0 {
         0.0
     } else {
         (total_stalls as f64) / (f64::from(u32::try_from(n).unwrap_or(u32::MAX))) / virtual_minutes
