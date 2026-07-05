@@ -1066,6 +1066,35 @@ fn oracle_catches_seeded_divergence_under_peer_kill() {
     );
 }
 
+/// A peer that diverges *before* it crashes must not escape detection by being
+/// killed. Corrupt the soon-to-be-killed peer 1 from frame 40, then crash it at
+/// step 100: its pre-death recorded states (frames 40..~99) diverge from the
+/// survivors and must still surface as `StateDivergence`. The alive-mask excises
+/// a dead peer from the liveness checks, not from pre-death state agreement — so
+/// a determinism bug on a doomed peer cannot hide behind its own crash.
+#[test]
+fn oracle_catches_pre_kill_divergence_on_the_killed_peer() {
+    let schedule = peer_kill_schedule(Some(1));
+    let options = RunOptions {
+        corrupt_state_from: Some((1, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a pre-crash divergence on the killed peer must fail the run"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the killed peer's pre-death states must still be compared (b): {:?}",
+        report.verdict.failures
+    );
+}
+
 /// A `PeerKill` naming a peer outside the mesh must fail loudly with the same
 /// clear message as the other events (per-event fail-loud contract of the
 /// up-front validation).

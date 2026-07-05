@@ -123,11 +123,13 @@ pub struct Oracle {
     /// guaranteed representation.
     per_class_cap: usize,
     /// Peers that were killed mid-run (`ScheduleEvent::PeerKill`). A crashed
-    /// peer is gone and no longer observable, so it is excluded from the
-    /// end-of-run checks: it cannot satisfy the `Running`/end-progress bar, and
-    /// its frozen confirmed frame must not drag the globally-confirmed prefix
-    /// below where the survivors actually agree. Pre-death observations already
-    /// entered the canonical stream and stand.
+    /// peer is excluded from the *liveness* checks only: it cannot satisfy the
+    /// `Running`/end-progress bar (c-lite), and its frozen confirmed frame must
+    /// not drag the globally-confirmed prefix below where the survivors agree.
+    /// Its **pre-death** observations still count — recorded states it produced
+    /// before crashing are compared in (b), and its confirmed-input samples
+    /// stand in (a) — so a peer that diverged before it died cannot escape
+    /// detection by being killed.
     dead: Vec<bool>,
 }
 
@@ -302,12 +304,13 @@ impl Oracle {
         // the result of simulating frame N with confirmed inputs ≤ N), so a
         // frame's state is final once the *previous* frame is confirmed;
         // comparing up to `global_confirmed` stays strictly inside the final
-        // region.
+        // region. Killed peers are NOT skipped here: their *pre-death* recorded
+        // states are real observations for the frames they produced, so a peer
+        // that diverged before it crashed is still caught (it cannot escape the
+        // check merely by being killed). They only lack states past their death,
+        // so they never contribute past the survivor prefix.
         let mut canonical_states: BTreeMap<i32, (usize, StateStub)> = BTreeMap::new();
         for (peer, states) in recorded.iter().enumerate() {
-            if self.is_dead(peer) {
-                continue;
-            }
             for (&frame, &state) in states.range(..=global_confirmed) {
                 match canonical_states.get(&frame) {
                     None => {
