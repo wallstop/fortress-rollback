@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783229263222,
+  "lastUpdate": 1783232901696,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "9e7d17e7ac499cf7d0c1d37bad87f26160fe454f",
-          "message": "Session abstraction (#85)\n\n## Description\n\nAdd Session abstraction and optimizations\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [x] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-02-07T07:34:37-08:00",
-          "tree_id": "e43d6bfa4ff9ed7cc172711df0508a86ef7ae6bb",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/9e7d17e7ac499cf7d0c1d37bad87f26160fe454f"
-        },
-        "date": 1770478787123,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 157,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 437,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 687,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 991,
-            "range": "± 23",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102320,
-            "range": "± 464",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27626,
-            "range": "± 838",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 82",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1557,
             "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a500b62790b48aa6485489cbf14c1dbcddd1742c",
+          "message": "Hardening M2 §5.2: SpectatorSession::peer_metrics(host_index) (#193)\n\n## Summary\n\nCompletes the per-peer metrics surface from PR #192 (M2 §5.2). The\nspectator's host `UdpProtocol` endpoints already accumulate wire-exact\n`PeerMetrics` counters (same endpoint type as P2P remotes/spectators) —\nthis PR adds the accessor to read them, which was flagged as a follow-up\nin PLAN.md §5.2.\n\n## Change\n\n- **`SpectatorSession::peer_metrics(host_index: usize) ->\nOption<PeerMetrics>`** — hosts addressed by dense index in\n`0..num_hosts()` (builder-priority order, matching\n`start_spectator_session_multi`).\n\n### API shape: `Option`, not `Result`\n\n`P2PSession::peer_metrics(handle)` returns `Result<_, FortressError>`\nbecause it validates an **opaque `PlayerHandle`** (structured error on a\nnon-remote handle). A spectator has **no player handles** for its\nupstream hosts — they're a dense `Vec` addressed by index with a public\n`num_hosts()` bound, so out-of-range is the *only* failure mode.\n`Option` (à la `slice::get`) is the idiomatic, non-breaking shape. A\n`Result` here would have required a new `InvalidRequestKind` variant — a\nbreaking change to a non-`#[non_exhaustive]` enum, which the plan\nreserves for M5's single atomic break.\n\n### Failover caveat (documented, and tested)\n\nHost endpoints are compacted on failover (`retain_surviving_hosts`),\nnever rebuilt. So the counters at a fixed `host_index` do **not** reset\nacross a failover — they discontinuously jump to the promoted survivor's\nalready-running totals. Per-index rate math is only meaningful between\nfailovers. This is documented and locked by a test that drives the real\n`remove_disconnected_hosts` compaction path.\n\n## Tests (3, data-driven)\n\n- `spectator_peer_metrics_out_of_range_index_is_none` — index-bound\nbehavior.\n- `spectator_peer_metrics_are_isolated_and_count_received_host_traffic`\n— multi-host session; traffic delivered to host 1 only leaves host 0 at\nzero and host 1 at exactly the delivered `packets_received` /\n`Input`-by-kind. Proves per-host isolation.\n- `spectator_peer_metrics_index_follows_surviving_host_after_compaction`\n— proves the jump-not-reset failover semantics.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` —\nclean.\n- `cargo doc --no-deps --features hot-join,tokio,json,sync-send\n--document-private-items` — clean.\n- `cargo nextest run` — 2347 passed. `--features hot-join` — 2584\npassed.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nReviewed internally by an adversarial pass that caught (and this PR\nfixes) a rustdoc misstatement about failover counter behavior and added\nthe compaction test.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Additive read-only API delegating to existing `UdpProtocol` metrics;\nno wire or session behavior changes beyond documentation and tests.\n> \n> **Overview**\n> Adds **`SpectatorSession::peer_metrics(host_index) ->\nOption<PeerMetrics>`** so spectators can read the same wire-exact\nper-host traffic counters that **`P2PSession::peer_metrics`** already\nexposes for remotes. Hosts are keyed by dense index in\n**`0..num_hosts()`** (builder order from\n**`start_spectator_session_multi`**); out-of-range indices return\n**`None`** instead of a **`Result`**, since spectators have no\n**`PlayerHandle`** for upstream hosts.\n> \n> Rustdoc calls out **failover semantics**: when hosts are compacted\nafter a disconnect, counters at a fixed index **jump** to the promoted\nsurvivor’s totals rather than resetting, so per-index rate math should\nbe re-anchored after **`num_hosts()`** changes. **CHANGELOG** documents\nthe new API.\n> \n> Three tests lock index bounds, per-host isolation on a multi-host\nsession, and post-compaction index behavior via\n**`remove_disconnected_hosts`**.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb9741cb98e397709f26bc9c3e835d58e2f1ec558. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-04T23:22:43-07:00",
+          "tree_id": "0aeb89b4c2a4f09e567a6804aa5713782b779717",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/a500b62790b48aa6485489cbf14c1dbcddd1742c"
+        },
+        "date": 1783232900764,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 111,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 466,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 702,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1032,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 134519,
+            "range": "± 1309",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44714,
+            "range": "± 902",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1245,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 85",
             "unit": "ns/iter"
           },
           {
