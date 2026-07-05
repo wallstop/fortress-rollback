@@ -120,7 +120,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants, with `as_str()`, `ALL`, and `COUNT`) plus `FortressEvent::kind()` to obtain one, and — under the
   `json` feature — `SessionMetrics::to_json()` / `to_json_pretty()` (the per-kind breakdown serializes as a
   self-describing snake_case-keyed map). `SessionMetrics` is `#[non_exhaustive]`, so later releases can add
-  counters without a breaking change.
+  counters without a breaking change. `SessionMetrics` now also carries **rollback and pacing counters** for
+  `P2PSession`: `frames_advanced` (total simulation steps), `visual_frames` (forward/rendered advances),
+  `resimulated_frames` (frames replayed during rollback — `frames_advanced == visual_frames +
+  resimulated_frames` by construction), `rollback_count`, `rollback_depth_histogram` (a new
+  `RollbackDepthHistogram` bucketing rollbacks by re-simulated depth `1..=16` then `17_plus`, serialized as a
+  self-describing depth-keyed map), `max_rollback_depth`, `prediction_miss_count`, `stall_count` (advances
+  throttled by a full prediction window — previously unobservable), `wait_recommendations`,
+  `confirmation_lag_current` / `_max` / `_sum` (per-advance samples of how far ahead of the confirmed frame
+  the simulation runs), `checksums_compared` / `checksums_matched` / `checksums_mismatched` (desync-detection
+  comparisons), and the `event_queue_high_water` / `checksum_history_high_water` container high-water marks.
+  All counters are always-on, allocation-free, and updated inline on the paths they measure.
 
 ### Changed
 

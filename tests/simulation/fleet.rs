@@ -41,6 +41,120 @@ fn pr_smoke_four_player_mesh_holds_invariants() {
     run_smoke_fleet(4);
 }
 
+/// M2 §5.2: the always-on [`SessionMetrics`] counters must actually be wired to
+/// the paths they measure. The PR-smoke fleet runs mild-loss meshes for 600
+/// frames, which reliably drives rollbacks, prediction misses, and periodic
+/// desync-checksum comparisons. This asserts, per peer, the structural
+/// identities that must hold by construction, and mesh-wide that the network
+/// paths feeding these counters are exercised (so none is silently dead).
+#[test]
+fn session_metrics_are_wired_across_smoke_fleet() {
+    let mut total_visual = 0u64;
+    let mut total_rollbacks = 0u64;
+    let mut total_prediction_misses = 0u64;
+    let mut total_checksum_comparisons = 0u64;
+    let mut total_checksum_mismatches = 0u64;
+    let mut total_stalls = 0u64;
+    let mut total_wait_recs = 0u64;
+    let mut max_confirmation_lag = 0u64;
+    let mut max_event_queue_hw = 0u64;
+    let mut max_checksum_hw = 0u64;
+
+    for n_players in [2usize, 3, 4] {
+        for seed in PR_SMOKE_SEEDS {
+            let schedule = generate(seed, SimConfig::smoke(n_players));
+            let report = run(&schedule, &RunOptions::default());
+            report.expect_pass(&schedule);
+
+            for (i, m) in report.metrics.iter().enumerate() {
+                let ctx = || format!("peer {i} seed {seed} n{n_players}: {m:?}");
+                // Total simulation work splits exactly into forward (visual)
+                // advances plus rollback re-simulation.
+                assert_eq!(
+                    m.frames_advanced,
+                    m.visual_frames + m.resimulated_frames,
+                    "frames_advanced != visual + resimulated — {}",
+                    ctx()
+                );
+                // The depth histogram accounts for every rollback exactly once.
+                assert_eq!(
+                    m.rollback_depth_histogram.total(),
+                    m.rollback_count,
+                    "histogram total != rollback_count — {}",
+                    ctx()
+                );
+                // Checksum comparisons split cleanly into matches + mismatches.
+                assert_eq!(
+                    m.checksums_compared,
+                    m.checksums_matched + m.checksums_mismatched,
+                    "checksum split mismatch — {}",
+                    ctx()
+                );
+                // Every peer that reached a passing end-state advanced forward.
+                assert!(m.visual_frames > 0, "no forward advances — {}", ctx());
+                // A clean (green) run must never observe a checksum mismatch.
+                assert_eq!(
+                    m.checksums_mismatched,
+                    0,
+                    "unexpected checksum mismatch on a clean run — {}",
+                    ctx()
+                );
+
+                total_visual += m.visual_frames;
+                total_rollbacks += m.rollback_count;
+                total_prediction_misses += m.prediction_miss_count;
+                total_checksum_comparisons += m.checksums_compared;
+                total_checksum_mismatches += m.checksums_mismatched;
+                total_stalls += m.stall_count;
+                total_wait_recs += m.wait_recommendations;
+                max_confirmation_lag = max_confirmation_lag.max(m.confirmation_lag_max);
+                max_event_queue_hw = max_event_queue_hw.max(m.event_queue_high_water);
+                max_checksum_hw = max_checksum_hw.max(m.checksum_history_high_water);
+            }
+        }
+    }
+
+    assert!(total_visual > 0, "fleet recorded no forward advances");
+    assert!(total_rollbacks > 0, "fleet recorded no rollbacks");
+    assert!(
+        total_prediction_misses > 0,
+        "fleet recorded no prediction misses"
+    );
+    assert!(
+        total_checksum_comparisons > 0,
+        "fleet recorded no checksum comparisons"
+    );
+    assert_eq!(
+        total_checksum_mismatches, 0,
+        "clean fleet must have zero checksum mismatches"
+    );
+    // Wiring coverage for the pacing / high-water counters: mild loss over 600
+    // frames reliably drives prediction-window stalls and wait recommendations,
+    // runs the simulation ahead of confirmation, and fills the event queue and
+    // checksum history — so every one of these sites is proven reachable, not
+    // merely exercised by the direct-call unit tests.
+    assert!(
+        total_stalls > 0,
+        "fleet recorded no prediction-window stalls"
+    );
+    assert!(
+        total_wait_recs > 0,
+        "fleet recorded no wait recommendations"
+    );
+    assert!(
+        max_confirmation_lag > 0,
+        "fleet never sampled a non-zero confirmation lag"
+    );
+    assert!(
+        max_event_queue_hw > 0,
+        "fleet never recorded an event-queue high-water mark"
+    );
+    assert!(
+        max_checksum_hw > 0,
+        "fleet never recorded a checksum-history high-water mark"
+    );
+}
+
 /// Meta-determinism: the same schedule must produce a bit-identical trace.
 /// This guards the harness itself — any hidden wall-clock read, unseeded RNG,
 /// or iteration-order nondeterminism in session, net, or harness breaks it.

@@ -54,6 +54,8 @@ pub struct RunReport {
     pub final_confirmed: Vec<i32>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
+    /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
+    pub metrics: Vec<fortress_rollback::SessionMetrics>,
 }
 
 impl RunReport {
@@ -385,11 +387,15 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         fold_trace(&mut trace_hash, confirmed);
     }
 
+    let metrics: Vec<fortress_rollback::SessionMetrics> =
+        peers.iter().map(|slot| slot.session.metrics()).collect();
+
     let verdict = oracle.finalize(&recorded, &end_confirmed, &end_state);
     RunReport {
         verdict,
         trace_hash,
         final_confirmed,
         net_stats: net.stats(),
+        metrics,
     }
 }

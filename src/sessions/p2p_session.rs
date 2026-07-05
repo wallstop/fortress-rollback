@@ -1116,6 +1116,10 @@ impl<T: Config> P2PSession<T> {
                 .check_simulation_consistency(self.disconnect_frame);
             // if we have an incorrect frame, then we need to rollback
             if first_incorrect != Frame::NULL {
+                self.metrics.record_prediction_misses(
+                    self.sync_layer
+                        .count_players_with_incorrect_predictions(self.disconnect_frame),
+                );
                 if let Some(telemetry) = &self.telemetry {
                     for (player, frame) in self
                         .sync_layer
@@ -1243,14 +1247,34 @@ impl<T: Config> P2PSession<T> {
             self.local_inputs.clear();
             requests.push(FortressRequest::AdvanceFrame { inputs });
 
+            // Record the forward (visual) advance and sample confirmation lag:
+            // how many frames ahead of the last confirmed frame we now are.
+            let current = self.sync_layer.current_frame();
+            let last_confirmed = self.sync_layer.last_confirmed_frame();
+            let lag = if last_confirmed.is_null() {
+                current.as_i32()
+            } else {
+                current - last_confirmed
+            };
+            self.metrics
+                .record_forward_advance(u64::try_from(lag.max(0)).unwrap_or(0));
+
             if let Some(telemetry) = &self.telemetry {
-                telemetry.on_frame_advance(self.sync_layer.current_frame());
+                telemetry.on_frame_advance(current);
             }
         } else {
             debug!(
                 "Prediction Threshold reached. Skipping on frame {}",
                 self.sync_layer.current_frame()
             );
+            // A prediction-window stall: the window is full, so the network is
+            // throttling the local simulation (waiting on a peer to confirm).
+            // Lockstep mode waits for confirmed inputs by design — that is the
+            // mode's normal cadence, not a stall — so it is excluded to keep the
+            // counter's documented "prediction window was full" meaning exact.
+            if !lockstep {
+                self.metrics.record_stall();
+            }
         }
 
         Ok(requests)
@@ -2630,6 +2654,10 @@ impl<T: Config> P2PSession<T> {
             .sync_layer
             .check_simulation_consistency(self.disconnect_frame);
         if !first_incorrect.is_null() {
+            self.metrics.record_prediction_misses(
+                self.sync_layer
+                    .count_players_with_incorrect_predictions(self.disconnect_frame),
+            );
             if let Some(telemetry) = &self.telemetry {
                 for (player, frame) in self
                     .sync_layer
@@ -7886,6 +7914,13 @@ impl<T: Config> P2PSession<T> {
             self.sync_layer.advance_frame();
             requests.push(FortressRequest::AdvanceFrame { inputs });
         }
+        // Record the rollback only after every re-simulated frame was actually
+        // advanced. A mid-loop internal error returns above without recording,
+        // so `resimulated_frames`/`frames_advanced` can never over-count the
+        // frames the application actually stepped.
+        if let Ok(depth) = usize::try_from(count) {
+            self.metrics.record_rollback(depth);
+        }
         // after all this, we should have arrived at the same frame where we started
         let final_frame = self.sync_layer.current_frame();
         if final_frame != current_frame {
@@ -9207,6 +9242,7 @@ impl<T: Config> P2PSession<T> {
             let skip_frames = self.frames_ahead.try_into().unwrap_or(0);
             self.event_queue
                 .push_back(FortressEvent::WaitRecommendation { skip_frames });
+            self.metrics.record_wait_recommendation();
         }
         // This runs from `advance_frame`, outside `handle_event`'s trim, so bound
         // the queue here too (D9: overflow must stay accounted + telemetered).
@@ -9709,6 +9745,9 @@ impl<T: Config> P2PSession<T> {
     /// many messages within one poll produces a single `Warning`, not one per
     /// message, while the always-incrementing counters keep the full history.
     fn trim_event_queue(&mut self) {
+        // Sample the queue length before trimming to capture the true peak
+        // (including any just-pushed overflow) as the high-water mark.
+        self.metrics.observe_event_queue_len(self.event_queue.len());
         let mut discarded = 0u64;
         while self.event_queue.len() > self.max_event_queue_size {
             if let Some(dropped) = self.event_queue.pop_front() {
@@ -9746,6 +9785,8 @@ impl<T: Config> P2PSession<T> {
                         if let Some(&local_checksum) =
                             self.local_checksum_history.get(&remote_frame)
                         {
+                            self.metrics
+                                .record_checksum_comparison(local_checksum == remote_checksum);
                             if local_checksum != remote_checksum {
                                 self.event_queue.push_back(FortressEvent::DesyncDetected {
                                     frame: remote_frame,
@@ -9874,6 +9915,10 @@ impl<T: Config> P2PSession<T> {
                         self.last_sent_checksum_frame = frame_to_send;
                         // collect locally for later comparison
                         self.local_checksum_history.insert(frame_to_send, checksum);
+                        // Record the peak history length (the momentary overshoot
+                        // before the size-cap prune below is the true high-water).
+                        self.metrics
+                            .observe_checksum_history_len(self.local_checksum_history.len());
                     }
 
                     let max_history = self.protocol_config.max_checksum_history;
