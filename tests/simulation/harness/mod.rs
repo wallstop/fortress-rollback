@@ -387,6 +387,18 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
              lower value would run time backwards (got {ppm})"
         );
     }
+    for &peer in &schedule.config.starve_events {
+        assert!(
+            peer < n,
+            "starve_events peer {peer} out of range for a {n}-peer mesh"
+        );
+    }
+    if let Some(size) = schedule.config.event_queue_size {
+        assert!(
+            size >= 10,
+            "event_queue_size must be >= 10 (SessionBuilder rejects smaller); got {size}"
+        );
+    }
 
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -429,6 +441,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 .with_disconnect_behavior(schedule.config.disconnect_behavior.into())
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(size) = schedule.config.event_queue_size {
+                // Validated `>= 10` up front, so the current min-cap check
+                // cannot reject it; surface the real error (not a fixed string)
+                // if the builder ever grows stricter validation.
+                builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
+                    panic!("with_event_queue_size({size}) rejected a pre-validated size: {error:?}")
+                });
+            }
             for (j, addr) in addrs.iter().enumerate() {
                 let player_type = if j == i {
                     PlayerType::Local
@@ -477,6 +497,16 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // does not advance, letting the others catch up — the closed time-sync loop.
     let app_model = schedule.config.app_model;
     let mut wait_skip: Vec<u32> = vec![0; n];
+    // Peers whose app model never drains the session event queue (models a
+    // wedged event consumer). Their bounded `event_queue` fills and the session
+    // trims oldest events, firing the D9 `events_discarded_*` telemetry. Because
+    // the harness normally drains (and feeds) events per step, starvation is the
+    // only fleet path that exercises that overflow. Built by direct index (peers
+    // validated in-range above) — O(n + |starve_events|), no per-peer rescan.
+    let mut starves = vec![false; n];
+    for &peer in &schedule.config.starve_events {
+        starves[peer] = true;
+    }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
@@ -538,19 +568,29 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             let confirmed = if !dead[i] && step >= stalled_until[i] {
                 slot.session.poll_remote_clients();
 
-                let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
-                for event in &events {
-                    if let FortressEvent::DesyncDetected { frame, .. } = event {
-                        oracle.observe_desync_event(i, *frame);
-                    }
-                    // Closed-loop app model: obey a `WaitRecommendation` by owing
-                    // that many skipped advances (max so a stronger one wins).
-                    if app_model == AppModel::Obey {
-                        if let FortressEvent::WaitRecommendation { skip_frames } = event {
-                            wait_skip[i] = wait_skip[i].max(*skip_frames);
+                // A starved peer never drains its event queue (models a wedged
+                // event consumer): the session's bounded queue fills and trims,
+                // firing D9. Skipping the drain forgoes only this peer's own
+                // event signals — its self-observed `DesyncDetected` and its
+                // event trace folds. The oracle keeps full teeth on it anyway:
+                // the primary state-agreement check reads its recorded state
+                // directly, and any real divergence is still caught in-band by
+                // its neighbors' own desync detection over the wire.
+                if !starves[i] {
+                    let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
+                    for event in &events {
+                        if let FortressEvent::DesyncDetected { frame, .. } = event {
+                            oracle.observe_desync_event(i, *frame);
                         }
+                        // Closed-loop app model: obey a `WaitRecommendation` by owing
+                        // that many skipped advances (max so a stronger one wins).
+                        if app_model == AppModel::Obey {
+                            if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                                wait_skip[i] = wait_skip[i].max(*skip_frames);
+                            }
+                        }
+                        fold_trace(&mut trace_hash, &format!("{event:?}"));
                     }
-                    fold_trace(&mut trace_hash, &format!("{event:?}"));
                 }
 
                 if slot.session.current_state() == SessionState::Running {

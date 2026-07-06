@@ -1435,3 +1435,116 @@ fn budget_probe_eight_player_long_schedule() {
     );
     report.expect_pass(&schedule);
 }
+
+/// §6.6-pre.6h — the event-loss oracle. The harness normally drains every
+/// peer's event queue each step, so the D9 event-discard telemetry
+/// (`events_discarded_*`) never fires in the fleet. A *starved* peer — one whose
+/// app model never services [`P2PSession::events`] — lets the session's bounded
+/// queue fill until it trims the oldest events, exercising that overflow path
+/// end-to-end.
+///
+/// Fire: on a Clean N=8 mesh with a small (10-slot) queue, the starved peer's
+/// cold-start sync burst (`Synchronizing`, one per remote per retry) overflows
+/// the queue (D9 > 0) while every draining peer stays clean. Neutralize: the
+/// identical schedule with every peer draining discards nothing — proving
+/// starvation, not the mesh itself, is the cause. Both runs pass the full
+/// oracle: not servicing events must not desync or stall the mesh.
+///
+/// A Clean mesh is deliberate — the discards come from the initial sync
+/// handshake (which every mesh runs regardless of noise), so the count is
+/// deterministic and N-scaled rather than dependent on random faults.
+///
+/// **N and the cap are load-bearing together.** A *draining* peer empties its
+/// queue every step, so its high-water mark is the largest single-poll burst:
+/// ≈`N − 1` `Synchronizing` events (one per remote) during cold start. That
+/// must stay strictly under the cap or a draining peer overflows too and the
+/// "draining peers discard nothing" assertion fails. At N=8 the burst is 7 < 10
+/// (margin 3, and the starved peer still accumulates ≈25 discards across polls);
+/// the relation breaks at N≥12 (burst ≥ 11 > 10). If you bump N, raise the cap
+/// past `N − 1` in step — the sub-assertion fails loudly if you forget, so this
+/// stays honest, but keep them paired.
+fn event_starvation_config(starve: bool) -> SimConfig {
+    let n = 8;
+    SimConfig {
+        n_players: n,
+        steps: 900,
+        noise: BackgroundNoise::Clean,
+        event_queue_size: Some(10),
+        starve_events: if starve { vec![0] } else { Vec::new() },
+        ..SimConfig::smoke(n)
+    }
+}
+
+#[test]
+fn event_starvation_overflows_the_bounded_event_queue() {
+    let seed = 0xE7A2;
+    let n = event_starvation_config(true).n_players;
+
+    // Fire: peer 0 never drains its 10-slot queue; the session trims the
+    // overflow and D9 fires — for peer 0 only.
+    let starved_schedule = generate(seed, event_starvation_config(true));
+    let starved = run(&starved_schedule, &RunOptions::default());
+    // Starvation must not break the mesh (events are informational): the full
+    // oracle still passes even though peer 0 ignores its event queue.
+    starved.expect_pass(&starved_schedule);
+    assert!(
+        starved.metrics[0].events_discarded_total > 0,
+        "starved peer 0 must overflow its bounded event queue (D9 telemetry); \
+         got discards={} — too few events, raise N or lower the cap",
+        starved.metrics[0].events_discarded_total
+    );
+    // Draining peers must NOT overflow: each empties its queue every step, so
+    // its high-water is one cold-start poll burst (≈N-1 < cap at N=8). This is
+    // load-bearing on N — see `event_starvation_config` (it fails loudly, not
+    // silently, if a future N-bump pushes the burst past the cap).
+    for i in 1..n {
+        assert_eq!(
+            starved.metrics[i].events_discarded_total, 0,
+            "a draining peer must not overflow (single-poll burst < cap): \
+             peer {i} discarded {}",
+            starved.metrics[i].events_discarded_total
+        );
+    }
+
+    // Neutralize: identical schedule, every peer draining → nobody overflows,
+    // isolating starvation as the sole cause of D9.
+    let drained_schedule = generate(seed, event_starvation_config(false));
+    let drained = run(&drained_schedule, &RunOptions::default());
+    drained.expect_pass(&drained_schedule);
+    for i in 0..n {
+        assert_eq!(
+            drained.metrics[i].events_discarded_total, 0,
+            "with every peer draining, no queue may overflow — starvation is the \
+             only cause of D9: peer {i} discarded {}",
+            drained.metrics[i].events_discarded_total
+        );
+    }
+}
+
+/// A `starve_events` entry naming a peer outside the mesh (a hand-edited or
+/// corrupt corpus artifact) must fail loudly up front, not silently no-op —
+/// the same fail-loud contract the event-index validation enforces.
+#[test]
+#[should_panic(expected = "out of range")]
+fn run_rejects_out_of_range_starve_events_peer() {
+    let config = SimConfig {
+        n_players: 2,
+        starve_events: vec![9],
+        ..SimConfig::smoke(2)
+    };
+    let _ = run(&generate(0, config), &RunOptions::default());
+}
+
+/// An `event_queue_size` below the library minimum (10) must be rejected up
+/// front with a clear message, mirroring `SessionBuilder::with_event_queue_size`,
+/// rather than surfacing as a builder error deep in session construction.
+#[test]
+#[should_panic(expected = "event_queue_size must be >= 10")]
+fn run_rejects_too_small_event_queue_size() {
+    let config = SimConfig {
+        n_players: 2,
+        event_queue_size: Some(5),
+        ..SimConfig::smoke(2)
+    };
+    let _ = run(&generate(0, config), &RunOptions::default());
+}
