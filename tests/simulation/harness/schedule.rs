@@ -260,8 +260,10 @@ pub enum ScheduleEvent {
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     GracefulRemove { by: usize, target: usize },
     /// A live peer `by` explicitly disconnects remote player `target` via
-    /// `P2PSession::disconnect_player`, then the target leaves the harness.
-    /// This is the legacy GGRS-style user path: unlike
+    /// `P2PSession::disconnect_player`. If the API call succeeds, the target
+    /// then leaves the harness; if it errors, the runner records a
+    /// `SessionError` and keeps the target live. This is the legacy GGRS-style
+    /// user path: unlike
     /// [`ScheduleEvent::GracefulRemove`], it does not freeze the dropped slot or
     /// emit `PeerDropped`; with today's `Halt` path it reports non-recovery
     /// and remains part of the D13 "not fully fail-closed" defect surface. That

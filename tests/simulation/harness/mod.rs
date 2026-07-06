@@ -699,10 +699,11 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 },
                 ScheduleEvent::LegacyDisconnect { by, target } => {
                     // User-driven legacy disconnect: one survivor explicitly
-                    // kicks the target through the older Halt-oriented API, and
-                    // the target stops participating. This deliberately does
-                    // not assert graceful convergence; D13 tracks the current
-                    // fabricated-frame Halt behavior.
+                    // kicks the target through the older Halt-oriented API. On
+                    // success the target stops participating; on error it
+                    // stays live and the oracle records the failed API call.
+                    // This deliberately does not assert graceful convergence;
+                    // D13 tracks the current fabricated-frame Halt behavior.
                     if !dead[*by] && !dead[*target] {
                         let handle = PlayerHandle::new(*target);
                         if let Err(error) = peers[*by].session.disconnect_player(handle) {

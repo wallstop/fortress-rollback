@@ -942,6 +942,46 @@ fn run_rejects_out_of_range_set_input_delay_peer() {
     let _ = run(&schedule, &RunOptions::default());
 }
 
+/// Builds the common clean 4-peer lifecycle schedule used by the planted drop
+/// operations. `event`, when present, fires at step 100; `None` yields the
+/// matched no-op control.
+fn clean_four_peer_lifecycle_schedule(
+    disconnect_behavior: DropPolicy,
+    event: Option<ScheduleEvent>,
+) -> Schedule {
+    let n = 4;
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        disconnect_behavior,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some(event) = event {
+        events.push((100, event));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
 /// Builds a peer-kill schedule: a clean 4-mesh (`ContinueWithout`) in which peer
 /// 1 crashes at step 100 — the harness stops driving it and detaches it from the
 /// fabric, so it never returns (not even after `HealAll`). Under `ContinueWithout`
@@ -950,118 +990,39 @@ fn run_rejects_out_of_range_set_input_delay_peer() {
 /// liveness checks. `None` yields the identical schedule without the kill, the
 /// control the premise compares to.
 fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
-    let n = 4;
-    let config = SimConfig {
-        n_players: n,
-        steps: 900,
-        disconnect_behavior: DropPolicy::ContinueWithout,
-        noise: BackgroundNoise::Clean,
-        ..SimConfig::smoke(n)
-    };
-    let mut initial_links = Vec::new();
-    for from in 0..n {
-        for to in 0..n {
-            if from != to {
-                initial_links.push((from, to, LinkPolicy::clean()));
-            }
-        }
-    }
-    let heal_at = 650;
-    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some(peer) = kill {
-        events.push((100, ScheduleEvent::PeerKill { peer }));
-    }
-    events.sort_by_key(|(step, _)| *step);
-    Schedule {
-        schema_version: SCHEDULE_SCHEMA_VERSION,
-        seed: 0,
-        link_seed: 0,
-        config,
-        initial_links,
-        events,
-        heal_at,
-    }
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::ContinueWithout,
+        kill.map(|peer| ScheduleEvent::PeerKill { peer }),
+    )
 }
 
 /// Builds a graceful-remove schedule: a clean 4-mesh (`ContinueWithout`) in
-/// which peer `by` calls `remove_player(target)` at step 100, then `target`
-/// leaves the harness. Only one survivor applies the user API; the other
-/// survivors must learn the drop through protocol gossip and converge on the
-/// same frozen slot value. `None` yields the identical schedule without the
-/// removal, the control the premise compares to.
+/// which peer `by` calls `remove_player(target)` at step 100. On success the
+/// target leaves the harness; on error it stays live and the oracle records the
+/// failed API call. Only one survivor applies the user API; the other survivors
+/// must learn the drop through protocol gossip and converge on the same frozen
+/// slot value. `None` yields the identical schedule without the removal, the
+/// control the premise compares to.
 fn graceful_remove_schedule(remove: Option<(usize, usize)>) -> Schedule {
-    let n = 4;
-    let config = SimConfig {
-        n_players: n,
-        steps: 900,
-        disconnect_behavior: DropPolicy::ContinueWithout,
-        noise: BackgroundNoise::Clean,
-        ..SimConfig::smoke(n)
-    };
-    let mut initial_links = Vec::new();
-    for from in 0..n {
-        for to in 0..n {
-            if from != to {
-                initial_links.push((from, to, LinkPolicy::clean()));
-            }
-        }
-    }
-    let heal_at = 650;
-    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some((by, target)) = remove {
-        events.push((100, ScheduleEvent::GracefulRemove { by, target }));
-    }
-    events.sort_by_key(|(step, _)| *step);
-    Schedule {
-        schema_version: SCHEDULE_SCHEMA_VERSION,
-        seed: 0,
-        link_seed: 0,
-        config,
-        initial_links,
-        events,
-        heal_at,
-    }
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::ContinueWithout,
+        remove.map(|(by, target)| ScheduleEvent::GracefulRemove { by, target }),
+    )
 }
 
 /// Builds a legacy-disconnect schedule: a clean 4-mesh in which peer `by`
-/// calls the older `disconnect_player(target)` API at step 100, then `target`
-/// leaves the harness. This is intentionally not a graceful-convergence
-/// contract: today's `disconnect_player` path is Halt-oriented and intersects
-/// D13, so the useful property is that the op is executable, deterministic, and
-/// reported as the expected post-heal non-recovery. `None` yields the identical
-/// schedule without the disconnect, the control the premise compares to.
+/// calls the older `disconnect_player(target)` API at step 100. On success the
+/// target leaves the harness; on error it stays live and the oracle records the
+/// failed API call. This is intentionally not a graceful-convergence contract:
+/// today's `disconnect_player` path is Halt-oriented and intersects D13, so the
+/// useful property is that the op is executable, deterministic, and reported as
+/// the expected post-heal non-recovery. `None` yields the identical schedule
+/// without the disconnect, the control the premise compares to.
 fn legacy_disconnect_schedule(disconnect: Option<(usize, usize)>) -> Schedule {
-    let n = 4;
-    let config = SimConfig {
-        n_players: n,
-        steps: 900,
-        disconnect_behavior: DropPolicy::Halt,
-        noise: BackgroundNoise::Clean,
-        ..SimConfig::smoke(n)
-    };
-    let mut initial_links = Vec::new();
-    for from in 0..n {
-        for to in 0..n {
-            if from != to {
-                initial_links.push((from, to, LinkPolicy::clean()));
-            }
-        }
-    }
-    let heal_at = 650;
-    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some((by, target)) = disconnect {
-        events.push((100, ScheduleEvent::LegacyDisconnect { by, target }));
-    }
-    events.sort_by_key(|(step, _)| *step);
-    Schedule {
-        schema_version: SCHEDULE_SCHEMA_VERSION,
-        seed: 0,
-        link_seed: 0,
-        config,
-        initial_links,
-        events,
-        heal_at,
-    }
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::Halt,
+        disconnect.map(|(by, target)| ScheduleEvent::LegacyDisconnect { by, target }),
+    )
 }
 
 /// M3 §6.1 lifecycle vocabulary — the peer crash (`ScheduleEvent::PeerKill`).
