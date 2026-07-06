@@ -676,7 +676,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     // oracle must surface, not swallow.
                     let handle = PlayerHandle::new(*peer);
                     if let Err(error) = peers[*peer].session.set_input_delay(handle, *delay) {
-                        oracle.observe_advance_error(*peer, step, &error);
+                        oracle.observe_session_error("set_input_delay", *peer, step, &error);
                     }
                 },
                 ScheduleEvent::GracefulRemove { by, target } => {
@@ -687,7 +687,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     if !dead[*by] && !dead[*target] {
                         let handle = PlayerHandle::new(*target);
                         if let Err(error) = peers[*by].session.remove_player(handle) {
-                            oracle.observe_advance_error(*by, step, &error);
+                            oracle.observe_session_error("remove_player", *by, step, &error);
                         } else {
                             dead[*target] = true;
                             net.detach(addrs[*target]);
@@ -763,7 +763,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                             if let Err(error) =
                                 slot.session.add_local_input(handle, input_for(step, i))
                             {
-                                oracle.observe_advance_error(i, step, &error);
+                                oracle.observe_session_error("add_local_input", i, step, &error);
                             }
                         }
                         match slot.session.advance_frame() {

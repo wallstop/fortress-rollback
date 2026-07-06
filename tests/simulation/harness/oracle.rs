@@ -18,9 +18,9 @@
 //!   silent desync. Checksum-mismatch metrics are also consumed directly so a
 //!   starved event queue cannot hide a detector finding. Either way the run
 //!   fails with the full picture recorded.
-//! - **(g) Session-error allowlist**: `advance_frame` while `Running` must
-//!   not error (the prediction throttle is `Ok` with no requests, not an
-//!   error). Any error fails the run with the step and peer recorded.
+//! - **(g) Session-error allowlist**: session APIs the harness expects to
+//!   succeed must not error. Any error fails the run with the operation, step,
+//!   and peer recorded.
 //! - **Violations**: telemetry violations at `Error`+ severity fail the run
 //!   (Critical is never acceptable; the Error allowlist arrives with the
 //!   lifecycle vocabulary in a later milestone, seeded by a fleet census).
@@ -88,8 +88,10 @@ pub enum OracleFailure {
         frame: i32,
         error: String,
     },
-    /// (g): `advance_frame` returned an error while `Running`.
+    /// (g): a session API returned an error while the harness expected it to
+    /// succeed.
     SessionError {
+        operation: &'static str,
         peer: usize,
         step: u32,
         error: String,
@@ -250,7 +252,7 @@ impl Oracle {
         self.dead[peer] = true;
     }
 
-    /// Whether `peer` was killed mid-run.
+    /// Whether `peer` was retired mid-run.
     fn is_dead(&self, peer: usize) -> bool {
         self.dead.get(peer).copied().unwrap_or(false)
     }
@@ -319,6 +321,22 @@ impl Oracle {
         }
     }
 
+    /// (g): a session API errored while the harness expected it to succeed.
+    pub fn observe_session_error(
+        &mut self,
+        operation: &'static str,
+        peer: usize,
+        step: u32,
+        error: &fortress_rollback::FortressError,
+    ) {
+        self.push_failure(OracleFailure::SessionError {
+            operation,
+            peer,
+            step,
+            error: format!("{error:?}"),
+        });
+    }
+
     /// (g): `advance_frame` errored while `Running`.
     pub fn observe_advance_error(
         &mut self,
@@ -326,11 +344,7 @@ impl Oracle {
         step: u32,
         error: &fortress_rollback::FortressError,
     ) {
-        self.push_failure(OracleFailure::SessionError {
-            peer,
-            step,
-            error: format!("{error:?}"),
-        });
+        self.observe_session_error("advance_frame", peer, step, error);
     }
 
     /// Telemetry violations collected for one peer over the whole run.
@@ -777,6 +791,35 @@ mod tests {
             1,
             "only the Error-severity violation should fail the run"
         );
+    }
+
+    /// Session errors carry the failing operation so non-advance harness calls
+    /// are diagnosable from the oracle verdict.
+    #[test]
+    fn oracle_records_session_error_operation() {
+        let mut oracle = Oracle::new(2);
+        oracle.observe_session_error(
+            "remove_player",
+            1,
+            7,
+            &fortress_rollback::FortressError::NotSynchronized,
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert_eq!(verdict.failures.len(), 1, "{:?}", verdict.failures);
+        assert!(matches!(
+            &verdict.failures[0],
+            OracleFailure::SessionError {
+                operation: "remove_player",
+                peer: 1,
+                step: 7,
+                error
+            } if error.contains("NotSynchronized")
+        ));
     }
 
     /// The failure cap keeps a systemically broken run readable.
