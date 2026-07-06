@@ -103,12 +103,13 @@ pub enum OracleFailure {
     NoLivePeers { n_players: usize },
     /// (c): a **live** peer failed the bounded post-heal liveness bar — after
     /// the last `HealAll`, its `confirmed_frame` did not advance by at least
-    /// `required` (G) frames within `window_steps` (B) steps. Catches a peer
-    /// pinned post-heal (or a mutual deadlock) that the coarse end-progress bar
-    /// (c-lite) can miss — a peer may recover late and still clear the absolute
-    /// end bar. Killed peers are excluded (dead, not pinned); the check is inert
-    /// when the schedule never heals and skipped when the post-heal window is
-    /// shorter than B. `advanced` is `after - at_heal` and may read negative
+    /// `required` (G) frames within the observed `window_steps` span (B, or B-1
+    /// at an exact-boundary drain). Catches a peer pinned post-heal (or a mutual
+    /// deadlock) that the coarse end-progress bar (c-lite) can miss — a peer may
+    /// recover late and still clear the absolute end bar. Killed peers are
+    /// excluded (dead, not pinned); the check is inert when the schedule never
+    /// heals and skipped when the post-heal drain is too short for both anchors
+    /// to be observable. `advanced` is `after - at_heal` and may read negative
     /// under the documented transient `confirmed_frame` dip — recorded raw so a
     /// dip is visible in the repro rather than hidden.
     PostHealLiveness {
@@ -127,17 +128,19 @@ pub enum OracleFailure {
 /// schedule that never heals — simply skips (c).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HealLiveness {
-    /// The (c) check should run: an actual `HealAll` event fired AND the run
-    /// leaves a full recovery window (≥ B steps) after it to observe. The runner
-    /// owns this decision (heal detection + drain length); `false` ⇒ (c) is
-    /// inert (no heal) or indeterminate (window < B), reported as
+    /// The (c) check should run: an actual `HealAll` event fired AND enough
+    /// post-heal drain remains for both anchors to be observable (the recovery
+    /// anchor `heal + B` is at most the run's end). The runner owns this
+    /// decision (heal detection + drain length); `false` ⇒ (c) is inert (no
+    /// heal) or indeterminate (window too short), reported as
     /// `recovered_within_b = None`.
     pub ran: bool,
     /// Actual steps spanned by the two anchors — the span the advance is
-    /// measured over. Equals the derived B, or B-1 when the recovery anchor
-    /// clamps to the run's last step (an exact-boundary drain window). Reported
-    /// in `PostHealLiveness` so the failure states the real window, not a
-    /// nominal one.
+    /// measured over, and the source of truth for the window (not a nominal B).
+    /// Equals the derived B, or B-1 at the exact-boundary drain where the
+    /// recovery anchor `heal + B` lands on the run's end and clamps to the last
+    /// recorded step. Reported in `PostHealLiveness` so a failure states the
+    /// real window.
     pub window_steps: u32,
     /// Minimum confirmed-frame advance required within the window (G).
     pub required_advance: i32,
@@ -153,13 +156,14 @@ pub struct HealLiveness {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub failures: Vec<OracleFailure>,
-    /// (i) metastability: `Some(true)` iff the schedule healed, the post-heal
-    /// window was ≥ B, and every live peer advanced ≥ G within B (the (c) check
-    /// ran and passed); `Some(false)` when it ran and at least one live peer was
-    /// pinned; `None` when (c) was inert (no heal), indeterminate (window < B),
-    /// or every peer was killed (no live peer to report recovery for — that is
-    /// caught separately by `NoLivePeers`, not reported here as "recovered").
-    /// The explicit "recovered within B steps of heal: yes/no" signal.
+    /// (i) metastability: `Some(true)` iff the schedule healed, both post-heal
+    /// anchors were observable, and every live peer advanced ≥ G within the
+    /// window (the (c) check ran and passed); `Some(false)` when it ran and at
+    /// least one live peer was pinned; `None` when (c) was inert (no heal), the
+    /// window was too short to observe, or every peer was killed (no live peer
+    /// to report recovery for — that is caught separately by `NoLivePeers`, not
+    /// reported here as "recovered"). The explicit "recovered within B steps of
+    /// heal: yes/no" signal.
     pub recovered_within_b: Option<bool>,
 }
 
@@ -416,18 +420,19 @@ impl Oracle {
         }
 
         // (c) bounded post-heal liveness. Inert unless the schedule healed AND
-        // the post-heal drain window is at least B (else the anchors would
-        // sample an incomplete recovery — indeterminate, never a failure). Dead
-        // peers are excluded exactly like (c-lite): a crashed peer cannot
-        // advance and that is not its own fault. A *live* peer whose confirmed
-        // frame did not advance by G within B steps is pinned (or mutually
-        // deadlocked) — fail it, per peer. This is orthogonal to (c-lite): a
-        // peer can clear the absolute end bar (recovered late, ends ≥ 30) yet
-        // fail this bounded bar (did not advance ≥ G within B), which is exactly
-        // the metastable stall (c-lite) misses.
-        // (c) runs only when the runner signalled it (a heal fired AND a full
-        // recovery window follows); otherwise it stays inert (no heal) or
-        // indeterminate (window < B) — `None`, never a pass or a fail.
+        // the post-heal drain is long enough for both anchors to be observable
+        // (else the anchors would sample an incomplete recovery — indeterminate,
+        // never a failure). Dead peers are excluded exactly like (c-lite): a
+        // crashed peer cannot advance and that is not its own fault. A *live*
+        // peer whose confirmed frame did not advance by G within the observed
+        // window is pinned (or mutually deadlocked) — fail it, per peer. This is
+        // orthogonal to (c-lite): a peer can clear the absolute end bar
+        // (recovered late, ends ≥ 30) yet fail this bounded bar (did not advance
+        // ≥ G within the window), which is exactly the metastable stall (c-lite)
+        // misses.
+        // (c) runs only when the runner signalled it (a heal fired AND both
+        // anchors are observable); otherwise it stays inert (no heal) or
+        // indeterminate (window too short) — `None`, never a pass or a fail.
         let recovered_within_b = if self.heal.ran {
             let mut checked_any = false;
             let mut all_live_ok = true;
@@ -441,6 +446,11 @@ impl Oracle {
                 // panicking on an index.
                 let at_heal = self.heal.confirmed_at_heal.get(peer).copied().unwrap_or(-1);
                 let after = self.heal.confirmed_after.get(peer).copied().unwrap_or(-1);
+                // Signed `saturating_sub`: guards only the (impossible for frame
+                // numbers) i32 overflow, NOT the sign — a transient dip where
+                // `after < at_heal` is preserved as a negative `advanced` and
+                // reported raw (it then trips the `< required` bar and shows the
+                // dip in the failure), never clamped to 0.
                 let advanced = after.saturating_sub(at_heal);
                 if advanced < self.heal.required_advance {
                     all_live_ok = false;

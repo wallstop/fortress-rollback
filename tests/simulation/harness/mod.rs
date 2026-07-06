@@ -70,17 +70,22 @@ pub struct RunReport {
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
     pub peer_wire: Vec<PeerWireTotals>,
-    /// (c) each peer's confirmed frame sampled at the last `HealAll`
-    /// (`schedule.heal_at`); empty when the schedule never heals. Indexed by peer.
+    /// (c) each peer's confirmed frame sampled at the heal anchor — the step of
+    /// the last actual `ScheduleEvent::HealAll` (derived from the event stream,
+    /// not `schedule.heal_at`, which can drift or be set without a `HealAll`);
+    /// empty when the schedule never heals. Indexed by peer.
     pub confirmed_at_heal: Vec<i32>,
-    /// (c) each peer's confirmed frame sampled B steps after the heal (clamped
-    /// to end of run); empty when the schedule never heals. Indexed by peer.
+    /// (c) each peer's confirmed frame sampled at the recovery anchor — B steps
+    /// after the heal, or the run's last step when that lands past the end (an
+    /// exact-boundary drain, span B-1); empty when the schedule never heals.
+    /// Indexed by peer.
     pub confirmed_after_recovery: Vec<i32>,
     /// (i) metastability: `Some(true/false)` iff the (c) bounded post-heal
-    /// liveness check ran (the schedule healed and the post-heal window was ≥ B)
-    /// — the explicit "recovered within B steps of heal: yes/no". `None` when
-    /// (c) was inert (no heal) or indeterminate (window < B). Mirrors
-    /// [`Verdict::recovered_within_b`].
+    /// liveness check ran — a `HealAll` fired and both anchors are observable (a
+    /// full recovery window; span B, or B-1 at an exact-boundary drain). The
+    /// explicit "recovered within B steps of heal: yes/no". `None` when (c) was
+    /// inert (no heal), the window was too short to observe, or every peer was
+    /// killed. Mirrors [`Verdict::recovered_within_b`].
     pub recovered_within_b: Option<bool>,
 }
 
@@ -528,11 +533,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // without emitting a heal (e.g. a no-fault clock-skew run sets it to `steps`
     // with no event), and a hand-authored schedule's `heal_at` field could drift
     // from where its event actually fires. Deriving both the anchor and the
-    // window from the event keeps them consistent. (c) runs only if a heal fired
-    // AND a full recovery window (≥ B steps) follows it, so recovery is fully
-    // observable; otherwise it is inert/indeterminate. The recovery anchor
-    // clamps to the last step, so its span is B, or B-1 at an exact-boundary
-    // drain — the runner reports that real span to the oracle.
+    // window from the event keeps them consistent. (c) runs only when a heal
+    // fired AND enough post-heal drain remains for both anchors to be observable
+    // (`steps - heal_at >= B`, i.e. the recovery anchor `heal_at + B` is at most
+    // the run's end); otherwise it is inert (no heal) or indeterminate (window
+    // too short). The recovery anchor clamps to the last recorded step only at
+    // the exact boundary `heal_at + B == steps`, giving a span of B-1 there and
+    // exactly B otherwise — the runner reports that real span to the oracle, so
+    // no case is silently mislabelled a full-B window.
     let heal_step = schedule
         .events
         .iter()
