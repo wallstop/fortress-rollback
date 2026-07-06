@@ -417,6 +417,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             "event_queue_size must be >= 10 (SessionBuilder rejects smaller); got {size}"
         );
     }
+    // A 0ms step never advances virtual time and makes the derived (c) recovery
+    // window (`RECOVERY_WINDOW_MS / step_dt_ms`) meaningless — reject it loudly
+    // rather than let `recovery_window_steps()`'s `.max(1)` div-by-zero guard
+    // silently paper over a broken config.
+    assert!(
+        schedule.config.step_dt_ms >= 1,
+        "step_dt_ms must be >= 1 (a 0ms step never advances virtual time)"
+    );
 
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -549,12 +557,24 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         .max();
     let b_steps = schedule.config.recovery_window_steps();
     let last_step = schedule.config.steps.saturating_sub(1);
+    // A healthy peer confirms ~1 frame per step post-heal, so the observed
+    // window (in steps) must be at least G wide for the G-frame floor to be
+    // clearable at all; a narrower window cannot distinguish a pinned peer from
+    // a healthy one, so (c) is indeterminate (`None`) rather than a false
+    // `Some(false)` charged against every healthy run. Unreachable at the
+    // default 16ms step_dt (span ~250 ≫ G=10); guards a pathologically coarse
+    // step_dt / tiny B (and the exact-boundary B-1 span).
+    let g_floor = u32::try_from(POST_HEAL_MIN_ADVANCE).unwrap_or(0);
     let (run_c, heal_anchor_at, recovery_anchor_at) = match heal_step {
-        Some(heal_at) if schedule.config.steps.saturating_sub(heal_at) >= b_steps => (
-            true,
-            heal_at.min(last_step),
-            heal_at.saturating_add(b_steps).min(last_step),
-        ),
+        Some(heal_at) if schedule.config.steps.saturating_sub(heal_at) >= b_steps => {
+            let heal_anchor = heal_at.min(last_step);
+            let recovery_anchor = heal_at.saturating_add(b_steps).min(last_step);
+            if recovery_anchor.saturating_sub(heal_anchor) >= g_floor {
+                (true, heal_anchor, recovery_anchor)
+            } else {
+                (false, 0, 0)
+            }
+        },
         _ => (false, 0, 0),
     };
     let mut confirmed_at_heal: Vec<i32> = Vec::new();

@@ -1552,6 +1552,21 @@ fn run_rejects_too_small_event_queue_size() {
     let _ = run(&generate(0, config), &RunOptions::default());
 }
 
+/// A `step_dt_ms` of 0 never advances virtual time and makes the derived (c)
+/// recovery window (`RECOVERY_WINDOW_MS / step_dt_ms`) meaningless — the runner
+/// must reject it up front rather than let `recovery_window_steps()`'s
+/// div-by-zero `.max(1)` guard silently paper over a broken config.
+#[test]
+#[should_panic(expected = "step_dt_ms must be >= 1")]
+fn run_rejects_zero_step_dt() {
+    let config = SimConfig {
+        n_players: 2,
+        step_dt_ms: 0,
+        ..SimConfig::smoke(2)
+    };
+    let _ = run(&generate(0, config), &RunOptions::default());
+}
+
 /// Heal step + length for the (c) bounded post-heal liveness tests. The recovery
 /// window B (`recovery_window_steps`, 250 at 16ms/step) plus slack must fit
 /// before `STEPS`, so the recovery anchor (`heal_at + B = 650`) is a genuine
@@ -1674,6 +1689,42 @@ fn post_heal_liveness_is_inert_without_a_heal() {
             .iter()
             .any(|f| matches!(f, OracleFailure::PostHealLiveness { .. })),
         "(c) must not fire without a heal: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// (c) NEGATIVE CONTROL 3: when `step_dt_ms` is coarse enough that the recovery
+/// window B is narrower than the G-frame floor (here 500ms/step ⇒ B=8 steps < G=10),
+/// a healthy peer confirming ~1 frame/step physically cannot advance G frames in
+/// the window. (c) must degrade to indeterminate (`None`) rather than charge a
+/// false `PostHealLiveness` against every healthy peer — the run still passes.
+#[test]
+fn post_heal_liveness_is_indeterminate_when_window_narrower_than_g() {
+    let mut schedule = heal_liveness_schedule(None, true);
+    schedule.config.step_dt_ms = 500;
+    assert!(
+        schedule.config.recovery_window_steps() < u32::try_from(POST_HEAL_MIN_ADVANCE).unwrap(),
+        "premise: this step_dt must make B narrower than G"
+    );
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert_eq!(
+        report.recovered_within_b, None,
+        "(c) must be indeterminate when the window is narrower than G, not a false failure"
+    );
+    assert!(
+        report.confirmed_at_heal.is_empty() && report.confirmed_after_recovery.is_empty(),
+        "an indeterminate (c) samples no anchors: at_heal={:?} after={:?}",
+        report.confirmed_at_heal,
+        report.confirmed_after_recovery
+    );
+    assert!(
+        !report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::PostHealLiveness { .. })),
+        "(c) must not fire a false failure on a too-narrow window: {:?}",
         report.verdict.failures
     );
 }
