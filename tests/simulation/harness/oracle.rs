@@ -156,7 +156,9 @@ pub struct Verdict {
     /// (i) metastability: `Some(true)` iff the schedule healed, the post-heal
     /// window was ≥ B, and every live peer advanced ≥ G within B (the (c) check
     /// ran and passed); `Some(false)` when it ran and at least one live peer was
-    /// pinned; `None` when (c) was inert (no heal) or indeterminate (window < B).
+    /// pinned; `None` when (c) was inert (no heal), indeterminate (window < B),
+    /// or every peer was killed (no live peer to report recovery for — that is
+    /// caught separately by `NoLivePeers`, not reported here as "recovered").
     /// The explicit "recovered within B steps of heal: yes/no" signal.
     pub recovered_within_b: Option<bool>,
 }
@@ -426,12 +428,14 @@ impl Oracle {
         // (c) runs only when the runner signalled it (a heal fired AND a full
         // recovery window follows); otherwise it stays inert (no heal) or
         // indeterminate (window < B) — `None`, never a pass or a fail.
-        let recovered_within_b = self.heal.ran.then(|| {
+        let recovered_within_b = if self.heal.ran {
+            let mut checked_any = false;
             let mut all_live_ok = true;
             for peer in 0..self.n_players {
                 if self.is_dead(peer) {
                     continue;
                 }
+                checked_any = true;
                 // A missing per-peer entry would be a runner bug; read it as
                 // NULL (-1) so a plumbing bug fails the bar loudly rather than
                 // panicking on an index.
@@ -450,8 +454,15 @@ impl Oracle {
                     });
                 }
             }
-            all_live_ok
-        });
+            // An all-dead mesh has no live peer whose recovery to report: the
+            // metastability signal is indeterminate (`None`), not "recovered".
+            // (Without this guard the loop skips every peer and `all_live_ok`
+            // stays `true`, so a fully-crashed mesh would read `Some(true)`.)
+            // The verdict itself still fails independently via `NoLivePeers`.
+            checked_any.then_some(all_live_ok)
+        } else {
+            None
+        };
 
         Verdict {
             failures: self.failures,
@@ -648,6 +659,43 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, OracleFailure::NoLivePeers { n_players: 2 })),
             "an all-crashed mesh must fail, not vacuously pass: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// The (i) metastability signal must not read "recovered" for a mesh with no
+    /// live peer left. Even when (c) is armed (`ran = true`), an all-dead mesh
+    /// has no peer whose recovery to report, so `recovered_within_b` is `None`
+    /// (indeterminate) rather than a vacuous `Some(true)` from an empty loop.
+    #[test]
+    fn recovered_within_b_is_none_when_every_peer_is_killed() {
+        let mut oracle = Oracle::new(2);
+        oracle.mark_peer_dead(0);
+        oracle.mark_peer_dead(1);
+        oracle.set_heal_liveness(HealLiveness {
+            ran: true,
+            window_steps: 250,
+            required_advance: POST_HEAL_MIN_ADVANCE,
+            confirmed_at_heal: vec![100, 100],
+            confirmed_after: vec![100, 100],
+        });
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert_eq!(
+            verdict.recovered_within_b, None,
+            "an all-dead mesh must be indeterminate, not vacuously recovered: {:?}",
+            verdict.recovered_within_b
+        );
+        // And no phantom per-peer liveness failure is charged to a dead peer.
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| matches!(f, OracleFailure::PostHealLiveness { .. })),
+            "dead peers must not be charged a (c) failure: {:?}",
             verdict.failures
         );
     }
