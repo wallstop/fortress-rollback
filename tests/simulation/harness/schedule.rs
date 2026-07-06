@@ -175,6 +175,32 @@ impl SimConfig {
     pub fn step_dt(&self) -> Duration {
         Duration::from_millis(self.step_dt_ms)
     }
+
+    /// Virtual wall-clock budget for post-heal recovery, in milliseconds — the
+    /// bound `B` for the oracle's (c) bounded-liveness check. Folds the maximum
+    /// documented compound recovery path (a peer that dropped during a partition
+    /// must, after the network heals, still time its endpoints out, re-run the
+    /// sync handshake, then re-fold connect-status gossip before it resumes
+    /// confirming): `disconnect_timeout` (2000ms), plus a sync-retry burst
+    /// (`num_sync_packets` times `sync_retry_interval` = 5 times 200ms = 1000ms),
+    /// plus gossip settle (3 times `keepalive_interval` = 600ms), rounded up to
+    /// one further keepalive round of slack. Source of the constants:
+    /// `src/network/protocol/mod.rs` `poll()` Running arm (:1237-1258, the
+    /// disconnect and keepalive cadence) and `SyncConfig::default` (:6431-6435);
+    /// `DEFAULT_DISCONNECT_TIMEOUT` and `DEFAULT_DISCONNECT_NOTIFY_START`
+    /// (`src/sessions/builder.rs:43-44`). This is the same ~250-step budget the
+    /// schedule generator already reserves as its post-heal drain window.
+    pub const RECOVERY_WINDOW_MS: u64 = 4000;
+
+    /// The (c) bounded-recovery window `B` in **steps** at this schedule's
+    /// `step_dt` — a fixed [`RECOVERY_WINDOW_MS`](Self::RECOVERY_WINDOW_MS)
+    /// wall-clock budget converted to the step granularity, so the bound is the
+    /// same real duration regardless of `step_dt_ms` (250 steps at 16ms, 125 at
+    /// 32ms, 500 at 8ms).
+    #[must_use]
+    pub fn recovery_window_steps(&self) -> u32 {
+        u32::try_from(Self::RECOVERY_WINDOW_MS.div_ceil(self.step_dt_ms.max(1))).unwrap_or(u32::MAX)
+    }
 }
 
 /// A timed control-plane event. Link endpoints are peer *indices* (resolved

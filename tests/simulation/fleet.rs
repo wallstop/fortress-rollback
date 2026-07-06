@@ -9,7 +9,10 @@ use super::harness::schedule::{
     generate, AppModel, BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
-use super::harness::{oracle::OracleFailure, run, RunOptions};
+use super::harness::{
+    oracle::{OracleFailure, POST_HEAL_MIN_ADVANCE},
+    run, RunOptions,
+};
 use crate::common::sim_net::LinkPolicy;
 use std::time::Duration;
 
@@ -1547,4 +1550,233 @@ fn run_rejects_too_small_event_queue_size() {
         ..SimConfig::smoke(2)
     };
     let _ = run(&generate(0, config), &RunOptions::default());
+}
+
+/// A `step_dt_ms` of 0 never advances virtual time and makes the derived (c)
+/// recovery window (`RECOVERY_WINDOW_MS / step_dt_ms`) meaningless — the runner
+/// must reject it up front rather than let `recovery_window_steps()`'s
+/// div-by-zero `.max(1)` guard silently paper over a broken config.
+#[test]
+#[should_panic(expected = "step_dt_ms must be >= 1")]
+fn run_rejects_zero_step_dt() {
+    let config = SimConfig {
+        n_players: 2,
+        step_dt_ms: 0,
+        ..SimConfig::smoke(2)
+    };
+    let _ = run(&generate(0, config), &RunOptions::default());
+}
+
+/// Heal step + length for the (c) bounded post-heal liveness tests. The recovery
+/// window B (`recovery_window_steps`, 250 at 16ms/step) plus slack must fit
+/// before `STEPS`, so the recovery anchor (`heal_at + B = 650`) is a genuine
+/// mid-drain sample rather than an end-of-run clamp.
+const HEAL_LIVENESS_HEAL_AT: u32 = 400;
+const HEAL_LIVENESS_STEPS: u32 = 700;
+
+/// Builds a schedule for the (c) bounded post-heal liveness checks: a clean
+/// 4-mesh (`ContinueWithout`) that optionally emits a `HealAll` at
+/// `HEAL_LIVENESS_HEAL_AT` and optionally freezes peer 1 for `stall` steps from
+/// that same step. `heal = false` emits no `HealAll` (heal_at = steps) — the
+/// "never heals" control, where (c) must stay inert. A short `stall` hitches
+/// peer 1 but it catches up within the window (passes (c)); a `stall` spanning
+/// the whole window pins it (fails (c)). The two differ only in stall length, so
+/// the pair is a clean red-green premise.
+fn heal_liveness_schedule(stall: Option<u32>, heal: bool) -> Schedule {
+    let n = 4;
+    let config = SimConfig {
+        n_players: n,
+        steps: HEAL_LIVENESS_STEPS,
+        noise: BackgroundNoise::Clean,
+        // ContinueWithout so the three survivors drop a long-pinned peer and
+        // keep confirming — the (c) failure then isolates to the pinned peer,
+        // rather than Halt taking the whole mesh down with it.
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    if let Some(steps) = stall {
+        events.push((
+            HEAL_LIVENESS_HEAL_AT,
+            ScheduleEvent::PeerStall { peer: 1, steps },
+        ));
+    }
+    let heal_at = if heal {
+        events.push((HEAL_LIVENESS_HEAL_AT, ScheduleEvent::HealAll));
+        HEAL_LIVENESS_HEAL_AT
+    } else {
+        HEAL_LIVENESS_STEPS
+    };
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+/// (c) POSITIVE: peer 1 hitches for 60 steps at the heal — well under the
+/// recovery window B — and the mesh catches up, so every live peer advances ≥ G
+/// and (c) passes with `recovered_within_b == Some(true)`. Also proves (c)
+/// actually ran (anchors sampled per peer, each clears the floor) — not silently
+/// inert.
+#[test]
+fn post_heal_liveness_passes_when_a_hitched_peer_recovers() {
+    let schedule = heal_liveness_schedule(Some(60), true);
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert_eq!(
+        report.recovered_within_b,
+        Some(true),
+        "(c) must run and pass on a mesh that recovers: at_heal={:?} after={:?}",
+        report.confirmed_at_heal,
+        report.confirmed_after_recovery
+    );
+    assert_eq!(
+        report.confirmed_at_heal.len(),
+        4,
+        "one heal anchor per peer"
+    );
+    assert_eq!(
+        report.confirmed_after_recovery.len(),
+        4,
+        "one recovery anchor per peer"
+    );
+    for peer in 0..4 {
+        let advanced = report.confirmed_after_recovery[peer] - report.confirmed_at_heal[peer];
+        assert!(
+            advanced >= POST_HEAL_MIN_ADVANCE,
+            "peer {peer} must clear the G floor post-heal: advanced={advanced}"
+        );
+    }
+}
+
+/// (c) NEGATIVE CONTROL 1: a schedule that never emits `HealAll` must leave (c)
+/// inert — `recovered_within_b == None`, no anchors sampled, no `PostHealLiveness`
+/// failure. Pins that `heal_at` alone (without a `HealAll` event) is NOT treated
+/// as a heal.
+#[test]
+fn post_heal_liveness_is_inert_without_a_heal() {
+    let schedule = heal_liveness_schedule(None, false);
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert_eq!(
+        report.recovered_within_b, None,
+        "(c) must be inert when the schedule never heals"
+    );
+    assert!(
+        report.confirmed_at_heal.is_empty() && report.confirmed_after_recovery.is_empty(),
+        "no HealAll ⇒ no heal anchors: at_heal={:?} after={:?}",
+        report.confirmed_at_heal,
+        report.confirmed_after_recovery
+    );
+    assert!(
+        !report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::PostHealLiveness { .. })),
+        "(c) must not fire without a heal: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// (c) NEGATIVE CONTROL 3: when `step_dt_ms` is coarse enough that the recovery
+/// window B is narrower than the G-frame floor (here 500ms/step ⇒ B=8 steps < G=10),
+/// a healthy peer confirming ~1 frame/step physically cannot advance G frames in
+/// the window. (c) must degrade to indeterminate (`None`) rather than charge a
+/// false `PostHealLiveness` against every healthy peer — the run still passes.
+#[test]
+fn post_heal_liveness_is_indeterminate_when_window_narrower_than_g() {
+    let mut schedule = heal_liveness_schedule(None, true);
+    schedule.config.step_dt_ms = 500;
+    assert!(
+        schedule.config.recovery_window_steps() < u32::try_from(POST_HEAL_MIN_ADVANCE).unwrap(),
+        "premise: this step_dt must make B narrower than G"
+    );
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert_eq!(
+        report.recovered_within_b, None,
+        "(c) must be indeterminate when the window is narrower than G, not a false failure"
+    );
+    assert!(
+        report.confirmed_at_heal.is_empty() && report.confirmed_after_recovery.is_empty(),
+        "an indeterminate (c) samples no anchors: at_heal={:?} after={:?}",
+        report.confirmed_at_heal,
+        report.confirmed_after_recovery
+    );
+    assert!(
+        !report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::PostHealLiveness { .. })),
+        "(c) must not fire a false failure on a too-narrow window: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// (c) NEGATIVE CONTROL 2: the same mesh, but peer 1 is frozen across the ENTIRE
+/// recovery window (B + 10 steps) — it cannot advance, so (c) must fire on it
+/// (and only it) while the other three recover. The inverse is the positive test
+/// above (identical schedule minus the long freeze), so the pin is provably what
+/// flips (c) — the premise has teeth.
+#[test]
+fn post_heal_liveness_fires_on_a_pinned_peer() {
+    let b = SimConfig::smoke(4).recovery_window_steps();
+    let schedule = heal_liveness_schedule(Some(b + 10), true);
+    let report = run(&schedule, &RunOptions::default());
+    assert!(!report.verdict.passed(), "a pinned peer must fail the run");
+    assert_eq!(
+        report.recovered_within_b,
+        Some(false),
+        "(i) must report non-recovery when a peer is pinned"
+    );
+    let pinned = report
+        .verdict
+        .failures
+        .iter()
+        .filter(|f| matches!(f, OracleFailure::PostHealLiveness { peer: 1, .. }))
+        .count();
+    assert_eq!(
+        pinned, 1,
+        "(c) must fire on the pinned peer 1: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|f| matches!(f,
+            OracleFailure::PostHealLiveness { peer, .. } if *peer != 1)),
+        "only the pinned peer may fail (c): {:?}",
+        report.verdict.failures
+    );
+}
+
+/// (c)/(i) HALT INVERSE: a symmetric partition healed under `Halt` never recovers
+/// (all peers halt in `Synchronizing`), so (c) legitimately reports
+/// `Some(false)` — healed network, metastable mesh. This is a TRUE non-recovery
+/// (the headline metastability case), not a false positive; (c) discriminates
+/// recovered-vs-not, it does not merely pass.
+#[test]
+fn post_heal_liveness_reports_non_recovery_under_halt() {
+    let schedule = split_brain_schedule(DropPolicy::Halt);
+    let report = run(&schedule, &RunOptions::default());
+    assert!(!report.verdict.passed());
+    assert_eq!(
+        report.recovered_within_b,
+        Some(false),
+        "a Halt-halted mesh healed but never recovered — (i) must say so"
+    );
 }

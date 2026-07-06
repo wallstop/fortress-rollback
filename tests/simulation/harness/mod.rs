@@ -27,7 +27,7 @@ use fortress_rollback::{
     MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
     SessionBuilder, SessionState,
 };
-use oracle::{Oracle, Verdict};
+use oracle::{HealLiveness, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
 use schedule::{AppModel, Schedule, ScheduleEvent};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -70,6 +70,23 @@ pub struct RunReport {
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
     pub peer_wire: Vec<PeerWireTotals>,
+    /// (c) each peer's confirmed frame sampled at the heal anchor — the step of
+    /// the last actual `ScheduleEvent::HealAll` (derived from the event stream,
+    /// not `schedule.heal_at`, which can drift or be set without a `HealAll`);
+    /// empty when the schedule never heals. Indexed by peer.
+    pub confirmed_at_heal: Vec<i32>,
+    /// (c) each peer's confirmed frame sampled at the recovery anchor — B steps
+    /// after the heal, or the run's last step when that lands past the end (an
+    /// exact-boundary drain, span B-1); empty when the schedule never heals.
+    /// Indexed by peer.
+    pub confirmed_after_recovery: Vec<i32>,
+    /// (i) metastability: `Some(true/false)` iff the (c) bounded post-heal
+    /// liveness check ran — a `HealAll` fired and both anchors are observable (a
+    /// full recovery window; span B, or B-1 at an exact-boundary drain). The
+    /// explicit "recovered within B steps of heal: yes/no". `None` when (c) was
+    /// inert (no heal), the window was too short to observe, or every peer was
+    /// killed. Mirrors [`Verdict::recovered_within_b`].
+    pub recovered_within_b: Option<bool>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -170,12 +187,13 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
             self.final_confirmed,
+            self.recovered_within_b,
             self.net_stats,
             self.verdict.failures.len(),
             self.verdict
@@ -399,6 +417,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             "event_queue_size must be >= 10 (SessionBuilder rejects smaller); got {size}"
         );
     }
+    // A 0ms step never advances virtual time and makes the derived (c) recovery
+    // window (`RECOVERY_WINDOW_MS / step_dt_ms`) meaningless — reject it loudly
+    // rather than let `recovery_window_steps()`'s `.max(1)` div-by-zero guard
+    // silently paper over a broken config.
+    assert!(
+        schedule.config.step_dt_ms >= 1,
+        "step_dt_ms must be >= 1 (a 0ms step never advances virtual time)"
+    );
 
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -509,6 +535,50 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
+
+    // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
+    // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
+    // without emitting a heal (e.g. a no-fault clock-skew run sets it to `steps`
+    // with no event), and a hand-authored schedule's `heal_at` field could drift
+    // from where its event actually fires. Deriving both the anchor and the
+    // window from the event keeps them consistent. (c) runs only when a heal
+    // fired AND enough post-heal drain remains for both anchors to be observable
+    // (`steps - heal_at >= B`, i.e. the recovery anchor `heal_at + B` is at most
+    // the run's end); otherwise it is inert (no heal) or indeterminate (window
+    // too short). The recovery anchor clamps to the last recorded step only at
+    // the exact boundary `heal_at + B == steps`, giving a span of B-1 there and
+    // exactly B otherwise — the runner reports that real span to the oracle, so
+    // no case is silently mislabelled a full-B window.
+    let heal_step = schedule
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
+        .map(|(step, _)| *step)
+        .max();
+    let b_steps = schedule.config.recovery_window_steps();
+    let last_step = schedule.config.steps.saturating_sub(1);
+    // A healthy peer confirms ~1 frame per step post-heal, so the observed
+    // window (in steps) must be at least G wide for the G-frame floor to be
+    // clearable at all; a narrower window cannot distinguish a pinned peer from
+    // a healthy one, so (c) is indeterminate (`None`) rather than a false
+    // `Some(false)` charged against every healthy run. Unreachable at the
+    // default 16ms step_dt (span ~250 ≫ G=10); guards a pathologically coarse
+    // step_dt / tiny B (and the exact-boundary B-1 span).
+    let g_floor = u32::try_from(POST_HEAL_MIN_ADVANCE).unwrap_or(0);
+    let (run_c, heal_anchor_at, recovery_anchor_at) = match heal_step {
+        Some(heal_at) if schedule.config.steps.saturating_sub(heal_at) >= b_steps => {
+            let heal_anchor = heal_at.min(last_step);
+            let recovery_anchor = heal_at.saturating_add(b_steps).min(last_step);
+            if recovery_anchor.saturating_sub(heal_anchor) >= g_floor {
+                (true, heal_anchor, recovery_anchor)
+            } else {
+                (false, 0, 0)
+            }
+        },
+        _ => (false, 0, 0),
+    };
+    let mut confirmed_at_heal: Vec<i32> = Vec::new();
+    let mut confirmed_after_recovery: Vec<i32> = Vec::new();
 
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
@@ -654,6 +724,19 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             if options.probe_confirmed_at == Some(step) {
                 probe_confirmed.push(confirmed.as_i32());
             }
+
+            // (c) heal-anchored snapshots, reusing the same confirmed value. The
+            // peer loop runs in fixed order, so each vector ends up indexed by
+            // peer. Only populated when (c) runs (a heal fired with a full
+            // recovery window). Captured for every peer — a stalled/dead peer
+            // falls through to here with its frozen confirmed frame, so the
+            // vectors stay length-n and correctly peer-indexed.
+            if run_c && step == heal_anchor_at {
+                confirmed_at_heal.push(confirmed.as_i32());
+            }
+            if run_c && step == recovery_anchor_at {
+                confirmed_after_recovery.push(confirmed.as_i32());
+            }
         }
 
         if diagnose && step % 50 == 0 {
@@ -720,7 +803,19 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         })
         .collect();
 
+    // Hand the oracle the (c) bounded post-heal liveness inputs. `window_steps`
+    // is the ACTUAL anchor span (B, or B-1 at an exact-boundary drain where the
+    // recovery anchor clamped to the last step), so the failure reports the real
+    // window rather than a nominal one.
+    oracle.set_heal_liveness(HealLiveness {
+        ran: run_c,
+        window_steps: recovery_anchor_at.saturating_sub(heal_anchor_at),
+        required_advance: POST_HEAL_MIN_ADVANCE,
+        confirmed_at_heal: confirmed_at_heal.clone(),
+        confirmed_after: confirmed_after_recovery.clone(),
+    });
     let verdict = oracle.finalize(&recorded, &end_confirmed, &end_state);
+    let recovered_within_b = verdict.recovered_within_b;
     RunReport {
         verdict,
         trace_hash,
@@ -729,5 +824,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         net_stats: net.stats(),
         metrics,
         peer_wire,
+        confirmed_at_heal,
+        confirmed_after_recovery,
+        recovered_within_b,
     }
 }
