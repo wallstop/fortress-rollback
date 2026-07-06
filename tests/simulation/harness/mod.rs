@@ -29,7 +29,7 @@ use fortress_rollback::{
 };
 use oracle::{HealLiveness, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
 use schedule::{AppModel, Schedule, ScheduleEvent};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -347,11 +347,56 @@ pub fn run(schedule: &Schedule, options: &RunOptions) -> RunReport {
 
 fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
     let n = schedule.config.n_players;
+    assert!(
+        (2..=16).contains(&n),
+        "materialized simulation schedules must use 2..=16 players (got {n})"
+    );
+    assert!(
+        schedule.config.steps >= 2,
+        "materialized simulation schedules need at least 2 steps (got {})",
+        schedule.config.steps
+    );
+
     let clock = TestClock::new();
     let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
 
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
 
+    assert!(
+        schedule
+            .events
+            .windows(2)
+            .all(|pair| pair[0].0 <= pair[1].0),
+        "schedule events must be sorted by nondecreasing step"
+    );
+    for (step, _) in &schedule.events {
+        assert!(
+            *step < schedule.config.steps,
+            "schedule event at step {step} is outside the run (0..{})",
+            schedule.config.steps
+        );
+    }
+    if let Some(last_heal) = schedule
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
+        .map(|(step, _)| *step)
+        .max()
+    {
+        for (step, event) in &schedule.events {
+            assert!(
+                *step <= last_heal || matches!(event, ScheduleEvent::HealAll),
+                "non-HealAll event at step {step} occurs after the last HealAll at {last_heal}"
+            );
+        }
+    }
+    let expected_links = n * (n - 1);
+    assert_eq!(
+        schedule.initial_links.len(),
+        expected_links,
+        "initial_links must contain exactly one directed policy for every non-self pair"
+    );
+    let mut seen_links = BTreeSet::new();
     // Validate every peer index up front so a malformed or hand-edited corpus
     // schedule fails loudly with a clear message instead of panicking on a raw
     // slice index deep in the run (or, for `PeerStall` steps, silently in a
@@ -361,15 +406,29 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             *from < n && *to < n,
             "initial link ({from} -> {to}) out of range for a {n}-peer mesh"
         );
+        assert!(
+            *from != *to,
+            "initial link ({from} -> {to}) must not target itself"
+        );
+        assert!(
+            seen_links.insert((*from, *to)),
+            "duplicate initial link ({from} -> {to})"
+        );
     }
     for (_, event) in &schedule.events {
         match event {
             ScheduleEvent::SetLink { from, to, .. }
             | ScheduleEvent::Block { from, to, .. }
-            | ScheduleEvent::Hold { from, to, .. } => assert!(
-                *from < n && *to < n,
-                "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
-            ),
+            | ScheduleEvent::Hold { from, to, .. } => {
+                assert!(
+                    *from < n && *to < n,
+                    "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
+                );
+                assert!(
+                    *from != *to,
+                    "schedule event link ({from} -> {to}) must not target itself"
+                );
+            },
             ScheduleEvent::PeerStall { peer, steps } => {
                 assert!(
                     *peer < n,
@@ -384,6 +443,16 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 *peer < n,
                 "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
             ),
+            ScheduleEvent::GracefulRemove { by, target } => {
+                assert!(
+                    *by < n && *target < n,
+                    "lifecycle drop ({by} -> {target}) out of range for a {n}-peer mesh"
+                );
+                assert!(
+                    by != target,
+                    "lifecycle drop target must be remote (by={by}, target={target})"
+                );
+            },
             ScheduleEvent::PeerKill { peer } => assert!(
                 *peer < n,
                 "PeerKill peer {peer} out of range for a {n}-peer mesh"
@@ -598,7 +667,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
-                    stalled_until[*peer] = step.saturating_add(*steps);
+                    stalled_until[*peer] = stalled_until[*peer].max(step.saturating_add(*steps));
                 },
                 ScheduleEvent::SetInputDelay { peer, delay } => {
                     // Reconfigure the peer's own local input delay mid-run. A
@@ -607,7 +676,23 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     // oracle must surface, not swallow.
                     let handle = PlayerHandle::new(*peer);
                     if let Err(error) = peers[*peer].session.set_input_delay(handle, *delay) {
-                        oracle.observe_advance_error(*peer, step, &error);
+                        oracle.observe_session_error("set_input_delay", *peer, step, &error);
+                    }
+                },
+                ScheduleEvent::GracefulRemove { by, target } => {
+                    // User-driven graceful departure: one survivor explicitly
+                    // removes the target and the target stops participating. The
+                    // remaining live peers must learn the drop through gossip and
+                    // keep a byte-consistent confirmed prefix.
+                    if !dead[*by] && !dead[*target] {
+                        let handle = PlayerHandle::new(*target);
+                        if let Err(error) = peers[*by].session.remove_player(handle) {
+                            oracle.observe_session_error("remove_player", *by, step, &error);
+                        } else {
+                            dead[*target] = true;
+                            net.detach(addrs[*target]);
+                            oracle.mark_peer_dead(*target);
+                        }
                     }
                 },
                 ScheduleEvent::PeerKill { peer } => {
@@ -678,7 +763,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                             if let Err(error) =
                                 slot.session.add_local_input(handle, input_for(step, i))
                             {
-                                oracle.observe_advance_error(i, step, &error);
+                                oracle.observe_session_error("add_local_input", i, step, &error);
                             }
                         }
                         match slot.session.advance_frame() {
@@ -746,12 +831,16 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         clock.advance(schedule.config.step_dt());
     }
 
+    let metrics: Vec<fortress_rollback::SessionMetrics> =
+        peers.iter().map(|slot| slot.session.metrics()).collect();
+
     // Final observations.
-    for (i, slot) in peers.iter().enumerate() {
+    for ((i, slot), metric) in peers.iter().enumerate().zip(metrics.iter()) {
         let severe = slot
             .observer
             .violations_at_severity(ViolationSeverity::Error);
         oracle.observe_violations(i, &severe);
+        oracle.observe_checksum_mismatches(i, metric.checksums_mismatched);
     }
     let recorded: Vec<BTreeMap<i32, StateStub>> = peers
         .iter()
@@ -769,9 +858,6 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     for confirmed in &final_confirmed {
         fold_trace(&mut trace_hash, confirmed);
     }
-
-    let metrics: Vec<fortress_rollback::SessionMetrics> =
-        peers.iter().map(|slot| slot.session.metrics()).collect();
 
     // Aggregate each peer's per-remote wire metrics into one per-player total.
     // Peer `i` holds a remote handle `PlayerHandle::new(j)` for every `j != i`

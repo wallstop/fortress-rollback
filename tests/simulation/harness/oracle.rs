@@ -15,10 +15,12 @@
 //! - **(b-cross) In-band cross-check**: `DesyncDetected` events must be
 //!   consistent with (b): an event while recorded states agree exposes a
 //!   false-positive detector; states diverging without an event exposes a
-//!   silent desync. Either way the run fails with the full picture recorded.
-//! - **(g) Session-error allowlist**: `advance_frame` while `Running` must
-//!   not error (the prediction throttle is `Ok` with no requests, not an
-//!   error). Any error fails the run with the step and peer recorded.
+//!   silent desync. Checksum-mismatch metrics are also consumed directly so a
+//!   starved event queue cannot hide a detector finding. Either way the run
+//!   fails with the full picture recorded.
+//! - **(g) Session-error allowlist**: session APIs the harness expects to
+//!   succeed must not error. Any error fails the run with the operation, step,
+//!   and peer recorded.
 //! - **Violations**: telemetry violations at `Error`+ severity fail the run
 //!   (Critical is never acceptable; the Error allowlist arrives with the
 //!   lifecycle vocabulary in a later milestone, seeded by a fleet census).
@@ -75,6 +77,10 @@ pub enum OracleFailure {
     },
     /// (b-cross): the in-band desync detector fired.
     InbandDesyncDetected { peer: usize, frame: i32 },
+    /// (b-cross): the session recorded checksum mismatches in metrics. This is
+    /// the event-queue-independent detector signal, so a peer whose app never
+    /// drains `DesyncDetected` events still fails the run.
+    ChecksumMismatchMetric { peer: usize, mismatches: u64 },
     /// (a)-sampling: confirmed inputs for a frame the session reported as
     /// confirmed could not be fetched (eviction outran sampling, or a bug).
     ConfirmedInputUnavailable {
@@ -82,8 +88,10 @@ pub enum OracleFailure {
         frame: i32,
         error: String,
     },
-    /// (g): `advance_frame` returned an error while `Running`.
+    /// (g): a session API returned an error while the harness expected it to
+    /// succeed.
     SessionError {
+        operation: &'static str,
         peer: usize,
         step: u32,
         error: String,
@@ -191,14 +199,15 @@ pub struct Oracle {
     /// anti-pattern inside the oracle itself). Every class is now
     /// guaranteed representation.
     per_class_cap: usize,
-    /// Peers that were killed mid-run (`ScheduleEvent::PeerKill`). A crashed
-    /// peer is excluded from the *liveness* checks only: it cannot satisfy the
-    /// `Running`/end-progress bar (c-lite), and its frozen confirmed frame must
-    /// not drag the globally-confirmed prefix below where the survivors agree.
-    /// Its **pre-death** observations still count — recorded states it produced
-    /// before crashing are compared in (b), and its confirmed-input samples
-    /// stand in (a) — so a peer that diverged before it died cannot escape
-    /// detection by being killed.
+    /// Peers that were retired mid-run (`PeerKill` or `GracefulRemove`). A
+    /// retired peer is excluded from the *liveness* checks only: it cannot
+    /// satisfy the `Running`/end-progress bar (c-lite), and its frozen confirmed
+    /// frame must not drag the globally-confirmed prefix below where the
+    /// survivors agree.
+    /// Its **pre-retirement** observations still count — recorded states it
+    /// produced before leaving are compared in (b), and its confirmed-input
+    /// samples stand in (a) — so a peer that diverged before it left cannot
+    /// escape detection by being retired.
     dead: Vec<bool>,
     /// (c) bounded post-heal liveness inputs. Inert by default; the runner sets
     /// it via [`Self::set_heal_liveness`] once it has the heal-anchored
@@ -228,8 +237,9 @@ impl Oracle {
         self.heal = heal;
     }
 
-    /// Marks `peer` as killed (crashed): it is excluded from the liveness
-    /// checks in [`Self::finalize`]. Idempotent for in-range peers. An
+    /// Marks `peer` as retired (crashed or gracefully removed): it is excluded
+    /// from the liveness checks in [`Self::finalize`]. Idempotent for in-range
+    /// peers. An
     /// out-of-range peer is a programming error — the runner validates every
     /// event's peer index up front — so it panics loudly rather than silently
     /// leaving the mask unset.
@@ -242,7 +252,7 @@ impl Oracle {
         self.dead[peer] = true;
     }
 
-    /// Whether `peer` was killed mid-run.
+    /// Whether `peer` was retired mid-run.
     fn is_dead(&self, peer: usize) -> bool {
         self.dead.get(peer).copied().unwrap_or(false)
     }
@@ -302,6 +312,31 @@ impl Oracle {
         });
     }
 
+    /// (b-cross): a session recorded checksum mismatches, even if its event
+    /// queue was not drained and the corresponding `DesyncDetected` event was
+    /// discarded or left buffered.
+    pub fn observe_checksum_mismatches(&mut self, peer: usize, mismatches: u64) {
+        if mismatches > 0 {
+            self.push_failure(OracleFailure::ChecksumMismatchMetric { peer, mismatches });
+        }
+    }
+
+    /// (g): a session API errored while the harness expected it to succeed.
+    pub fn observe_session_error(
+        &mut self,
+        operation: &'static str,
+        peer: usize,
+        step: u32,
+        error: &fortress_rollback::FortressError,
+    ) {
+        self.push_failure(OracleFailure::SessionError {
+            operation,
+            peer,
+            step,
+            error: format!("{error:?}"),
+        });
+    }
+
     /// (g): `advance_frame` errored while `Running`.
     pub fn observe_advance_error(
         &mut self,
@@ -309,11 +344,7 @@ impl Oracle {
         step: u32,
         error: &fortress_rollback::FortressError,
     ) {
-        self.push_failure(OracleFailure::SessionError {
-            peer,
-            step,
-            error: format!("{error:?}"),
-        });
+        self.observe_session_error("advance_frame", peer, step, error);
     }
 
     /// Telemetry violations collected for one peer over the whole run.
@@ -344,8 +375,9 @@ impl Oracle {
         assert_eq!(end_confirmed.len(), self.n_players);
         assert_eq!(end_state.len(), self.n_players);
 
-        // (c-lite) end progress per peer. Killed peers are excluded — a crashed
-        // peer cannot be `Running` and its frozen frame is not its own fault.
+        // (c-lite) end progress per peer. Retired peers are excluded — a peer
+        // that left the harness cannot be `Running` and its frozen frame is not
+        // its own fault.
         for peer in 0..self.n_players {
             if self.is_dead(peer) {
                 continue;
@@ -369,9 +401,9 @@ impl Oracle {
             }
         }
 
-        // Guard against a vacuous pass: if every peer was killed, the excluded
+        // Guard against a vacuous pass: if every peer was retired, the excluded
         // end-checks below all skip and the run would report success with
-        // nothing verified. A whole-mesh crash proves no property.
+        // nothing verified. A whole-mesh crash/removal proves no property.
         if self.n_players > 0 && (0..self.n_players).all(|peer| self.is_dead(peer)) {
             self.push_failure(OracleFailure::NoLivePeers {
                 n_players: self.n_players,
@@ -379,7 +411,7 @@ impl Oracle {
         }
 
         // (b) state agreement over the globally confirmed prefix. The prefix is
-        // the minimum over *live* peers only — a killed peer's frozen confirmed
+        // the minimum over *live* peers only — a retired peer's frozen confirmed
         // frame must not shrink the window the survivors are checked across.
         let global_confirmed = end_confirmed
             .iter()
@@ -392,11 +424,11 @@ impl Oracle {
         // the result of simulating frame N with confirmed inputs ≤ N), so a
         // frame's state is final once the *previous* frame is confirmed;
         // comparing up to `global_confirmed` stays strictly inside the final
-        // region. Killed peers are NOT skipped here: their *pre-death* recorded
-        // states are real observations for the frames they produced, so a peer
-        // that diverged before it crashed is still caught (it cannot escape the
-        // check merely by being killed). They only lack states past their death,
-        // so they never contribute past the survivor prefix.
+        // region. Retired peers are NOT skipped here: their *pre-retirement*
+        // recorded states are real observations for the frames they produced, so
+        // a peer that diverged before leaving is still caught. They only lack
+        // states past retirement, so they never contribute past the survivor
+        // prefix.
         let mut canonical_states: BTreeMap<i32, (usize, StateStub)> = BTreeMap::new();
         for (peer, states) in recorded.iter().enumerate() {
             for (&frame, &state) in states.range(..=global_confirmed) {
@@ -422,8 +454,8 @@ impl Oracle {
         // (c) bounded post-heal liveness. Inert unless the schedule healed AND
         // the post-heal drain is long enough for both anchors to be observable
         // (else the anchors would sample an incomplete recovery — indeterminate,
-        // never a failure). Dead peers are excluded exactly like (c-lite): a
-        // crashed peer cannot advance and that is not its own fault. A *live*
+        // never a failure). Retired peers are excluded exactly like (c-lite): a
+        // retired peer cannot advance and that is not its own fault. A *live*
         // peer whose confirmed frame did not advance by G within the observed
         // window is pinned (or mutually deadlocked) — fail it, per peer. This is
         // orthogonal to (c-lite): a peer can clear the absolute end bar
@@ -759,6 +791,35 @@ mod tests {
             1,
             "only the Error-severity violation should fail the run"
         );
+    }
+
+    /// Session errors carry the failing operation so non-advance harness calls
+    /// are diagnosable from the oracle verdict.
+    #[test]
+    fn oracle_records_session_error_operation() {
+        let mut oracle = Oracle::new(2);
+        oracle.observe_session_error(
+            "remove_player",
+            1,
+            7,
+            &fortress_rollback::FortressError::NotSynchronized,
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert_eq!(verdict.failures.len(), 1, "{:?}", verdict.failures);
+        assert!(matches!(
+            &verdict.failures[0],
+            OracleFailure::SessionError {
+                operation: "remove_player",
+                peer: 1,
+                step: 7,
+                error
+            } if error.contains("NotSynchronized")
+        ));
     }
 
     /// The failure cap keeps a systemically broken run readable.
