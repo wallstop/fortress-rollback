@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783300578749,
+  "lastUpdate": 1783353381208,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "55d1aefa9694d1a7e7d4480ac9c949d7f173ac94",
-          "message": "chore(ci): bump actions/upload-artifact from 6 to 7 (#101)\n\nBumps\n[actions/upload-artifact](https://github.com/actions/upload-artifact)\nfrom 6 to 7.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/actions/upload-artifact/releases\">actions/upload-artifact's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v7.0.0</h2>\n<h2>v7 What's new</h2>\n<h3>Direct Uploads</h3>\n<p>Adds support for uploading single files directly (unzipped). Callers\ncan set the new <code>archive</code> parameter to <code>false</code> to\nskip zipping the file during upload. Right now, we only support single\nfiles. The action will fail if the glob passed resolves to multiple\nfiles. The <code>name</code> parameter is also ignored with this\nsetting. Instead, the name of the artifact will be the name of the\nuploaded file.</p>\n<h3>ESM</h3>\n<p>To support new versions of the <code>@actions/*</code> packages,\nwe've upgraded the package to ESM.</p>\n<h2>What's Changed</h2>\n<ul>\n<li>Add proxy integration test by <a\nhref=\"https://github.com/Link\"><code>@​Link</code></a>- in <a\nhref=\"https://redirect.github.com/actions/upload-artifact/pull/754\">actions/upload-artifact#754</a></li>\n<li>Upgrade the module to ESM and bump dependencies by <a\nhref=\"https://github.com/danwkennedy\"><code>@​danwkennedy</code></a> in\n<a\nhref=\"https://redirect.github.com/actions/upload-artifact/pull/762\">actions/upload-artifact#762</a></li>\n<li>Support direct file uploads by <a\nhref=\"https://github.com/danwkennedy\"><code>@​danwkennedy</code></a> in\n<a\nhref=\"https://redirect.github.com/actions/upload-artifact/pull/764\">actions/upload-artifact#764</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a href=\"https://github.com/Link\"><code>@​Link</code></a>- made\ntheir first contribution in <a\nhref=\"https://redirect.github.com/actions/upload-artifact/pull/754\">actions/upload-artifact#754</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/actions/upload-artifact/compare/v6...v7.0.0\">https://github.com/actions/upload-artifact/compare/v6...v7.0.0</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/actions/upload-artifact/commit/bbbca2ddaa5d8feaa63e36b76fdaad77386f024f\"><code>bbbca2d</code></a>\nSupport direct file uploads (<a\nhref=\"https://redirect.github.com/actions/upload-artifact/issues/764\">#764</a>)</li>\n<li><a\nhref=\"https://github.com/actions/upload-artifact/commit/589182c5a4cec8920b8c1bce3e2fab1c97a02296\"><code>589182c</code></a>\nUpgrade the module to ESM and bump dependencies (<a\nhref=\"https://redirect.github.com/actions/upload-artifact/issues/762\">#762</a>)</li>\n<li><a\nhref=\"https://github.com/actions/upload-artifact/commit/47309c993abb98030a35d55ef7ff34b7fa1074b5\"><code>47309c9</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/actions/upload-artifact/issues/754\">#754</a>\nfrom actions/Link-/add-proxy-integration-tests</li>\n<li><a\nhref=\"https://github.com/actions/upload-artifact/commit/02a8460834e70dab0ce194c64360c59dc1475ef0\"><code>02a8460</code></a>\nAdd proxy integration test</li>\n<li>See full diff in <a\nhref=\"https://github.com/actions/upload-artifact/compare/v6...v7\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=actions/upload-artifact&package-manager=github_actions&previous-version=6&new-version=7)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-02-26T20:10:21-08:00",
-          "tree_id": "2ae2e8ee049309f596b4e60dd17cbd4ed5417ef6",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/55d1aefa9694d1a7e7d4480ac9c949d7f173ac94"
-        },
-        "date": 1772165696310,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 438,
-            "range": "± 24",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 701,
-            "range": "± 29",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 990,
-            "range": "± 23",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 106529,
-            "range": "± 894",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27382,
-            "range": "± 1327",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 76",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 869,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec3cff5b9d12d8cde692de5b31d063ba06f60488",
+          "message": "Hardening M3 §6.2(c): bounded post-heal liveness + (i) metastability report (#205)\n\n## Summary\n\nLands the **§6.2 (c) bounded post-heal liveness** oracle invariant and\nthe **(i) metastability report** — the quantitative recovery check the\nDST harness was missing.\n\nUntil now the oracle's only liveness check was **(c-lite)**: at\nend-of-run every non-dead peer must be `Running` and confirmed ≥ 30.\nThat is a coarse *absolute* bar — a peer can stall for most of the run,\nrecover in the final stretch, and still clear it. **(c)** adds a\n*bounded* bar: after the last `HealAll`, every **live** peer's\n`confirmed_frame` must advance by at least **G = 10** frames within\n**B** steps of the heal. It catches a peer pinned post-heal (or a mutual\ndeadlock) that (c-lite) misses.\n\n**(i)** surfaces the metastability verdict explicitly:\n`recovered_within_b: Some(true)` = every live peer recovered,\n`Some(false)` = healed but at least one peer stayed pinned (the\nmetastable case), `None` = inert (no heal) or indeterminate (post-heal\nwindow < B).\n\n## The bound B (derived, not arbitrary)\n\n`RECOVERY_WINDOW_MS = 4000ms` folds the documented compound worst-case\nrecovery path — a peer that dropped during a partition must, after the\nheal, time its endpoints out, re-run sync, then re-fold gossip:\n\n```\ndisconnect_timeout           2000 ms   (builder.rs:43, protocol/mod.rs:1254)\n+ sync-retry burst (5 × 200)  1000 ms   (SyncConfig::default, protocol/mod.rs:6431-6435)\n+ gossip settle  (3 × 200)     600 ms   (keepalive cadence, protocol/mod.rs:1237)\n→ round up                    4000 ms   →  250 steps at 16ms\n```\n\nThis is the same ~250-step budget the schedule generator already\nreserves as its post-heal drain window. B is computed from `step_dt`\n(`recovery_window_steps()`), so it is the same wall-clock bound at any\nstep granularity. **G = 10** is a floor, not a rate target: `>\nmax_prediction` (8) so a mere prediction-window refill does not clear\nit, `< MIN_END_CONFIRMED` (30) so (c) stays complementary to (c-lite).\n\n## Both directions, with measured margins\n\nFour tests (`fleet.rs`), sharing one builder that differs only by stall\nduration — a clean red-green premise:\n\n- **passes when a hitched peer recovers** — peer 1 hitches 60 steps then\ncatches up; every peer advances **~191** frames post-heal →\n`Some(true)`, (c) passes. Also asserts (c) actually *ran* (anchors\nsampled per peer, each clears the floor) — not silently inert.\n- **inert without a heal** — no `HealAll` ⇒ `None`, empty anchors, no\n`PostHealLiveness`. Pins that `heal_at` alone (without a `HealAll`\nevent) is not a heal.\n- **fires on a pinned peer** — peer 1 frozen across the whole window\nadvances **0**, the three ContinueWithout survivors advance **90** each\n→ (c) fires on peer 1 *only*, `Some(false)`. The G=10 threshold sits\nunambiguously between 0 and 90.\n- **reports non-recovery under Halt** — a partition healed under `Halt`\nnever recovers (all peers halt) → `Some(false)`: the headline\nmetastability case, a true non-recovery.\n\n## Design: always-on, no schema bump\n\n(c) runs on **every** healing schedule (no opt-in), so the existing\nsmoke/tcp/hitch/split-brain fleets gain it for free — **verified: all\n2411 tests stay green**. The change adds no `SimConfig`/`Schedule`/serde\nfields (only harness-internal anchors + `RunReport`/`Verdict` fields),\nand the anchors reuse the already-trace-folded per-`(step,peer)`\n`confirmed` read — no new session call, no RNG draw — so existing seeds\nreplay **bit-identically**. Killed peers are excluded (dead, not\npinned); a stalled peer is live and *is* checked. `heals` is decided by\nan actual `HealAll` event, not `heal_at < steps`.\n\n## Changes (test-infra only — no `src/`, no public API, no changelog)\n\n- **`schedule.rs`**: `RECOVERY_WINDOW_MS` + `recovery_window_steps()`.\n- **`oracle.rs`**: `PostHealLiveness` failure, `HealLiveness` inputs\n(Default = inert), `set_heal_liveness`, the (c) check in `finalize`,\n`POST_HEAL_MIN_ADVANCE`, `Verdict::recovered_within_b`.\n- **`mod.rs`**: heal-anchored confirmed snapshots + 3 `RunReport`\nfields; `expect_pass` repro now prints `recovered_within_b`.\n- **`fleet.rs`**: the builder + four tests.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` — clean\n- full test suite: **2411 passed**; the four new tests pass with the\nmargins above\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass\n\nReviewed by a Plan agent (design) + an adversarial sub-agent (always-on\nsoundness, negative-control teeth, B/G derivation, anchor-vector\nalignment, non-monotonicity) + GitHub Copilot.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only simulation harness and oracle changes; production library\ncode is untouched.\n> \n> **Overview**\n> Extends the **DST simulation harness** with **§6.2 (c) bounded\npost-heal liveness** and an **(i) metastability** signal, complementing\nexisting end-of-run **(c-lite)** checks.\n> \n> After the last real **`HealAll`** event (not `schedule.heal_at`\nalone), the runner samples each peer’s **`confirmed_frame`** at heal and\nat **B** steps later (**`RECOVERY_WINDOW_MS` / `step_dt`** via\n**`recovery_window_steps()`**). Live peers must advance by at least **G\n= 10** frames in that span or get **`PostHealLiveness`**; **`Verdict` /\n`RunReport`** expose **`recovered_within_b`** as **`Some(true/false)`**\nor **`None`** when the check is inert or indeterminate (no heal, window\nshorter than G, all peers dead).\n> \n> **`fleet.rs`** adds red/green tests (recovering hitch, pinned peer,\nno-heal inert, coarse `step_dt`, Halt non-recovery) plus **`step_dt_ms\n>= 1`** validation. No **`src/`** or public API changes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nadf545113d910128792595ad9f7b688fde220293. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-07-06T08:51:36-07:00",
+          "tree_id": "e507a75b64dfb5664b48b11d83af451e173a0324",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ec3cff5b9d12d8cde692de5b31d063ba06f60488"
+        },
+        "date": 1783353379668,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 95,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 140,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 546,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 905,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1317,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 98028,
+            "range": "± 887",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 39822,
+            "range": "± 435",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 867,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 868,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
