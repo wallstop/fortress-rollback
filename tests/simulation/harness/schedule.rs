@@ -123,6 +123,27 @@ pub struct SimConfig {
     /// corpus artifacts replayable without a bump.
     #[serde(default)]
     pub clock_skew_ppm: Vec<i32>,
+    /// Peers (by index) whose app model **never drains the session event
+    /// queue** — modeling an application that stops servicing
+    /// `P2PSession::events` (a wedged UI thread, a dropped event consumer). The
+    /// session keeps polling and advancing, so its bounded `event_queue` fills;
+    /// the session then trims the oldest events, incrementing the D9
+    /// `events_discarded_*` telemetry (`§6.6-pre.6h` event-loss oracle). A
+    /// starved peer is excluded only from *event-derived* oracle signals (the
+    /// secondary `DesyncDetected` observation); the primary state-agreement,
+    /// confirmed-prefix, and liveness checks read `confirmed_frame`/recorded
+    /// state directly and keep full teeth. `#[serde(default)]` (empty = every
+    /// peer drains every step, the behavior every prior run used) keeps existing
+    /// corpus artifacts replayable without a schema bump.
+    #[serde(default)]
+    pub starve_events: Vec<usize>,
+    /// Optional override for every session's event-queue capacity
+    /// (`SessionBuilder::with_event_queue_size`, min 10). `#[serde(default)]`
+    /// (`None` = the library default of 100) keeps existing corpus artifacts
+    /// replayable without a bump. A small cap makes event-starvation overflow
+    /// (D9) reachable within a short schedule.
+    #[serde(default)]
+    pub event_queue_size: Option<usize>,
 }
 
 impl SimConfig {
@@ -144,6 +165,8 @@ impl SimConfig {
             disconnect_behavior: DropPolicy::default(),
             app_model: AppModel::default(),
             clock_skew_ppm: Vec::new(),
+            starve_events: Vec::new(),
+            event_queue_size: None,
         }
     }
 
@@ -621,6 +644,14 @@ mod tests {
             config.remove("clock_skew_ppm").is_some(),
             "config must serialize a `clock_skew_ppm` field for this test to remove"
         );
+        assert!(
+            config.remove("starve_events").is_some(),
+            "config must serialize a `starve_events` field for this test to remove"
+        );
+        assert!(
+            config.remove("event_queue_size").is_some(),
+            "config must serialize an `event_queue_size` field for this test to remove"
+        );
         let back: Schedule = serde_json::from_value(value).unwrap();
         assert_eq!(
             back.config.app_model,
@@ -630,6 +661,14 @@ mod tests {
         assert!(
             back.config.clock_skew_ppm.is_empty(),
             "a pre-axis config (no clock_skew_ppm) must default to no skew"
+        );
+        assert!(
+            back.config.starve_events.is_empty(),
+            "a pre-axis config (no starve_events) must default to every peer draining"
+        );
+        assert_eq!(
+            back.config.event_queue_size, None,
+            "a pre-axis config (no event_queue_size) must default to the library cap"
         );
     }
 }
