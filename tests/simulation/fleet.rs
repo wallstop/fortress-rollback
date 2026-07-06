@@ -14,7 +14,8 @@ use super::harness::{
     run, RunOptions,
 };
 use crate::common::sim_net::LinkPolicy;
-use std::time::Duration;
+use fortress_rollback::SessionState;
+use std::{collections::BTreeSet, time::Duration};
 
 /// Fixed PR-smoke seed set. Nightly fleets (later milestone) randomize seeds
 /// from the CI run id; the PR set is fixed so PR failures are reproducible
@@ -941,19 +942,18 @@ fn run_rejects_out_of_range_set_input_delay_peer() {
     let _ = run(&schedule, &RunOptions::default());
 }
 
-/// Builds a peer-kill schedule: a clean 4-mesh (`ContinueWithout`) in which peer
-/// 1 crashes at step 100 — the harness stops driving it and detaches it from the
-/// fabric, so it never returns (not even after `HealAll`). Under `ContinueWithout`
-/// the three survivors time it out, freeze its slot, and keep confirming together
-/// on their own timeline; the crashed peer is excluded from the oracle's
-/// liveness checks. `None` yields the identical schedule without the kill, the
-/// control the premise compares to.
-fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
+/// Builds the common clean 4-peer lifecycle schedule used by the planted drop
+/// operations. `event`, when present, fires at step 100; `None` yields the
+/// matched no-op control.
+fn clean_four_peer_lifecycle_schedule(
+    disconnect_behavior: DropPolicy,
+    event: Option<ScheduleEvent>,
+) -> Schedule {
     let n = 4;
     let config = SimConfig {
         n_players: n,
         steps: 900,
-        disconnect_behavior: DropPolicy::ContinueWithout,
+        disconnect_behavior,
         noise: BackgroundNoise::Clean,
         ..SimConfig::smoke(n)
     };
@@ -967,8 +967,8 @@ fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
     }
     let heal_at = 650;
     let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some(peer) = kill {
-        events.push((100, ScheduleEvent::PeerKill { peer }));
+    if let Some(event) = event {
+        events.push((100, event));
     }
     events.sort_by_key(|(step, _)| *step);
     Schedule {
@@ -982,44 +982,47 @@ fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
     }
 }
 
+/// Builds a peer-kill schedule: a clean 4-mesh (`ContinueWithout`) in which peer
+/// 1 crashes at step 100 — the harness stops driving it and detaches it from the
+/// fabric, so it never returns (not even after `HealAll`). Under `ContinueWithout`
+/// the three survivors time it out, freeze its slot, and keep confirming together
+/// on their own timeline; the crashed peer is excluded from the oracle's
+/// liveness checks. `None` yields the identical schedule without the kill, the
+/// control the premise compares to.
+fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::ContinueWithout,
+        kill.map(|peer| ScheduleEvent::PeerKill { peer }),
+    )
+}
+
 /// Builds a graceful-remove schedule: a clean 4-mesh (`ContinueWithout`) in
-/// which peer `by` calls `remove_player(target)` at step 100, then `target`
-/// leaves the harness. Only one survivor applies the user API; the other
-/// survivors must learn the drop through protocol gossip and converge on the
-/// same frozen slot value. `None` yields the identical schedule without the
-/// removal, the control the premise compares to.
+/// which peer `by` calls `remove_player(target)` at step 100. On success the
+/// target leaves the harness; on error it stays live and the oracle records the
+/// failed API call. Only one survivor applies the user API; the other survivors
+/// must learn the drop through protocol gossip and converge on the same frozen
+/// slot value. `None` yields the identical schedule without the removal, the
+/// control the premise compares to.
 fn graceful_remove_schedule(remove: Option<(usize, usize)>) -> Schedule {
-    let n = 4;
-    let config = SimConfig {
-        n_players: n,
-        steps: 900,
-        disconnect_behavior: DropPolicy::ContinueWithout,
-        noise: BackgroundNoise::Clean,
-        ..SimConfig::smoke(n)
-    };
-    let mut initial_links = Vec::new();
-    for from in 0..n {
-        for to in 0..n {
-            if from != to {
-                initial_links.push((from, to, LinkPolicy::clean()));
-            }
-        }
-    }
-    let heal_at = 650;
-    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
-    if let Some((by, target)) = remove {
-        events.push((100, ScheduleEvent::GracefulRemove { by, target }));
-    }
-    events.sort_by_key(|(step, _)| *step);
-    Schedule {
-        schema_version: SCHEDULE_SCHEMA_VERSION,
-        seed: 0,
-        link_seed: 0,
-        config,
-        initial_links,
-        events,
-        heal_at,
-    }
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::ContinueWithout,
+        remove.map(|(by, target)| ScheduleEvent::GracefulRemove { by, target }),
+    )
+}
+
+/// Builds a legacy-disconnect schedule: a clean 4-mesh in which peer `by`
+/// calls the older `disconnect_player(target)` API at step 100. On success the
+/// target leaves the harness; on error it stays live and the oracle records the
+/// failed API call. This is intentionally not a graceful-convergence contract:
+/// today's `disconnect_player` path is Halt-oriented and intersects D13, so the
+/// useful property is that the op is executable, deterministic, and reported as
+/// the expected post-heal non-recovery. `None` yields the identical schedule
+/// without the disconnect, the control the premise compares to.
+fn legacy_disconnect_schedule(disconnect: Option<(usize, usize)>) -> Schedule {
+    clean_four_peer_lifecycle_schedule(
+        DropPolicy::Halt,
+        disconnect.map(|(by, target)| ScheduleEvent::LegacyDisconnect { by, target }),
+    )
 }
 
 /// M3 §6.1 lifecycle vocabulary — the peer crash (`ScheduleEvent::PeerKill`).
@@ -1208,6 +1211,201 @@ fn oracle_catches_seeded_divergence_under_graceful_remove() {
         "the state comparison must keep its teeth after graceful remove: {:?}",
         report.verdict.failures
     );
+}
+
+/// M3 §6.1 lifecycle vocabulary — the legacy user disconnect
+/// (`ScheduleEvent::LegacyDisconnect`). Unlike `GracefulRemove`,
+/// `disconnect_player` takes the Halt-oriented path, so this test does NOT
+/// assert survivor convergence. It pins the executable harness vocabulary and
+/// the current D13-adjacent observation: after a clean network heal, the live
+/// peers do not recover within B and the oracle reports that non-recovery.
+#[test]
+fn legacy_disconnect_reports_halt_non_recovery() {
+    let base = legacy_disconnect_schedule(None);
+    let disconnected = legacy_disconnect_schedule(Some((0, 1)));
+
+    let base_report = run(&base, &RunOptions::default());
+    base_report.expect_pass(&base);
+    let report = run(&disconnected, &RunOptions::default());
+
+    assert!(
+        !report.verdict.passed(),
+        "legacy disconnect is expected to report Halt non-recovery today, not \
+         pass as a graceful drop"
+    );
+    assert_eq!(
+        report.recovered_within_b,
+        Some(false),
+        "a legacy-disconnected Halt mesh healed but did not recover"
+    );
+
+    let expected_live: BTreeSet<usize> = [0usize, 2, 3].into_iter().collect();
+    let expected_advance_errors: BTreeSet<usize> = [2usize, 3].into_iter().collect();
+    let mut advance_error_peers = BTreeSet::new();
+    let mut end_progress_peers = BTreeSet::new();
+    let mut post_heal_peers = BTreeSet::new();
+    for failure in &report.verdict.failures {
+        match failure {
+            OracleFailure::SessionError {
+                operation: "advance_frame",
+                peer,
+                error,
+                ..
+            } => {
+                assert!(
+                    expected_advance_errors.contains(peer),
+                    "only peers that learn the propagated Halt through \
+                     advance_frame should report NotSynchronized: {:?}",
+                    report.verdict.failures
+                );
+                assert!(
+                    error.contains("NotSynchronized"),
+                    "legacy disconnect should surface only NotSynchronized \
+                     advance errors, got {error:?}: {:?}",
+                    report.verdict.failures
+                );
+                advance_error_peers.insert(*peer);
+            },
+            OracleFailure::EndProgress { peer, state, .. } => {
+                assert!(
+                    expected_live.contains(peer),
+                    "target peer 1 is retired; only live peers should fail \
+                     end-progress: {:?}",
+                    report.verdict.failures
+                );
+                assert_eq!(
+                    *state,
+                    SessionState::Synchronizing,
+                    "legacy disconnect should leave live peers Halt-stalled in \
+                     Synchronizing today: {:?}",
+                    report.verdict.failures
+                );
+                end_progress_peers.insert(*peer);
+            },
+            OracleFailure::PostHealLiveness { peer, .. } => {
+                assert!(
+                    expected_live.contains(peer),
+                    "target peer 1 is retired; only live peers should fail \
+                     post-heal liveness: {:?}",
+                    report.verdict.failures
+                );
+                post_heal_peers.insert(*peer);
+            },
+            _ => panic!(
+                "unexpected failure class for a clean legacy-disconnect Halt \
+                 probe: {failure:?}\nall failures: {:?}",
+                report.verdict.failures
+            ),
+        }
+    }
+    assert_eq!(
+        advance_error_peers, expected_advance_errors,
+        "peers 2 and 3 should learn the propagated Halt during advance_frame; \
+         this keeps the expected-failure shape precise: {:?}",
+        report.verdict.failures
+    );
+    assert_eq!(
+        end_progress_peers, expected_live,
+        "all and only live peers must fail end-progress after the legacy \
+         disconnect; this catches regressions where only the caller halts: {:?}",
+        report.verdict.failures
+    );
+    assert_eq!(
+        post_heal_peers, expected_live,
+        "all and only live peers must fail bounded post-heal liveness after \
+         the legacy disconnect: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|f| matches!(
+            f,
+            OracleFailure::SessionError {
+                operation: "disconnect_player",
+                ..
+            }
+        )),
+        "the harness must call disconnect_player successfully; failures are the \
+         protocol outcome, not an API error: {:?}",
+        report.verdict.failures
+    );
+
+    let again = run(&disconnected, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "a LegacyDisconnect schedule must reproduce its exact trace"
+    );
+    assert_ne!(
+        base_report.trace_hash, report.trace_hash,
+        "LegacyDisconnect must change execution — a silent no-op would leave \
+         the trace identical"
+    );
+}
+
+/// A peer that diverges *before* a legacy disconnect must not escape detection
+/// by being retired. This is the `LegacyDisconnect` analogue of the peer-kill
+/// and graceful-remove alive-mask negative controls: retirement excludes the
+/// target from liveness only, not from pre-retirement state agreement.
+#[test]
+fn oracle_catches_pre_disconnect_divergence_on_the_legacy_target() {
+    let schedule = legacy_disconnect_schedule(Some((0, 1)));
+    let options = RunOptions {
+        corrupt_state_from: Some((1, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a pre-disconnect divergence on the retired target must fail the run"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the legacy-disconnected peer's pre-retirement states must still be \
+         compared: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Malformed `LegacyDisconnect` events share the lifecycle-drop validation
+/// contract with `GracefulRemove`: bad caller, bad target, and self-target are
+/// rejected before the runner can raw-index or accidentally call the API on a
+/// local handle.
+#[test]
+fn run_rejects_malformed_legacy_disconnect_events() {
+    let cases = [
+        (
+            ScheduleEvent::LegacyDisconnect { by: 9, target: 1 },
+            "out of range",
+        ),
+        (
+            ScheduleEvent::LegacyDisconnect { by: 0, target: 9 },
+            "out of range",
+        ),
+        (
+            ScheduleEvent::LegacyDisconnect { by: 1, target: 1 },
+            "target must be remote",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        let mut schedule = legacy_disconnect_schedule(None);
+        schedule.events.push((100, event));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        let result = std::panic::catch_unwind(|| {
+            let _ = run(&schedule, &RunOptions::default());
+        });
+        let Err(payload) = result else {
+            panic!("malformed LegacyDisconnect event unexpectedly ran: {schedule:?}");
+        };
+        let message = panic_payload_to_string(payload.as_ref());
+        assert!(
+            message.contains(expected),
+            "panic should mention {expected:?}, got {message:?}"
+        );
+    }
 }
 
 /// A checksum-only desync must fail even when the app model starves every

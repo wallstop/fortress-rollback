@@ -199,11 +199,11 @@ pub struct Oracle {
     /// anti-pattern inside the oracle itself). Every class is now
     /// guaranteed representation.
     per_class_cap: usize,
-    /// Peers that were retired mid-run (`PeerKill` or `GracefulRemove`). A
-    /// retired peer is excluded from the *liveness* checks only: it cannot
-    /// satisfy the `Running`/end-progress bar (c-lite), and its frozen confirmed
-    /// frame must not drag the globally-confirmed prefix below where the
-    /// survivors agree.
+    /// Peers that were retired mid-run (`PeerKill`, `GracefulRemove`, or
+    /// `LegacyDisconnect`). A retired peer is excluded from the *liveness*
+    /// checks only: it cannot satisfy the `Running`/end-progress bar (c-lite),
+    /// and its frozen confirmed frame must not drag the globally-confirmed
+    /// prefix below where the survivors agree.
     /// Its **pre-retirement** observations still count — recorded states it
     /// produced before leaving are compared in (b), and its confirmed-input
     /// samples stand in (a) — so a peer that diverged before it left cannot
