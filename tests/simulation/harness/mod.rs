@@ -523,19 +523,32 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
-    // (c) bounded post-heal liveness anchors. "Healed" is decided by an actual
-    // `HealAll` event, NOT by `heal_at < steps` — a schedule can set `heal_at`
-    // without emitting a heal (e.g. a no-fault clock-skew run), and that is "no
-    // heal". We snapshot each peer's confirmed frame at the heal step and again
-    // B steps later (clamped into the run); the oracle compares the delta.
-    let heals = schedule
+    // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
+    // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
+    // without emitting a heal (e.g. a no-fault clock-skew run sets it to `steps`
+    // with no event), and a hand-authored schedule's `heal_at` field could drift
+    // from where its event actually fires. Deriving both the anchor and the
+    // window from the event keeps them consistent. (c) runs only if a heal fired
+    // AND a full recovery window (≥ B steps) follows it, so recovery is fully
+    // observable; otherwise it is inert/indeterminate. The recovery anchor
+    // clamps to the last step, so its span is B, or B-1 at an exact-boundary
+    // drain — the runner reports that real span to the oracle.
+    let heal_step = schedule
         .events
         .iter()
-        .any(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
+        .map(|(step, _)| *step)
+        .max();
     let b_steps = schedule.config.recovery_window_steps();
     let last_step = schedule.config.steps.saturating_sub(1);
-    let heal_anchor_at = schedule.heal_at.min(last_step);
-    let recovery_anchor_at = schedule.heal_at.saturating_add(b_steps).min(last_step);
+    let (run_c, heal_anchor_at, recovery_anchor_at) = match heal_step {
+        Some(heal_at) if schedule.config.steps.saturating_sub(heal_at) >= b_steps => (
+            true,
+            heal_at.min(last_step),
+            heal_at.saturating_add(b_steps).min(last_step),
+        ),
+        _ => (false, 0, 0),
+    };
     let mut confirmed_at_heal: Vec<i32> = Vec::new();
     let mut confirmed_after_recovery: Vec<i32> = Vec::new();
 
@@ -686,11 +699,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
 
             // (c) heal-anchored snapshots, reusing the same confirmed value. The
             // peer loop runs in fixed order, so each vector ends up indexed by
-            // peer. Only populated when the schedule actually heals.
-            if heals && step == heal_anchor_at {
+            // peer. Only populated when (c) runs (a heal fired with a full
+            // recovery window). Captured for every peer — a stalled/dead peer
+            // falls through to here with its frozen confirmed frame, so the
+            // vectors stay length-n and correctly peer-indexed.
+            if run_c && step == heal_anchor_at {
                 confirmed_at_heal.push(confirmed.as_i32());
             }
-            if heals && step == recovery_anchor_at {
+            if run_c && step == recovery_anchor_at {
                 confirmed_after_recovery.push(confirmed.as_i32());
             }
         }
@@ -759,17 +775,13 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         })
         .collect();
 
-    // Hand the oracle the (c) bounded post-heal liveness inputs. `post_heal_window`
-    // is only meaningful when a heal actually fired; 0 otherwise keeps (c) inert.
-    let post_heal_window = if heals {
-        schedule.config.steps.saturating_sub(schedule.heal_at)
-    } else {
-        0
-    };
+    // Hand the oracle the (c) bounded post-heal liveness inputs. `window_steps`
+    // is the ACTUAL anchor span (B, or B-1 at an exact-boundary drain where the
+    // recovery anchor clamped to the last step), so the failure reports the real
+    // window rather than a nominal one.
     oracle.set_heal_liveness(HealLiveness {
-        healed: heals,
-        post_heal_window,
-        window_steps: b_steps,
+        ran: run_c,
+        window_steps: recovery_anchor_at.saturating_sub(heal_anchor_at),
         required_advance: POST_HEAL_MIN_ADVANCE,
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after: confirmed_after_recovery.clone(),
