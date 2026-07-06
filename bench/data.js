@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783353381208,
+  "lastUpdate": 1783365178678,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "6eba6f3011a8f73caae8e28fe8a32a2ea19e565d",
-          "message": "Potentially Fix Pipeline (Kani issues) (#109)\n\n## Description\n\n<!-- Provide a clear and concise description of your changes. -->\n<!-- What problem does this solve? Why is this change needed? -->\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets` with no\nwarnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-03-12T08:16:34-07:00",
-          "tree_id": "ee6ad4851fdd09924f9ef2e9f6af7574cc5285b2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/6eba6f3011a8f73caae8e28fe8a32a2ea19e565d"
-        },
-        "date": 1773328898680,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 142,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 178,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 429,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 683,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 984,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103349,
-            "range": "± 1237",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27874,
-            "range": "± 981",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 108",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6292,6 +6166,132 @@ window.BENCHMARK_DATA = {
           {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 868,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fbffe891654fe7f1aacf76aa4299a4889b4b4ff1",
+          "message": "[codex] Hardening M3 GracefulRemove lifecycle op (#206)\n\n## Summary\n\nAdds the M3 simulation lifecycle operation\n`ScheduleEvent::GracefulRemove { by, target }`, backed by the real\n`P2PSession::remove_player` API path. The deterministic simulation\nrunner now applies the removal on one live survivor, detaches/retires\nthe target, and lets the remaining mesh learn the drop through protocol\ngossip.\n\nThis also folds in adversarial harness hardening found during review:\n\n- checksum mismatch metrics now feed the oracle directly, so a starved\nevent queue cannot hide a checksum-only desync\n- materialized/corpus schedules are validated at `run()` time for player\nbounds, sorted/in-run events, post-heal faults, exact directed-link\ncoverage, self links, and duplicates\n- overlapping `PeerStall` events keep the later deadline instead of\nshortening an existing stall\n\n## Validation\n\n- `cargo fmt`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture graceful_remove`\n- `cargo nextest run --no-capture\nchecksum_mismatch_metric_catches_starved_desync_event\nrun_rejects_invalid_materialized_schedule_invariants\noverlapping_peer_stalls_keep_the_later_deadline`\n- `cargo nextest run --no-capture simulation::` — 60 passed, 2388\nskipped\n- `cargo nextest run --no-capture` — 2391 passed, 57 skipped\n- `cargo nextest run --features hot-join --no-capture` — 2630 passed, 57\nskipped\n- `npx markdownlint 'PLAN.md'\n'progress/session-76-m3-graceful-remove-harness-hardening.md' --config\n.markdownlint.json --fix`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n\nNo production `src/` changes and no public API changes; no changelog\nentry needed.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests and harness/oracle code; no\nproduction src/ or public API changes, so rollout risk is low aside from\nstricter schedule validation for hand-authored corpora.\n> \n> **Overview**\n> Introduces **`ScheduleEvent::GracefulRemove`** (schedule schema v5):\nthe runner calls **`P2PSession::remove_player`** on one survivor,\ndetaches the target, and marks it retired like **`PeerKill`** so\nsurvivors stay byte-consistent under **`ContinueWithout`**. Fleet tests\ncover convergence, determinism, oracle negative controls, and\nmalformed-event validation.\n> \n> **Harness/oracle hardening:** **`run()`** now rejects invalid\nmaterialized schedules (player bounds, sorted in-run events, full\ndirected link mesh, no self/duplicate links, no faults after last\n**`HealAll`**). Overlapping **`PeerStall`** deadlines use **`max`**, not\noverwrite. The oracle fails on **`checksums_mismatched`** metrics when\nevent queues are starved, and **`SessionError`** records the failing\noperation (e.g. **`remove_player`**, **`set_input_delay`**).\nRetired-peer wording generalizes the alive mask beyond kills only.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6521e5a39380db1e413e3fb7b036507aab7b0210. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-06T12:08:41-07:00",
+          "tree_id": "1c172bd063fc1bbba002870206e53b77ea17ebca",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/fbffe891654fe7f1aacf76aa4299a4889b4b4ff1"
+        },
+        "date": 1783365177568,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 95,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 130,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 364,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 584,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 863,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 96165,
+            "range": "± 574",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 37566,
+            "range": "± 284",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1090,
+            "range": "± 429",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1243,
             "range": "± 1",
             "unit": "ns/iter"
           },
