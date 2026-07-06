@@ -41,6 +41,17 @@ use std::collections::BTreeMap;
 /// network; a healthy mesh confirms hundreds of frames there.
 pub const MIN_END_CONFIRMED: i32 = 30;
 
+/// Minimum confirmed-frame advance (G) every live peer must make within the
+/// bounded recovery window B after the last `HealAll` — the (c) liveness floor.
+///
+/// A floor, not a rate target: the harness advances one frame per step while
+/// `Running`, so a healthy peer confirms ≈B frames (hundreds) over the window,
+/// clearing this by ~25×. It is set `> max_prediction` (default 8) so a peer
+/// that merely re-fills its prediction window once without truly resuming
+/// confirmation does not clear it, and `< MIN_END_CONFIRMED` (30) so (c) stays a
+/// strictly per-window bound complementary to (c-lite)'s absolute end bar.
+pub const POST_HEAL_MIN_ADVANCE: i32 = 10;
+
 /// One concrete invariant violation, with enough context to debug.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleFailure {
@@ -90,12 +101,58 @@ pub enum OracleFailure {
     /// vacuous pass unless flagged. A schedule that crashes the whole mesh
     /// proves no correctness property and must not report success.
     NoLivePeers { n_players: usize },
+    /// (c): a **live** peer failed the bounded post-heal liveness bar — after
+    /// the last `HealAll`, its `confirmed_frame` did not advance by at least
+    /// `required` (G) frames within `window_steps` (B) steps. Catches a peer
+    /// pinned post-heal (or a mutual deadlock) that the coarse end-progress bar
+    /// (c-lite) can miss — a peer may recover late and still clear the absolute
+    /// end bar. Killed peers are excluded (dead, not pinned); the check is inert
+    /// when the schedule never heals and skipped when the post-heal window is
+    /// shorter than B. `advanced` is `after - at_heal` and may read negative
+    /// under the documented transient `confirmed_frame` dip — recorded raw so a
+    /// dip is visible in the repro rather than hidden.
+    PostHealLiveness {
+        peer: usize,
+        at_heal: i32,
+        after: i32,
+        advanced: i32,
+        required: i32,
+        window_steps: u32,
+    },
+}
+
+/// Inputs for the (c) bounded post-heal liveness check, assembled by the runner
+/// from the heal-anchored confirmed-frame snapshots. The [`Default`] is inert
+/// (`healed = false`), so an oracle that is never handed a `HealLiveness` — or
+/// a schedule that never heals — simply skips (c).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HealLiveness {
+    /// The schedule emitted a `HealAll` (else (c) is inert).
+    pub healed: bool,
+    /// Steps of drain available after the heal (`steps - heal_at`).
+    pub post_heal_window: u32,
+    /// The bounded-recovery window B in steps (derived from `step_dt`).
+    pub window_steps: u32,
+    /// Minimum confirmed-frame advance required within B (G).
+    pub required_advance: i32,
+    /// Confirmed frame per peer at the heal anchor (indexed by peer; empty if
+    /// `!healed`).
+    pub confirmed_at_heal: Vec<i32>,
+    /// Confirmed frame per peer at the recovery anchor (indexed by peer; empty
+    /// if `!healed`).
+    pub confirmed_after: Vec<i32>,
 }
 
 /// Final verdict of a run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub failures: Vec<OracleFailure>,
+    /// (i) metastability: `Some(true)` iff the schedule healed, the post-heal
+    /// window was ≥ B, and every live peer advanced ≥ G within B (the (c) check
+    /// ran and passed); `Some(false)` when it ran and at least one live peer was
+    /// pinned; `None` when (c) was inert (no heal) or indeterminate (window < B).
+    /// The explicit "recovered within B steps of heal: yes/no" signal.
+    pub recovered_within_b: Option<bool>,
 }
 
 impl Verdict {
@@ -131,6 +188,11 @@ pub struct Oracle {
     /// stand in (a) — so a peer that diverged before it died cannot escape
     /// detection by being killed.
     dead: Vec<bool>,
+    /// (c) bounded post-heal liveness inputs. Inert by default; the runner sets
+    /// it via [`Self::set_heal_liveness`] once it has the heal-anchored
+    /// confirmed snapshots. Oracle unit tests never set it, so (c) stays inert
+    /// for them.
+    heal: HealLiveness,
 }
 
 impl Oracle {
@@ -143,7 +205,15 @@ impl Oracle {
             failure_cap: 64,
             per_class_cap: 8,
             dead: vec![false; n_players],
+            heal: HealLiveness::default(),
         }
+    }
+
+    /// Hands the oracle the (c) bounded post-heal liveness inputs (heal-anchored
+    /// confirmed snapshots + the derived B/G bounds). Called once by the runner
+    /// before [`Self::finalize`]; left unset (inert) by the oracle unit tests.
+    pub fn set_heal_liveness(&mut self, heal: HealLiveness) {
+        self.heal = heal;
     }
 
     /// Marks `peer` as killed (crashed): it is excluded from the liveness
@@ -337,8 +407,50 @@ impl Oracle {
             }
         }
 
+        // (c) bounded post-heal liveness. Inert unless the schedule healed AND
+        // the post-heal drain window is at least B (else the anchors would
+        // sample an incomplete recovery — indeterminate, never a failure). Dead
+        // peers are excluded exactly like (c-lite): a crashed peer cannot
+        // advance and that is not its own fault. A *live* peer whose confirmed
+        // frame did not advance by G within B steps is pinned (or mutually
+        // deadlocked) — fail it, per peer. This is orthogonal to (c-lite): a
+        // peer can clear the absolute end bar (recovered late, ends ≥ 30) yet
+        // fail this bounded bar (did not advance ≥ G within B), which is exactly
+        // the metastable stall (c-lite) misses.
+        // (c) runs only when the schedule healed AND the drain window is at
+        // least B; otherwise it stays inert (no heal) or indeterminate
+        // (window < B) — `None`, never a pass or a fail.
+        let run_check = self.heal.healed && self.heal.post_heal_window >= self.heal.window_steps;
+        let recovered_within_b = run_check.then(|| {
+            let mut all_live_ok = true;
+            for peer in 0..self.n_players {
+                if self.is_dead(peer) {
+                    continue;
+                }
+                // A missing per-peer entry would be a runner bug; read it as
+                // NULL (-1) so a plumbing bug fails the bar loudly rather than
+                // panicking on an index.
+                let at_heal = self.heal.confirmed_at_heal.get(peer).copied().unwrap_or(-1);
+                let after = self.heal.confirmed_after.get(peer).copied().unwrap_or(-1);
+                let advanced = after.saturating_sub(at_heal);
+                if advanced < self.heal.required_advance {
+                    all_live_ok = false;
+                    self.push_failure(OracleFailure::PostHealLiveness {
+                        peer,
+                        at_heal,
+                        after,
+                        advanced,
+                        required: self.heal.required_advance,
+                        window_steps: self.heal.window_steps,
+                    });
+                }
+            }
+            all_live_ok
+        });
+
         Verdict {
             failures: self.failures,
+            recovered_within_b,
         }
     }
 }

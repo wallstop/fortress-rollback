@@ -27,7 +27,7 @@ use fortress_rollback::{
     MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
     SessionBuilder, SessionState,
 };
-use oracle::{Oracle, Verdict};
+use oracle::{HealLiveness, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
 use schedule::{AppModel, Schedule, ScheduleEvent};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -70,6 +70,18 @@ pub struct RunReport {
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
     pub peer_wire: Vec<PeerWireTotals>,
+    /// (c) each peer's confirmed frame sampled at the last `HealAll`
+    /// (`schedule.heal_at`); empty when the schedule never heals. Indexed by peer.
+    pub confirmed_at_heal: Vec<i32>,
+    /// (c) each peer's confirmed frame sampled B steps after the heal (clamped
+    /// to end of run); empty when the schedule never heals. Indexed by peer.
+    pub confirmed_after_recovery: Vec<i32>,
+    /// (i) metastability: `Some(true/false)` iff the (c) bounded post-heal
+    /// liveness check ran (the schedule healed and the post-heal window was ≥ B)
+    /// — the explicit "recovered within B steps of heal: yes/no". `None` when
+    /// (c) was inert (no heal) or indeterminate (window < B). Mirrors
+    /// [`Verdict::recovered_within_b`].
+    pub recovered_within_b: Option<bool>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -170,12 +182,13 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
             self.final_confirmed,
+            self.recovered_within_b,
             self.net_stats,
             self.verdict.failures.len(),
             self.verdict
@@ -510,6 +523,22 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
+    // (c) bounded post-heal liveness anchors. "Healed" is decided by an actual
+    // `HealAll` event, NOT by `heal_at < steps` — a schedule can set `heal_at`
+    // without emitting a heal (e.g. a no-fault clock-skew run), and that is "no
+    // heal". We snapshot each peer's confirmed frame at the heal step and again
+    // B steps later (clamped into the run); the oracle compares the delta.
+    let heals = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+    let b_steps = schedule.config.recovery_window_steps();
+    let last_step = schedule.config.steps.saturating_sub(1);
+    let heal_anchor_at = schedule.heal_at.min(last_step);
+    let recovery_anchor_at = schedule.heal_at.saturating_add(b_steps).min(last_step);
+    let mut confirmed_at_heal: Vec<i32> = Vec::new();
+    let mut confirmed_after_recovery: Vec<i32> = Vec::new();
+
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
         while let Some((event_step, event)) = schedule.events.get(next_event) {
@@ -654,6 +683,16 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             if options.probe_confirmed_at == Some(step) {
                 probe_confirmed.push(confirmed.as_i32());
             }
+
+            // (c) heal-anchored snapshots, reusing the same confirmed value. The
+            // peer loop runs in fixed order, so each vector ends up indexed by
+            // peer. Only populated when the schedule actually heals.
+            if heals && step == heal_anchor_at {
+                confirmed_at_heal.push(confirmed.as_i32());
+            }
+            if heals && step == recovery_anchor_at {
+                confirmed_after_recovery.push(confirmed.as_i32());
+            }
         }
 
         if diagnose && step % 50 == 0 {
@@ -720,7 +759,23 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         })
         .collect();
 
+    // Hand the oracle the (c) bounded post-heal liveness inputs. `post_heal_window`
+    // is only meaningful when a heal actually fired; 0 otherwise keeps (c) inert.
+    let post_heal_window = if heals {
+        schedule.config.steps.saturating_sub(schedule.heal_at)
+    } else {
+        0
+    };
+    oracle.set_heal_liveness(HealLiveness {
+        healed: heals,
+        post_heal_window,
+        window_steps: b_steps,
+        required_advance: POST_HEAL_MIN_ADVANCE,
+        confirmed_at_heal: confirmed_at_heal.clone(),
+        confirmed_after: confirmed_after_recovery.clone(),
+    });
     let verdict = oracle.finalize(&recorded, &end_confirmed, &end_state);
+    let recovered_within_b = verdict.recovered_within_b;
     RunReport {
         verdict,
         trace_hash,
@@ -729,5 +784,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         net_stats: net.stats(),
         metrics,
         peer_wire,
+        confirmed_at_heal,
+        confirmed_after_recovery,
+        recovered_within_b,
     }
 }
