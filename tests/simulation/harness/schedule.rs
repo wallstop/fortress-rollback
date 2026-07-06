@@ -74,7 +74,9 @@ pub enum AppModel {
 /// - `4`: adds [`ScheduleEvent::PeerKill`] (a peer crash — the harness stops
 ///   driving the peer and detaches it from the fabric — modeled distinctly from
 ///   a network black-hole).
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 4;
+/// - `5`: adds [`ScheduleEvent::GracefulRemove`], the explicit
+///   user-driven graceful-drop entry point (`P2PSession::remove_player`).
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 5;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +249,14 @@ pub enum ScheduleEvent {
     /// Like `PeerStall`, this is planted by lifecycle tests, not yet emitted by
     /// the random generator (that lands with the §6.1 storyline overhaul).
     SetInputDelay { peer: usize, delay: usize },
+    /// A live peer `by` explicitly removes remote player `target` via
+    /// `P2PSession::remove_player`, then the target leaves the harness. This is
+    /// the clean user-driven graceful-drop path: one survivor applies the API
+    /// call and the remaining live mesh must learn the drop through protocol
+    /// gossip, freeze the target slot to an agreed value, and keep confirming.
+    ///
+    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    GracefulRemove { by: usize, target: usize },
     /// Permanently kill peer `peer`: the harness stops driving its session and
     /// detaches it from the fabric (its inbox is discarded; further traffic to
     /// it is dropped). Models a **crash** — the peer is gone for good and, being
@@ -626,6 +636,9 @@ mod tests {
             .push((250, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 }));
         schedule
             .events
+            .push((275, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+        schedule
+            .events
             .push((300, ScheduleEvent::PeerKill { peer: 2 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
@@ -642,6 +655,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::SetInputDelay { peer: 2, delay: 3 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::GracefulRemove { by: 0, target: 1 })));
         assert!(back
             .events
             .iter()

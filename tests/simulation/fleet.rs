@@ -982,6 +982,46 @@ fn peer_kill_schedule(kill: Option<usize>) -> Schedule {
     }
 }
 
+/// Builds a graceful-remove schedule: a clean 4-mesh (`ContinueWithout`) in
+/// which peer `by` calls `remove_player(target)` at step 100, then `target`
+/// leaves the harness. Only one survivor applies the user API; the other
+/// survivors must learn the drop through protocol gossip and converge on the
+/// same frozen slot value. `None` yields the identical schedule without the
+/// removal, the control the premise compares to.
+fn graceful_remove_schedule(remove: Option<(usize, usize)>) -> Schedule {
+    let n = 4;
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some((by, target)) = remove {
+        events.push((100, ScheduleEvent::GracefulRemove { by, target }));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
 /// M3 §6.1 lifecycle vocabulary — the peer crash (`ScheduleEvent::PeerKill`).
 /// Under `ContinueWithout`, crashing one peer must degrade gracefully: the three
 /// survivors converge on dropping it (freeze its slot to an agreed value) and
@@ -1101,6 +1141,111 @@ fn oracle_catches_pre_kill_divergence_on_the_killed_peer() {
     );
 }
 
+/// M3 §6.1 lifecycle vocabulary — the user-driven graceful drop
+/// (`ScheduleEvent::GracefulRemove`). Under `ContinueWithout`, one survivor's
+/// `remove_player(target)` call must be enough for the live mesh to converge on
+/// the target's frozen slot and keep confirming together. This covers the real
+/// public API path, not just organic timeout/crash detection.
+#[test]
+fn graceful_remove_survivors_converge_under_continue_without() {
+    let base = graceful_remove_schedule(None);
+    let removed = graceful_remove_schedule(Some((0, 1)));
+
+    let base_report = run(&base, &RunOptions::default());
+    base_report.expect_pass(&base);
+    let removed_report = run(&removed, &RunOptions::default());
+    removed_report.expect_pass(&removed);
+
+    let removed_again = run(&removed, &RunOptions::default());
+    assert_eq!(
+        removed_report.trace_hash, removed_again.trace_hash,
+        "a GracefulRemove schedule must reproduce its exact trace"
+    );
+    assert_ne!(
+        base_report.trace_hash, removed_report.trace_hash,
+        "GracefulRemove must change execution — a silent no-op would leave the \
+         trace identical"
+    );
+
+    let confirmed = &removed_report.final_confirmed;
+    for (peer, &c) in confirmed.iter().enumerate() {
+        if peer == 1 {
+            continue;
+        }
+        assert!(
+            c > 200,
+            "survivor {peer} must keep confirming after graceful remove: {confirmed:?}"
+        );
+    }
+    assert!(
+        confirmed[1] < confirmed[0],
+        "the removed peer 1 must stay frozen behind the survivors: {confirmed:?}"
+    );
+}
+
+/// Negative control for graceful remove: the alive mask must exclude only the
+/// removed peer. A real divergence seeded into a survivor after the removal must
+/// still reach the state-agreement oracle, not be hidden by the retired target's
+/// frozen confirmed frame.
+#[test]
+fn oracle_catches_seeded_divergence_under_graceful_remove() {
+    let schedule = graceful_remove_schedule(Some((0, 1)));
+    let options = RunOptions {
+        corrupt_state_from: Some((2, 300)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded divergence in a survivor must fail under graceful remove"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::StateDivergence { .. })),
+        "the state comparison must keep its teeth after graceful remove: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// A checksum-only desync must fail even when the app model starves every
+/// session event queue. Without the metrics-backed oracle path, `DesyncDetected`
+/// can sit undrained (or be discarded by D9 trimming), states still agree, and
+/// the run can report a false green.
+#[test]
+fn checksum_mismatch_metric_catches_starved_desync_event() {
+    let config = SimConfig {
+        n_players: 2,
+        noise: BackgroundNoise::Clean,
+        starve_events: vec![0, 1],
+        event_queue_size: Some(10),
+        ..SimConfig::smoke(2)
+    };
+    let mut schedule = generate(13, config);
+    schedule.events.clear();
+    schedule.heal_at = schedule.config.steps;
+    let options = RunOptions {
+        corrupt_checksum_from: Some((0, 40)),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a checksum mismatch must fail even when DesyncDetected events are starved"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::ChecksumMismatchMetric { .. })),
+        "metrics-backed checksum mismatch must be visible to the oracle: {:?}",
+        report.verdict.failures
+    );
+}
+
 /// A `PeerKill` naming a peer outside the mesh must fail loudly with the same
 /// clear message as the other events (per-event fail-loud contract of the
 /// up-front validation).
@@ -1113,6 +1258,141 @@ fn run_rejects_out_of_range_peer_kill() {
         .push((100, ScheduleEvent::PeerKill { peer: 9 }));
     schedule.events.sort_by_key(|(step, _)| *step);
     let _ = run(&schedule, &RunOptions::default());
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
+    }
+}
+
+/// Malformed `GracefulRemove` events must fail during up-front schedule
+/// validation with clear corpus-replay diagnostics, not as raw indexing panics
+/// in the runner body. The cases cover the whole class: bad caller, bad target,
+/// and a self-target that would make the target local rather than remote.
+#[test]
+fn run_rejects_malformed_graceful_remove_events() {
+    let cases = [
+        (
+            ScheduleEvent::GracefulRemove { by: 9, target: 1 },
+            "out of range",
+        ),
+        (
+            ScheduleEvent::GracefulRemove { by: 0, target: 9 },
+            "out of range",
+        ),
+        (
+            ScheduleEvent::GracefulRemove { by: 1, target: 1 },
+            "target must be remote",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        let mut schedule = graceful_remove_schedule(None);
+        schedule.events.push((100, event));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        let result = std::panic::catch_unwind(|| {
+            let _ = run(&schedule, &RunOptions::default());
+        });
+        let Err(payload) = result else {
+            panic!("malformed GracefulRemove event unexpectedly ran: {schedule:?}");
+        };
+        let message = panic_payload_to_string(payload.as_ref());
+        assert!(
+            message.contains(expected),
+            "panic should mention {expected:?}, got {message:?}"
+        );
+    }
+}
+
+fn assert_run_panics_with(schedule: &Schedule, expected: &str) {
+    let result = std::panic::catch_unwind(|| {
+        let _ = run(schedule, &RunOptions::default());
+    });
+    let Err(payload) = result else {
+        panic!("invalid schedule unexpectedly ran: {schedule:?}");
+    };
+    let message = panic_payload_to_string(payload.as_ref());
+    assert!(
+        message.contains(expected),
+        "panic should mention {expected:?}, got {message:?}"
+    );
+}
+
+/// Hand-authored/corpus schedules must satisfy the same invariants as generated
+/// schedules. Otherwise the runner can silently run an empty mesh, skip a late
+/// event, reorder lifecycle faults, or default a missing directed link to clean.
+#[test]
+fn run_rejects_invalid_materialized_schedule_invariants() {
+    let valid = graceful_remove_schedule(None);
+
+    let mut zero_players = valid.clone();
+    zero_players.config.n_players = 0;
+    zero_players.initial_links.clear();
+    zero_players.events.clear();
+    zero_players.heal_at = zero_players.config.steps;
+
+    let mut unsorted_events = valid.clone();
+    unsorted_events.events.push((10, ScheduleEvent::HealAll));
+
+    let mut event_outside_run = valid.clone();
+    event_outside_run
+        .events
+        .push((event_outside_run.config.steps, ScheduleEvent::HealAll));
+
+    let mut missing_link = valid.clone();
+    let _ = missing_link.initial_links.pop();
+
+    let mut self_link = valid.clone();
+    if let Some(first) = self_link.initial_links.first_mut() {
+        first.1 = first.0;
+    }
+
+    let mut self_link_event = valid.clone();
+    self_link_event.events.push((
+        10,
+        ScheduleEvent::Block {
+            from: 0,
+            to: 0,
+            blocked: true,
+        },
+    ));
+    self_link_event.events.sort_by_key(|(step, _)| *step);
+
+    let mut duplicate_link = valid.clone();
+    if let Some(first) = duplicate_link.initial_links.first().cloned() {
+        let _ = duplicate_link.initial_links.pop();
+        duplicate_link.initial_links.push(first);
+    }
+
+    let mut post_heal_fault = valid;
+    post_heal_fault.events.push((
+        post_heal_fault.heal_at + 1,
+        ScheduleEvent::Block {
+            from: 0,
+            to: 1,
+            blocked: true,
+        },
+    ));
+
+    let cases = [
+        (zero_players, "2..=16 players"),
+        (unsorted_events, "sorted"),
+        (event_outside_run, "outside the run"),
+        (missing_link, "exactly one directed policy"),
+        (self_link, "must not target itself"),
+        (self_link_event, "must not target itself"),
+        (duplicate_link, "duplicate initial link"),
+        (post_heal_fault, "after the last HealAll"),
+    ];
+
+    for (schedule, expected) in cases {
+        assert_run_panics_with(&schedule, expected);
+    }
 }
 
 /// Builds a schedule that reliably drives `WaitRecommendation`s: an `n`-mesh
@@ -1761,6 +2041,44 @@ fn post_heal_liveness_fires_on_a_pinned_peer() {
             OracleFailure::PostHealLiveness { peer, .. } if *peer != 1)),
         "only the pinned peer may fail (c): {:?}",
         report.verdict.failures
+    );
+}
+
+/// Overlapping `PeerStall` events are cumulative in effect: a later short stall
+/// during a long stall must not shorten the first stall's deadline. This pins the
+/// runner to `max(existing_deadline, new_deadline)` semantics; otherwise the
+/// second event below lets peer 1 resume immediately and falsely clears (c).
+#[test]
+fn overlapping_peer_stalls_keep_the_later_deadline() {
+    let b = SimConfig::smoke(4).recovery_window_steps();
+    let mut schedule = heal_liveness_schedule(None, true);
+    schedule.events.push((
+        HEAL_LIVENESS_HEAL_AT - 1,
+        ScheduleEvent::PeerStall {
+            peer: 1,
+            steps: b + 11,
+        },
+    ));
+    schedule.events.push((
+        HEAL_LIVENESS_HEAL_AT,
+        ScheduleEvent::PeerStall { peer: 1, steps: 1 },
+    ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, OracleFailure::PostHealLiveness { peer: 1, .. })),
+        "overlapping short stall must not shorten the long pinned stall: {:?}",
+        report.verdict.failures
+    );
+    assert_eq!(
+        report.recovered_within_b,
+        Some(false),
+        "the long stall must remain pinned across the recovery window"
     );
 }
 
