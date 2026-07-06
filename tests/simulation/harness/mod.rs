@@ -442,11 +442,12 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
             if let Some(size) = schedule.config.event_queue_size {
-                // Validated `>= 10` up front, so the builder's min-cap check
-                // cannot reject it here.
-                builder = builder
-                    .with_event_queue_size(size)
-                    .expect("event_queue_size >= 10 (validated up front)");
+                // Validated `>= 10` up front, so the current min-cap check
+                // cannot reject it; surface the real error (not a fixed string)
+                // if the builder ever grows stricter validation.
+                builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
+                    panic!("with_event_queue_size({size}) rejected a pre-validated size: {error:?}")
+                });
             }
             for (j, addr) in addrs.iter().enumerate() {
                 let player_type = if j == i {
@@ -500,10 +501,12 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // wedged event consumer). Their bounded `event_queue` fills and the session
     // trims oldest events, firing the D9 `events_discarded_*` telemetry. Because
     // the harness normally drains (and feeds) events per step, starvation is the
-    // only fleet path that exercises that overflow.
-    let starves: Vec<bool> = (0..n)
-        .map(|i| schedule.config.starve_events.contains(&i))
-        .collect();
+    // only fleet path that exercises that overflow. Built by direct index (peers
+    // validated in-range above) — O(n + |starve_events|), no per-peer rescan.
+    let mut starves = vec![false; n];
+    for &peer in &schedule.config.starve_events {
+        starves[peer] = true;
+    }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
 
