@@ -443,7 +443,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 *peer < n,
                 "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
             ),
-            ScheduleEvent::GracefulRemove { by, target } => {
+            ScheduleEvent::GracefulRemove { by, target }
+            | ScheduleEvent::LegacyDisconnect { by, target } => {
                 assert!(
                     *by < n && *target < n,
                     "lifecycle drop ({by} -> {target}) out of range for a {n}-peer mesh"
@@ -583,8 +584,9 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
     // sets it to `step + steps`.
     let mut stalled_until: Vec<u32> = vec![0; n];
-    // Peers killed by a `PeerKill` event: no longer driven, detached from the
-    // fabric, and excluded from the oracle's liveness checks (their pre-death
+    // Peers retired by lifecycle events (`PeerKill`, `GracefulRemove`, or
+    // `LegacyDisconnect`): no longer driven, detached from the fabric, and
+    // excluded from the oracle's liveness checks (their pre-retirement
     // observations still count for agreement).
     let mut dead: Vec<bool> = vec![false; n];
     // Per-peer count of advances still owed to an obeyed `WaitRecommendation`
@@ -688,6 +690,23 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                         let handle = PlayerHandle::new(*target);
                         if let Err(error) = peers[*by].session.remove_player(handle) {
                             oracle.observe_session_error("remove_player", *by, step, &error);
+                        } else {
+                            dead[*target] = true;
+                            net.detach(addrs[*target]);
+                            oracle.mark_peer_dead(*target);
+                        }
+                    }
+                },
+                ScheduleEvent::LegacyDisconnect { by, target } => {
+                    // User-driven legacy disconnect: one survivor explicitly
+                    // kicks the target through the older Halt-oriented API, and
+                    // the target stops participating. This deliberately does
+                    // not assert graceful convergence; D13 tracks the current
+                    // fabricated-frame Halt behavior.
+                    if !dead[*by] && !dead[*target] {
+                        let handle = PlayerHandle::new(*target);
+                        if let Err(error) = peers[*by].session.disconnect_player(handle) {
+                            oracle.observe_session_error("disconnect_player", *by, step, &error);
                         } else {
                             dead[*target] = true;
                             net.detach(addrs[*target]);

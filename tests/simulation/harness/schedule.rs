@@ -76,7 +76,9 @@ pub enum AppModel {
 ///   a network black-hole).
 /// - `5`: adds [`ScheduleEvent::GracefulRemove`], the explicit
 ///   user-driven graceful-drop entry point (`P2PSession::remove_player`).
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 5;
+/// - `6`: adds [`ScheduleEvent::LegacyDisconnect`], the older
+///   user-driven disconnect entry point (`P2PSession::disconnect_player`).
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 6;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +259,16 @@ pub enum ScheduleEvent {
     ///
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     GracefulRemove { by: usize, target: usize },
+    /// A live peer `by` explicitly disconnects remote player `target` via
+    /// `P2PSession::disconnect_player`, then the target leaves the harness.
+    /// This is the legacy GGRS-style user path: unlike
+    /// [`ScheduleEvent::GracefulRemove`], it does not freeze the dropped slot or
+    /// emit `PeerDropped`; with today's `Halt` path it reports non-recovery
+    /// and remains part of the D13 "not fully fail-closed" defect surface. That
+    /// makes it a Halt/D13 probe rather than a graceful-convergence contract.
+    ///
+    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    LegacyDisconnect { by: usize, target: usize },
     /// Permanently kill peer `peer`: the harness stops driving its session and
     /// detaches it from the fabric (its inbox is discarded; further traffic to
     /// it is dropped). Models a **crash** — the peer is gone for good and, being
@@ -639,6 +651,9 @@ mod tests {
             .push((275, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
         schedule
             .events
+            .push((285, ScheduleEvent::LegacyDisconnect { by: 0, target: 2 }));
+        schedule
+            .events
             .push((300, ScheduleEvent::PeerKill { peer: 2 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
@@ -659,6 +674,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::GracefulRemove { by: 0, target: 1 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::LegacyDisconnect { by: 0, target: 2 })));
         assert!(back
             .events
             .iter()
