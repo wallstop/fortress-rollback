@@ -380,19 +380,36 @@ impl<I: SimInput> SimGameStub<I> {
         self.applied_inputs.retain(|frame, _| *frame < from_frame);
     }
 
-    fn handle_requests(&mut self, requests: RequestVec<I::SessionConfig>) -> Option<Frame> {
-        let mut loaded_frame = None;
+    fn loaded_frame(requests: &RequestVec<I::SessionConfig>) -> Option<Frame> {
+        requests.iter().find_map(|request| match request {
+            FortressRequest::LoadGameState { frame, .. } => Some(*frame),
+            FortressRequest::SaveGameState { .. } | FortressRequest::AdvanceFrame { .. } => None,
+        })
+    }
+
+    fn handle_replacement_handoff_requests(
+        &mut self,
+        requests: RequestVec<I::SessionConfig>,
+        handoff_floor: i32,
+    ) -> Option<Frame> {
+        let loaded = Self::loaded_frame(&requests);
+        if let Some(frame) = loaded {
+            self.prune_replacement_generation(handoff_floor.min(frame.as_i32()));
+        }
+        self.handle_requests(requests);
+        loaded
+    }
+
+    fn handle_requests(&mut self, requests: RequestVec<I::SessionConfig>) {
         for request in requests {
             match request {
-                FortressRequest::LoadGameState { cell, frame } => {
+                FortressRequest::LoadGameState { cell, .. } => {
                     self.load(&cell);
-                    loaded_frame = Some(frame);
                 },
                 FortressRequest::SaveGameState { cell, frame } => self.save(&cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance(&inputs),
             }
         }
-        loaded_frame
     }
 
     fn save(&self, cell: &GameStateCell<StateStub>, frame: Frame) {
@@ -1415,16 +1432,20 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         }
                         match slot.session.advance_frame() {
                             Ok(requests) => {
-                                let loaded = slot.game.handle_requests(requests);
                                 if let Some(handoff_floor) = slot.pending_replacement_handoff_floor
                                 {
-                                    if let Some(frame) = loaded {
+                                    if let Some(frame) =
+                                        slot.game.handle_replacement_handoff_requests(
+                                            requests,
+                                            handoff_floor,
+                                        )
+                                    {
                                         let snapshot_frame = frame.as_i32();
-                                        let state_boundary = handoff_floor.min(snapshot_frame);
-                                        slot.game.prune_replacement_generation(state_boundary);
                                         slot.sampled_confirmed = snapshot_frame;
                                         slot.pending_replacement_handoff_floor = None;
                                     }
+                                } else {
+                                    slot.game.handle_requests(requests);
                                 }
                             },
                             Err(error) => oracle.observe_advance_error(i, step, &error),
@@ -1640,6 +1661,69 @@ mod tests {
     fn sim_input_widths_match_codec() {
         assert_input_width(input_for::<StubInput>(7, 1));
         assert_input_width(input_for::<WideStubInput>(7, 1));
+    }
+
+    #[test]
+    fn replacement_generation_prunes_before_loading_snapshot_requests() {
+        let mut game = SimGameStub::<StubInput>::new();
+        game.recorded.insert(
+            4,
+            StateStub {
+                frame: 4,
+                state: 40,
+            },
+        );
+        game.recorded.insert(
+            6,
+            StateStub {
+                frame: 6,
+                state: 60,
+            },
+        );
+        game.applied_inputs.insert(5, Vec::new());
+
+        let cell = GameStateCell::<StateStub>::default();
+        cell.save(
+            Frame::new(5),
+            Some(StateStub {
+                frame: 5,
+                state: 10,
+            }),
+            Some(0),
+        );
+        let mut inputs = InputVec::<StubInput>::new();
+        inputs.push((StubInput { inp: 1 }, InputStatus::Confirmed));
+        let mut requests = RequestVec::<StubConfig>::new();
+        requests.push(FortressRequest::LoadGameState {
+            cell,
+            frame: Frame::new(5),
+        });
+        requests.push(FortressRequest::AdvanceFrame { inputs });
+
+        let loaded = game.handle_replacement_handoff_requests(requests, 5);
+
+        assert_eq!(loaded, Some(Frame::new(5)));
+        assert_eq!(
+            game.recorded.get(&4),
+            Some(&StateStub {
+                frame: 4,
+                state: 40
+            }),
+            "pre-handoff state must remain available for oracle comparison"
+        );
+        assert_eq!(
+            game.recorded.get(&6),
+            Some(&StateStub { frame: 6, state: 9 }),
+            "same-tick replacement advance must survive handoff pruning"
+        );
+        assert_eq!(
+            game.applied_inputs.get(&5),
+            Some(&vec![(
+                StubInput { inp: 1 }.fingerprint(),
+                InputStatus::Confirmed
+            )]),
+            "same-tick replacement inputs must replace old-generation data"
+        );
     }
 
     #[test]
