@@ -1,6 +1,7 @@
 name: CI - Network Tests (Nightly)
 
-# Nightly "does it survive real sockets" lane.
+# Nightly "does it survive real sockets and keep producing measured cost
+# baselines" lane.
 #
 # The extreme / flaky real-UDP chaos scenarios in tests/network/multi_process.rs
 # are marked `#[ignore]` so they do NOT gate every PR (they are slow and
@@ -8,7 +9,9 @@ name: CI - Network Tests (Nightly)
 # covered deterministically and in-process by tests/network/in_process_chaos.rs.
 #
 # This workflow runs the ignored real-UDP extreme tests on a daily schedule (and
-# on demand) to confirm they still survive real sockets + real wall-clock.
+# on demand) to confirm they still survive real sockets + real wall-clock. It
+# also captures the deterministic full baseline sweep artifact on Linux so M5's
+# wire-format cost deltas have a nightly ledger.
 
 on:
   # Daily at 3 AM UTC
@@ -119,6 +122,30 @@ jobs:
           restore-keys: |
             network-nightly-${{ runner.os }}-cargo-
             network-${{ runner.os }}-cargo-
+
+      - name: Run deterministic baseline full matrix (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          rm -rf "$RUNNER_TEMP/fortress-sweep"
+          mkdir -p "$RUNNER_TEMP/fortress-sweep"
+          cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(full_matrix_sweep)' --test simulation --no-capture
+        env:
+          FORTRESS_SWEEP_OUT: ${{ runner.temp }}/fortress-sweep/full-matrix.jsonl
+          FORTRESS_SWEEP_GIT_SHA: ${{ github.sha }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Upload deterministic baseline sweep artifact
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: baseline-sweep-nightly-results
+          path: ${{ runner.temp }}/fortress-sweep/full-matrix.jsonl
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Build network test peer
         uses: nick-fields/retry@v4
