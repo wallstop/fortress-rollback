@@ -573,6 +573,15 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     }
 
     let Some(host) = hot_join_host_for_slot(ctx.schedule.config.n_players, slot) else {
+        ctx.oracle.observe_runner_error(
+            "hot_join_host_unavailable",
+            slot,
+            step,
+            format!(
+                "no deterministic coordinator exists for slot {slot} in a {}-peer mesh",
+                ctx.schedule.config.n_players
+            ),
+        );
         return;
     };
     if ctx.dead[host] {
@@ -1355,11 +1364,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 },
                 #[cfg(feature = "hot-join")]
                 ScheduleEvent::HotJoin { slot } => {
-                    // Returning clean-drop path: one survivor gracefully removes
-                    // the slot, then a fresh session re-attaches at the same
-                    // address and runs the public hot-join protocol. The slot is
-                    // not marked dead: it remains part of the live oracle set
-                    // and must end Running/confirming after reactivation.
+                    // Returning clean-drop path: build the replacement first so
+                    // constructor failures leave the old slot intact; then one
+                    // survivor removes the old slot, the runner resets the old
+                    // inbox, and the replacement runs the public hot-join
+                    // protocol. The slot is not marked dead: it remains part
+                    // of the live oracle set and must end Running/confirming
+                    // after reactivation.
                     let mut ctx = HotJoinRuntime {
                         schedule,
                         clock: &clock,
@@ -1649,6 +1660,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
 

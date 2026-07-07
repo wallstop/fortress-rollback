@@ -311,10 +311,11 @@ pub enum ScheduleEvent {
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     SpectatorHostKill { host: usize },
     /// Reactivate player slot `slot` through the public hot-join path. The
-    /// runner first has a live survivor gracefully remove the slot, detaches the
-    /// old peer from the fabric, and then starts a fresh hot-joiner at that same
-    /// address with `slot` as its local player. That exercises the returning
-    /// clean-drop path without permanently retiring the slot from the oracle.
+    /// runner first constructs a fresh hot-joiner for that slot; once that
+    /// succeeds, a live survivor gracefully removes the old slot, the fabric
+    /// inbox at the old address is reset, and the fresh session takes over that
+    /// address. That exercises the returning clean-drop path without permanently
+    /// retiring the slot from the oracle.
     ///
     /// Requires the crate's `hot-join` feature at runtime. Hot-join schedules
     /// must use input delay 0 and `max_prediction >= 1`, matching
