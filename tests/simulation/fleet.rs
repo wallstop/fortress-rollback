@@ -1049,6 +1049,55 @@ fn graceful_remove_schedule(remove: Option<(usize, usize)>) -> Schedule {
     )
 }
 
+#[cfg(feature = "hot-join")]
+fn hot_join_schedule(slot: Option<usize>) -> Schedule {
+    let n = 2;
+    let config = SimConfig {
+        n_players: n,
+        steps: 900,
+        input_delay: 0,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let heal_at = 650;
+    let mut events = vec![(heal_at, ScheduleEvent::HealAll)];
+    if let Some(slot) = slot {
+        events.push((100, ScheduleEvent::HotJoin { slot }));
+    }
+    events.sort_by_key(|(step, _)| *step);
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0,
+        link_seed: 0,
+        config,
+        initial_links,
+        events,
+        heal_at,
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_after_runtime_remove_schedule() -> Schedule {
+    let mut schedule = hot_join_schedule(None);
+    schedule
+        .events
+        .push((100, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+    schedule
+        .events
+        .push((120, ScheduleEvent::HotJoin { slot: 1 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
 /// Builds a legacy-disconnect schedule: a clean 4-mesh in which peer `by`
 /// calls the older `disconnect_player(target)` API at step 100. On success the
 /// target leaves the harness; on error it stays live and the oracle records the
@@ -1282,6 +1331,119 @@ fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
     assert_eq!(
         report.trace_hash, again.trace_hash,
         "a preplanned spectator schedule must reproduce its exact trace"
+    );
+}
+
+/// M3 §6.1 lifecycle vocabulary — hot-join reactivation
+/// (`ScheduleEvent::HotJoin`). A cleanly dropped slot must be refillable by a
+/// fresh peer at the same address, and that rejoined slot must return to the
+/// live mesh rather than staying behind the oracle's dead-peer mask.
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_reactivates_cleanly_dropped_slot() {
+    use fortress_rollback::MessageKind;
+
+    let base = hot_join_schedule(None);
+    let base_report = run(&base, &RunOptions::default());
+    base_report.expect_pass(&base);
+
+    let slot = 1;
+    let joined = hot_join_schedule(Some(slot));
+    let report = run(&joined, &RunOptions::default());
+    report.expect_pass(&joined);
+
+    let again = run(&joined, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "a HotJoin schedule for slot {slot} must reproduce its exact trace"
+    );
+    assert_ne!(
+        base_report.trace_hash, report.trace_hash,
+        "HotJoin slot {slot} must change execution — a silent no-op would \
+         leave the trace identical"
+    );
+
+    for (peer, &confirmed) in report.final_confirmed.iter().enumerate() {
+        assert!(
+            confirmed > 200,
+            "peer {peer} must be live and confirming after hot-join slot {slot}: {:?}",
+            report.final_confirmed
+        );
+    }
+
+    let join_requests: u64 = report
+        .peer_wire
+        .iter()
+        .map(|wire| wire.sent_by_kind(MessageKind::JoinRequest))
+        .sum();
+    let snapshots: u64 = report
+        .peer_wire
+        .iter()
+        .map(|wire| wire.sent_by_kind(MessageKind::StateSnapshot))
+        .sum();
+    assert!(
+        join_requests > 0 && snapshots > 0,
+        "hot-join slot {slot} wire traffic must be present \
+         (join_requests={join_requests}, snapshots={snapshots})"
+    );
+}
+
+/// A `HotJoin` event must never silently no-op against a slot already retired by
+/// an earlier runtime lifecycle API. `GracefulRemove` is runtime-contingent, so
+/// static validation cannot reject it; the runner must report it through the
+/// oracle when the hot-join event fires.
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_after_runtime_remove_fails_loudly() {
+    let schedule = hot_join_after_runtime_remove_schedule();
+
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        !report.verdict.passed(),
+        "hot-joining an already-retired slot must fail loudly"
+    );
+    assert!(
+        report.verdict.failures.iter().any(|failure| {
+            matches!(
+                failure,
+                OracleFailure::SessionError {
+                    operation: "hot_join_slot_unavailable",
+                    peer: 1,
+                    ..
+                }
+            )
+        }),
+        "expected explicit hot_join_slot_unavailable failure, got {:?}",
+        report.verdict.failures
+    );
+}
+
+/// The hot-join generation boundary intentionally discards the departing
+/// slot's trailing handoff-window confirmed-input authorship, because the
+/// coordinator freezes that window when it cleanly removes the slot. It must
+/// not hide settled pre-handoff determinism bugs.
+#[cfg(feature = "hot-join")]
+#[test]
+fn oracle_catches_settled_pre_handoff_divergence_under_hot_join() {
+    let schedule = hot_join_schedule(Some(1));
+    let options = RunOptions {
+        corrupt_state_from: Some((1, 80)),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a pre-handoff divergence on the departing slot must still fail"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::StateDivergence { .. })),
+        "expected StateDivergence before the hot-join handoff, got {:?}",
+        report.verdict.failures
     );
 }
 

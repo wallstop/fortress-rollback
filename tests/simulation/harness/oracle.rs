@@ -519,6 +519,23 @@ impl Oracle {
         self.dead[peer] = true;
     }
 
+    /// Starts a new live generation for `peer` without marking it dead. A
+    /// hot-join replacement is a different session at the same player slot; the
+    /// old session may have been the first author for trailing confirmed-input
+    /// samples that the serving host intentionally freezes differently when it
+    /// removes the slot. Those trailing old input-frame samples must not become
+    /// canonical for the replacement generation, while older settled samples
+    /// keep their oracle coverage.
+    pub fn begin_replacement_generation(&mut self, peer: usize, input_from_frame: i32) {
+        assert!(
+            peer < self.dead.len(),
+            "begin_replacement_generation: peer {peer} out of range (dead-mask len {})",
+            self.dead.len()
+        );
+        self.canonical_inputs
+            .retain(|frame, (first_author, _)| *first_author != peer || *frame < input_from_frame);
+    }
+
     /// Whether `peer` was retired mid-run.
     fn is_dead(&self, peer: usize) -> bool {
         self.dead.get(peer).copied().unwrap_or(false)
@@ -600,11 +617,23 @@ impl Oracle {
         step: u32,
         error: &fortress_rollback::FortressError,
     ) {
+        self.observe_runner_error(operation, peer, step, format!("{error:?}"));
+    }
+
+    /// (g): the harness detected an invalid lifecycle transition that is not a
+    /// direct library API error.
+    pub fn observe_runner_error(
+        &mut self,
+        operation: &'static str,
+        peer: usize,
+        step: u32,
+        error: impl Into<String>,
+    ) {
         self.push_failure(OracleFailure::SessionError {
             operation,
             peer,
             step,
-            error: format!("{error:?}"),
+            error: error.into(),
         });
     }
 
