@@ -640,6 +640,10 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         .confirmed_frame()
         .as_i32()
         .saturating_sub(i32::try_from(ctx.schedule.config.max_prediction).unwrap_or(i32::MAX));
+    // `handoff_floor` is a post-advance state-frame boundary. Canonical
+    // confirmed-input samples are keyed by the input frame that produces the
+    // next state frame, so input frame `handoff_floor - 1` is the first sample
+    // that can affect replacement-generation state at `handoff_floor`.
     let input_handoff_floor = handoff_floor.saturating_sub(1);
     ctx.oracle
         .begin_replacement_generation(slot, input_handoff_floor);
@@ -1015,7 +1019,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     "HotJoin slot {slot} is already retired by an earlier kill event"
                 );
                 let Some(host) = hot_join_host_for_slot(n, *slot) else {
-                    unreachable!("n >= 2 and slot in range guarantee a hot-join host")
+                    panic!("HotJoin requires at least two players; got n_players={n}, slot={slot}");
                 };
                 assert!(
                     !retired_by_guaranteed_kill[host],
