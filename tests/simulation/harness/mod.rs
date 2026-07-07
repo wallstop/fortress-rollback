@@ -550,28 +550,25 @@ fn drive_spectator<I: SimInput>(
     oracle: &mut Oracle,
     trace_hash: &mut u64,
 ) {
-    spectator.session.poll_remote_clients();
+    let start_frame = spectator.session.current_frame().as_i32().saturating_add(1);
+    match spectator.session.advance_frame() {
+        Ok(requests) => record_spectator_requests(
+            spectator,
+            requests,
+            start_frame,
+            options.corrupt_spectator_input_from,
+            options.corrupt_spectator_status_from,
+        ),
+        Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+        Err(error) => oracle.observe_spectator_error("advance_frame", step, &error),
+    }
+
     let events: Vec<FortressEvent<I::SessionConfig>> = spectator.session.events().collect();
     for event in &events {
         if let FortressEvent::SpectatorDivergence { frame, player, .. } = event {
             oracle.observe_spectator_divergence_event(*frame, *player);
         }
         fold_trace(trace_hash, &format!("spectator:{event:?}"));
-    }
-
-    if spectator.session.current_state() == SessionState::Running {
-        let start_frame = spectator.session.current_frame().as_i32().saturating_add(1);
-        match spectator.session.advance_frame() {
-            Ok(requests) => record_spectator_requests(
-                spectator,
-                requests,
-                start_frame,
-                options.corrupt_spectator_input_from,
-                options.corrupt_spectator_status_from,
-            ),
-            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
-            Err(error) => oracle.observe_spectator_error("advance_frame", step, &error),
-        }
     }
 
     fold_trace(
