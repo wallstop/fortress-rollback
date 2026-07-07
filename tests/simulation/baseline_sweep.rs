@@ -590,9 +590,10 @@ fn sweep_pr_gate() {
     check_or_bless_baseline(&reports);
 }
 
-/// The full baseline matrix. `#[ignore]`d: it runs 5000-frame cells across the
-/// loss × RTT × jitter grid plus scale spot rows and is intended for nightly or
-/// offline capture via `FORTRESS_SWEEP_OUT`, not PR CI.
+/// Returns the full baseline matrix used by the ignored
+/// [`full_matrix_sweep`] test: 5000-frame cells across the loss × RTT ×
+/// jitter grid plus scale spot rows, intended for nightly or offline capture
+/// via `FORTRESS_SWEEP_OUT`, not PR CI.
 fn full_matrix_cells() -> Vec<CellParams> {
     const STEPS: u32 = 5000;
     const SEED: u64 = 1;
