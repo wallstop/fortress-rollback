@@ -585,22 +585,6 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         return;
     }
 
-    let handle = PlayerHandle::new(slot);
-    if let Err(error) = ctx.peers[host].session.remove_player(handle) {
-        ctx.oracle
-            .observe_session_error("hot_join_remove_player", host, step, &error);
-        return;
-    }
-
-    let handoff_floor = ctx.peers[host]
-        .session
-        .confirmed_frame()
-        .as_i32()
-        .saturating_sub(i32::try_from(ctx.schedule.config.max_prediction).unwrap_or(i32::MAX));
-    let input_handoff_floor = handoff_floor.saturating_sub(1);
-    ctx.oracle
-        .begin_replacement_generation(slot, input_handoff_floor);
-    ctx.net.detach(ctx.addrs[slot]);
     let socket: SimSocket<Message> = ctx.net.attach(ctx.addrs[slot]);
     let observer = Arc::clone(&ctx.peers[slot].observer);
     let protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
@@ -635,16 +619,36 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
             .expect("valid hot-join player registration");
     }
 
-    match builder.start_hot_join_session(socket, ctx.addrs[host]) {
-        Ok(session) => {
-            ctx.peers[slot].session = session;
-            ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
-        },
+    let replacement = match builder.start_hot_join_session(socket, ctx.addrs[host]) {
+        Ok(session) => session,
         Err(error) => {
             ctx.oracle
                 .observe_session_error("start_hot_join_session", slot, step, &error);
+            return;
         },
+    };
+
+    let handle = PlayerHandle::new(slot);
+    if let Err(error) = ctx.peers[host].session.remove_player(handle) {
+        ctx.oracle
+            .observe_session_error("hot_join_remove_player", host, step, &error);
+        return;
     }
+
+    let handoff_floor = ctx.peers[host]
+        .session
+        .confirmed_frame()
+        .as_i32()
+        .saturating_sub(i32::try_from(ctx.schedule.config.max_prediction).unwrap_or(i32::MAX));
+    let input_handoff_floor = handoff_floor.saturating_sub(1);
+    ctx.oracle
+        .begin_replacement_generation(slot, input_handoff_floor);
+    // The replacement owns an address-backed `SimSocket`; reset the old peer's
+    // inbox, then recreate an empty inbox at the same address for that socket.
+    ctx.net.detach(ctx.addrs[slot]);
+    let _replacement_inbox = ctx.net.attach(ctx.addrs[slot]);
+    ctx.peers[slot].session = replacement;
+    ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
 }
 
 /// Pure per-peer input function: any deterministic mapping works; this one
@@ -1641,6 +1645,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
 
     fn assert_input_width<I: SimInput>(input: I) {
@@ -1723,6 +1728,126 @@ mod tests {
                 InputStatus::Confirmed
             )]),
             "same-tick replacement inputs must replace old-generation data"
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn test_peer_slot(
+        peer: usize,
+        schedule: &Schedule,
+        clock: &TestClock,
+        net: &SimNet<Message>,
+        addrs: &[SocketAddr],
+    ) -> PeerSlot<StubInput> {
+        let socket: SimSocket<Message> = net.attach(addrs[peer]);
+        let observer = Arc::new(CollectingObserver::new());
+        let protocol_config = peer_protocol_config(schedule, peer, clock);
+        let mut builder = SessionBuilder::<StubConfig>::new()
+            .with_num_players(addrs.len())
+            .expect("valid player count")
+            .with_max_prediction_window(1)
+            .with_input_delay(0)
+            .expect("valid input delay")
+            .with_desync_detection_mode(DesyncDetection::On {
+                interval: schedule.config.desync_interval,
+            })
+            .with_disconnect_behavior(schedule.config.disconnect_behavior.into())
+            .with_protocol_config(protocol_config)
+            .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+        for (slot, addr) in addrs.iter().enumerate() {
+            let player_type = if slot == peer {
+                PlayerType::Local
+            } else {
+                PlayerType::Remote(*addr)
+            };
+            builder = builder
+                .add_player(player_type, PlayerHandle::new(slot))
+                .expect("valid player registration");
+        }
+        PeerSlot {
+            session: builder.start_p2p_session(socket).expect("session starts"),
+            game: SimGameStub::<StubInput>::new(),
+            observer,
+            sampled_confirmed: -1,
+            pending_replacement_handoff_floor: None,
+        }
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn failed_hot_join_session_build_leaves_existing_slot_intact() {
+        let n = 2;
+        let clock = TestClock::new();
+        let net: SimNet<Message> = SimNet::new(0, clock.as_protocol_clock());
+        let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+        let schedule = Schedule {
+            schema_version: schedule::SCHEDULE_SCHEMA_VERSION,
+            seed: 0,
+            link_seed: 0,
+            config: schedule::SimConfig {
+                n_players: n,
+                steps: 10,
+                input_delay: 0,
+                max_prediction: 0,
+                disconnect_behavior: schedule::DropPolicy::ContinueWithout,
+                noise: schedule::BackgroundNoise::Clean,
+                ..schedule::SimConfig::smoke(n)
+            },
+            initial_links: Vec::new(),
+            events: Vec::new(),
+            heal_at: 0,
+        };
+        let mut peers: Vec<PeerSlot<StubInput>> = (0..n)
+            .map(|peer| test_peer_slot(peer, &schedule, &clock, &net, &addrs))
+            .collect();
+        let dead = vec![false; n];
+        let mut oracle = Oracle::new(n);
+
+        {
+            let mut ctx = HotJoinRuntime {
+                schedule: &schedule,
+                clock: &clock,
+                net: &net,
+                addrs: &addrs,
+                peers: &mut peers,
+                dead: &dead,
+                oracle: &mut oracle,
+            };
+            start_hot_join_for_slot::<StubInput>(1, 3, &mut ctx);
+        }
+
+        assert!(
+            !dead[1],
+            "failed replacement construction must not retire the old slot"
+        );
+        assert!(
+            peers[1].pending_replacement_handoff_floor.is_none(),
+            "failed replacement construction must not arm handoff pruning"
+        );
+        peers[0]
+            .session
+            .remove_player(PlayerHandle::new(1))
+            .expect("host must not have removed slot before replacement construction failed");
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::NULL, Frame::NULL],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| {
+                matches!(
+                    failure,
+                    OracleFailure::SessionError {
+                        operation: "start_hot_join_session",
+                        peer: 1,
+                        step: 3,
+                        ..
+                    }
+                )
+            }),
+            "expected start_hot_join_session failure, got {:?}",
+            verdict.failures
         );
     }
 
