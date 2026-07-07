@@ -80,7 +80,9 @@ pub enum AppModel {
 ///   user-driven disconnect entry point (`P2PSession::disconnect_player`).
 /// - `7`: adds [`ScheduleEvent::SpectatorHostKill`], a spectator-focused host
 ///   crash/failover probe.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 7;
+/// - `8`: adds [`ScheduleEvent::HotJoin`], a returning-peer reactivation probe
+///   driven through the public hot-join API.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 8;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +310,17 @@ pub enum ScheduleEvent {
     ///
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     SpectatorHostKill { host: usize },
+    /// Reactivate player slot `slot` through the public hot-join path. The
+    /// runner first has a live survivor gracefully remove the slot, detaches the
+    /// old peer from the fabric, and then starts a fresh hot-joiner at that same
+    /// address with `slot` as its local player. That exercises the returning
+    /// clean-drop path without permanently retiring the slot from the oracle.
+    ///
+    /// Requires the crate's `hot-join` feature at runtime. Hot-join schedules
+    /// must use input delay 0 and `max_prediction >= 1`, matching
+    /// `SessionBuilder::start_hot_join_session`'s public contract. Planted by
+    /// lifecycle tests, not yet emitted by the random generator.
+    HotJoin { slot: usize },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
@@ -679,6 +692,9 @@ mod tests {
         schedule
             .events
             .push((325, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        schedule
+            .events
+            .push((350, ScheduleEvent::HotJoin { slot: 1 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
         let back: Schedule = serde_json::from_str(&json).unwrap();
@@ -710,6 +726,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::SpectatorHostKill { host: 0 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::HotJoin { slot: 1 })));
     }
 
     /// A corpus artifact predating the `#[serde(default)]` config axes (its

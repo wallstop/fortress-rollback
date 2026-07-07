@@ -375,14 +375,24 @@ impl<I: SimInput> SimGameStub<I> {
         }
     }
 
-    fn handle_requests(&mut self, requests: RequestVec<I::SessionConfig>) {
+    fn prune_replacement_generation(&mut self, from_frame: i32) {
+        self.recorded.retain(|frame, _| *frame < from_frame);
+        self.applied_inputs.retain(|frame, _| *frame < from_frame);
+    }
+
+    fn handle_requests(&mut self, requests: RequestVec<I::SessionConfig>) -> Option<Frame> {
+        let mut loaded_frame = None;
         for request in requests {
             match request {
-                FortressRequest::LoadGameState { cell, .. } => self.load(&cell),
+                FortressRequest::LoadGameState { cell, frame } => {
+                    self.load(&cell);
+                    loaded_frame = Some(frame);
+                },
                 FortressRequest::SaveGameState { cell, frame } => self.save(&cell, frame),
                 FortressRequest::AdvanceFrame { inputs } => self.advance(&inputs),
             }
         }
+        loaded_frame
     }
 
     fn save(&self, cell: &GameStateCell<StateStub>, frame: Frame) {
@@ -435,12 +445,51 @@ struct PeerSlot<I: SimInput> {
     observer: Arc<CollectingObserver>,
     /// Highest frame whose confirmed inputs were sampled into the oracle.
     sampled_confirmed: i32,
+    /// A hot-joined replacement starts from a mid-game snapshot and cannot
+    /// answer historical `confirmed_inputs_for_frame` queries below that
+    /// snapshot. While armed, this stores the earliest frame the coordinator's
+    /// clean-drop handoff may rewrite; the drive loop waits for the
+    /// replacement's first `LoadGameState { frame }`, prunes the replacement
+    /// generation from the earlier of those two boundaries, then resumes
+    /// confirmed-input sampling above the loaded snapshot frame.
+    pending_replacement_handoff_floor: Option<i32>,
 }
 
 struct SpectatorSlot<I: SimInput> {
     session: SpectatorSession<I::SessionConfig>,
     observer: Arc<CollectingObserver>,
     applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
+}
+
+fn peer_protocol_config(schedule: &Schedule, peer: usize, clock: &TestClock) -> ProtocolConfig {
+    // Per-peer clock: the exact base clock at 0 ppm (byte-identical to
+    // before), or a rate-skewed clock modeling an unsynchronized local clock
+    // (H-SKEW). A missing/short skew vector means "no skew".
+    let ppm = schedule
+        .config
+        .clock_skew_ppm
+        .get(peer)
+        .copied()
+        .unwrap_or(0);
+    let peer_clock = if ppm == 0 {
+        clock.as_protocol_clock()
+    } else {
+        // ratio (1e6 + ppm) / 1e6. `ppm == -1_000_000` (-100%) is a
+        // frozen clock (num = 0); anything below that would run time
+        // backwards and is rejected up front, so the fallback is unused.
+        let num = u64::try_from(1_000_000_i64 + i64::from(ppm)).unwrap_or(0);
+        clock.as_skewed_protocol_clock(num, 1_000_000)
+    };
+
+    ProtocolConfig {
+        clock: Some(peer_clock),
+        protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, peer))),
+        ..ProtocolConfig::default()
+    }
+}
+
+fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<usize> {
+    (0..n_players).find(|&peer| peer != slot)
 }
 
 fn update_spectator_required_min_frame<I: SimInput>(
@@ -480,6 +529,104 @@ fn retire_peer_for_lifecycle<I: SimInput>(
     oracle.mark_peer_dead(peer);
     if let Some(required_min_frame) = spectator_required_min_frame {
         update_spectator_required_min_frame(peers, dead, required_min_frame);
+    }
+}
+
+#[cfg(feature = "hot-join")]
+struct HotJoinRuntime<'a, I: SimInput> {
+    schedule: &'a Schedule,
+    clock: &'a TestClock,
+    net: &'a SimNet<Message>,
+    addrs: &'a [SocketAddr],
+    peers: &'a mut [PeerSlot<I>],
+    dead: &'a [bool],
+    oracle: &'a mut Oracle,
+}
+
+#[cfg(feature = "hot-join")]
+fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoinRuntime<'_, I>) {
+    if ctx.dead[slot] {
+        ctx.oracle.observe_runner_error(
+            "hot_join_slot_unavailable",
+            slot,
+            step,
+            "slot is already retired",
+        );
+        return;
+    }
+
+    let Some(host) = hot_join_host_for_slot(ctx.schedule.config.n_players, slot) else {
+        return;
+    };
+    if ctx.dead[host] {
+        ctx.oracle.observe_runner_error(
+            "hot_join_host_unavailable",
+            host,
+            step,
+            "deterministic coordinator is already retired",
+        );
+        return;
+    }
+
+    let handle = PlayerHandle::new(slot);
+    if let Err(error) = ctx.peers[host].session.remove_player(handle) {
+        ctx.oracle
+            .observe_session_error("hot_join_remove_player", host, step, &error);
+        return;
+    }
+
+    let handoff_floor = ctx.peers[host]
+        .session
+        .confirmed_frame()
+        .as_i32()
+        .saturating_sub(i32::try_from(ctx.schedule.config.max_prediction).unwrap_or(i32::MAX));
+    let input_handoff_floor = handoff_floor.saturating_sub(1);
+    ctx.oracle
+        .begin_replacement_generation(slot, input_handoff_floor);
+    ctx.net.detach(ctx.addrs[slot]);
+    let socket: SimSocket<Message> = ctx.net.attach(ctx.addrs[slot]);
+    let observer = Arc::clone(&ctx.peers[slot].observer);
+    let protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
+    let mut builder = SessionBuilder::<I::SessionConfig>::new()
+        .with_num_players(ctx.schedule.config.n_players)
+        .expect("valid player count")
+        .with_max_prediction_window(ctx.schedule.config.max_prediction)
+        .with_input_delay(0)
+        .expect("hot-join input delay is fixed at zero")
+        .with_desync_detection_mode(DesyncDetection::On {
+            interval: ctx.schedule.config.desync_interval,
+        })
+        .with_disconnect_behavior(ctx.schedule.config.disconnect_behavior.into())
+        .with_protocol_config(protocol_config)
+        .with_violation_observer(observer as Arc<_>);
+    if let Some(size) = ctx.schedule.config.event_queue_size {
+        builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
+            panic!(
+                "hot-join with_event_queue_size({size}) rejected a pre-validated \
+                 size: {error:?}"
+            )
+        });
+    }
+    for (peer, addr) in ctx.addrs.iter().enumerate() {
+        let player_type = if peer == slot {
+            PlayerType::Local
+        } else {
+            PlayerType::Remote(*addr)
+        };
+        builder = builder
+            .add_player(player_type, PlayerHandle::new(peer))
+            .expect("valid hot-join player registration");
+    }
+
+    match builder.start_hot_join_session(socket, ctx.addrs[host]) {
+        Ok(session) => {
+            ctx.peers[slot].session = session;
+            ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
+        },
+        Err(error) => {
+            ctx.oracle
+                .observe_session_error("start_hot_join_session", slot, step, &error);
+        },
     }
 }
 
@@ -679,6 +826,27 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             );
         }
     }
+    let has_hot_join = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { .. }));
+    #[cfg(not(feature = "hot-join"))]
+    assert!(
+        !has_hot_join,
+        "ScheduleEvent::HotJoin requires the crate's `hot-join` feature"
+    );
+    if has_hot_join {
+        assert!(
+            schedule.config.input_delay == 0,
+            "HotJoin schedules must use input_delay 0 (got {})",
+            schedule.config.input_delay
+        );
+        assert!(
+            schedule.config.max_prediction >= 1,
+            "HotJoin schedules must use max_prediction >= 1 (got {})",
+            schedule.config.max_prediction
+        );
+    }
     let expected_links = n * (n - 1);
     assert_eq!(
         schedule.initial_links.len(),
@@ -751,6 +919,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 *host < n,
                 "SpectatorHostKill host {host} out of range for a {n}-peer mesh"
             ),
+            ScheduleEvent::HotJoin { slot } => assert!(
+                *slot < n,
+                "HotJoin slot {slot} out of range for a {n}-peer mesh"
+            ),
             ScheduleEvent::HealAll => {},
         }
     }
@@ -786,6 +958,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         );
         spectator_host_enabled[peer] = true;
     }
+    let mut hot_join_host_enabled = vec![false; n];
+    for (_, event) in &schedule.events {
+        if let ScheduleEvent::HotJoin { slot } = event {
+            if let Some(host) = hot_join_host_for_slot(n, *slot) {
+                hot_join_host_enabled[host] = true;
+            }
+        }
+    }
+    #[cfg(not(feature = "hot-join"))]
+    let _ = &hot_join_host_enabled;
     // Only guaranteed harness kills can make a SpectatorHostKill malformed up
     // front. User API drops retire only after the runtime call returns `Ok`.
     let mut retired_by_guaranteed_kill = vec![false; n];
@@ -805,6 +987,20 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     "SpectatorHostKill host {host} is already retired by an earlier kill event"
                 );
                 retired_by_guaranteed_kill[*host] = true;
+            },
+            ScheduleEvent::HotJoin { slot } => {
+                assert!(
+                    !retired_by_guaranteed_kill[*slot],
+                    "HotJoin slot {slot} is already retired by an earlier kill event"
+                );
+                let Some(host) = hot_join_host_for_slot(n, *slot) else {
+                    unreachable!("n >= 2 and slot in range guarantee a hot-join host")
+                };
+                assert!(
+                    !retired_by_guaranteed_kill[host],
+                    "HotJoin slot {slot}'s coordinator peer {host} is already retired by an \
+                     earlier kill event"
+                );
             },
             ScheduleEvent::SetLink { .. }
             | ScheduleEvent::Block { .. }
@@ -842,24 +1038,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
             let observer = Arc::new(CollectingObserver::new());
-            // Per-peer clock: the exact base clock at 0 ppm (byte-identical to
-            // before), or a rate-skewed clock modeling an unsynchronized local
-            // clock (H-SKEW). A missing/short skew vector means "no skew".
-            let ppm = schedule.config.clock_skew_ppm.get(i).copied().unwrap_or(0);
-            let peer_clock = if ppm == 0 {
-                clock.as_protocol_clock()
-            } else {
-                // ratio (1e6 + ppm) / 1e6. `ppm == -1_000_000` (-100%) is a
-                // frozen clock (num = 0); anything below that would run time
-                // backwards and is rejected up front, so the fallback is unused.
-                let num = u64::try_from(1_000_000_i64 + i64::from(ppm)).unwrap_or(0);
-                clock.as_skewed_protocol_clock(num, 1_000_000)
-            };
-            let protocol_config = ProtocolConfig {
-                clock: Some(peer_clock),
-                protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, i))),
-                ..ProtocolConfig::default()
-            };
+            let protocol_config = peer_protocol_config(schedule, i, &clock);
             let mut builder = SessionBuilder::<I::SessionConfig>::new()
                 .with_num_players(n)
                 .expect("valid player count")
@@ -872,6 +1051,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .with_disconnect_behavior(schedule.config.disconnect_behavior.into())
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            #[cfg(feature = "hot-join")]
+            if hot_join_host_enabled[i] {
+                builder = builder.with_hot_join(true);
+            }
             if let Some(size) = schedule.config.event_queue_size {
                 // Validated `>= 10` up front, so the current min-cap check
                 // cannot reject it; surface the real error (not a fixed string)
@@ -913,6 +1096,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 game,
                 observer,
                 sampled_confirmed: -1,
+                pending_replacement_handoff_floor: None,
             }
         })
         .collect();
@@ -1144,6 +1328,28 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         spectator_enabled.then_some(&mut spectator_required_min_frame),
                     );
                 },
+                #[cfg(feature = "hot-join")]
+                ScheduleEvent::HotJoin { slot } => {
+                    // Returning clean-drop path: one survivor gracefully removes
+                    // the slot, then a fresh session re-attaches at the same
+                    // address and runs the public hot-join protocol. The slot is
+                    // not marked dead: it remains part of the live oracle set
+                    // and must end Running/confirming after reactivation.
+                    let mut ctx = HotJoinRuntime {
+                        schedule,
+                        clock: &clock,
+                        net: &net,
+                        addrs: &addrs,
+                        peers: &mut peers,
+                        dead: &dead,
+                        oracle: &mut oracle,
+                    };
+                    start_hot_join_for_slot(*slot, step, &mut ctx);
+                },
+                #[cfg(not(feature = "hot-join"))]
+                ScheduleEvent::HotJoin { .. } => {
+                    unreachable!("HotJoin schedules are rejected before sessions are built")
+                },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
             next_event += 1;
@@ -1208,7 +1414,19 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             }
                         }
                         match slot.session.advance_frame() {
-                            Ok(requests) => slot.game.handle_requests(requests),
+                            Ok(requests) => {
+                                let loaded = slot.game.handle_requests(requests);
+                                if let Some(handoff_floor) = slot.pending_replacement_handoff_floor
+                                {
+                                    if let Some(frame) = loaded {
+                                        let snapshot_frame = frame.as_i32();
+                                        let state_boundary = handoff_floor.min(snapshot_frame);
+                                        slot.game.prune_replacement_generation(state_boundary);
+                                        slot.sampled_confirmed = snapshot_frame;
+                                        slot.pending_replacement_handoff_floor = None;
+                                    }
+                                }
+                            },
                             Err(error) => oracle.observe_advance_error(i, step, &error),
                         }
                     }
@@ -1216,7 +1434,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 
                 // Incrementally sample newly confirmed inputs (they evict).
                 let confirmed = slot.session.confirmed_frame();
-                if confirmed.is_valid() {
+                if confirmed.is_valid() && slot.pending_replacement_handoff_floor.is_none() {
                     for frame in (slot.sampled_confirmed + 1)..=confirmed.as_i32() {
                         match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
                             Ok(inputs) => {
