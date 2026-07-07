@@ -5,9 +5,9 @@
 //! that no per-session assertion can express:
 //!
 //! - **(a) Confirmed-prefix agreement**: every peer's confirmed input stream
-//!   is byte-identical to the first-observed (canonical) stream, frame by
-//!   frame. Sampled incrementally because confirmed inputs evict from the
-//!   session's history window.
+//!   has the same serialized-input fingerprint as the first-observed
+//!   (canonical) stream, frame by frame. Sampled incrementally because
+//!   confirmed inputs evict from the session's history window.
 //! - **(b) State agreement**: after the run, every peer's recorded
 //!   post-advance state for each *globally confirmed* frame is identical.
 //!   Speculative (not-yet-confirmed) frames legitimately differ mid-run and
@@ -336,11 +336,12 @@ fn census_message_prefix(message: &str) -> String {
     }
 }
 
-/// Stable identity of one serialized input value.
+/// Stable fingerprint of one serialized input value.
 ///
 /// The harness's game transition uses only a logical `u32` lane, but the oracle
-/// compares the full serialized input identity so the 32-byte sweep axis cannot
-/// hide divergence in padding bytes.
+/// also hashes all serialized bytes and stores their length, so the 32-byte
+/// sweep axis cannot hide ordinary divergence in padding bytes. This is a
+/// fingerprint, not a collision-proof byte vector.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InputFingerprint {
     pub logical: u32,
