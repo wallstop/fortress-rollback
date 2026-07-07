@@ -1586,6 +1586,33 @@ fn run_rejects_malformed_spectator_host_kill_events() {
         "a lifecycle drop from an already-dead caller is a runtime no-op and \
          must not make a later SpectatorHostKill look already retired"
     );
+
+    let runtime_contingent_drops = [
+        (
+            "GracefulRemove",
+            ScheduleEvent::GracefulRemove { by: 1, target: 0 },
+        ),
+        (
+            "LegacyDisconnect",
+            ScheduleEvent::LegacyDisconnect { by: 1, target: 0 },
+        ),
+    ];
+    for (label, prior_drop) in runtime_contingent_drops {
+        let mut schedule = spectator_host_kill_schedule(None, None);
+        schedule.events.push((90, prior_drop));
+        schedule
+            .events
+            .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        let result = std::panic::catch_unwind(|| {
+            let _ = run(&schedule, &RunOptions::default());
+        });
+        assert!(
+            result.is_ok(),
+            "{label} is a runtime-contingent API call and must not make a later \
+             SpectatorHostKill fail static validation"
+        );
+    }
 }
 
 /// Negative control for graceful remove: the alive mask must exclude only the

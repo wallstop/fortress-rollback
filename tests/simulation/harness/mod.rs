@@ -786,17 +786,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         );
         spectator_host_enabled[peer] = true;
     }
-    let mut retired_by_lifecycle = vec![false; n];
+    // Only guaranteed harness kills can make a SpectatorHostKill malformed up
+    // front. User API drops retire only after the runtime call returns `Ok`.
+    let mut retired_by_guaranteed_kill = vec![false; n];
     for (_, event) in &schedule.events {
         match event {
-            ScheduleEvent::GracefulRemove { by, target }
-            | ScheduleEvent::LegacyDisconnect { by, target } => {
-                if !retired_by_lifecycle[*by] && !retired_by_lifecycle[*target] {
-                    retired_by_lifecycle[*target] = true;
-                }
-            },
+            ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
             ScheduleEvent::PeerKill { peer } => {
-                retired_by_lifecycle[*peer] = true;
+                retired_by_guaranteed_kill[*peer] = true;
             },
             ScheduleEvent::SpectatorHostKill { host } => {
                 assert!(
@@ -804,10 +801,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     "SpectatorHostKill host {host} is not configured in spectator_hosts"
                 );
                 assert!(
-                    !retired_by_lifecycle[*host],
-                    "SpectatorHostKill host {host} is already retired by an earlier lifecycle event"
+                    !retired_by_guaranteed_kill[*host],
+                    "SpectatorHostKill host {host} is already retired by an earlier kill event"
                 );
-                retired_by_lifecycle[*host] = true;
+                retired_by_guaranteed_kill[*host] = true;
             },
             ScheduleEvent::SetLink { .. }
             | ScheduleEvent::Block { .. }
