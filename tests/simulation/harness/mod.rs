@@ -23,9 +23,9 @@ use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::telemetry::{CollectingObserver, ViolationSeverity};
 use fortress_rollback::{
-    DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputVec, Message,
-    MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
-    SessionBuilder, SessionState,
+    DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputStatus, InputVec,
+    Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig,
+    RequestVec, SessionBuilder, SessionState,
 };
 use oracle::{HealLiveness, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
 use schedule::{AppModel, Schedule, ScheduleEvent};
@@ -213,6 +213,11 @@ struct SimGameStub {
     /// Post-advance state per frame; last write wins (rollback re-simulation
     /// overwrites), so confirmed frames hold their final state.
     recorded: BTreeMap<i32, StateStub>,
+    /// Applied inputs per simulated frame; last write wins just like
+    /// [`Self::recorded`], so a rollback re-simulation replaces stale transient
+    /// statuses with the end-of-run truth. Used by the oracle's dropped-slot
+    /// freeze-frame convergence check.
+    applied_inputs: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
     corrupt_state_from: Option<i32>,
     corrupt_checksum_from: Option<i32>,
 }
@@ -222,6 +227,7 @@ impl SimGameStub {
         Self {
             gs: StateStub { frame: 0, state: 0 },
             recorded: BTreeMap::new(),
+            applied_inputs: BTreeMap::new(),
             corrupt_state_from: None,
             corrupt_checksum_from: None,
         }
@@ -252,6 +258,15 @@ impl SimGameStub {
     }
 
     fn advance(&mut self, inputs: &InputVec<StubInput>) {
+        let frame = self.gs.frame;
+        self.applied_inputs.insert(
+            frame,
+            inputs
+                .iter()
+                .map(|(input, status)| (*input, *status))
+                .collect(),
+        );
+
         // Same transition as GameStub/StateStub::advance_frame.
         let total: u32 = inputs.iter().map(|(input, _)| input.inp).sum();
         if total % 2 == 0 {
@@ -866,6 +881,10 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         .iter()
         .map(|slot| slot.game.recorded.clone())
         .collect();
+    let applied_inputs: Vec<BTreeMap<i32, Vec<(StubInput, InputStatus)>>> = peers
+        .iter()
+        .map(|slot| slot.game.applied_inputs.clone())
+        .collect();
     let end_confirmed: Vec<Frame> = peers
         .iter()
         .map(|slot| slot.session.confirmed_frame())
@@ -920,7 +939,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after: confirmed_after_recovery.clone(),
     });
-    let verdict = oracle.finalize(&recorded, &end_confirmed, &end_state);
+    let verdict =
+        oracle.finalize_with_applied_inputs(&recorded, &applied_inputs, &end_confirmed, &end_state);
     let recovered_within_b = verdict.recovered_within_b;
     RunReport {
         verdict,

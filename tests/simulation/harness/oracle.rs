@@ -18,6 +18,9 @@
 //!   silent desync. Checksum-mismatch metrics are also consumed directly so a
 //!   starved event queue cannot hide a detector finding. Either way the run
 //!   fails with the full picture recorded.
+//! - **(e) Freeze-frame convergence**: for every dropped slot, every live
+//!   survivor must agree on the stable frame/value where that slot begins
+//!   presenting [`InputStatus::Disconnected`].
 //! - **(g) Session-error allowlist**: session APIs the harness expects to
 //!   succeed must not error. Any error fails the run with the operation, step,
 //!   and peer recorded.
@@ -34,7 +37,7 @@
 
 use crate::common::stubs::{StateStub, StubInput};
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity};
-use fortress_rollback::{Frame, SessionState};
+use fortress_rollback::{Frame, InputStatus, SessionState};
 use std::collections::BTreeMap;
 
 /// Minimum confirmed frames every peer must reach by end of run (c-lite).
@@ -128,6 +131,28 @@ pub enum OracleFailure {
         required: i32,
         window_steps: u32,
     },
+    /// (e): live survivors disagree on the stable frame/value where a dropped
+    /// slot became `Disconnected`.
+    FreezeFrameDivergence {
+        slot: usize,
+        peer: usize,
+        first_author: usize,
+        expected: Option<FreezePoint>,
+        actual: Option<FreezePoint>,
+    },
+    /// (e): a retired slot had live `Running` survivors, but none of them ever
+    /// presented a stable `Disconnected` run for that slot.
+    FreezeFrameMissing {
+        slot: usize,
+        live_running_peers: Vec<usize>,
+    },
+}
+
+/// A survivor's stable dropped-slot freeze observation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FreezePoint {
+    pub frame: i32,
+    pub input: u32,
 }
 
 /// Inputs for the (c) bounded post-heal liveness check, assembled by the runner
@@ -366,14 +391,30 @@ impl Oracle {
     /// post-advance state map; `end_confirmed[i]` its final confirmed frame;
     /// `end_state[i]` its final session state.
     pub fn finalize(
+        self,
+        recorded: &[BTreeMap<i32, StateStub>],
+        end_confirmed: &[Frame],
+        end_state: &[SessionState],
+    ) -> Verdict {
+        self.finalize_with_applied_inputs(recorded, &[], end_confirmed, end_state)
+    }
+
+    /// Finalize with the per-frame [`InputStatus`] records needed by (e)
+    /// freeze-frame convergence. Passing an empty `applied_inputs` slice keeps
+    /// the (e) check inert for unit tests that only exercise older invariants.
+    pub fn finalize_with_applied_inputs(
         mut self,
         recorded: &[BTreeMap<i32, StateStub>],
+        applied_inputs: &[BTreeMap<i32, Vec<(StubInput, InputStatus)>>],
         end_confirmed: &[Frame],
         end_state: &[SessionState],
     ) -> Verdict {
         assert_eq!(recorded.len(), self.n_players);
         assert_eq!(end_confirmed.len(), self.n_players);
         assert_eq!(end_state.len(), self.n_players);
+        if !applied_inputs.is_empty() {
+            assert_eq!(applied_inputs.len(), self.n_players);
+        }
 
         // (c-lite) end progress per peer. Retired peers are excluded — a peer
         // that left the harness cannot be `Running` and its frozen frame is not
@@ -451,6 +492,70 @@ impl Oracle {
             }
         }
 
+        // (e) freeze-frame convergence. Only slots that retired mid-run are
+        // checked; only live survivors are compared. The applied-input record is
+        // last-write-wins over rollback re-simulations, so each peer's map is the
+        // end-of-run truth for frames it actually simulated. Limit each survivor
+        // to its own confirmed prefix so speculative disconnected tails never
+        // create false failures. The freeze point is the start of the final
+        // trailing run of identical `(Disconnected, input)` observations. A
+        // missing `Disconnected` run is represented as `None` and compared too:
+        // one survivor seeing no stable freeze while another does is exactly the
+        // class this invariant is meant to catch.
+        if !applied_inputs.is_empty() {
+            for slot in 0..self.n_players {
+                if !self.is_dead(slot) {
+                    continue;
+                }
+                let live_running_peers: Vec<usize> = (0..self.n_players)
+                    .filter(|peer| {
+                        !self.is_dead(*peer)
+                            && end_state
+                                .get(*peer)
+                                .copied()
+                                .unwrap_or(SessionState::Synchronizing)
+                                == SessionState::Running
+                    })
+                    .collect();
+                let mut canonical: Option<(usize, Option<FreezePoint>)> = None;
+                let mut any_stable_freeze = false;
+                for &peer in &live_running_peers {
+                    let Some(records) = applied_inputs.get(peer) else {
+                        continue;
+                    };
+                    let max_frame = end_confirmed
+                        .get(peer)
+                        .copied()
+                        .unwrap_or(Frame::NULL)
+                        .as_i32();
+                    let observed = stable_freeze_point(records, slot, max_frame);
+                    any_stable_freeze |= observed.is_some();
+                    match canonical {
+                        None => canonical = Some((peer, observed)),
+                        Some((first_author, expected)) if expected != observed => {
+                            self.push_failure(OracleFailure::FreezeFrameDivergence {
+                                slot,
+                                peer,
+                                first_author,
+                                expected,
+                                actual: observed,
+                            });
+                        },
+                        Some(_) => {},
+                    }
+                }
+                if matches!(canonical, Some((_, None)))
+                    && !live_running_peers.is_empty()
+                    && !any_stable_freeze
+                {
+                    self.push_failure(OracleFailure::FreezeFrameMissing {
+                        slot,
+                        live_running_peers,
+                    });
+                }
+            }
+        }
+
         // (c) bounded post-heal liveness. Inert unless the schedule healed AND
         // the post-heal drain is long enough for both anchors to be observable
         // (else the anchors would sample an incomplete recovery — indeterminate,
@@ -513,6 +618,34 @@ impl Oracle {
     }
 }
 
+fn stable_freeze_point(
+    records: &BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+    slot: usize,
+    max_frame: i32,
+) -> Option<FreezePoint> {
+    let mut candidate: Option<FreezePoint> = None;
+    for (&frame, inputs) in records.range(..=max_frame) {
+        let Some((input, status)) = inputs.get(slot).copied() else {
+            candidate = None;
+            continue;
+        };
+        if status == InputStatus::Disconnected {
+            match candidate {
+                Some(point) if point.input == input.inp => {},
+                _ => {
+                    candidate = Some(FreezePoint {
+                        frame,
+                        input: input.inp,
+                    });
+                },
+            }
+        } else {
+            candidate = None;
+        }
+    }
+    candidate
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -520,6 +653,113 @@ mod tests {
 
     fn inputs(values: &[u32]) -> Vec<StubInput> {
         values.iter().map(|&inp| StubInput { inp }).collect()
+    }
+
+    #[derive(Copy, Clone)]
+    enum Slot2 {
+        Missing,
+        Present(u32, InputStatus),
+    }
+
+    fn confirmed(input: u32) -> Slot2 {
+        Slot2::Present(input, InputStatus::Confirmed)
+    }
+
+    fn disconnected(input: u32) -> Slot2 {
+        Slot2::Present(input, InputStatus::Disconnected)
+    }
+
+    fn slot2_records(frames: &[(i32, Slot2)]) -> BTreeMap<i32, Vec<(StubInput, InputStatus)>> {
+        frames
+            .iter()
+            .map(|(frame, slot2)| {
+                let mut inputs = vec![
+                    (StubInput { inp: 1 }, InputStatus::Confirmed),
+                    (StubInput { inp: 2 }, InputStatus::Confirmed),
+                ];
+                if let Slot2::Present(input, status) = slot2 {
+                    inputs.push((StubInput { inp: *input }, *status));
+                }
+                (*frame, inputs)
+            })
+            .collect()
+    }
+
+    fn freeze_verdict(
+        peer0: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+        peer1: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+    ) -> Verdict {
+        freeze_verdict_with_states(
+            peer0,
+            peer1,
+            [
+                SessionState::Running,
+                SessionState::Running,
+                SessionState::Synchronizing,
+            ],
+        )
+    }
+
+    fn freeze_verdict_with_states(
+        peer0: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+        peer1: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+        end_state: [SessionState; 3],
+    ) -> Verdict {
+        let mut oracle = Oracle::new(3);
+        oracle.mark_peer_dead(2);
+        let applied = [peer0, peer1, BTreeMap::new()];
+        oracle.finalize_with_applied_inputs(
+            &[BTreeMap::new(), BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60), Frame::new(9)],
+            &end_state,
+        )
+    }
+
+    #[test]
+    fn freeze_point_uses_final_stable_disconnected_value() {
+        let records = slot2_records(&[
+            (0, confirmed(30)),
+            (10, disconnected(30)),
+            (11, disconnected(31)),
+            (12, disconnected(31)),
+        ]);
+
+        assert_eq!(
+            stable_freeze_point(&records, 2, 12),
+            Some(FreezePoint {
+                frame: 11,
+                input: 31
+            }),
+            "value changes inside a Disconnected tail reset the stable freeze point"
+        );
+        assert_ne!(
+            stable_freeze_point(&records, 2, 12),
+            Some(FreezePoint {
+                frame: 10,
+                input: 30
+            }),
+            "the first Disconnected status alone is not a stable frozen value"
+        );
+    }
+
+    #[test]
+    fn freeze_point_resets_on_missing_slot() {
+        let records = slot2_records(&[
+            (0, confirmed(30)),
+            (10, disconnected(30)),
+            (11, Slot2::Missing),
+            (12, disconnected(30)),
+        ]);
+
+        assert_eq!(
+            stable_freeze_point(&records, 2, 12),
+            Some(FreezePoint {
+                frame: 12,
+                input: 30
+            }),
+            "a missing slot breaks the stable Disconnected run"
+        );
     }
 
     /// Negative control: the input-divergence invariant must fire on a
@@ -820,6 +1060,245 @@ mod tests {
                 error
             } if error.contains("NotSynchronized")
         ));
+    }
+
+    /// Negative control for (e): once a slot is dropped, every live survivor must
+    /// agree on the stable `Disconnected` frame and frozen value. This seeded
+    /// disagreement fails even though the older state/liveness inputs are healthy,
+    /// proving the freeze-frame oracle has its own teeth.
+    #[test]
+    fn oracle_detects_freeze_frame_divergence() {
+        let verdict = freeze_verdict(
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (11, disconnected(30)),
+            ]),
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(31)),
+                (11, disconnected(31)),
+            ]),
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence {
+                    slot: 2,
+                    peer: 1,
+                    first_author: 0,
+                    expected: Some(FreezePoint {
+                        frame: 10,
+                        input: 30
+                    }),
+                    actual: Some(FreezePoint {
+                        frame: 10,
+                        input: 31
+                    }),
+                }
+            )),
+            "expected a freeze-frame disagreement failure, got {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Same frozen value, different stable frame: the oracle must compare the
+    /// freeze frame as well as the value.
+    #[test]
+    fn oracle_detects_freeze_frame_start_divergence() {
+        let verdict = freeze_verdict(
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (11, disconnected(30)),
+            ]),
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, confirmed(30)),
+                (11, disconnected(30)),
+            ]),
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence {
+                    slot: 2,
+                    peer: 1,
+                    first_author: 0,
+                    expected: Some(FreezePoint {
+                        frame: 10,
+                        input: 30
+                    }),
+                    actual: Some(FreezePoint {
+                        frame: 11,
+                        input: 30
+                    }),
+                }
+            )),
+            "expected a freeze-frame start disagreement, got {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Mixed `Some`/`None`: one survivor freezing a retired slot while another
+    /// never freezes it must fail as a divergence, not only the all-`None` missing
+    /// case.
+    #[test]
+    fn oracle_detects_one_survivor_missing_freeze_frame() {
+        let verdict = freeze_verdict(
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (11, disconnected(30)),
+            ]),
+            slot2_records(&[(0, confirmed(30)), (10, confirmed(30)), (11, confirmed(30))]),
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence {
+                    slot: 2,
+                    peer: 1,
+                    first_author: 0,
+                    expected: Some(FreezePoint {
+                        frame: 10,
+                        input: 30
+                    }),
+                    actual: None,
+                }
+            )),
+            "expected a mixed Some/None freeze-frame divergence, got {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Mixed `None`/`Some` in the opposite author order should report the
+    /// disagreement without also claiming that no survivor ever froze the slot.
+    #[test]
+    fn oracle_does_not_report_missing_when_later_survivor_has_freeze_frame() {
+        let verdict = freeze_verdict(
+            slot2_records(&[(0, confirmed(30)), (10, confirmed(30)), (11, confirmed(30))]),
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (11, disconnected(30)),
+            ]),
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence {
+                    slot: 2,
+                    peer: 1,
+                    first_author: 0,
+                    expected: None,
+                    actual: Some(FreezePoint {
+                        frame: 10,
+                        input: 30
+                    }),
+                }
+            )),
+            "expected a mixed None/Some freeze-frame divergence, got {:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::FreezeFrameMissing { .. })),
+            "a later stable freeze must suppress the all-missing diagnostic: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Non-`Running` live peers already fail end-progress; their incomplete or
+    /// divergent freeze observations should not add secondary (e) failures.
+    #[test]
+    fn oracle_ignores_non_running_live_peer_for_freeze_frame_comparison() {
+        let verdict = freeze_verdict_with_states(
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (11, disconnected(30)),
+            ]),
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(31)),
+                (11, disconnected(31)),
+            ]),
+            [
+                SessionState::Running,
+                SessionState::Synchronizing,
+                SessionState::Synchronizing,
+            ],
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::EndProgress {
+                    peer: 1,
+                    state: SessionState::Synchronizing,
+                    ..
+                }
+            )),
+            "the non-Running peer should still fail end-progress: {:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence { .. }
+                    | OracleFailure::FreezeFrameMissing { .. }
+            )),
+            "non-Running peers must not add freeze-frame failures: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Disconnected observations past `end_confirmed` are speculative and must
+    /// not perturb the stable freeze point used by the oracle.
+    #[test]
+    fn oracle_ignores_speculative_freeze_tail_beyond_confirmed() {
+        let verdict = freeze_verdict(
+            slot2_records(&[
+                (0, confirmed(30)),
+                (10, disconnected(30)),
+                (61, disconnected(31)),
+            ]),
+            slot2_records(&[(0, confirmed(30)), (10, disconnected(30))]),
+        );
+        assert!(
+            !verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence { .. }
+                    | OracleFailure::FreezeFrameMissing { .. }
+            )),
+            "speculative post-confirmation tails must not fail (e): {:?}",
+            verdict.failures
+        );
+    }
+
+    /// Negative control for the all-`None` case: a retired slot with live,
+    /// running survivors must eventually present a stable `Disconnected` run.
+    /// Comparing `None == None` would otherwise false-green a mesh that kept
+    /// confirming without ever freezing the dropped slot.
+    #[test]
+    fn oracle_detects_missing_freeze_frame_for_running_survivors() {
+        let verdict = freeze_verdict(
+            slot2_records(&[(0, confirmed(30)), (10, confirmed(30)), (11, confirmed(30))]),
+            slot2_records(&[(0, confirmed(30)), (10, confirmed(30)), (11, confirmed(30))]),
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameMissing {
+                    slot: 2,
+                    live_running_peers
+                } if live_running_peers == &vec![0, 1]
+            )),
+            "expected a missing-freeze failure, got {:?}",
+            verdict.failures
+        );
     }
 
     /// The failure cap keeps a systemically broken run readable.
