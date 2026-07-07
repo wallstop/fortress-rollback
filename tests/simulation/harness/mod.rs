@@ -161,9 +161,10 @@ pub struct RunOptions {
     /// hides recovery dynamics because a clean drain always converges. Must be
     /// within `0..steps` (asserted up front, so a requested probe always fires).
     pub probe_confirmed_at: Option<u32>,
-    /// Corrupt the configured spectator's displayed input fingerprints from
-    /// this frame onward. Negative controls use this to prove the §6.2(d)
-    /// spectator oracle compares the spectator path, not only the mesh peers.
+    /// Corrupt the configured spectator's first input fingerprint in each
+    /// displayed frame at or after this frame. Negative controls only need one
+    /// planted spectator-only mismatch to prove the §6.2(d) oracle compares
+    /// the spectator path, not only the mesh peers.
     pub corrupt_spectator_input_from: Option<i32>,
     /// Corrupt the first displayed `Disconnected` spectator slot from this
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
