@@ -38,7 +38,7 @@
 use crate::common::stubs::StateStub;
 use fortress_rollback::hash::DeterministicHasher;
 use fortress_rollback::telemetry::{SpecViolation, ViolationKind, ViolationSeverity};
-use fortress_rollback::{Frame, InputStatus, SessionState};
+use fortress_rollback::{Frame, InputStatus, PlayerHandle, SessionState};
 use std::collections::BTreeMap;
 use std::hash::Hasher;
 
@@ -147,6 +147,37 @@ pub enum OracleFailure {
     FreezeFrameMissing {
         slot: usize,
         live_running_peers: Vec<usize>,
+    },
+    /// (d): a redundant spectator reported an internal host disagreement.
+    SpectatorDivergenceEvent { frame: i32, player: PlayerHandle },
+    /// (d): a spectator API returned an error while the harness expected it to
+    /// keep following at least one live host.
+    SpectatorSessionError {
+        operation: &'static str,
+        step: u32,
+        error: String,
+    },
+    /// (d): a configured spectator never displayed any frame by the end of a
+    /// run with live `Running` mesh peers, or did not display through the
+    /// runner-supplied frame floor needed by the scenario.
+    SpectatorProgressMissing {
+        live_running_peers: Vec<usize>,
+        required_min_frame: Option<i32>,
+        observed_max_frame: Option<i32>,
+    },
+    /// (d): the spectator displayed a frame inside the live mesh's confirmed
+    /// prefix, but no live mesh peer had an applied-input record for it.
+    SpectatorMeshCanonMissing {
+        frame: i32,
+        live_running_peers: Vec<usize>,
+    },
+    /// (d): the spectator's displayed input bytes or dropped-slot status do
+    /// not match the mesh canon for the same confirmed frame.
+    SpectatorInputDivergence {
+        frame: i32,
+        peer: usize,
+        expected: Vec<(InputFingerprint, InputStatus)>,
+        actual: Vec<(InputFingerprint, InputStatus)>,
     },
 }
 
@@ -569,6 +600,28 @@ impl Oracle {
         self.observe_session_error("advance_frame", peer, step, error);
     }
 
+    /// (d): a redundant spectator observed host disagreement.
+    pub fn observe_spectator_divergence_event(&mut self, frame: Frame, player: PlayerHandle) {
+        self.push_failure(OracleFailure::SpectatorDivergenceEvent {
+            frame: frame.as_i32(),
+            player,
+        });
+    }
+
+    /// (d): a spectator API errored while the harness expected it to continue.
+    pub fn observe_spectator_error(
+        &mut self,
+        operation: &'static str,
+        step: u32,
+        error: &fortress_rollback::FortressError,
+    ) {
+        self.push_failure(OracleFailure::SpectatorSessionError {
+            operation,
+            step,
+            error: format!("{error:?}"),
+        });
+    }
+
     /// Telemetry violations collected for one peer over the whole run.
     pub fn observe_violations(&mut self, peer: usize, violations: &[SpecViolation]) {
         for violation in violations {
@@ -606,11 +659,34 @@ impl Oracle {
     /// freeze-frame convergence. Passing an empty `applied_inputs` slice keeps
     /// the (e) check inert for unit tests that only exercise older invariants.
     pub fn finalize_with_applied_inputs(
+        self,
+        recorded: &[BTreeMap<i32, StateStub>],
+        applied_inputs: &[BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>],
+        end_confirmed: &[Frame],
+        end_state: &[SessionState],
+    ) -> Verdict {
+        self.finalize_with_applied_inputs_and_spectator(
+            recorded,
+            applied_inputs,
+            end_confirmed,
+            end_state,
+            None,
+            None,
+        )
+    }
+
+    /// Finalize with an optional spectator-applied input/status record for
+    /// §6.2(d). The spectator check compares only frames the spectator actually
+    /// displayed and that fall inside the live mesh's globally confirmed prefix,
+    /// so a lagging but healthy spectator does not create false failures.
+    pub fn finalize_with_applied_inputs_and_spectator(
         mut self,
         recorded: &[BTreeMap<i32, StateStub>],
         applied_inputs: &[BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>],
         end_confirmed: &[Frame],
         end_state: &[SessionState],
+        spectator_inputs: Option<&BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
+        spectator_min_frame: Option<i32>,
     ) -> Verdict {
         assert_eq!(recorded.len(), self.n_players);
         assert_eq!(end_confirmed.len(), self.n_players);
@@ -759,6 +835,60 @@ impl Oracle {
             }
         }
 
+        // (d) spectator convergence. A configured spectator must make progress
+        // when the mesh still has live Running peers. For each displayed frame
+        // inside the live mesh confirmed prefix, compare full input
+        // fingerprints and require `Disconnected` statuses to agree with the
+        // first live mesh peer that applied that frame. A mesh record may still
+        // show a matching live slot as `Predicted` when no later rollback
+        // needed to resimulate that early frame; the spectator stream receives
+        // confirmed host inputs, so `Predicted` mesh vs `Confirmed` spectator is
+        // accepted only when the fingerprint matches.
+        if let Some(spectator_records) = spectator_inputs {
+            let live_running_peers: Vec<usize> = (0..self.n_players)
+                .filter(|peer| {
+                    !self.is_dead(*peer)
+                        && end_state
+                            .get(*peer)
+                            .copied()
+                            .unwrap_or(SessionState::Synchronizing)
+                            == SessionState::Running
+                })
+                .collect();
+            let observed_max_frame = spectator_records.keys().next_back().copied();
+            let missing_required_frame = match (spectator_min_frame, observed_max_frame) {
+                (Some(required), Some(observed)) => observed < required,
+                (Some(_), None) => true,
+                (None, _) => spectator_records.is_empty(),
+            };
+            if missing_required_frame && !live_running_peers.is_empty() {
+                self.push_failure(OracleFailure::SpectatorProgressMissing {
+                    live_running_peers: live_running_peers.clone(),
+                    required_min_frame: spectator_min_frame,
+                    observed_max_frame,
+                });
+            }
+            for (&frame, actual) in spectator_records.range(..=global_confirmed) {
+                let Some((peer, expected)) =
+                    first_live_applied_inputs(applied_inputs, &live_running_peers, frame)
+                else {
+                    self.push_failure(OracleFailure::SpectatorMeshCanonMissing {
+                        frame,
+                        live_running_peers: live_running_peers.clone(),
+                    });
+                    continue;
+                };
+                if !spectator_matches_mesh_canon(expected, actual) {
+                    self.push_failure(OracleFailure::SpectatorInputDivergence {
+                        frame,
+                        peer,
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+            }
+        }
+
         // (c) bounded post-heal liveness. Inert unless the schedule healed AND
         // the post-heal drain is long enough for both anchors to be observable
         // (else the anchors would sample an incomplete recovery — indeterminate,
@@ -830,6 +960,42 @@ impl Oracle {
     }
 }
 
+fn first_live_applied_inputs<'a>(
+    applied_inputs: &'a [BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>],
+    live_running_peers: &[usize],
+    frame: i32,
+) -> Option<(usize, &'a Vec<(InputFingerprint, InputStatus)>)> {
+    live_running_peers.iter().find_map(|&peer| {
+        applied_inputs
+            .get(peer)
+            .and_then(|records| records.get(&frame))
+            .map(|inputs| (peer, inputs))
+    })
+}
+
+fn spectator_matches_mesh_canon(
+    expected: &[(InputFingerprint, InputStatus)],
+    actual: &[(InputFingerprint, InputStatus)],
+) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(
+            |((expected_input, expected_status), (actual_input, actual_status))| {
+                expected_input == actual_input
+                    && match (expected_status, actual_status) {
+                        (InputStatus::Disconnected, InputStatus::Disconnected) => true,
+                        (InputStatus::Disconnected, InputStatus::Confirmed)
+                        | (InputStatus::Disconnected, InputStatus::Predicted)
+                        | (InputStatus::Confirmed, InputStatus::Disconnected)
+                        | (InputStatus::Predicted, InputStatus::Disconnected)
+                        | (InputStatus::Confirmed, InputStatus::Predicted)
+                        | (InputStatus::Predicted, InputStatus::Predicted) => false,
+                        (InputStatus::Confirmed, InputStatus::Confirmed)
+                        | (InputStatus::Predicted, InputStatus::Confirmed) => true,
+                    }
+            },
+        )
+}
+
 fn violation_failure(peer: usize, violation: &SpecViolation) -> OracleFailure {
     OracleFailure::Violation {
         peer,
@@ -880,6 +1046,22 @@ mod tests {
 
     fn inputs(values: &[u32]) -> Vec<InputFingerprint> {
         values.iter().copied().map(fp).collect()
+    }
+
+    fn input_statuses(values: &[u32]) -> Vec<(InputFingerprint, InputStatus)> {
+        values
+            .iter()
+            .copied()
+            .map(|value| (fp(value), InputStatus::Confirmed))
+            .collect()
+    }
+
+    fn predicted_input_statuses(values: &[u32]) -> Vec<(InputFingerprint, InputStatus)> {
+        values
+            .iter()
+            .copied()
+            .map(|value| (fp(value), InputStatus::Predicted))
+            .collect()
     }
 
     #[derive(Copy, Clone)]
@@ -1078,6 +1260,173 @@ mod tests {
                 }
             )),
             "same logical input with different serialized identity must fail: {:?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn oracle_accepts_spectator_matching_mesh_canon() {
+        let applied = [
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+        ];
+        let spectator = BTreeMap::from([(0, input_statuses(&[1, 2]))]);
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            None,
+        );
+
+        assert!(verdict.passed(), "matching spectator inputs must pass");
+    }
+
+    #[test]
+    fn oracle_accepts_spectator_confirmed_when_mesh_record_was_predicted() {
+        let applied = [
+            BTreeMap::from([(0, predicted_input_statuses(&[1, 2]))]),
+            BTreeMap::from([(0, predicted_input_statuses(&[1, 2]))]),
+        ];
+        let spectator = BTreeMap::from([(0, input_statuses(&[1, 2]))]);
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            None,
+        );
+
+        assert!(
+            verdict.passed(),
+            "the spectator confirmed stream may outrun a mesh game record that never resimulated an early predicted frame"
+        );
+    }
+
+    #[test]
+    fn oracle_detects_spectator_input_divergence() {
+        let applied = [
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+        ];
+        let spectator = BTreeMap::from([(0, input_statuses(&[1, 9]))]);
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            None,
+        );
+
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+            "spectator byte/status mismatch must fail: {:?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn oracle_detects_spectator_disconnected_status_divergence() {
+        let mesh = vec![
+            (fp(1), InputStatus::Confirmed),
+            (fp(2), InputStatus::Disconnected),
+        ];
+        let spectator = BTreeMap::from([(
+            20,
+            vec![
+                (fp(1), InputStatus::Confirmed),
+                (fp(2), InputStatus::Confirmed),
+            ],
+        )]);
+        let applied = [
+            BTreeMap::from([(20, mesh.clone())]),
+            BTreeMap::from([(20, mesh)]),
+        ];
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            None,
+        );
+
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+            "spectator must agree with mesh Disconnected statuses: {:?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn oracle_detects_configured_spectator_without_progress() {
+        let applied = [
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+        ];
+        let spectator = BTreeMap::new();
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            None,
+        );
+
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::SpectatorProgressMissing { .. })),
+            "a configured spectator with no displayed frames must fail: {:?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn oracle_detects_spectator_missing_required_post_event_frame() {
+        let applied = [
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+            BTreeMap::from([(0, input_statuses(&[1, 2]))]),
+        ];
+        let spectator = BTreeMap::from([(0, input_statuses(&[1, 2]))]);
+
+        let verdict = Oracle::new(2).finalize_with_applied_inputs_and_spectator(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+            Some(&spectator),
+            Some(10),
+        );
+
+        assert!(
+            verdict.failures.iter().any(|failure| {
+                matches!(
+                    failure,
+                    OracleFailure::SpectatorProgressMissing {
+                        required_min_frame: Some(10),
+                        observed_max_frame: Some(0),
+                        ..
+                    }
+                )
+            }),
+            "spectator must display through the required scenario frame: {:?}",
             verdict.failures
         );
     }

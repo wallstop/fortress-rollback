@@ -1225,6 +1225,114 @@ fn graceful_remove_survivors_converge_under_continue_without() {
     );
 }
 
+/// M3 §6.2(d) spectator convergence: a pre-planned redundant spectator attached
+/// to live survivors must display the same input bytes the mesh applies over
+/// its confirmed prefix and agree on dropped-slot `Disconnected` statuses, even
+/// after one player is gracefully removed.
+#[test]
+fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    let required_post_remove_frame = schedule
+        .events
+        .iter()
+        .filter_map(|(step, event)| {
+            matches!(event, ScheduleEvent::GracefulRemove { .. }).then_some(
+                i32::try_from(*step)
+                    .unwrap_or(i32::MAX)
+                    .saturating_add(POST_HEAL_MIN_ADVANCE),
+            )
+        })
+        .max()
+        .expect("planted graceful-remove schedule has a removal event");
+    assert!(
+        report.spectator_max_frame >= Some(required_post_remove_frame),
+        "spectator must display post-remove frames through {required_post_remove_frame}: {:?}",
+        report.spectator_max_frame
+    );
+
+    let again = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "a preplanned spectator schedule must reproduce its exact trace"
+    );
+}
+
+/// Negative control for §6.2(d): corrupting only the spectator's displayed
+/// record must fail the spectator oracle while leaving the mesh path itself
+/// untouched.
+#[test]
+fn oracle_catches_spectator_input_divergence_under_graceful_remove() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    let options = RunOptions {
+        corrupt_spectator_input_from: Some(0),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded spectator-only divergence must fail"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+        "spectator mismatch must be visible to the oracle: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Negative control for the dropped-slot half of §6.2(d): once the mesh freezes
+/// a gracefully removed slot as `Disconnected`, the spectator must report that
+/// same status for the same input bytes.
+#[test]
+fn oracle_catches_spectator_disconnected_status_divergence_under_graceful_remove() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    let options = RunOptions {
+        corrupt_spectator_status_from: Some(100),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded spectator status divergence must fail"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+        "spectator status mismatch must be visible to the oracle: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Malformed spectator host lists are schedule bugs, not runtime indexing
+/// panics. Reject them before sessions are built.
+#[test]
+fn run_rejects_malformed_spectator_hosts() {
+    let cases = [
+        (vec![9], "spectator_hosts peer 9 out of range"),
+        (vec![0, 0], "duplicate spectator_hosts peer 0"),
+    ];
+
+    for (hosts, expected) in cases {
+        let mut schedule = graceful_remove_schedule(None);
+        schedule.config.spectator_hosts = hosts;
+        assert_run_panics_with(&schedule, expected);
+    }
+}
+
 /// Negative control for graceful remove: the alive mask must exclude only the
 /// removed peer. A real divergence seeded into a survivor after the removal must
 /// still reach the state-agreement oracle, not be hidden by the retired target's

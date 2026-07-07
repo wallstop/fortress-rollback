@@ -23,9 +23,9 @@ use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
-    Config, DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputStatus,
-    InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
-    ProtocolConfig, RequestVec, SessionBuilder, SessionState,
+    Config, DesyncDetection, FortressError, FortressEvent, FortressRequest, Frame, GameStateCell,
+    InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
+    ProtocolConfig, RequestVec, SessionBuilder, SessionState, SpectatorSession,
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
@@ -161,6 +161,14 @@ pub struct RunOptions {
     /// hides recovery dynamics because a clean drain always converges. Must be
     /// within `0..steps` (asserted up front, so a requested probe always fires).
     pub probe_confirmed_at: Option<u32>,
+    /// Corrupt the configured spectator's displayed input fingerprints from
+    /// this frame onward. Negative controls use this to prove the §6.2(d)
+    /// spectator oracle compares the spectator path, not only the mesh peers.
+    pub corrupt_spectator_input_from: Option<i32>,
+    /// Corrupt the first displayed `Disconnected` spectator slot from this
+    /// frame onward by reporting it as `Confirmed`. Negative controls use this
+    /// to pin the dropped-slot status half of §6.2(d).
+    pub corrupt_spectator_status_from: Option<i32>,
 }
 
 /// Outcome of one simulation run.
@@ -204,6 +212,12 @@ pub struct RunReport {
     /// census so warning-only signatures stay visible even though they do not
     /// fail the run.
     pub violation_census: BTreeMap<ViolationSignature, u64>,
+    /// Number of frames the configured spectator displayed and handed to the
+    /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
+    pub spectator_applied_frames: usize,
+    /// Highest frame the configured spectator displayed. `None` when
+    /// `SimConfig::spectator_hosts` is empty or the spectator never advanced.
+    pub spectator_max_frame: Option<i32>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -304,13 +318,15 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
             self.final_confirmed,
             self.recovered_within_b,
+            self.spectator_applied_frames,
+            self.spectator_max_frame,
             self.verdict.violation_allowlist_hits,
             self.violation_census,
             self.net_stats,
@@ -416,6 +432,12 @@ struct PeerSlot<I: SimInput> {
     sampled_confirmed: i32,
 }
 
+struct SpectatorSlot<I: SimInput> {
+    session: SpectatorSession<I::SessionConfig>,
+    observer: Arc<CollectingObserver>,
+    applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
+}
+
 /// Pure per-peer input function: any deterministic mapping works; this one
 /// varies across both axes so prediction is frequently wrong (exercising
 /// rollback) and per-peer streams never collide.
@@ -426,6 +448,47 @@ fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
         .wrapping_add(p.wrapping_mul(7))
         .wrapping_add(1);
     I::from_word(word, step, peer)
+}
+
+fn corrupt_fingerprint(fingerprint: InputFingerprint) -> InputFingerprint {
+    InputFingerprint {
+        logical: fingerprint.logical.wrapping_add(1),
+        len: fingerprint.len,
+        hash: fingerprint.hash ^ 0xA5A5_5A5A_D3C1_B2E0,
+    }
+}
+
+fn record_spectator_requests<I: SimInput>(
+    spectator: &mut SpectatorSlot<I>,
+    requests: RequestVec<I::SessionConfig>,
+    start_frame: i32,
+    corrupt_from: Option<i32>,
+    corrupt_status_from: Option<i32>,
+) {
+    let mut frame = start_frame;
+    for request in requests {
+        if let FortressRequest::AdvanceFrame { inputs } = request {
+            let mut values: Vec<(InputFingerprint, InputStatus)> = inputs
+                .iter()
+                .map(|(input, status)| (input.fingerprint(), *status))
+                .collect();
+            if corrupt_from.is_some_and(|from| frame >= from) {
+                if let Some((fingerprint, _)) = values.first_mut() {
+                    *fingerprint = corrupt_fingerprint(*fingerprint);
+                }
+            }
+            if corrupt_status_from.is_some_and(|from| frame >= from) {
+                for (_, status) in &mut values {
+                    if *status == InputStatus::Disconnected {
+                        *status = InputStatus::Confirmed;
+                        break;
+                    }
+                }
+            }
+            spectator.applied_inputs.insert(frame, values);
+            frame += 1;
+        }
+    }
 }
 
 /// Synthetic mesh addresses (never bound): `127.0.0.1:(20001 + i)`.
@@ -459,6 +522,49 @@ fn print_step_summary<I: SimInput>(step: u32, peers: &[PeerSlot<I>], net: &SimNe
     for (i, slot) in peers.iter().enumerate() {
         println!("  peer{i}: {}", slot.session.diagnostic_connect_status());
     }
+}
+
+fn drive_spectator<I: SimInput>(
+    spectator: &mut SpectatorSlot<I>,
+    step: u32,
+    options: &RunOptions,
+    oracle: &mut Oracle,
+    trace_hash: &mut u64,
+) {
+    spectator.session.poll_remote_clients();
+    let events: Vec<FortressEvent<I::SessionConfig>> = spectator.session.events().collect();
+    for event in &events {
+        if let FortressEvent::SpectatorDivergence { frame, player, .. } = event {
+            oracle.observe_spectator_divergence_event(*frame, *player);
+        }
+        fold_trace(trace_hash, &format!("spectator:{event:?}"));
+    }
+
+    if spectator.session.current_state() == SessionState::Running {
+        let start_frame = spectator.session.current_frame().as_i32().saturating_add(1);
+        match spectator.session.advance_frame() {
+            Ok(requests) => record_spectator_requests(
+                spectator,
+                requests,
+                start_frame,
+                options.corrupt_spectator_input_from,
+                options.corrupt_spectator_status_from,
+            ),
+            Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+            Err(error) => oracle.observe_spectator_error("advance_frame", step, &error),
+        }
+    }
+
+    fold_trace(
+        trace_hash,
+        &(
+            step,
+            "spectator",
+            spectator.session.current_state(),
+            spectator.session.current_frame().as_i32(),
+            spectator.session.num_hosts(),
+        ),
+    );
 }
 
 /// Diagnostic variant of [`run`]: prints per-peer progress every 50 steps.
@@ -622,6 +728,18 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             "starve_events peer {peer} out of range for a {n}-peer mesh"
         );
     }
+    let mut spectator_host_enabled = vec![false; n];
+    for &peer in &schedule.config.spectator_hosts {
+        assert!(
+            peer < n,
+            "spectator_hosts peer {peer} out of range for a {n}-peer mesh"
+        );
+        assert!(
+            !spectator_host_enabled[peer],
+            "duplicate spectator_hosts peer {peer}"
+        );
+        spectator_host_enabled[peer] = true;
+    }
     if let Some(size) = schedule.config.event_queue_size {
         assert!(
             size >= 10,
@@ -644,6 +762,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // Build one session per peer. Handles: peer i is Local handle i, Remote
     // handle j at addrs[j] for j != i. Protocol RNG seeded per peer so magic
     // numbers/sync tokens are reproducible.
+    let spectator_addr = peer_addr(n);
+    let spectator_handle = PlayerHandle::new(n);
     let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
@@ -696,6 +816,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .add_player(player_type, PlayerHandle::new(j))
                     .expect("valid player registration");
             }
+            if spectator_host_enabled[i] {
+                builder = builder
+                    .add_player(PlayerType::Spectator(spectator_addr), spectator_handle)
+                    .expect("valid spectator registration");
+            }
             let session = builder.start_p2p_session(socket).expect("session starts");
 
             let mut game = SimGameStub::<I>::new();
@@ -717,6 +842,44 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         })
         .collect();
+
+    let mut spectator: Option<SpectatorSlot<I>> = (!schedule.config.spectator_hosts.is_empty())
+        .then(|| {
+            let socket: SimSocket<Message> = net.attach(spectator_addr);
+            let observer = Arc::new(CollectingObserver::new());
+            let protocol_config = ProtocolConfig {
+                clock: Some(clock.as_protocol_clock()),
+                protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, "spectator"))),
+                ..ProtocolConfig::default()
+            };
+            let host_addrs: Vec<SocketAddr> = schedule
+                .config
+                .spectator_hosts
+                .iter()
+                .map(|&peer| addrs[peer])
+                .collect();
+            let mut builder = SessionBuilder::<I::SessionConfig>::new()
+                .with_num_players(n)
+                .expect("valid player count")
+                .with_protocol_config(protocol_config)
+                .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(size) = schedule.config.event_queue_size {
+                builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
+                    panic!(
+                        "spectator with_event_queue_size({size}) rejected a \
+                         pre-validated size: {error:?}"
+                    )
+                });
+            }
+            let session = builder
+                .start_spectator_session_multi(&host_addrs, socket)
+                .expect("spectator session starts");
+            SpectatorSlot {
+                session,
+                observer,
+                applied_inputs: BTreeMap::new(),
+            }
+        });
 
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
@@ -793,6 +956,29 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     };
     let mut confirmed_at_heal: Vec<i32> = Vec::new();
     let mut confirmed_after_recovery: Vec<i32> = Vec::new();
+    let spectator_required_min_frame = (!schedule.config.spectator_hosts.is_empty())
+        .then(|| {
+            schedule
+                .events
+                .iter()
+                .filter_map(|(step, event)| match event {
+                    ScheduleEvent::GracefulRemove { .. }
+                    | ScheduleEvent::LegacyDisconnect { .. }
+                    | ScheduleEvent::PeerKill { .. } => Some(
+                        i32::try_from(*step)
+                            .unwrap_or(i32::MAX)
+                            .saturating_add(POST_HEAL_MIN_ADVANCE),
+                    ),
+                    ScheduleEvent::SetLink { .. }
+                    | ScheduleEvent::Block { .. }
+                    | ScheduleEvent::Hold { .. }
+                    | ScheduleEvent::PeerStall { .. }
+                    | ScheduleEvent::SetInputDelay { .. }
+                    | ScheduleEvent::HealAll => None,
+                })
+                .max()
+        })
+        .flatten();
 
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
@@ -993,6 +1179,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
+        if let Some(spectator) = spectator.as_mut() {
+            drive_spectator(spectator, step, options, &mut oracle, &mut trace_hash);
+        }
+
         if diagnose && step % 50 == 0 {
             print_step_summary(step, &peers, &net);
         }
@@ -1014,6 +1204,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         }
         oracle.observe_violations(i, &violations);
         oracle.observe_checksum_mismatches(i, metric.checksums_mismatched);
+    }
+    if let Some(spectator) = &spectator {
+        let violations = spectator.observer.violations();
+        for violation in &violations {
+            let signature =
+                ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
+            *violation_census.entry(signature).or_default() += 1;
+        }
+        oracle.observe_violations(n, &violations);
     }
     let recorded: Vec<BTreeMap<i32, StateStub>> = peers
         .iter()
@@ -1077,8 +1276,19 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after: confirmed_after_recovery.clone(),
     });
-    let verdict =
-        oracle.finalize_with_applied_inputs(&recorded, &applied_inputs, &end_confirmed, &end_state);
+    let spectator_applied_inputs = spectator.as_ref().map(|slot| &slot.applied_inputs);
+    let spectator_applied_frames =
+        spectator_applied_inputs.map_or(0, std::collections::BTreeMap::len);
+    let spectator_max_frame =
+        spectator_applied_inputs.and_then(|records| records.keys().next_back().copied());
+    let verdict = oracle.finalize_with_applied_inputs_and_spectator(
+        &recorded,
+        &applied_inputs,
+        &end_confirmed,
+        &end_state,
+        spectator_applied_inputs,
+        spectator_required_min_frame,
+    );
     let recovered_within_b = verdict.recovered_within_b;
     RunReport {
         verdict,
@@ -1092,6 +1302,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         confirmed_after_recovery,
         recovered_within_b,
         violation_census,
+        spectator_applied_frames,
+        spectator_max_frame,
     }
 }
 
@@ -1138,6 +1350,11 @@ mod tests {
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
         assert_eq!(implicit.violation_census, explicit.violation_census);
+        assert_eq!(
+            implicit.spectator_applied_frames,
+            explicit.spectator_applied_frames
+        );
+        assert_eq!(implicit.spectator_max_frame, explicit.spectator_max_frame);
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
     }
 }
