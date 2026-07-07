@@ -438,6 +438,25 @@ struct SpectatorSlot<I: SimInput> {
     applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
 }
 
+fn update_spectator_required_min_frame<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    dead: &[bool],
+    required_min_frame: &mut Option<i32>,
+) {
+    let Some(live_floor) = peers
+        .iter()
+        .enumerate()
+        .filter(|(peer, _)| !dead[*peer])
+        .map(|(_, slot)| slot.session.current_frame().as_i32())
+        .min()
+    else {
+        return;
+    };
+    let required = live_floor.saturating_add(POST_HEAL_MIN_ADVANCE);
+    *required_min_frame =
+        Some(required_min_frame.map_or(required, |current| current.max(required)));
+}
+
 /// Pure per-peer input function: any deterministic mapping works; this one
 /// varies across both axes so prediction is frequently wrong (exercising
 /// rollback) and per-peer streams never collide.
@@ -956,29 +975,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     };
     let mut confirmed_at_heal: Vec<i32> = Vec::new();
     let mut confirmed_after_recovery: Vec<i32> = Vec::new();
-    let spectator_required_min_frame = (!schedule.config.spectator_hosts.is_empty())
-        .then(|| {
-            schedule
-                .events
-                .iter()
-                .filter_map(|(step, event)| match event {
-                    ScheduleEvent::GracefulRemove { .. }
-                    | ScheduleEvent::LegacyDisconnect { .. }
-                    | ScheduleEvent::PeerKill { .. } => Some(
-                        i32::try_from(*step)
-                            .unwrap_or(i32::MAX)
-                            .saturating_add(POST_HEAL_MIN_ADVANCE),
-                    ),
-                    ScheduleEvent::SetLink { .. }
-                    | ScheduleEvent::Block { .. }
-                    | ScheduleEvent::Hold { .. }
-                    | ScheduleEvent::PeerStall { .. }
-                    | ScheduleEvent::SetInputDelay { .. }
-                    | ScheduleEvent::HealAll => None,
-                })
-                .max()
-        })
-        .flatten();
+    // A spectator floor is in displayed game-frame space, not schedule-step
+    // space. Capture it only when a lifecycle event actually retires a peer,
+    // using the slowest live survivor's current frame so stalled/waiting app
+    // models are not charged for virtual time they never simulated.
+    let spectator_enabled = spectator.is_some();
+    let mut spectator_required_min_frame: Option<i32> = None;
 
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
@@ -1023,6 +1025,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             dead[*target] = true;
                             net.detach(addrs[*target]);
                             oracle.mark_peer_dead(*target);
+                            if spectator_enabled {
+                                update_spectator_required_min_frame(
+                                    &peers,
+                                    &dead,
+                                    &mut spectator_required_min_frame,
+                                );
+                            }
                         }
                     }
                 },
@@ -1041,6 +1050,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             dead[*target] = true;
                             net.detach(addrs[*target]);
                             oracle.mark_peer_dead(*target);
+                            if spectator_enabled {
+                                update_spectator_required_min_frame(
+                                    &peers,
+                                    &dead,
+                                    &mut spectator_required_min_frame,
+                                );
+                            }
                         }
                     }
                 },
@@ -1050,9 +1066,18 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     // `UnattachedPolicy::Drop`), and exclude it from the oracle's
                     // liveness checks. Its remaining mesh survives per the
                     // configured `DisconnectBehavior`. Idempotent.
-                    dead[*peer] = true;
-                    net.detach(addrs[*peer]);
-                    oracle.mark_peer_dead(*peer);
+                    if !dead[*peer] {
+                        dead[*peer] = true;
+                        net.detach(addrs[*peer]);
+                        oracle.mark_peer_dead(*peer);
+                        if spectator_enabled {
+                            update_spectator_required_min_frame(
+                                &peers,
+                                &dead,
+                                &mut spectator_required_min_frame,
+                            );
+                        }
+                    }
                 },
                 ScheduleEvent::HealAll => net.heal_all(),
             }

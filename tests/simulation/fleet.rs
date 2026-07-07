@@ -1236,21 +1236,10 @@ fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
 
     let report = run(&schedule, &RunOptions::default());
     report.expect_pass(&schedule);
-    let required_post_remove_frame = schedule
-        .events
-        .iter()
-        .filter_map(|(step, event)| {
-            matches!(event, ScheduleEvent::GracefulRemove { .. }).then_some(
-                i32::try_from(*step)
-                    .unwrap_or(i32::MAX)
-                    .saturating_add(POST_HEAL_MIN_ADVANCE),
-            )
-        })
-        .max()
-        .expect("planted graceful-remove schedule has a removal event");
     assert!(
-        report.spectator_max_frame >= Some(required_post_remove_frame),
-        "spectator must display post-remove frames through {required_post_remove_frame}: {:?}",
+        report.spectator_max_frame >= Some(POST_HEAL_MIN_ADVANCE),
+        "spectator must display post-remove frames; the oracle's scenario floor \
+         would fail the run if it stopped before the lifecycle event: {:?}",
         report.spectator_max_frame
     );
 
@@ -1258,6 +1247,105 @@ fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
     assert_eq!(
         report.trace_hash, again.trace_hash,
         "a preplanned spectator schedule must reproduce its exact trace"
+    );
+}
+
+const SPECTATOR_FLOOR_STALL_AT: u32 = 30;
+const SPECTATOR_FLOOR_REMOVE_AT: u32 = 80;
+
+fn stalled_spectator_floor_schedule(steps: u32) -> Schedule {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.steps = steps;
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    schedule.heal_at = steps - 1;
+    schedule.events = vec![
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 0,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 1,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 2,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 3,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_REMOVE_AT,
+            ScheduleEvent::GracefulRemove { by: 0, target: 1 },
+        ),
+    ];
+    schedule
+}
+
+/// Regression for Bugbot f256657d: the spectator post-drop progress floor is a
+/// displayed-frame threshold, not a schedule-step threshold. This schedule
+/// stalls the live spectator hosts before removal, so virtual steps race far
+/// ahead of their simulated frames; the run should still pass once the
+/// spectator displays G frames past the survivors' actual removal-time frame.
+#[test]
+fn spectator_post_drop_floor_uses_display_frames_not_schedule_steps() {
+    let schedule = stalled_spectator_floor_schedule(130);
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+
+    let max_frame = report
+        .spectator_max_frame
+        .expect("passing spectator run must display frames");
+    let old_step_domain_floor = i32::try_from(SPECTATOR_FLOOR_REMOVE_AT)
+        .unwrap_or(i32::MAX)
+        .saturating_add(POST_HEAL_MIN_ADVANCE);
+    assert!(
+        max_frame < old_step_domain_floor,
+        "regression premise failed: old step-domain floor {old_step_domain_floor} \
+         would not have failed with spectator max {max_frame}"
+    );
+}
+
+/// Negative half of the same regression: if the run ends before the spectator
+/// displays G frames past the removal-time game frame, the oracle must report
+/// scenario-floor progress missing. Without wiring the runtime floor through to
+/// the oracle this would have passed the spectator check after any display.
+#[test]
+fn oracle_catches_spectator_missing_display_frame_floor_after_drop() {
+    let schedule = stalled_spectator_floor_schedule(90);
+
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        !report.verdict.passed(),
+        "a spectator that stops before the post-drop frame floor must fail"
+    );
+    assert!(
+        report.verdict.failures.iter().any(|failure| {
+            matches!(
+                failure,
+                OracleFailure::SpectatorProgressMissing {
+                    required_min_frame: Some(required),
+                    observed_max_frame: Some(observed),
+                    ..
+                } if observed < required
+            )
+        }),
+        "spectator progress failure must carry the runtime display-frame floor: {:?}",
+        report.verdict.failures
     );
 }
 
