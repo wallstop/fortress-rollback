@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783371112831,
+  "lastUpdate": 1783391072174,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bf97a402c8a9cf1f187c52f1c3fb872f2026e5f2",
-          "message": "chore(deps): bump js-sys from 0.3.90 to 0.3.91 in /loom-tests (#103)\n\nBumps [js-sys](https://github.com/wasm-bindgen/wasm-bindgen) from 0.3.90\nto 0.3.91.\n<details>\n<summary>Commits</summary>\n<ul>\n<li>See full diff in <a\nhref=\"https://github.com/wasm-bindgen/wasm-bindgen/commits\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=js-sys&package-manager=cargo&previous-version=0.3.90&new-version=0.3.91)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-03-12T09:07:28-07:00",
-          "tree_id": "dd67f476b87446d948c7ded5eec73a139f74ccc6",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bf97a402c8a9cf1f187c52f1c3fb872f2026e5f2"
-        },
-        "date": 1773331989646,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 159,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 428,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 677,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 983,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 102707,
-            "range": "± 727",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27517,
-            "range": "± 1063",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 93",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1603,
             "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b877befafef0f289321bc83f26fa6108fbfbb88d",
+          "message": "Add freeze-frame convergence oracle (#208)\n\n## Summary\n- Record simulation harness applied `(input, InputStatus)` vectors by\nsimulated frame with rollback last-write-wins semantics.\n- Add an always-on oracle check for retired-slot freeze-frame\nconvergence across live `Running` survivors, including stable\nframe/value comparison and missing-freeze diagnostics.\n- Add negative controls for divergent freeze values, divergent freeze\nstarts, mixed `Some`/`None`, non-`Running` live peers, all-missing\nfreezes, missing-slot resets, value-change resets, and speculative tail\nbounds.\n\n## Validation\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo nextest run --no-capture --test simulation` - 135 passed, 10\nskipped\n- `cargo nextest run --no-capture` - 2404 passed, 57 skipped\n- `cargo nextest run --features hot-join --no-capture` - 2643 passed, 57\nskipped\n\n## Review\n- Adversarial sub-agent found one diagnostic precision issue in mixed\n`None`/`Some` order.\n- Fixed with `any_stable_freeze` gating and\n`oracle_does_not_report_missing_when_later_survivor_has_freeze_frame`.\n- Copilot found the divergence comparison should use the same live\n`Running` survivor set as missing-freeze diagnostics.\n- Fixed by iterating over `live_running_peers` and adding\n`oracle_ignores_non_running_live_peer_for_freeze_frame_comparison`.\n- Follow-up adversarial review reported zero issues.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation test harness and oracle validation;\nproduction rollback/session code is untouched.\n> \n> **Overview**\n> Adds **(e) freeze-frame convergence** to the simulation harness\noracle: when a player slot retires mid-run, every live **`Running`**\nsurvivor must agree on the stable frame and frozen input value where\nthat slot begins presenting **`InputStatus::Disconnected`**.\n> \n> The harness **`SimGameStub`** now records per-simulated-frame applied\n`(input, InputStatus)` vectors with rollback **last-write-wins**\nsemantics (same as recorded state), and the runner feeds those maps into\n**`finalize_with_applied_inputs`**. Older unit tests keep calling\n**`finalize`**, which leaves (e) inert via an empty applied-inputs\nslice.\n> \n> The oracle compares survivors only within each peer’s confirmed prefix\n(ignoring speculative disconnected tails), derives the freeze point from\nthe final stable trailing **`Disconnected`** run (value or missing-slot\nchanges reset it), and reports **`FreezeFrameDivergence`** or\n**`FreezeFrameMissing`** when appropriate. **`any_stable_freeze`**\navoids mis-firing the all-missing diagnostic when only the iteration\norder differs in mixed `None`/`Some` cases.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na3f19e0c259a22b83a53cbfdafa6731d3245bba5. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-06T19:20:27-07:00",
+          "tree_id": "175f39e0807ade3c1900c09a45983e2a5628c957",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b877befafef0f289321bc83f26fa6108fbfbb88d"
+        },
+        "date": 1783391070634,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 62,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 89,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 341,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 580,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 862,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 50744,
+            "range": "± 432",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 22038,
+            "range": "± 365",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 450,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 560,
+            "range": "± 1",
             "unit": "ns/iter"
           },
           {
