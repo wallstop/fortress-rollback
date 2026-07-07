@@ -65,7 +65,7 @@ jobs:
           components: rust-src
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -134,7 +134,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -202,7 +202,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
@@ -384,7 +384,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: |
