@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783391072174,
+  "lastUpdate": 1783399857427,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ff0f8b975bc0f1f46c40fd3c051db002f9d3643f",
-          "message": "chore(deps): bump clap from 4.5.60 to 4.6.0 (#111)\n\nBumps [clap](https://github.com/clap-rs/clap) from 4.5.60 to 4.6.0.\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.6.0] - 2026-03-12</h2>\n<h3>Compatibility</h3>\n<ul>\n<li>Update MSRV to 1.85</li>\n</ul>\n<h2>[4.5.61] - 2026-03-12</h2>\n<h3>Internal</h3>\n<ul>\n<li>Update dependencies</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/9ab6dee710aa384e02ec5e9e2cfeadb2f35abf2a\"><code>9ab6dee</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/374a30dac685d492cbdae124e757afdb52dd47b6\"><code>374a30d</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/d0c8aabc000adc54fc39efa721e6caad035fc3da\"><code>d0c8aab</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6306\">#6306</a>\nfrom epage/update</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/686ce2f665f43f927c1dbd5ad63a2f989e503bb9\"><code>686ce2f</code></a>\nchore: Upgrade compatible</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8203238de61f89b60ce1ca1672cfe20997d20a1e\"><code>8203238</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6305\">#6305</a>\nfrom epage/msrv</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/c774a892ba8bb703a9e77a16e6ebc6ff1c551868\"><code>c774a89</code></a>\ndocs: Reduce main's in doctests</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/73534f6ed3697b834743d283cedc7f529778d8a7\"><code>73534f6</code></a>\nchore: Upgrade to 2025 edition</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/dfe05a9bfe5bf49ec560e484c1abf50bcb55cd96\"><code>dfe05a9</code></a>\nchore: Bump MSRV to 1.85</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/8b41d0b8497ccaa0fb0d1d8a51f91ea2f62b3aa8\"><code>8b41d0b</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/518220f102cc34b2cf39c64efa35975a22341e36\"><code>518220f</code></a>\ndocs: Update changelog</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.5.60...clap_complete-v4.6.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=clap&package-manager=cargo&previous-version=4.5.60&new-version=4.6.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-03-13T06:39:30-07:00",
-          "tree_id": "02d53bb70efbb25b79caaddedcf260f1bb9b2336",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ff0f8b975bc0f1f46c40fd3c051db002f9d3643f"
-        },
-        "date": 1773409471358,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 103,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 141,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 546,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 886,
-            "range": "± 28",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1322,
-            "range": "± 30",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 105622,
-            "range": "± 411",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24363,
-            "range": "± 302",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 867,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 869,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 560,
             "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b9db9ef7b5026239b6e8d1b0514da79d67612463",
+          "message": "[codex] Wire nightly baseline sweep (#209)\n\n## Summary\n\n- Wire the deterministic full baseline sweep into the nightly network\nworkflow on Linux.\n- Add N=3/8/12/16 scale rows to the ignored full matrix and pin the\nexact row set with a cheap PR test.\n- Strengthen the full-matrix sweep to assert the same health invariants\nas the PR gate, and write sweep artifacts under `$RUNNER_TEMP` so\nuploads cannot publish stale cached `target` data.\n- Update locked dev dependencies (`crossbeam-epoch`, `rand`) to patched\nversions after the security advisory gate failed on newly published\nadvisories.\n\n## Validation\n\n- `cargo nextest run --no-capture --test simulation -E\n'test(full_matrix_includes_scale_spot_rows) | test(sweep_pr_gate)'`\n- `FORTRESS_SWEEP_OUT=/tmp/fortress-full-matrix.jsonl\nFORTRESS_SWEEP_GIT_SHA=local-test-sha cargo nextest run --profile\nci-network-nightly --release --run-ignored ignored-only -E\n'test(full_matrix_sweep)' --test simulation --no-capture`\n- `actionlint .github/workflows/ci-network-nightly.yml`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo deny check advisories`\n- `cargo deny check`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to CI orchestration, simulation test/baseline\ncapture, and non-runtime dependency lockfile updates—no production\nnetworking or auth paths.\n> \n> **Overview**\n> The **nightly network workflow** on Linux now runs the ignored\n`full_matrix_sweep` simulation test, writes `full-matrix.jsonl` under\n`$RUNNER_TEMP/fortress-sweep` (avoiding stale cached `target`\nartifacts), uploads it for 30 days, and **fails the job** if that step\ndid not succeed—even though the sweep step itself uses\n`continue-on-error` so the artifact can still upload.\n> \n> **Baseline sweep harness** changes: `FORTRESS_SWEEP_GIT_SHA` is read\nat runtime via `std::env::var` instead of compile-time `option_env!`.\nPR-gate and full-matrix sweeps share **`assert_cell_health`**. The full\nmatrix gains four **scale spot rows** (3/8/12/16 players, regional\nprofile); a cheap PR test **`full_matrix_includes_scale_spot_rows`**\npins 68 cells total. Docs no longer defer nightly CI for the full\nmatrix.\n> \n> **`Cargo.lock`**: bumps `crossbeam-epoch` and `rand` to address\nadvisory gate failures.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n2148017f4997d7f8fac2e22974b7d78e83a0bbde. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-06T21:45:52-07:00",
+          "tree_id": "fb7f89c67aba8553dc37aae23b56ffd62adc1156",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b9db9ef7b5026239b6e8d1b0514da79d67612463"
+        },
+        "date": 1783399856506,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 114,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 163,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 462,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 708,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1048,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 130839,
+            "range": "± 7519",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44025,
+            "range": "± 337",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1243,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 101",
             "unit": "ns/iter"
           },
           {
