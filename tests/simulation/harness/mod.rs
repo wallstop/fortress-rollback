@@ -21,17 +21,129 @@ use crate::common::sim_net::{SimNet, SimSocket};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::telemetry::{CollectingObserver, ViolationSeverity};
+use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
-    DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputStatus, InputVec,
-    Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig,
-    RequestVec, SessionBuilder, SessionState,
+    Config, DesyncDetection, FortressError, FortressEvent, FortressRequest, Frame, GameStateCell,
+    InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
+    ProtocolConfig, RequestVec, SessionBuilder, SessionState, SpectatorSession,
 };
-use oracle::{HealLiveness, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
+use oracle::{
+    validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
+    ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
+};
 use schedule::{AppModel, Schedule, ScheduleEvent};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+/// Input contract used by the deterministic simulation harness.
+///
+/// The production library already supports arbitrary fixed-width `Config::Input`
+/// types; this trait keeps the harness's game/oracle semantics stable while the
+/// M2 sweep varies only serialized input width.
+pub trait SimInput:
+    Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync + 'static
+{
+    type SessionConfig: Config<Input = Self, State = StateStub, Address = SocketAddr>
+        + std::fmt::Debug;
+
+    /// Serialized byte width of one input value under the crate's fixed-int
+    /// bincode codec.
+    const WIDTH_BYTES: u32;
+
+    /// Deterministic input for `(step, peer)`.
+    fn from_word(word: u32, step: u32, peer: usize) -> Self;
+
+    /// State-transition value used by the harness oracle. This intentionally
+    /// stays 32-bit for every input width so wide-input sweep cells isolate wire
+    /// cost instead of changing game behavior.
+    fn value(self) -> u32;
+
+    /// Full serialized input identity observed by the oracle.
+    fn fingerprint(self) -> InputFingerprint;
+}
+
+impl SimInput for StubInput {
+    type SessionConfig = StubConfig;
+
+    const WIDTH_BYTES: u32 = 4;
+
+    fn from_word(word: u32, _step: u32, _peer: usize) -> Self {
+        Self { inp: word }
+    }
+
+    fn value(self) -> u32 {
+        self.inp
+    }
+
+    fn fingerprint(self) -> InputFingerprint {
+        InputFingerprint::from_bytes(self.inp, &self.inp.to_le_bytes())
+    }
+}
+
+/// A 32-byte fixed-width input for the M2 sweep width axis.
+///
+/// The first word drives the same game-state transition as [`StubInput`]; the
+/// seven padding words are deterministic, varying payload so the bandwidth
+/// counters measure a real wide input stream rather than a zero-filled artifact.
+#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WideStubInput {
+    pub inp: u32,
+    pub padding: [u32; 7],
+}
+
+#[derive(Debug)]
+pub struct WideStubConfig;
+
+impl Config for WideStubConfig {
+    type Input = WideStubInput;
+    type State = StateStub;
+    type Address = SocketAddr;
+}
+
+impl SimInput for WideStubInput {
+    type SessionConfig = WideStubConfig;
+
+    const WIDTH_BYTES: u32 = 32;
+
+    fn from_word(word: u32, step: u32, peer: usize) -> Self {
+        let mut padding = [0u32; 7];
+        let peer_word = u32::try_from(peer).unwrap_or(u32::MAX);
+        for (i, slot) in padding.iter_mut().enumerate() {
+            let salt = u32::try_from(i).unwrap_or(u32::MAX).wrapping_add(1);
+            *slot = word
+                .rotate_left(salt)
+                .wrapping_add(step.wrapping_mul(17))
+                .wrapping_add(peer_word.wrapping_mul(97))
+                .wrapping_add(salt.wrapping_mul(0x9E37));
+        }
+        Self { inp: word, padding }
+    }
+
+    fn value(self) -> u32 {
+        self.inp
+    }
+
+    fn fingerprint(self) -> InputFingerprint {
+        let mut bytes = [0u8; 32];
+        let words = [
+            self.inp,
+            self.padding[0],
+            self.padding[1],
+            self.padding[2],
+            self.padding[3],
+            self.padding[4],
+            self.padding[5],
+            self.padding[6],
+        ];
+        for (chunk, word) in bytes.chunks_exact_mut(4).zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        InputFingerprint::from_bytes(self.inp, &bytes)
+    }
+}
 
 /// Options for fault-injection *inside the harness itself* — used by the
 /// oracle's negative controls to prove the invariants actually fire.
@@ -49,6 +161,15 @@ pub struct RunOptions {
     /// hides recovery dynamics because a clean drain always converges. Must be
     /// within `0..steps` (asserted up front, so a requested probe always fires).
     pub probe_confirmed_at: Option<u32>,
+    /// Corrupt the configured spectator's first input fingerprint in each
+    /// displayed frame at or after this frame. Negative controls only need one
+    /// planted spectator-only mismatch to prove the §6.2(d) oracle compares
+    /// the spectator path, not only the mesh peers.
+    pub corrupt_spectator_input_from: Option<i32>,
+    /// Corrupt the first displayed `Disconnected` spectator slot from this
+    /// frame onward by reporting it as `Confirmed`. Negative controls use this
+    /// to pin the dropped-slot status half of §6.2(d).
+    pub corrupt_spectator_status_from: Option<i32>,
 }
 
 /// Outcome of one simulation run.
@@ -87,6 +208,17 @@ pub struct RunReport {
     /// inert (no heal), the window was too short to observe, or every peer was
     /// killed. Mirrors [`Verdict::recovered_within_b`].
     pub recovered_within_b: Option<bool>,
+    /// All telemetry violations observed by every peer, before the oracle's
+    /// severity/allowlist policy is applied. Used by the §6.2(f) violation
+    /// census so warning-only signatures stay visible even though they do not
+    /// fail the run.
+    pub violation_census: BTreeMap<ViolationSignature, u64>,
+    /// Number of frames the configured spectator displayed and handed to the
+    /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
+    pub spectator_applied_frames: usize,
+    /// Highest frame the configured spectator displayed. `None` when
+    /// `SimConfig::spectator_hosts` is empty or the spectator never advanced.
+    pub spectator_max_frame: Option<i32>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -187,13 +319,17 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
             self.final_confirmed,
             self.recovered_within_b,
+            self.spectator_applied_frames,
+            self.spectator_max_frame,
+            self.verdict.violation_allowlist_hits,
+            self.violation_census,
             self.net_stats,
             self.verdict.failures.len(),
             self.verdict
@@ -208,7 +344,7 @@ impl RunReport {
 
 /// The harness's game stub: `GameStub` semantics (shared `StateStub`
 /// transition) plus recording and the negative-control corruption hooks.
-struct SimGameStub {
+struct SimGameStub<I: SimInput> {
     gs: StateStub,
     /// Post-advance state per frame; last write wins (rollback re-simulation
     /// overwrites), so confirmed frames hold their final state.
@@ -217,12 +353,13 @@ struct SimGameStub {
     /// [`Self::recorded`], so a rollback re-simulation replaces stale transient
     /// statuses with the end-of-run truth. Used by the oracle's dropped-slot
     /// freeze-frame convergence check.
-    applied_inputs: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+    applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
     corrupt_state_from: Option<i32>,
     corrupt_checksum_from: Option<i32>,
+    input_marker: PhantomData<I>,
 }
 
-impl SimGameStub {
+impl<I: SimInput> SimGameStub<I> {
     fn new() -> Self {
         Self {
             gs: StateStub { frame: 0, state: 0 },
@@ -230,10 +367,11 @@ impl SimGameStub {
             applied_inputs: BTreeMap::new(),
             corrupt_state_from: None,
             corrupt_checksum_from: None,
+            input_marker: PhantomData,
         }
     }
 
-    fn handle_requests(&mut self, requests: RequestVec<StubConfig>) {
+    fn handle_requests(&mut self, requests: RequestVec<I::SessionConfig>) {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => self.load(&cell),
@@ -257,18 +395,18 @@ impl SimGameStub {
         self.gs = cell.load().expect("harness stub: missing saved state");
     }
 
-    fn advance(&mut self, inputs: &InputVec<StubInput>) {
+    fn advance(&mut self, inputs: &InputVec<I>) {
         let frame = self.gs.frame;
         self.applied_inputs.insert(
             frame,
             inputs
                 .iter()
-                .map(|(input, status)| (*input, *status))
+                .map(|(input, status)| (input.fingerprint(), *status))
                 .collect(),
         );
 
         // Same transition as GameStub/StateStub::advance_frame.
-        let total: u32 = inputs.iter().map(|(input, _)| input.inp).sum();
+        let total: u32 = inputs.iter().map(|(input, _)| input.value()).sum();
         if total % 2 == 0 {
             self.gs.state += 2;
         } else {
@@ -287,24 +425,89 @@ impl SimGameStub {
     }
 }
 
-struct PeerSlot {
-    session: P2PSession<StubConfig>,
-    game: SimGameStub,
+struct PeerSlot<I: SimInput> {
+    session: P2PSession<I::SessionConfig>,
+    game: SimGameStub<I>,
     observer: Arc<CollectingObserver>,
     /// Highest frame whose confirmed inputs were sampled into the oracle.
     sampled_confirmed: i32,
 }
 
+struct SpectatorSlot<I: SimInput> {
+    session: SpectatorSession<I::SessionConfig>,
+    observer: Arc<CollectingObserver>,
+    applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
+}
+
+fn update_spectator_required_min_frame<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    dead: &[bool],
+    required_min_frame: &mut Option<i32>,
+) {
+    let Some(live_floor) = peers
+        .iter()
+        .enumerate()
+        .filter(|(peer, _)| !dead[*peer])
+        .map(|(_, slot)| slot.session.current_frame().as_i32())
+        .min()
+    else {
+        return;
+    };
+    let required = live_floor.saturating_add(POST_HEAL_MIN_ADVANCE);
+    *required_min_frame =
+        Some(required_min_frame.map_or(required, |current| current.max(required)));
+}
+
 /// Pure per-peer input function: any deterministic mapping works; this one
 /// varies across both axes so prediction is frequently wrong (exercising
 /// rollback) and per-peer streams never collide.
-fn input_for(step: u32, peer: usize) -> StubInput {
+fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
     let p = u32::try_from(peer).unwrap_or(0);
-    StubInput {
-        inp: step
-            .wrapping_mul(31)
-            .wrapping_add(p.wrapping_mul(7))
-            .wrapping_add(1),
+    let word = step
+        .wrapping_mul(31)
+        .wrapping_add(p.wrapping_mul(7))
+        .wrapping_add(1);
+    I::from_word(word, step, peer)
+}
+
+fn corrupt_fingerprint(fingerprint: InputFingerprint) -> InputFingerprint {
+    InputFingerprint {
+        logical: fingerprint.logical.wrapping_add(1),
+        len: fingerprint.len,
+        hash: fingerprint.hash ^ 0xA5A5_5A5A_D3C1_B2E0,
+    }
+}
+
+fn record_spectator_requests<I: SimInput>(
+    spectator: &mut SpectatorSlot<I>,
+    requests: RequestVec<I::SessionConfig>,
+    start_frame: i32,
+    corrupt_from: Option<i32>,
+    corrupt_status_from: Option<i32>,
+) {
+    let mut frame = start_frame;
+    for request in requests {
+        if let FortressRequest::AdvanceFrame { inputs } = request {
+            let mut values: Vec<(InputFingerprint, InputStatus)> = inputs
+                .iter()
+                .map(|(input, status)| (input.fingerprint(), *status))
+                .collect();
+            if corrupt_from.is_some_and(|from| frame >= from) {
+                if let Some((fingerprint, _)) = values.first_mut() {
+                    *fingerprint = corrupt_fingerprint(*fingerprint);
+                }
+            }
+            if corrupt_status_from.is_some_and(|from| frame >= from) {
+                for (_, status) in &mut values {
+                    if *status == InputStatus::Disconnected {
+                        *status = InputStatus::Confirmed;
+                        break;
+                    }
+                }
+            }
+            spectator.applied_inputs.insert(frame, values);
+            frame += 1;
+        }
     }
 }
 
@@ -323,7 +526,7 @@ fn fold_trace<T: std::hash::Hash>(hash: &mut u64, item: &T) {
 // Deliberate diagnostic stdout: this path only runs under `--run-ignored`
 // manual investigation, where print output IS the deliverable.
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
-fn print_step_summary(step: u32, peers: &[PeerSlot], net: &SimNet<Message>) {
+fn print_step_summary<I: SimInput>(step: u32, peers: &[PeerSlot<I>], net: &SimNet<Message>) {
     let summary: Vec<String> = peers
         .iter()
         .map(|slot| {
@@ -341,13 +544,53 @@ fn print_step_summary(step: u32, peers: &[PeerSlot], net: &SimNet<Message>) {
     }
 }
 
+fn drive_spectator<I: SimInput>(
+    spectator: &mut SpectatorSlot<I>,
+    step: u32,
+    options: &RunOptions,
+    oracle: &mut Oracle,
+    trace_hash: &mut u64,
+) {
+    let start_frame = spectator.session.current_frame().as_i32().saturating_add(1);
+    match spectator.session.advance_frame() {
+        Ok(requests) => record_spectator_requests(
+            spectator,
+            requests,
+            start_frame,
+            options.corrupt_spectator_input_from,
+            options.corrupt_spectator_status_from,
+        ),
+        Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
+        Err(error) => oracle.observe_spectator_error("advance_frame", step, &error),
+    }
+
+    let events: Vec<FortressEvent<I::SessionConfig>> = spectator.session.events().collect();
+    for event in &events {
+        if let FortressEvent::SpectatorDivergence { frame, player, .. } = event {
+            oracle.observe_spectator_divergence_event(*frame, *player);
+        }
+        fold_trace(trace_hash, &format!("spectator:{event:?}"));
+    }
+
+    fold_trace(
+        trace_hash,
+        &(
+            step,
+            "spectator",
+            spectator.session.current_state(),
+            spectator.session.current_frame().as_i32(),
+            spectator.session.num_hosts(),
+        ),
+    );
+}
+
 /// Diagnostic variant of [`run`]: prints per-peer progress every 50 steps.
 /// For manual investigation of a repro seed (see `fleet::diagnose_repro`).
 // Deliberate diagnostic stdout: this path only runs under `--run-ignored`
 // manual investigation, where print output IS the deliverable.
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
 pub fn diagnose(schedule: &Schedule) {
-    let report = run_inner(schedule, &RunOptions::default(), true);
+    let report = run_inner::<StubInput>(schedule, &RunOptions::default(), true);
     println!(
         "final: confirmed={:?} net={:?} failures={:#?}",
         report.final_confirmed, report.net_stats, report.verdict.failures
@@ -357,10 +600,16 @@ pub fn diagnose(schedule: &Schedule) {
 /// Runs one schedule to completion and reports.
 #[must_use]
 pub fn run(schedule: &Schedule, options: &RunOptions) -> RunReport {
-    run_inner(schedule, options, false)
+    run_with_input::<StubInput>(schedule, options)
 }
 
-fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
+/// Runs one schedule with a specific fixed-width harness input type.
+#[must_use]
+pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) -> RunReport {
+    run_inner::<I>(schedule, options, false)
+}
+
+fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
     let n = schedule.config.n_players;
     assert!(
         (2..=16).contains(&n),
@@ -496,6 +745,18 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             "starve_events peer {peer} out of range for a {n}-peer mesh"
         );
     }
+    let mut spectator_host_enabled = vec![false; n];
+    for &peer in &schedule.config.spectator_hosts {
+        assert!(
+            peer < n,
+            "spectator_hosts peer {peer} out of range for a {n}-peer mesh"
+        );
+        assert!(
+            !spectator_host_enabled[peer],
+            "duplicate spectator_hosts peer {peer}"
+        );
+        spectator_host_enabled[peer] = true;
+    }
     if let Some(size) = schedule.config.event_queue_size {
         assert!(
             size >= 10,
@@ -518,7 +779,9 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     // Build one session per peer. Handles: peer i is Local handle i, Remote
     // handle j at addrs[j] for j != i. Protocol RNG seeded per peer so magic
     // numbers/sync tokens are reproducible.
-    let mut peers: Vec<PeerSlot> = (0..n)
+    let spectator_addr = peer_addr(n);
+    let spectator_handle = PlayerHandle::new(n);
+    let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
             let observer = Arc::new(CollectingObserver::new());
@@ -540,7 +803,7 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, i))),
                 ..ProtocolConfig::default()
             };
-            let mut builder = SessionBuilder::<StubConfig>::new()
+            let mut builder = SessionBuilder::<I::SessionConfig>::new()
                 .with_num_players(n)
                 .expect("valid player count")
                 .with_max_prediction_window(schedule.config.max_prediction)
@@ -570,9 +833,14 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     .add_player(player_type, PlayerHandle::new(j))
                     .expect("valid player registration");
             }
+            if spectator_host_enabled[i] {
+                builder = builder
+                    .add_player(PlayerType::Spectator(spectator_addr), spectator_handle)
+                    .expect("valid spectator registration");
+            }
             let session = builder.start_p2p_session(socket).expect("session starts");
 
-            let mut game = SimGameStub::new();
+            let mut game = SimGameStub::<I>::new();
             if let Some((peer, from)) = options.corrupt_state_from {
                 if peer == i {
                     game.corrupt_state_from = Some(from);
@@ -592,7 +860,47 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         })
         .collect();
 
+    let mut spectator: Option<SpectatorSlot<I>> = (!schedule.config.spectator_hosts.is_empty())
+        .then(|| {
+            let socket: SimSocket<Message> = net.attach(spectator_addr);
+            let observer = Arc::new(CollectingObserver::new());
+            let protocol_config = ProtocolConfig {
+                clock: Some(clock.as_protocol_clock()),
+                protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, "spectator"))),
+                ..ProtocolConfig::default()
+            };
+            let host_addrs: Vec<SocketAddr> = schedule
+                .config
+                .spectator_hosts
+                .iter()
+                .map(|&peer| addrs[peer])
+                .collect();
+            let mut builder = SessionBuilder::<I::SessionConfig>::new()
+                .with_num_players(n)
+                .expect("valid player count")
+                .with_protocol_config(protocol_config)
+                .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(size) = schedule.config.event_queue_size {
+                builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
+                    panic!(
+                        "spectator with_event_queue_size({size}) rejected a \
+                         pre-validated size: {error:?}"
+                    )
+                });
+            }
+            let session = builder
+                .start_spectator_session_multi(&host_addrs, socket)
+                .expect("spectator session starts");
+            SpectatorSlot {
+                session,
+                observer,
+                applied_inputs: BTreeMap::new(),
+            }
+        });
+
     let mut oracle = Oracle::new(n);
+    validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
+        .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
@@ -665,6 +973,12 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
     };
     let mut confirmed_at_heal: Vec<i32> = Vec::new();
     let mut confirmed_after_recovery: Vec<i32> = Vec::new();
+    // A spectator floor is in displayed game-frame space, not schedule-step
+    // space. Capture it only when a lifecycle event actually retires a peer,
+    // using the slowest live survivor's current frame so stalled/waiting app
+    // models are not charged for virtual time they never simulated.
+    let spectator_enabled = spectator.is_some();
+    let mut spectator_required_min_frame: Option<i32> = None;
 
     for step in 0..schedule.config.steps {
         // Apply control-plane events due at this step.
@@ -709,6 +1023,13 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                             dead[*target] = true;
                             net.detach(addrs[*target]);
                             oracle.mark_peer_dead(*target);
+                            if spectator_enabled {
+                                update_spectator_required_min_frame(
+                                    &peers,
+                                    &dead,
+                                    &mut spectator_required_min_frame,
+                                );
+                            }
                         }
                     }
                 },
@@ -727,6 +1048,13 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                             dead[*target] = true;
                             net.detach(addrs[*target]);
                             oracle.mark_peer_dead(*target);
+                            if spectator_enabled {
+                                update_spectator_required_min_frame(
+                                    &peers,
+                                    &dead,
+                                    &mut spectator_required_min_frame,
+                                );
+                            }
                         }
                     }
                 },
@@ -736,9 +1064,18 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                     // `UnattachedPolicy::Drop`), and exclude it from the oracle's
                     // liveness checks. Its remaining mesh survives per the
                     // configured `DisconnectBehavior`. Idempotent.
-                    dead[*peer] = true;
-                    net.detach(addrs[*peer]);
-                    oracle.mark_peer_dead(*peer);
+                    if !dead[*peer] {
+                        dead[*peer] = true;
+                        net.detach(addrs[*peer]);
+                        oracle.mark_peer_dead(*peer);
+                        if spectator_enabled {
+                            update_spectator_required_min_frame(
+                                &peers,
+                                &dead,
+                                &mut spectator_required_min_frame,
+                            );
+                        }
+                    }
                 },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
@@ -767,7 +1104,8 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 // directly, and any real divergence is still caught in-band by
                 // its neighbors' own desync detection over the wire.
                 if !starves[i] {
-                    let events: Vec<FortressEvent<StubConfig>> = slot.session.events().collect();
+                    let events: Vec<FortressEvent<I::SessionConfig>> =
+                        slot.session.events().collect();
                     for event in &events {
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
@@ -795,8 +1133,9 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                         wait_skip[i] -= 1;
                     } else {
                         for handle in slot.session.local_player_handles() {
-                            if let Err(error) =
-                                slot.session.add_local_input(handle, input_for(step, i))
+                            if let Err(error) = slot
+                                .session
+                                .add_local_input(handle, input_for::<I>(step, i))
                             {
                                 oracle.observe_session_error("add_local_input", i, step, &error);
                             }
@@ -813,7 +1152,11 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
                 if confirmed.is_valid() {
                     for frame in (slot.sampled_confirmed + 1)..=confirmed.as_i32() {
                         match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
-                            Ok(inputs) => oracle.observe_confirmed_inputs(i, frame, &inputs),
+                            Ok(inputs) => {
+                                let values: Vec<InputFingerprint> =
+                                    inputs.iter().map(|input| input.fingerprint()).collect();
+                                oracle.observe_confirmed_inputs(i, frame, values);
+                            },
                             Err(error) => {
                                 oracle.observe_confirmed_unavailable(
                                     i,
@@ -859,6 +1202,10 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
             }
         }
 
+        if let Some(spectator) = spectator.as_mut() {
+            drive_spectator(spectator, step, options, &mut oracle, &mut trace_hash);
+        }
+
         if diagnose && step % 50 == 0 {
             print_step_summary(step, &peers, &net);
         }
@@ -870,18 +1217,31 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         peers.iter().map(|slot| slot.session.metrics()).collect();
 
     // Final observations.
+    let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
     for ((i, slot), metric) in peers.iter().enumerate().zip(metrics.iter()) {
-        let severe = slot
-            .observer
-            .violations_at_severity(ViolationSeverity::Error);
-        oracle.observe_violations(i, &severe);
+        let violations = slot.observer.violations();
+        for violation in &violations {
+            let signature =
+                ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
+            *violation_census.entry(signature).or_default() += 1;
+        }
+        oracle.observe_violations(ViolationSource::Peer(i), &violations);
         oracle.observe_checksum_mismatches(i, metric.checksums_mismatched);
+    }
+    if let Some(spectator) = &spectator {
+        let violations = spectator.observer.violations();
+        for violation in &violations {
+            let signature =
+                ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
+            *violation_census.entry(signature).or_default() += 1;
+        }
+        oracle.observe_violations(ViolationSource::Spectator, &violations);
     }
     let recorded: Vec<BTreeMap<i32, StateStub>> = peers
         .iter()
         .map(|slot| slot.game.recorded.clone())
         .collect();
-    let applied_inputs: Vec<BTreeMap<i32, Vec<(StubInput, InputStatus)>>> = peers
+    let applied_inputs: Vec<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>> = peers
         .iter()
         .map(|slot| slot.game.applied_inputs.clone())
         .collect();
@@ -939,8 +1299,19 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after: confirmed_after_recovery.clone(),
     });
-    let verdict =
-        oracle.finalize_with_applied_inputs(&recorded, &applied_inputs, &end_confirmed, &end_state);
+    let spectator_applied_inputs = spectator.as_ref().map(|slot| &slot.applied_inputs);
+    let spectator_applied_frames =
+        spectator_applied_inputs.map_or(0, std::collections::BTreeMap::len);
+    let spectator_max_frame =
+        spectator_applied_inputs.and_then(|records| records.keys().next_back().copied());
+    let verdict = oracle.finalize_with_applied_inputs_and_spectator(
+        &recorded,
+        &applied_inputs,
+        &end_confirmed,
+        &end_state,
+        spectator_applied_inputs,
+        spectator_required_min_frame,
+    );
     let recovered_within_b = verdict.recovered_within_b;
     RunReport {
         verdict,
@@ -953,5 +1324,60 @@ fn run_inner(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunRe
         confirmed_at_heal,
         confirmed_after_recovery,
         recovered_within_b,
+        violation_census,
+        spectator_applied_frames,
+        spectator_max_frame,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fortress_rollback::network::codec;
+
+    fn assert_input_width<I: SimInput>(input: I) {
+        let encoded = codec::encode(&input).expect("harness input serializes");
+        assert_eq!(
+            encoded.len(),
+            usize::try_from(I::WIDTH_BYTES).expect("width fits usize"),
+            "SimInput::WIDTH_BYTES must match codec width"
+        );
+        assert_eq!(
+            input.fingerprint(),
+            InputFingerprint::from_bytes(input.value(), &encoded),
+            "SimInput::fingerprint must cover the full codec bytes"
+        );
+    }
+
+    #[test]
+    fn sim_input_widths_match_codec() {
+        assert_input_width(input_for::<StubInput>(7, 1));
+        assert_input_width(input_for::<WideStubInput>(7, 1));
+    }
+
+    #[test]
+    fn default_run_matches_explicit_stub_input_run() {
+        let schedule = schedule::generate(
+            7,
+            schedule::SimConfig {
+                steps: 180,
+                ..schedule::SimConfig::smoke(2)
+            },
+        );
+
+        let implicit = run(&schedule, &RunOptions::default());
+        let explicit = run_with_input::<StubInput>(&schedule, &RunOptions::default());
+
+        assert_eq!(implicit.trace_hash, explicit.trace_hash);
+        assert_eq!(implicit.final_confirmed, explicit.final_confirmed);
+        assert_eq!(implicit.net_stats, explicit.net_stats);
+        assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
+        assert_eq!(implicit.violation_census, explicit.violation_census);
+        assert_eq!(
+            implicit.spectator_applied_frames,
+            explicit.spectator_applied_frames
+        );
+        assert_eq!(implicit.spectator_max_frame, explicit.spectator_max_frame);
+        assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
     }
 }

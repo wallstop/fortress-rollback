@@ -10,11 +10,11 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    oracle::{OracleFailure, POST_HEAL_MIN_ADVANCE},
+    oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
     run, RunOptions,
 };
 use crate::common::sim_net::LinkPolicy;
-use fortress_rollback::SessionState;
+use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
 use std::{collections::BTreeSet, time::Duration};
 
 /// Fixed PR-smoke seed set. Nightly fleets (later milestone) randomize seeds
@@ -43,6 +43,45 @@ fn pr_smoke_three_player_mesh_holds_invariants() {
 #[test]
 fn pr_smoke_four_player_mesh_holds_invariants() {
     run_smoke_fleet(4);
+}
+
+/// M3 §6.2(f): empty-allowlist violation census. The default simulation
+/// allowlist is intentionally empty; a passing non-injection smoke run should
+/// not emit any `Error`/`Critical` telemetry signature. Warnings remain visible
+/// through `RunReport::violation_census` without failing the oracle.
+#[test]
+#[ignore = "200-seed violation census; run manually/nightly after allowlist changes"]
+// Deliberate census stdout: ignored/manual runs need the green signature ledger.
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn violation_census_two_hundred_smoke_seeds_has_no_error_signatures() {
+    let mut census: std::collections::BTreeMap<ViolationSignature, u64> =
+        std::collections::BTreeMap::new();
+    let mut allowlist_hits: std::collections::BTreeMap<ViolationAllowlistEntry, u64> =
+        std::collections::BTreeMap::new();
+
+    for seed in 0..200u64 {
+        let schedule = generate(seed, SimConfig::smoke(4));
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+        for hit in report.verdict.violation_allowlist_hits {
+            *allowlist_hits.entry(hit.entry).or_default() += hit.count;
+        }
+        for (key, count) in report.violation_census {
+            *census.entry(key).or_default() += count;
+        }
+    }
+
+    println!("violation allowlist hits: {allowlist_hits:#?}");
+    println!("violation census: {census:#?}");
+
+    let unexpected: Vec<_> = census
+        .iter()
+        .filter(|(key, _)| key.severity >= ViolationSeverity::Error)
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "empty-allowlist census found Error+ telemetry signatures: {unexpected:#?}"
+    );
 }
 
 /// M2 §5.2: the always-on [`SessionMetrics`] counters must actually be wired to
@@ -1184,6 +1223,202 @@ fn graceful_remove_survivors_converge_under_continue_without() {
         confirmed[1] < confirmed[0],
         "the removed peer 1 must stay frozen behind the survivors: {confirmed:?}"
     );
+}
+
+/// M3 §6.2(d) spectator convergence: a pre-planned redundant spectator attached
+/// to live survivors must display the same input bytes the mesh applies over
+/// its confirmed prefix and agree on dropped-slot `Disconnected` statuses, even
+/// after one player is gracefully removed.
+#[test]
+fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert!(
+        report.spectator_max_frame >= Some(POST_HEAL_MIN_ADVANCE),
+        "spectator must display post-remove frames; the oracle's scenario floor \
+         would fail the run if it stopped before the lifecycle event: {:?}",
+        report.spectator_max_frame
+    );
+
+    let again = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "a preplanned spectator schedule must reproduce its exact trace"
+    );
+}
+
+const SPECTATOR_FLOOR_STALL_AT: u32 = 30;
+const SPECTATOR_FLOOR_REMOVE_AT: u32 = 80;
+
+fn stalled_spectator_floor_schedule(steps: u32) -> Schedule {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.steps = steps;
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    schedule.heal_at = steps - 1;
+    schedule.events = vec![
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 0,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 1,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 2,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_STALL_AT,
+            ScheduleEvent::PeerStall {
+                peer: 3,
+                steps: SPECTATOR_FLOOR_REMOVE_AT - SPECTATOR_FLOOR_STALL_AT,
+            },
+        ),
+        (
+            SPECTATOR_FLOOR_REMOVE_AT,
+            ScheduleEvent::GracefulRemove { by: 0, target: 1 },
+        ),
+    ];
+    schedule
+}
+
+/// Regression for Bugbot f256657d: the spectator post-drop progress floor is a
+/// displayed-frame threshold, not a schedule-step threshold. This schedule
+/// stalls the live spectator hosts before removal, so virtual steps race far
+/// ahead of their simulated frames; the run should still pass once the
+/// spectator displays G frames past the survivors' actual removal-time frame.
+#[test]
+fn spectator_post_drop_floor_uses_display_frames_not_schedule_steps() {
+    let schedule = stalled_spectator_floor_schedule(130);
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+
+    let max_frame = report
+        .spectator_max_frame
+        .expect("passing spectator run must display frames");
+    let old_step_domain_floor = i32::try_from(SPECTATOR_FLOOR_REMOVE_AT)
+        .unwrap_or(i32::MAX)
+        .saturating_add(POST_HEAL_MIN_ADVANCE);
+    assert!(
+        max_frame < old_step_domain_floor,
+        "regression premise failed: old step-domain floor {old_step_domain_floor} \
+         would not have failed with spectator max {max_frame}"
+    );
+}
+
+/// Negative half of the same regression: if the run ends before the spectator
+/// displays G frames past the removal-time game frame, the oracle must report
+/// scenario-floor progress missing. Without wiring the runtime floor through to
+/// the oracle this would have passed the spectator check after any display.
+#[test]
+fn oracle_catches_spectator_missing_display_frame_floor_after_drop() {
+    let schedule = stalled_spectator_floor_schedule(90);
+
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        !report.verdict.passed(),
+        "a spectator that stops before the post-drop frame floor must fail"
+    );
+    assert!(
+        report.verdict.failures.iter().any(|failure| {
+            matches!(
+                failure,
+                OracleFailure::SpectatorProgressMissing {
+                    required_min_frame: Some(required),
+                    observed_max_frame: Some(observed),
+                    ..
+                } if observed < required
+            )
+        }),
+        "spectator progress failure must carry the runtime display-frame floor: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Negative control for §6.2(d): corrupting only the spectator's displayed
+/// record must fail the spectator oracle while leaving the mesh path itself
+/// untouched.
+#[test]
+fn oracle_catches_spectator_input_divergence_under_graceful_remove() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    let options = RunOptions {
+        corrupt_spectator_input_from: Some(0),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded spectator-only divergence must fail"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+        "spectator mismatch must be visible to the oracle: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Negative control for the dropped-slot half of §6.2(d): once the mesh freezes
+/// a gracefully removed slot as `Disconnected`, the spectator must report that
+/// same status for the same input bytes.
+#[test]
+fn oracle_catches_spectator_disconnected_status_divergence_under_graceful_remove() {
+    let mut schedule = graceful_remove_schedule(Some((0, 1)));
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    let options = RunOptions {
+        corrupt_spectator_status_from: Some(100),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    assert!(
+        !report.verdict.passed(),
+        "a seeded spectator status divergence must fail"
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::SpectatorInputDivergence { .. })),
+        "spectator status mismatch must be visible to the oracle: {:?}",
+        report.verdict.failures
+    );
+}
+
+/// Malformed spectator host lists are schedule bugs, not runtime indexing
+/// panics. Reject them before sessions are built.
+#[test]
+fn run_rejects_malformed_spectator_hosts() {
+    let cases = [
+        (vec![9], "spectator_hosts peer 9 out of range"),
+        (vec![0, 0], "duplicate spectator_hosts peer 0"),
+    ];
+
+    for (hosts, expected) in cases {
+        let mut schedule = graceful_remove_schedule(None);
+        schedule.config.spectator_hosts = hosts;
+        assert_run_panics_with(&schedule, expected);
+    }
 }
 
 /// Negative control for graceful remove: the alive mask must exclude only the

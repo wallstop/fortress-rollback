@@ -148,6 +148,12 @@ pub struct SimConfig {
     /// (D9) reachable within a short schedule.
     #[serde(default)]
     pub event_queue_size: Option<usize>,
+    /// P2P peer indices that should serve one pre-planned redundant spectator.
+    /// Empty disables spectator driving. The generator leaves this empty so
+    /// existing random schedules stay byte-identical; hand-authored schedules
+    /// opt in when they need the §6.2(d) spectator-convergence oracle.
+    #[serde(default)]
+    pub spectator_hosts: Vec<usize>,
 }
 
 impl SimConfig {
@@ -171,6 +177,7 @@ impl SimConfig {
             clock_skew_ppm: Vec::new(),
             starve_events: Vec::new(),
             event_queue_size: None,
+            spectator_hosts: Vec::new(),
         }
     }
 
@@ -716,6 +723,10 @@ mod tests {
             config.remove("event_queue_size").is_some(),
             "config must serialize an `event_queue_size` field for this test to remove"
         );
+        assert!(
+            config.remove("spectator_hosts").is_some(),
+            "config must serialize a `spectator_hosts` field for this test to remove"
+        );
         let back: Schedule = serde_json::from_value(value).unwrap();
         assert_eq!(
             back.config.app_model,
@@ -733,6 +744,10 @@ mod tests {
         assert_eq!(
             back.config.event_queue_size, None,
             "a pre-axis config (no event_queue_size) must default to the library cap"
+        );
+        assert!(
+            back.config.spectator_hosts.is_empty(),
+            "a pre-axis config (no spectator_hosts) must default to no spectator"
         );
     }
 }

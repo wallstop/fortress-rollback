@@ -14,21 +14,19 @@
 //! is bit-for-bit reproducible. `FORTRESS_SWEEP_OUT`, if set, receives the
 //! reports as JSON Lines for offline analysis.
 //!
-//! Deferred to a follow-up (see PLAN.md §5.3): the input-width axis (the harness
-//! `StubConfig` fixes a 4-byte input).
-
 use super::harness::schedule::{Schedule, SimConfig, SCHEDULE_SCHEMA_VERSION};
-use super::harness::{run, PeerWireTotals, RunOptions, RunReport};
+use super::harness::{
+    run_with_input, PeerWireTotals, RunOptions, RunReport, SimInput, WideStubInput,
+};
 use crate::common::sim_net::LinkPolicy;
+use crate::common::stubs::StubInput;
 use fortress_rollback::{MessageKind, RollbackDepthHistogram, SessionMetrics};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// The fixed per-player input width the harness stub serializes (`u32`). The
-/// `{4, 32}` B width axis from the plan needs a generic-input harness refactor
-/// and is deferred; recorded here so the JSON is self-describing.
-const INPUT_WIDTH_BYTES: u32 = 4;
+/// Per-player serialized input widths covered by the sweep.
+const INPUT_WIDTHS_BYTES: [u32; 2] = [StubInput::WIDTH_BYTES, WideStubInput::WIDTH_BYTES];
 
 /// One sweep cell: a mesh size under constant link conditions.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +38,8 @@ pub struct CellParams {
     /// (integer division — an odd `rtt_ms` truncates by 1ms one-way).
     pub rtt_ms: u64,
     pub jitter_ms: u64,
+    /// Serialized byte width of one player input under the harness input type.
+    pub input_width_bytes: u32,
     pub steps: u32,
     pub seed: u64,
 }
@@ -94,6 +94,19 @@ impl CellParams {
             heal_at: self.steps,
         }
     }
+}
+
+fn cells_with_widths(base: impl IntoIterator<Item = CellParams>) -> Vec<CellParams> {
+    let mut cells = Vec::new();
+    for cell in base {
+        for input_width_bytes in INPUT_WIDTHS_BYTES {
+            cells.push(CellParams {
+                input_width_bytes,
+                ..cell
+            });
+        }
+    }
+    cells
 }
 
 /// The measured, serializable result for one cell. All rate columns are derived
@@ -201,8 +214,21 @@ fn sum_to_rate_per_sec(total: u64, per_players: usize, virtual_secs: f64) -> f64
 /// [`CellReport`]. Deterministic: identical `(seed, params)` ⇒ identical report.
 #[must_use]
 pub fn run_cell(params: CellParams) -> CellReport {
+    match params.input_width_bytes {
+        StubInput::WIDTH_BYTES => run_cell_with_input::<StubInput>(params),
+        WideStubInput::WIDTH_BYTES => run_cell_with_input::<WideStubInput>(params),
+        other => panic!("unsupported sweep input_width_bytes {other}; expected 4 or 32"),
+    }
+}
+
+fn run_cell_with_input<I: SimInput>(params: CellParams) -> CellReport {
+    assert_eq!(
+        params.input_width_bytes,
+        I::WIDTH_BYTES,
+        "cell width must match the selected harness input type"
+    );
     let schedule = params.schedule();
-    let report: RunReport = run(&schedule, &RunOptions::default());
+    let report: RunReport = run_with_input::<I>(&schedule, &RunOptions::default());
 
     #[allow(clippy::cast_precision_loss)]
     let virtual_secs = f64::from(params.steps) * (schedule.config.step_dt_ms as f64) / 1000.0;
@@ -294,15 +320,15 @@ pub fn run_cell(params: CellParams) -> CellReport {
         .unwrap_or(i32::MIN);
 
     CellReport {
-        schema: 1,
-        label: params.label.to_owned(),
+        schema: 2,
+        label: format!("{}-{}b", params.label, I::WIDTH_BYTES),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: std::env::var("FORTRESS_SWEEP_GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
         n_players: n,
         loss_pct: params.loss_pct,
         rtt_ms: params.rtt_ms,
         jitter_ms: params.jitter_ms,
-        input_width_bytes: INPUT_WIDTH_BYTES,
+        input_width_bytes: I::WIDTH_BYTES,
         steps: params.steps,
         seed: params.seed,
         min_final_confirmed,
@@ -360,6 +386,7 @@ struct BaselineCell {
     loss_pct: f64,
     rtt_ms: u64,
     jitter_ms: u64,
+    input_width_bytes: u32,
     steps: u32,
     bytes_sent_per_player_per_sec: f64,
     input_bytes_post_compression_per_player_per_sec: f64,
@@ -382,6 +409,7 @@ impl BaselineCell {
             loss_pct: r.loss_pct,
             rtt_ms: r.rtt_ms,
             jitter_ms: r.jitter_ms,
+            input_width_bytes: r.input_width_bytes,
             steps: r.steps,
             bytes_sent_per_player_per_sec: r.bytes_sent_per_player_per_sec,
             input_bytes_post_compression_per_player_per_sec: r
@@ -402,7 +430,7 @@ impl BaselineCell {
 /// Path to the checked-in gate baseline.
 fn baseline_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/simulation/baselines/sweep-v1.json")
+        .join("tests/simulation/baselines/sweep-v2.json")
 }
 
 /// Asserts `actual` is within `rel` (relative) plus `abs_floor` (absolute) of
@@ -469,6 +497,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
                 cur.loss_pct,
                 cur.rtt_ms,
                 cur.jitter_ms,
+                cur.input_width_bytes,
                 cur.steps,
             ),
             (
@@ -476,6 +505,7 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
                 base.loss_pct,
                 base.rtt_ms,
                 base.jitter_ms,
+                base.input_width_bytes,
                 base.steps,
             ),
             "cell {} parameters changed — re-bless the baseline",
@@ -521,13 +551,14 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
 fn pr_gate_cells() -> Vec<CellParams> {
     const GATE_STEPS: u32 = 1000;
     const SEED: u64 = 1;
-    vec![
+    cells_with_widths([
         CellParams {
             label: "2p-lan",
             n_players: 2,
             loss_pct: 0.0,
             rtt_ms: 10,
             jitter_ms: 0,
+            input_width_bytes: 4,
             steps: GATE_STEPS,
             seed: SEED,
         },
@@ -537,6 +568,7 @@ fn pr_gate_cells() -> Vec<CellParams> {
             loss_pct: 1.0,
             rtt_ms: 50,
             jitter_ms: 20,
+            input_width_bytes: 4,
             steps: GATE_STEPS,
             seed: SEED,
         },
@@ -546,6 +578,7 @@ fn pr_gate_cells() -> Vec<CellParams> {
             loss_pct: 5.0,
             rtt_ms: 100,
             jitter_ms: 20,
+            input_width_bytes: 4,
             steps: GATE_STEPS,
             seed: SEED,
         },
@@ -555,6 +588,7 @@ fn pr_gate_cells() -> Vec<CellParams> {
             loss_pct: 1.0,
             rtt_ms: 50,
             jitter_ms: 20,
+            input_width_bytes: 4,
             steps: GATE_STEPS,
             seed: SEED,
         },
@@ -564,10 +598,11 @@ fn pr_gate_cells() -> Vec<CellParams> {
             loss_pct: 15.0,
             rtt_ms: 200,
             jitter_ms: 20,
+            input_width_bytes: 4,
             steps: GATE_STEPS,
             seed: SEED,
         },
-    ]
+    ])
 }
 
 #[test]
@@ -583,6 +618,13 @@ fn sweep_pr_gate() {
     let first = &reports[0];
     let replay = run_cell(pr_gate_cells()[0]);
     assert_eq!(*first, replay, "cell is not reproducible: {}", first.label);
+    let wide = &reports[1];
+    let wide_replay = run_cell(pr_gate_cells()[1]);
+    assert_eq!(
+        *wide, wide_replay,
+        "wide-input cell is not reproducible: {}",
+        wide.label
+    );
 
     write_jsonl(&reports);
 
@@ -600,17 +642,18 @@ fn full_matrix_cells() -> Vec<CellParams> {
     let losses = [0.0, 1.0, 5.0, 15.0];
     let rtts = [10u64, 50, 100, 200];
     let jitters = [0u64, 20];
-    let mut cells = Vec::new();
+    let mut base_cells = Vec::new();
     for &n_players in &[2usize, 4] {
         for &loss_pct in &losses {
             for &rtt_ms in &rtts {
                 for &jitter_ms in &jitters {
-                    cells.push(CellParams {
+                    base_cells.push(CellParams {
                         label: "matrix",
                         n_players,
                         loss_pct,
                         rtt_ms,
                         jitter_ms,
+                        input_width_bytes: 4,
                         steps: STEPS,
                         seed: SEED,
                     });
@@ -624,17 +667,18 @@ fn full_matrix_cells() -> Vec<CellParams> {
         ("12p-regional", 12, 1.0, 100, 20),
         ("16p-regional", 16, 1.0, 100, 20),
     ] {
-        cells.push(CellParams {
+        base_cells.push(CellParams {
             label,
             n_players,
             loss_pct,
             rtt_ms,
             jitter_ms,
+            input_width_bytes: 4,
             steps: STEPS,
             seed: SEED,
         });
     }
-    cells
+    cells_with_widths(base_cells)
 }
 
 #[test]
@@ -648,21 +692,56 @@ fn full_matrix_includes_scale_spot_rows() {
     ];
     assert_eq!(
         cells.len(),
-        68,
-        "full matrix should be the 64-cell grid plus 4 scale spot rows"
+        136,
+        "full matrix should be the 64-cell grid plus 4 scale spot rows, across 2 input widths"
     );
     for (label, n_players, loss_pct, rtt_ms, jitter_ms) in expected_spots {
-        assert!(
-            cells.iter().any(|cell| {
-                cell.label == label
-                    && cell.n_players == n_players
-                    && cell.loss_pct.to_bits() == loss_pct.to_bits()
-                    && cell.rtt_ms == rtt_ms
-                    && cell.jitter_ms == jitter_ms
-            }),
-            "full matrix must include exact scale spot row {label}"
-        );
+        for input_width_bytes in INPUT_WIDTHS_BYTES {
+            assert!(
+                cells.iter().any(|cell| {
+                    cell.label == label
+                        && cell.n_players == n_players
+                        && cell.loss_pct.to_bits() == loss_pct.to_bits()
+                        && cell.rtt_ms == rtt_ms
+                        && cell.jitter_ms == jitter_ms
+                        && cell.input_width_bytes == input_width_bytes
+                }),
+                "full matrix must include exact scale spot row {label} at {input_width_bytes}B"
+            );
+        }
     }
+}
+
+#[test]
+fn input_width_axis_changes_measured_raw_input_bytes() {
+    let base = CellParams {
+        label: "2p-axis",
+        n_players: 2,
+        loss_pct: 0.0,
+        rtt_ms: 10,
+        jitter_ms: 0,
+        input_width_bytes: StubInput::WIDTH_BYTES,
+        steps: 300,
+        seed: 1,
+    };
+    let narrow = run_cell(base);
+    let wide = run_cell(CellParams {
+        input_width_bytes: WideStubInput::WIDTH_BYTES,
+        ..base
+    });
+
+    assert_eq!(narrow.input_width_bytes, StubInput::WIDTH_BYTES);
+    assert_eq!(wide.input_width_bytes, WideStubInput::WIDTH_BYTES);
+    assert_eq!(
+        narrow.desync_incidents, 0,
+        "narrow cell desynced: {narrow:?}"
+    );
+    assert_eq!(wide.desync_incidents, 0, "wide cell desynced: {wide:?}");
+    assert!(
+        wide.input_bytes_pre_compression_per_player_per_sec
+            > narrow.input_bytes_pre_compression_per_player_per_sec,
+        "wide input should increase raw input bytes: narrow={narrow:?} wide={wide:?}"
+    );
 }
 
 fn assert_cell_health(r: &CellReport) {
