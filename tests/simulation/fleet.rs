@@ -1566,6 +1566,26 @@ fn run_rejects_malformed_spectator_host_kill_events() {
         .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
     already_retired.events.sort_by_key(|(step, _)| *step);
     assert_run_panics_with(&already_retired, "already retired");
+
+    let mut skipped_prior_drop = spectator_host_kill_schedule(None, None);
+    skipped_prior_drop
+        .events
+        .push((80, ScheduleEvent::PeerKill { peer: 2 }));
+    skipped_prior_drop
+        .events
+        .push((90, ScheduleEvent::GracefulRemove { by: 2, target: 0 }));
+    skipped_prior_drop
+        .events
+        .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+    skipped_prior_drop.events.sort_by_key(|(step, _)| *step);
+    let result = std::panic::catch_unwind(|| {
+        let _ = run(&skipped_prior_drop, &RunOptions::default());
+    });
+    assert!(
+        result.is_ok(),
+        "a lifecycle drop from an already-dead caller is a runtime no-op and \
+         must not make a later SpectatorHostKill look already retired"
+    );
 }
 
 /// Negative control for graceful remove: the alive mask must exclude only the

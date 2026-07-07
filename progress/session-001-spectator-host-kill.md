@@ -34,6 +34,11 @@ production Rust API or wire behavior changed.
 - Final validation showed the partition-only control intentionally fails closed
   with spectator divergence; the test now asserts that failure shape rather than
   treating the stale-host control as a passing schedule.
+- Copilot PR review found that validation marked `GracefulRemove`/
+  `LegacyDisconnect` targets retired even when runtime would skip the event
+  because the caller was already dead. The pre-scan now mirrors the runtime
+  `!dead[by] && !dead[target]` gate, with a regression proving a skipped prior
+  drop does not make a later `SpectatorHostKill` look already retired.
 
 ## Validation
 

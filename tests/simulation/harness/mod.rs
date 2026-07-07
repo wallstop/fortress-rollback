@@ -789,9 +789,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut retired_by_lifecycle = vec![false; n];
     for (_, event) in &schedule.events {
         match event {
-            ScheduleEvent::GracefulRemove { target, .. }
-            | ScheduleEvent::LegacyDisconnect { target, .. } => {
-                retired_by_lifecycle[*target] = true;
+            ScheduleEvent::GracefulRemove { by, target }
+            | ScheduleEvent::LegacyDisconnect { by, target } => {
+                if !retired_by_lifecycle[*by] && !retired_by_lifecycle[*target] {
+                    retired_by_lifecycle[*target] = true;
+                }
             },
             ScheduleEvent::PeerKill { peer } => {
                 retired_by_lifecycle[*peer] = true;
