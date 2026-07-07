@@ -15,8 +15,7 @@
 //! reports as JSON Lines for offline analysis.
 //!
 //! Deferred to a follow-up (see PLAN.md §5.3): the input-width axis (the harness
-//! `StubConfig` fixes a 4-byte input), a checked-in exact-value baseline as M5's
-//! cost ledger, and the nightly full-matrix CI job.
+//! `StubConfig` fixes a 4-byte input).
 
 use super::harness::schedule::{Schedule, SimConfig, SCHEDULE_SCHEMA_VERSION};
 use super::harness::{run, PeerWireTotals, RunOptions, RunReport};
@@ -298,9 +297,7 @@ pub fn run_cell(params: CellParams) -> CellReport {
         schema: 1,
         label: params.label.to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        git_sha: option_env!("FORTRESS_SWEEP_GIT_SHA")
-            .unwrap_or("unknown")
-            .to_owned(),
+        git_sha: std::env::var("FORTRESS_SWEEP_GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
         n_players: n,
         loss_pct: params.loss_pct,
         rtt_ms: params.rtt_ms,
@@ -579,41 +576,7 @@ fn sweep_pr_gate() {
     let reports: Vec<CellReport> = cells.iter().copied().map(run_cell).collect();
 
     for r in &reports {
-        let ctx = || format!("cell {}: {r:?}", r.label);
-        // The load-bearing invariant: constant-conditions meshes never desync.
-        assert_eq!(r.desync_incidents, 0, "desync in a clean cell — {}", ctx());
-        // Liveness: every cell confirms real frames (a stalled mesh would pin
-        // near frame 0). 1000 steps ≈ 16 virtual seconds even at loss15/rtt200.
-        assert!(
-            r.min_final_confirmed >= 50,
-            "cell made too little progress — {}",
-            ctx()
-        );
-        // Real wire traffic flowed, and the per-kind map covers every kind.
-        assert!(
-            r.bytes_sent_per_player_per_sec > 0.0,
-            "no bandwidth recorded — {}",
-            ctx()
-        );
-        assert_eq!(
-            r.messages_sent_by_kind.len(),
-            MessageKind::COUNT,
-            "by-kind map missing categories — {}",
-            ctx()
-        );
-        // Rollback-depth percentiles are ordered and bounded by the observed
-        // max — a real cross-check between the histogram (percentile source)
-        // and the independently-tracked `max_rollback_depth`.
-        assert!(
-            r.rollback_depth_p50 <= r.rollback_depth_p99,
-            "p50 > p99 — {}",
-            ctx()
-        );
-        assert!(
-            r.rollback_depth_p99 <= r.rollback_depth_max,
-            "p99 exceeds max — {}",
-            ctx()
-        );
+        assert_cell_health(r);
     }
 
     // Determinism: virtual time ⇒ a cell is bit-for-bit reproducible.
@@ -627,24 +590,22 @@ fn sweep_pr_gate() {
     check_or_bless_baseline(&reports);
 }
 
-/// The full baseline matrix. `#[ignore]`d: it runs 5000-frame cells across the
-/// loss × RTT × jitter grid and is intended for offline capture via
-/// `FORTRESS_SWEEP_OUT`, not PR CI. (Nightly CI wiring is a follow-up; see
-/// PLAN.md §5.3.)
-#[test]
-#[ignore = "full matrix; run offline with FORTRESS_SWEEP_OUT set"]
-fn full_matrix_sweep() {
+/// Returns the full baseline matrix used by the ignored
+/// [`full_matrix_sweep`] test: 5000-frame cells across the loss × RTT ×
+/// jitter grid plus scale spot rows, intended for nightly or offline capture
+/// via `FORTRESS_SWEEP_OUT`, not PR CI.
+fn full_matrix_cells() -> Vec<CellParams> {
     const STEPS: u32 = 5000;
     const SEED: u64 = 1;
     let losses = [0.0, 1.0, 5.0, 15.0];
     let rtts = [10u64, 50, 100, 200];
     let jitters = [0u64, 20];
-    let mut reports = Vec::new();
+    let mut cells = Vec::new();
     for &n_players in &[2usize, 4] {
         for &loss_pct in &losses {
             for &rtt_ms in &rtts {
                 for &jitter_ms in &jitters {
-                    reports.push(run_cell(CellParams {
+                    cells.push(CellParams {
                         label: "matrix",
                         n_players,
                         loss_pct,
@@ -652,13 +613,103 @@ fn full_matrix_sweep() {
                         jitter_ms,
                         steps: STEPS,
                         seed: SEED,
-                    }));
+                    });
                 }
             }
         }
     }
-    for r in &reports {
-        assert_eq!(r.desync_incidents, 0, "desync in matrix cell: {r:?}");
+    for (label, n_players, loss_pct, rtt_ms, jitter_ms) in [
+        ("3p-regional", 3usize, 1.0, 100u64, 20u64),
+        ("8p-regional", 8, 1.0, 100, 20),
+        ("12p-regional", 12, 1.0, 100, 20),
+        ("16p-regional", 16, 1.0, 100, 20),
+    ] {
+        cells.push(CellParams {
+            label,
+            n_players,
+            loss_pct,
+            rtt_ms,
+            jitter_ms,
+            steps: STEPS,
+            seed: SEED,
+        });
     }
+    cells
+}
+
+#[test]
+fn full_matrix_includes_scale_spot_rows() {
+    let cells = full_matrix_cells();
+    let expected_spots: [(&str, usize, f64, u64, u64); 4] = [
+        ("3p-regional", 3usize, 1.0, 100u64, 20u64),
+        ("8p-regional", 8, 1.0, 100, 20),
+        ("12p-regional", 12, 1.0, 100, 20),
+        ("16p-regional", 16, 1.0, 100, 20),
+    ];
+    assert_eq!(
+        cells.len(),
+        68,
+        "full matrix should be the 64-cell grid plus 4 scale spot rows"
+    );
+    for (label, n_players, loss_pct, rtt_ms, jitter_ms) in expected_spots {
+        assert!(
+            cells.iter().any(|cell| {
+                cell.label == label
+                    && cell.n_players == n_players
+                    && cell.loss_pct.to_bits() == loss_pct.to_bits()
+                    && cell.rtt_ms == rtt_ms
+                    && cell.jitter_ms == jitter_ms
+            }),
+            "full matrix must include exact scale spot row {label}"
+        );
+    }
+}
+
+fn assert_cell_health(r: &CellReport) {
+    let ctx = || format!("cell {}: {r:?}", r.label);
+    // The load-bearing invariant: constant-conditions meshes never desync.
+    assert_eq!(r.desync_incidents, 0, "desync in a clean cell — {}", ctx());
+    // Liveness: every cell confirms real frames (a stalled mesh would pin near
+    // frame 0). 1000 steps ≈ 16 virtual seconds even at loss15/rtt200; the full
+    // matrix runs 5000 steps, so this floor is intentionally conservative there.
+    assert!(
+        r.min_final_confirmed >= 50,
+        "cell made too little progress — {}",
+        ctx()
+    );
+    // Real wire traffic flowed, and the per-kind map covers every kind.
+    assert!(
+        r.bytes_sent_per_player_per_sec > 0.0,
+        "no bandwidth recorded — {}",
+        ctx()
+    );
+    assert_eq!(
+        r.messages_sent_by_kind.len(),
+        MessageKind::COUNT,
+        "by-kind map missing categories — {}",
+        ctx()
+    );
+    // Rollback-depth percentiles are ordered and bounded by the observed max —
+    // a real cross-check between the histogram (percentile source) and the
+    // independently-tracked `max_rollback_depth`.
+    assert!(
+        r.rollback_depth_p50 <= r.rollback_depth_p99,
+        "p50 > p99 — {}",
+        ctx()
+    );
+    assert!(
+        r.rollback_depth_p99 <= r.rollback_depth_max,
+        "p99 exceeds max — {}",
+        ctx()
+    );
+}
+
+#[test]
+#[ignore = "full matrix; run offline with FORTRESS_SWEEP_OUT set"]
+fn full_matrix_sweep() {
+    let reports: Vec<CellReport> = full_matrix_cells().into_iter().map(run_cell).collect();
     write_jsonl(&reports);
+    for r in &reports {
+        assert_cell_health(r);
+    }
 }
