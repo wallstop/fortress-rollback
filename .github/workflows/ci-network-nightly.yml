@@ -124,7 +124,9 @@ jobs:
             network-${{ runner.os }}-cargo-
 
       - name: Run deterministic baseline full matrix (Linux)
+        id: baseline-sweep
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: |
           rm -rf "$RUNNER_TEMP/fortress-sweep"
           mkdir -p "$RUNNER_TEMP/fortress-sweep"
@@ -144,7 +146,7 @@ jobs:
         with:
           name: baseline-sweep-nightly-results
           path: ${{ runner.temp }}/fortress-sweep/full-matrix.jsonl
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Build network test peer
@@ -174,6 +176,10 @@ jobs:
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Fail if deterministic baseline full matrix failed
+        if: always() && runner.os == 'Linux' && steps.baseline-sweep.outcome != 'success'
+        run: exit 1
 
   # Docker tc/netem chaos lane (with packet loss).
   #

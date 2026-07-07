@@ -708,8 +708,8 @@ fn assert_cell_health(r: &CellReport) {
 #[ignore = "full matrix; run offline with FORTRESS_SWEEP_OUT set"]
 fn full_matrix_sweep() {
     let reports: Vec<CellReport> = full_matrix_cells().into_iter().map(run_cell).collect();
+    write_jsonl(&reports);
     for r in &reports {
         assert_cell_health(r);
     }
-    write_jsonl(&reports);
 }
