@@ -59,6 +59,13 @@ pub const MIN_END_CONFIRMED: i32 = 30;
 /// strictly per-window bound complementary to (c-lite)'s absolute end bar.
 pub const POST_HEAL_MIN_ADVANCE: i32 = 10;
 
+/// Source that emitted telemetry violations consumed by the oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViolationSource {
+    Peer(usize),
+    Spectator,
+}
+
 /// One concrete invariant violation, with enough context to debug.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleFailure {
@@ -102,7 +109,17 @@ pub enum OracleFailure {
         error: String,
     },
     /// A telemetry violation at `Error`+ severity was reported.
-    Violation { peer: usize, violation: String },
+    Violation {
+        source: ViolationSource,
+        violation: String,
+    },
+    /// The runner reported violations for a source that cannot exist in this
+    /// mesh. This fails independently from the violation payload so spectator
+    /// telemetry can never be smuggled through an out-of-range peer sentinel.
+    InvalidViolationSource {
+        source: ViolationSource,
+        n_players: usize,
+    },
     /// (c-lite): a peer failed the end-of-run progress bar.
     EndProgress {
         peer: usize,
@@ -623,8 +640,18 @@ impl Oracle {
         });
     }
 
-    /// Telemetry violations collected for one peer over the whole run.
-    pub fn observe_violations(&mut self, peer: usize, violations: &[SpecViolation]) {
+    /// Telemetry violations collected for one source over the whole run.
+    pub fn observe_violations(&mut self, source: ViolationSource, violations: &[SpecViolation]) {
+        if let ViolationSource::Peer(peer) = source {
+            if peer >= self.n_players {
+                self.push_failure(OracleFailure::InvalidViolationSource {
+                    source,
+                    n_players: self.n_players,
+                });
+                return;
+            }
+        }
+
         for violation in violations {
             let allowlist_hit = self
                 .violation_allowlist
@@ -639,7 +666,7 @@ impl Oracle {
                 }
             }
             if violation.severity >= ViolationSeverity::Error {
-                self.push_failure(violation_failure(peer, violation));
+                self.push_failure(violation_failure(source, violation));
             }
         }
     }
@@ -997,9 +1024,9 @@ fn spectator_matches_mesh_canon(
         )
 }
 
-fn violation_failure(peer: usize, violation: &SpecViolation) -> OracleFailure {
+fn violation_failure(source: ViolationSource, violation: &SpecViolation) -> OracleFailure {
     OracleFailure::Violation {
-        peer,
+        source,
         violation: format!(
             "[{:?}/{:?}] {}",
             violation.severity, violation.kind, violation.message
@@ -1628,7 +1655,7 @@ mod tests {
         let mut oracle = Oracle::new(2);
         oracle.observe_desync_event(0, Frame::new(42));
         oracle.observe_violations(
-            1,
+            ViolationSource::Peer(1),
             &[
                 SpecViolation::new(
                     ViolationSeverity::Error,
@@ -1654,10 +1681,13 @@ mod tests {
             f,
             OracleFailure::InbandDesyncDetected { peer: 0, frame: 42 }
         )));
-        assert!(verdict
-            .failures
-            .iter()
-            .any(|f| matches!(f, OracleFailure::Violation { peer: 1, .. })));
+        assert!(verdict.failures.iter().any(|f| matches!(
+            f,
+            OracleFailure::Violation {
+                source: ViolationSource::Peer(1),
+                ..
+            }
+        )));
         // Exactly one violation failure: the `Warning` must not have counted.
         assert_eq!(
             verdict
@@ -1671,6 +1701,79 @@ mod tests {
         assert!(
             verdict.violation_allowlist_hits.is_empty(),
             "default empty allowlist must record no hits"
+        );
+    }
+
+    #[test]
+    fn oracle_records_spectator_violations_without_peer_sentinel() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        let mut oracle = Oracle::new(2);
+        oracle.observe_violations(
+            ViolationSource::Spectator,
+            &[SpecViolation::new(
+                ViolationSeverity::Error,
+                ViolationKind::InternalError,
+                "seeded spectator error violation",
+                "p2p_spectator_session.rs:1295",
+            )],
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+
+        assert!(verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::Violation {
+                source: ViolationSource::Spectator,
+                ..
+            }
+        )));
+        assert!(
+            !verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::Violation {
+                    source: ViolationSource::Peer(2),
+                    ..
+                }
+            )),
+            "spectator violations must not be encoded as peer == n_players: {:?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn oracle_rejects_out_of_range_peer_violation_source() {
+        let mut oracle = Oracle::new(2);
+        oracle.observe_violations(ViolationSource::Peer(2), &[]);
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::InvalidViolationSource {
+                    source: ViolationSource::Peer(2),
+                    n_players: 2,
+                }
+            )),
+            "out-of-range peer violation sources must fail explicitly: {:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::Violation { .. })),
+            "invalid sources must not create a confusing peer violation: {:?}",
+            verdict.failures
         );
     }
 
@@ -1794,7 +1897,7 @@ mod tests {
         let mut oracle = Oracle::new(2);
         oracle.set_violation_allowlist(ALLOWLIST);
         oracle.observe_violations(
-            1,
+            ViolationSource::Peer(1),
             &[
                 SpecViolation::new(
                     ViolationSeverity::Error,
@@ -1849,7 +1952,7 @@ mod tests {
         let mut oracle = Oracle::new(2);
         oracle.set_violation_allowlist(ALLOWLIST);
         oracle.observe_violations(
-            1,
+            ViolationSource::Peer(1),
             &[SpecViolation::new(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -1893,7 +1996,7 @@ mod tests {
         let mut oracle = Oracle::new(2);
         oracle.set_violation_allowlist(ALLOWLIST);
         oracle.observe_violations(
-            1,
+            ViolationSource::Peer(1),
             &[SpecViolation::new(
                 ViolationSeverity::Critical,
                 ViolationKind::InternalError,
@@ -1909,10 +2012,13 @@ mod tests {
         );
 
         assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| matches!(failure, OracleFailure::Violation { peer: 1, .. })),
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::Violation {
+                    source: ViolationSource::Peer(1),
+                    ..
+                }
+            )),
             "Critical violations must fail even if an allowlist entry matches: {:?}",
             verdict.failures
         );

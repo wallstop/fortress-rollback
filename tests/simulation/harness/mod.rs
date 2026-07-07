@@ -29,7 +29,7 @@ use fortress_rollback::{
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
-    ViolationSignature, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
+    ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
 use schedule::{AppModel, Schedule, ScheduleEvent};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -1225,7 +1225,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
             *violation_census.entry(signature).or_default() += 1;
         }
-        oracle.observe_violations(i, &violations);
+        oracle.observe_violations(ViolationSource::Peer(i), &violations);
         oracle.observe_checksum_mismatches(i, metric.checksums_mismatched);
     }
     if let Some(spectator) = &spectator {
@@ -1235,7 +1235,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
             *violation_census.entry(signature).or_default() += 1;
         }
-        oracle.observe_violations(n, &violations);
+        oracle.observe_violations(ViolationSource::Spectator, &violations);
     }
     let recorded: Vec<BTreeMap<i32, StateStub>> = peers
         .iter()
