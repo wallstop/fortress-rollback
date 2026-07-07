@@ -78,7 +78,9 @@ pub enum AppModel {
 ///   user-driven graceful-drop entry point (`P2PSession::remove_player`).
 /// - `6`: adds [`ScheduleEvent::LegacyDisconnect`], the older
 ///   user-driven disconnect entry point (`P2PSession::disconnect_player`).
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 6;
+/// - `7`: adds [`ScheduleEvent::SpectatorHostKill`], a spectator-focused host
+///   crash/failover probe.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 7;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +299,15 @@ pub enum ScheduleEvent {
     ///
     /// Planted by lifecycle tests, not yet emitted by the random generator.
     PeerKill { peer: usize },
+    /// Permanently kill a peer that is configured as one of the redundant
+    /// spectator hosts. The runtime effect is the same crash model as
+    /// [`ScheduleEvent::PeerKill`] — the host is no longer driven and is detached
+    /// from the fabric — but the event has a stricter schedule precondition:
+    /// `host` must appear in [`SimConfig::spectator_hosts`]. This pins spectator
+    /// failover coverage separately from ordinary mesh crash coverage.
+    ///
+    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    SpectatorHostKill { host: usize },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
@@ -649,6 +660,7 @@ mod tests {
     #[test]
     fn lifecycle_events_round_trip_through_json() {
         let mut schedule = generate(42, SimConfig::smoke(3));
+        schedule.config.spectator_hosts = vec![0, 1];
         schedule
             .events
             .push((200, ScheduleEvent::PeerStall { peer: 1, steps: 40 }));
@@ -664,6 +676,9 @@ mod tests {
         schedule
             .events
             .push((300, ScheduleEvent::PeerKill { peer: 2 }));
+        schedule
+            .events
+            .push((325, ScheduleEvent::SpectatorHostKill { host: 0 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
         let back: Schedule = serde_json::from_str(&json).unwrap();
@@ -691,6 +706,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerKill { peer: 2 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::SpectatorHostKill { host: 0 })));
     }
 
     /// A corpus artifact predating the `#[serde(default)]` config axes (its
