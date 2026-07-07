@@ -10,11 +10,11 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    oracle::{OracleFailure, POST_HEAL_MIN_ADVANCE},
+    oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
     run, RunOptions,
 };
 use crate::common::sim_net::LinkPolicy;
-use fortress_rollback::SessionState;
+use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
 use std::{collections::BTreeSet, time::Duration};
 
 /// Fixed PR-smoke seed set. Nightly fleets (later milestone) randomize seeds
@@ -43,6 +43,45 @@ fn pr_smoke_three_player_mesh_holds_invariants() {
 #[test]
 fn pr_smoke_four_player_mesh_holds_invariants() {
     run_smoke_fleet(4);
+}
+
+/// M3 §6.2(f): empty-allowlist violation census. The default simulation
+/// allowlist is intentionally empty; a passing non-injection smoke run should
+/// not emit any `Error`/`Critical` telemetry signature. Warnings remain visible
+/// through `RunReport::violation_census` without failing the oracle.
+#[test]
+#[ignore = "200-seed violation census; run manually/nightly after allowlist changes"]
+// Deliberate census stdout: ignored/manual runs need the green signature ledger.
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn violation_census_two_hundred_smoke_seeds_has_no_error_signatures() {
+    let mut census: std::collections::BTreeMap<ViolationSignature, u64> =
+        std::collections::BTreeMap::new();
+    let mut allowlist_hits: std::collections::BTreeMap<ViolationAllowlistEntry, u64> =
+        std::collections::BTreeMap::new();
+
+    for seed in 0..200u64 {
+        let schedule = generate(seed, SimConfig::smoke(4));
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+        for hit in report.verdict.violation_allowlist_hits {
+            *allowlist_hits.entry(hit.entry).or_default() += hit.count;
+        }
+        for (key, count) in report.violation_census {
+            *census.entry(key).or_default() += count;
+        }
+    }
+
+    println!("violation allowlist hits: {allowlist_hits:#?}");
+    println!("violation census: {census:#?}");
+
+    let unexpected: Vec<_> = census
+        .iter()
+        .filter(|(key, _)| key.severity >= ViolationSeverity::Error)
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "empty-allowlist census found Error+ telemetry signatures: {unexpected:#?}"
+    );
 }
 
 /// M2 §5.2: the always-on [`SessionMetrics`] counters must actually be wired to

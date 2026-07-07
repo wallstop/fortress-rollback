@@ -37,7 +37,7 @@
 
 use crate::common::stubs::StateStub;
 use fortress_rollback::hash::DeterministicHasher;
-use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity};
+use fortress_rollback::telemetry::{SpecViolation, ViolationKind, ViolationSeverity};
 use fortress_rollback::{Frame, InputStatus, SessionState};
 use std::collections::BTreeMap;
 use std::hash::Hasher;
@@ -157,6 +157,154 @@ pub struct FreezePoint {
     pub input: InputFingerprint,
 }
 
+/// One reviewed telemetry violation pattern that the simulation oracle may
+/// tolerate while still counting hits.
+///
+/// Matching is intentionally narrow: severity, kind, and source location must
+/// match exactly, while the message uses a prefix so numeric/run-specific
+/// suffixes do not force one entry per value. [`ViolationSeverity::Critical`] is
+/// never allowlistable even if an entry matches.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ViolationAllowlistEntry {
+    pub severity: ViolationSeverity,
+    pub kind: ViolationKind,
+    pub location: &'static str,
+    pub message_prefix: &'static str,
+    pub rationale: &'static str,
+}
+
+impl ViolationAllowlistEntry {
+    #[must_use]
+    pub fn matches(self, violation: &SpecViolation) -> bool {
+        self.severity == violation.severity
+            && self.kind == violation.kind
+            && self.location == violation.location
+            && violation.message.starts_with(self.message_prefix)
+    }
+
+    #[must_use]
+    pub fn signature(self) -> ViolationSignature {
+        ViolationSignature {
+            severity: self.severity,
+            kind: self.kind,
+            location: self.location.to_owned(),
+            message_prefix: self.message_prefix.to_owned(),
+        }
+    }
+}
+
+/// Stable telemetry signature used by both allowlist matching and census rows.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ViolationSignature {
+    pub severity: ViolationSeverity,
+    pub kind: ViolationKind,
+    pub location: String,
+    pub message_prefix: String,
+}
+
+impl ViolationSignature {
+    #[must_use]
+    pub fn from_violation(
+        violation: &SpecViolation,
+        allowlist: &[ViolationAllowlistEntry],
+    ) -> Self {
+        allowlist
+            .iter()
+            .find(|entry| entry.matches(violation))
+            .map_or_else(
+                || Self {
+                    severity: violation.severity,
+                    kind: violation.kind,
+                    location: violation.location.to_owned(),
+                    message_prefix: census_message_prefix(&violation.message),
+                },
+                |entry| entry.signature(),
+            )
+    }
+}
+
+/// Hit count for one allowlisted violation pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViolationAllowlistHit {
+    pub entry: ViolationAllowlistEntry,
+    pub count: u64,
+}
+
+/// Reviewed default allowlist for the simulation oracle.
+///
+/// Empty after the current census: no `Error`+ telemetry violation is expected
+/// in passing non-injection fleet runs. Keeping this explicit empty list makes
+/// additions deliberate and reviewable.
+pub const DEFAULT_VIOLATION_ALLOWLIST: &[ViolationAllowlistEntry] = &[];
+
+/// Validate allowlist entries for reviewability.
+///
+/// The runner calls this for the reviewed default allowlist before each run, and
+/// unit tests exercise the failure modes directly. Test-only injected allowlists
+/// may call it too when they intend to model production-reviewed entries.
+pub fn validate_violation_allowlist(entries: &[ViolationAllowlistEntry]) -> Result<(), String> {
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.severity == ViolationSeverity::Critical {
+            return Err(format!(
+                "entry {index}: Critical violations are never allowlistable"
+            ));
+        }
+        if entry.message_prefix.is_empty() {
+            return Err(format!("entry {index}: message_prefix must be non-empty"));
+        }
+        if entry.rationale.trim().is_empty() {
+            return Err(format!("entry {index}: rationale must be non-empty"));
+        }
+        if !has_file_line(entry.location) {
+            return Err(format!(
+                "entry {index}: location must include a parseable file:line, got {:?}",
+                entry.location
+            ));
+        }
+    }
+
+    for (left_index, left) in entries.iter().enumerate() {
+        for (right_index, right) in entries.iter().enumerate().skip(left_index + 1) {
+            let same_source = left.severity == right.severity
+                && left.kind == right.kind
+                && left.location == right.location;
+            let overlapping_prefix = left.message_prefix.starts_with(right.message_prefix)
+                || right.message_prefix.starts_with(left.message_prefix);
+            if same_source && overlapping_prefix {
+                return Err(format!(
+                    "entries {left_index} and {right_index}: overlapping message_prefix values"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn has_file_line(location: &str) -> bool {
+    let Some((file, line)) = location.rsplit_once(':') else {
+        return false;
+    };
+    !file.is_empty() && line.parse::<u32>().is_ok()
+}
+
+fn census_message_prefix(message: &str) -> String {
+    let first_numeric = message
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_ascii_digit().then_some(index));
+    let prefix = first_numeric
+        .filter(|index| *index > 0)
+        .and_then(|index| message.get(..index))
+        .unwrap_or(message)
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '=' | '#' | '-'))
+        .trim();
+    if prefix.is_empty() {
+        message.to_owned()
+    } else {
+        prefix.to_owned()
+    }
+}
+
 /// Stable identity of one serialized input value.
 ///
 /// The harness's game transition uses only a logical `u32` lane, but the oracle
@@ -225,6 +373,10 @@ pub struct Verdict {
     /// reported here as "recovered"). The explicit "recovered within B steps of
     /// heal: yes/no" signal.
     pub recovered_within_b: Option<bool>,
+    /// Counts for reviewed telemetry violation patterns the oracle tolerated.
+    /// Empty when no allowlisted pattern was observed. Critical violations never
+    /// appear here because they are not allowlistable.
+    pub violation_allowlist_hits: Vec<ViolationAllowlistHit>,
 }
 
 impl Verdict {
@@ -266,6 +418,10 @@ pub struct Oracle {
     /// confirmed snapshots. Oracle unit tests never set it, so (c) stays inert
     /// for them.
     heal: HealLiveness,
+    /// Reviewed telemetry violation patterns accepted by this oracle instance.
+    violation_allowlist: &'static [ViolationAllowlistEntry],
+    /// Hit counts parallel to [`Self::violation_allowlist`].
+    violation_allowlist_hits: Vec<u64>,
 }
 
 impl Oracle {
@@ -279,7 +435,17 @@ impl Oracle {
             per_class_cap: 8,
             dead: vec![false; n_players],
             heal: HealLiveness::default(),
+            violation_allowlist: DEFAULT_VIOLATION_ALLOWLIST,
+            violation_allowlist_hits: vec![0; DEFAULT_VIOLATION_ALLOWLIST.len()],
         }
+    }
+
+    /// Replaces the default telemetry violation allowlist. Test-only negative
+    /// controls use this to prove matching and the Critical hard-fail rule; the
+    /// harness runner uses the reviewed default.
+    pub fn set_violation_allowlist(&mut self, entries: &'static [ViolationAllowlistEntry]) {
+        self.violation_allowlist = entries;
+        self.violation_allowlist_hits = vec![0; entries.len()];
     }
 
     /// Hands the oracle the (c) bounded post-heal liveness inputs (heal-anchored
@@ -406,14 +572,20 @@ impl Oracle {
     /// Telemetry violations collected for one peer over the whole run.
     pub fn observe_violations(&mut self, peer: usize, violations: &[SpecViolation]) {
         for violation in violations {
+            let allowlist_hit = self
+                .violation_allowlist
+                .iter()
+                .position(|entry| (*entry).matches(violation));
+            if violation.severity != ViolationSeverity::Critical {
+                if let Some(index) = allowlist_hit {
+                    if let Some(count) = self.violation_allowlist_hits.get_mut(index) {
+                        *count = count.saturating_add(1);
+                    }
+                    continue;
+                }
+            }
             if violation.severity >= ViolationSeverity::Error {
-                self.push_failure(OracleFailure::Violation {
-                    peer,
-                    violation: format!(
-                        "[{:?}/{:?}] {}",
-                        violation.severity, violation.kind, violation.message
-                    ),
-                });
+                self.push_failure(violation_failure(peer, violation));
             }
         }
     }
@@ -645,7 +817,26 @@ impl Oracle {
         Verdict {
             failures: self.failures,
             recovered_within_b,
+            violation_allowlist_hits: self
+                .violation_allowlist
+                .iter()
+                .copied()
+                .zip(self.violation_allowlist_hits)
+                .filter_map(|(entry, count)| {
+                    (count > 0).then_some(ViolationAllowlistHit { entry, count })
+                })
+                .collect(),
         }
+    }
+}
+
+fn violation_failure(peer: usize, violation: &SpecViolation) -> OracleFailure {
+    OracleFailure::Violation {
+        peer,
+        violation: format!(
+            "[{:?}/{:?}] {}",
+            violation.severity, violation.kind, violation.message
+        ),
     }
 }
 
@@ -1126,6 +1317,258 @@ mod tests {
                 .count(),
             1,
             "only the Error-severity violation should fail the run"
+        );
+        assert!(
+            verdict.violation_allowlist_hits.is_empty(),
+            "default empty allowlist must record no hits"
+        );
+    }
+
+    #[test]
+    fn default_violation_allowlist_is_valid_and_reviewable() {
+        validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
+            .expect("reviewed default allowlist must stay valid");
+    }
+
+    #[test]
+    fn violation_allowlist_validation_rejects_overbroad_entries() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        let critical = [ViolationAllowlistEntry {
+            severity: ViolationSeverity::Critical,
+            kind: ViolationKind::InternalError,
+            location: "sync_test_session.rs:139",
+            message_prefix: "critical seeded",
+            rationale: "must be rejected",
+        }];
+        assert!(validate_violation_allowlist(&critical)
+            .expect_err("Critical entries must be rejected")
+            .contains("Critical"));
+
+        let empty_prefix = [ViolationAllowlistEntry {
+            severity: ViolationSeverity::Error,
+            kind: ViolationKind::Synchronization,
+            location: "p2p_session.rs:441",
+            message_prefix: "",
+            rationale: "must be rejected",
+        }];
+        assert!(validate_violation_allowlist(&empty_prefix)
+            .expect_err("empty prefixes must be rejected")
+            .contains("message_prefix"));
+
+        let bad_location = [ViolationAllowlistEntry {
+            severity: ViolationSeverity::Error,
+            kind: ViolationKind::Synchronization,
+            location: "p2p_session.rs",
+            message_prefix: "sync retry budget exceeded",
+            rationale: "must be rejected",
+        }];
+        assert!(validate_violation_allowlist(&bad_location)
+            .expect_err("locations need file:line")
+            .contains("file:line"));
+
+        let overlapping = [
+            ViolationAllowlistEntry {
+                severity: ViolationSeverity::Error,
+                kind: ViolationKind::Synchronization,
+                location: "p2p_session.rs:441",
+                message_prefix: "sync retry",
+                rationale: "first reviewed prefix",
+            },
+            ViolationAllowlistEntry {
+                severity: ViolationSeverity::Error,
+                kind: ViolationKind::Synchronization,
+                location: "p2p_session.rs:441",
+                message_prefix: "sync retry budget exceeded",
+                rationale: "overlaps first",
+            },
+        ];
+        assert!(validate_violation_allowlist(&overlapping)
+            .expect_err("overlapping prefixes must be rejected")
+            .contains("overlapping"));
+    }
+
+    #[test]
+    fn violation_signature_uses_reviewed_prefix_or_numeric_normalization() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        static ALLOWLIST: &[ViolationAllowlistEntry] = &[ViolationAllowlistEntry {
+            severity: ViolationSeverity::Error,
+            kind: ViolationKind::Synchronization,
+            location: "p2p_session.rs:441",
+            message_prefix: "sync retry budget exceeded",
+            rationale: "seeded reviewed prefix",
+        }];
+        let allowlisted = SpecViolation::new(
+            ViolationSeverity::Error,
+            ViolationKind::Synchronization,
+            "sync retry budget exceeded after 6 attempts",
+            "p2p_session.rs:441",
+        );
+        assert_eq!(
+            ViolationSignature::from_violation(&allowlisted, ALLOWLIST),
+            ALLOWLIST[0].signature()
+        );
+
+        let uncategorized_a = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "event queue overflow discarded 3 events",
+            "p2p_session.rs:9606",
+        );
+        let uncategorized_b = SpecViolation::new(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "event queue overflow discarded 7 events",
+            "p2p_session.rs:9606",
+        );
+        assert_eq!(
+            ViolationSignature::from_violation(&uncategorized_a, DEFAULT_VIOLATION_ALLOWLIST),
+            ViolationSignature::from_violation(&uncategorized_b, DEFAULT_VIOLATION_ALLOWLIST),
+            "numeric suffixes should not fragment one census signature"
+        );
+    }
+
+    #[test]
+    fn oracle_allowlists_reviewed_error_violation_and_counts_hits() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        static ALLOWLIST: &[ViolationAllowlistEntry] = &[ViolationAllowlistEntry {
+            severity: ViolationSeverity::Error,
+            kind: ViolationKind::Synchronization,
+            location: "p2p_session.rs:441",
+            message_prefix: "sync retry budget exceeded",
+            rationale: "seeded test entry; real entries must cite the reviewed source path",
+        }];
+
+        let mut oracle = Oracle::new(2);
+        oracle.set_violation_allowlist(ALLOWLIST);
+        oracle.observe_violations(
+            1,
+            &[
+                SpecViolation::new(
+                    ViolationSeverity::Error,
+                    ViolationKind::Synchronization,
+                    "sync retry budget exceeded after 5 attempts",
+                    "p2p_session.rs:441",
+                ),
+                SpecViolation::new(
+                    ViolationSeverity::Error,
+                    ViolationKind::Synchronization,
+                    "sync retry budget exceeded after 6 attempts",
+                    "p2p_session.rs:441",
+                ),
+            ],
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::Violation { .. })),
+            "allowlisted Error violations must not fail the run: {:?}",
+            verdict.failures
+        );
+        assert_eq!(
+            verdict.violation_allowlist_hits,
+            vec![ViolationAllowlistHit {
+                entry: ALLOWLIST[0],
+                count: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn oracle_counts_allowlisted_warning_without_failing() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        static ALLOWLIST: &[ViolationAllowlistEntry] = &[ViolationAllowlistEntry {
+            severity: ViolationSeverity::Warning,
+            kind: ViolationKind::NetworkProtocol,
+            location: "p2p_session.rs:9606",
+            message_prefix: "event queue overflow",
+            rationale: "seeded test entry proving warning hit-count visibility",
+        }];
+
+        let mut oracle = Oracle::new(2);
+        oracle.set_violation_allowlist(ALLOWLIST);
+        oracle.observe_violations(
+            1,
+            &[SpecViolation::new(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "event queue overflow discarded 3 events",
+                "p2p_session.rs:9606",
+            )],
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+
+        assert!(
+            verdict.failures.is_empty(),
+            "allowlisted warnings should remain non-failing: {:?}",
+            verdict.failures
+        );
+        assert_eq!(
+            verdict.violation_allowlist_hits,
+            vec![ViolationAllowlistHit {
+                entry: ALLOWLIST[0],
+                count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn oracle_never_allowlists_critical_violation() {
+        use fortress_rollback::telemetry::ViolationKind;
+
+        static ALLOWLIST: &[ViolationAllowlistEntry] = &[ViolationAllowlistEntry {
+            severity: ViolationSeverity::Critical,
+            kind: ViolationKind::InternalError,
+            location: "sync_test_session.rs:139",
+            message_prefix: "critical seeded",
+            rationale: "negative control only; Critical must still hard-fail",
+        }];
+
+        let mut oracle = Oracle::new(2);
+        oracle.set_violation_allowlist(ALLOWLIST);
+        oracle.observe_violations(
+            1,
+            &[SpecViolation::new(
+                ViolationSeverity::Critical,
+                ViolationKind::InternalError,
+                "critical seeded invariant break",
+                "sync_test_session.rs:139",
+            )],
+        );
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(500), Frame::new(500)],
+            &[SessionState::Running, SessionState::Running],
+        );
+
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::Violation { peer: 1, .. })),
+            "Critical violations must fail even if an allowlist entry matches: {:?}",
+            verdict.failures
+        );
+        assert!(
+            verdict.violation_allowlist_hits.is_empty(),
+            "Critical matches must not be counted as tolerated hits"
         );
     }
 

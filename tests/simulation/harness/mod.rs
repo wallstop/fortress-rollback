@@ -21,13 +21,16 @@ use crate::common::sim_net::{SimNet, SimSocket};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::telemetry::{CollectingObserver, ViolationSeverity};
+use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, FortressEvent, FortressRequest, Frame, GameStateCell, InputStatus,
     InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
     ProtocolConfig, RequestVec, SessionBuilder, SessionState,
 };
-use oracle::{HealLiveness, InputFingerprint, Oracle, Verdict, POST_HEAL_MIN_ADVANCE};
+use oracle::{
+    validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
+    ViolationSignature, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
+};
 use schedule::{AppModel, Schedule, ScheduleEvent};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,6 +199,11 @@ pub struct RunReport {
     /// inert (no heal), the window was too short to observe, or every peer was
     /// killed. Mirrors [`Verdict::recovered_within_b`].
     pub recovered_within_b: Option<bool>,
+    /// All telemetry violations observed by every peer, before the oracle's
+    /// severity/allowlist policy is applied. Used by the §6.2(f) violation
+    /// census so warning-only signatures stay visible even though they do not
+    /// fail the run.
+    pub violation_census: BTreeMap<ViolationSignature, u64>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -296,13 +304,15 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
             self.final_confirmed,
             self.recovered_within_b,
+            self.verdict.violation_allowlist_hits,
+            self.violation_census,
             self.net_stats,
             self.verdict.failures.len(),
             self.verdict
@@ -709,6 +719,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .collect();
 
     let mut oracle = Oracle::new(n);
+    validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
+        .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
@@ -992,11 +1004,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         peers.iter().map(|slot| slot.session.metrics()).collect();
 
     // Final observations.
+    let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
     for ((i, slot), metric) in peers.iter().enumerate().zip(metrics.iter()) {
-        let severe = slot
-            .observer
-            .violations_at_severity(ViolationSeverity::Error);
-        oracle.observe_violations(i, &severe);
+        let violations = slot.observer.violations();
+        for violation in &violations {
+            let signature =
+                ViolationSignature::from_violation(violation, DEFAULT_VIOLATION_ALLOWLIST);
+            *violation_census.entry(signature).or_default() += 1;
+        }
+        oracle.observe_violations(i, &violations);
         oracle.observe_checksum_mismatches(i, metric.checksums_mismatched);
     }
     let recorded: Vec<BTreeMap<i32, StateStub>> = peers
@@ -1075,6 +1091,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         confirmed_at_heal,
         confirmed_after_recovery,
         recovered_within_b,
+        violation_census,
     }
 }
 
@@ -1120,6 +1137,7 @@ mod tests {
         assert_eq!(implicit.final_confirmed, explicit.final_confirmed);
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
+        assert_eq!(implicit.violation_census, explicit.violation_census);
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
     }
 }
