@@ -1064,6 +1064,41 @@ fn legacy_disconnect_schedule(disconnect: Option<(usize, usize)>) -> Schedule {
     )
 }
 
+fn spectator_host_kill_schedule(partition: Option<usize>, kill: Option<usize>) -> Schedule {
+    let mut schedule = clean_four_peer_lifecycle_schedule(DropPolicy::ContinueWithout, None);
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    if let Some(host) = partition {
+        for peer in 0..schedule.config.n_players {
+            if peer == host {
+                continue;
+            }
+            schedule.events.push((
+                80,
+                ScheduleEvent::Block {
+                    from: host,
+                    to: peer,
+                    blocked: true,
+                },
+            ));
+            schedule.events.push((
+                80,
+                ScheduleEvent::Block {
+                    from: peer,
+                    to: host,
+                    blocked: true,
+                },
+            ));
+        }
+    }
+    if let Some(host) = kill {
+        schedule
+            .events
+            .push((140, ScheduleEvent::SpectatorHostKill { host }));
+    }
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
 /// M3 §6.1 lifecycle vocabulary — the peer crash (`ScheduleEvent::PeerKill`).
 /// Under `ContinueWithout`, crashing one peer must degrade gracefully: the three
 /// survivors converge on dropping it (freeze its slot to an agreed value) and
@@ -1250,6 +1285,88 @@ fn preplanned_spectator_matches_graceful_remove_mesh_canon() {
     );
 }
 
+/// M3 §6.1/§6.2(d): a redundant spectator must fail over when its first,
+/// highest-priority configured host is partitioned away from the mesh and then
+/// crashes. The event is distinct from a plain `PeerKill` so corpus schedules can
+/// state the spectator precondition explicitly: the killed peer must be one of
+/// `spectator_hosts`, and the spectator must keep displaying from the remaining
+/// hosts after the crash.
+#[test]
+fn spectator_failover_survives_configured_host_kill_under_partition() {
+    let base = spectator_host_kill_schedule(None, None);
+    let partitioned = spectator_host_kill_schedule(Some(0), None);
+    let killed = spectator_host_kill_schedule(Some(0), Some(0));
+
+    let base_report = run(&base, &RunOptions::default());
+    base_report.expect_pass(&base);
+    let partitioned_report = run(&partitioned, &RunOptions::default());
+    let report = run(&killed, &RunOptions::default());
+    report.expect_pass(&killed);
+    assert!(
+        !partitioned_report.verdict.passed(),
+        "partition-only control should fail closed while the stale host remains \
+         connected; SpectatorHostKill is what removes it"
+    );
+    assert_eq!(
+        partitioned_report.spectator_final_hosts,
+        Some(3),
+        "without the host-kill event the spectator should still retain all three hosts"
+    );
+    assert!(
+        partitioned_report.verdict.failures.iter().any(|failure| {
+            matches!(
+                failure,
+                OracleFailure::SpectatorDivergenceEvent { .. }
+                    | OracleFailure::SpectatorSessionError { .. }
+            )
+        }),
+        "partition-only control should fail through spectator divergence, not an \
+         unrelated oracle class: {:?}",
+        partitioned_report.verdict.failures
+    );
+
+    let again = run(&killed, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "a SpectatorHostKill schedule must reproduce its exact trace"
+    );
+    assert_ne!(
+        partitioned_report.trace_hash, report.trace_hash,
+        "SpectatorHostKill itself must change execution beyond the partition — \
+         a silent no-op would leave the partition-only trace identical"
+    );
+
+    assert!(
+        report.spectator_max_frame >= Some(POST_HEAL_MIN_ADVANCE),
+        "spectator must keep displaying after the configured host crash: {:?}",
+        report.spectator_max_frame
+    );
+    assert_eq!(
+        report.spectator_final_hosts,
+        Some(2),
+        "the spectator must remove the crashed host and keep the two remaining hosts"
+    );
+    assert!(
+        report.net_stats.dropped_blocked > 0,
+        "the host partition must actually drop traffic before the crash: {:?}",
+        report.net_stats
+    );
+    let confirmed = &report.final_confirmed;
+    for (peer, &c) in confirmed.iter().enumerate() {
+        if peer == 0 {
+            continue;
+        }
+        assert!(
+            c > 200,
+            "survivor {peer} must keep confirming after spectator host crash: {confirmed:?}"
+        );
+    }
+    assert!(
+        confirmed[0] < confirmed[1],
+        "the killed spectator host must stay frozen behind survivors: {confirmed:?}"
+    );
+}
+
 const SPECTATOR_FLOOR_STALL_AT: u32 = 30;
 const SPECTATOR_FLOOR_REMOVE_AT: u32 = 80;
 
@@ -1418,6 +1535,83 @@ fn run_rejects_malformed_spectator_hosts() {
         let mut schedule = graceful_remove_schedule(None);
         schedule.config.spectator_hosts = hosts;
         assert_run_panics_with(&schedule, expected);
+    }
+}
+
+/// `SpectatorHostKill` has a stricter fail-loud contract than `PeerKill`: it
+/// must name a valid peer that is actually configured as a spectator host.
+#[test]
+fn run_rejects_malformed_spectator_host_kill_events() {
+    let cases = [
+        (ScheduleEvent::SpectatorHostKill { host: 9 }, "out of range"),
+        (
+            ScheduleEvent::SpectatorHostKill { host: 1 },
+            "not configured in spectator_hosts",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        let mut schedule = spectator_host_kill_schedule(None, None);
+        schedule.events.push((100, event));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        assert_run_panics_with(&schedule, expected);
+    }
+
+    let mut already_retired = spectator_host_kill_schedule(None, None);
+    already_retired
+        .events
+        .push((90, ScheduleEvent::PeerKill { peer: 0 }));
+    already_retired
+        .events
+        .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+    already_retired.events.sort_by_key(|(step, _)| *step);
+    assert_run_panics_with(&already_retired, "already retired");
+
+    let mut skipped_prior_drop = spectator_host_kill_schedule(None, None);
+    skipped_prior_drop
+        .events
+        .push((80, ScheduleEvent::PeerKill { peer: 2 }));
+    skipped_prior_drop
+        .events
+        .push((90, ScheduleEvent::GracefulRemove { by: 2, target: 0 }));
+    skipped_prior_drop
+        .events
+        .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+    skipped_prior_drop.events.sort_by_key(|(step, _)| *step);
+    let result = std::panic::catch_unwind(|| {
+        let _ = run(&skipped_prior_drop, &RunOptions::default());
+    });
+    assert!(
+        result.is_ok(),
+        "a lifecycle drop from an already-dead caller is a runtime no-op and \
+         must not make a later SpectatorHostKill look already retired"
+    );
+
+    let runtime_contingent_drops = [
+        (
+            "GracefulRemove",
+            ScheduleEvent::GracefulRemove { by: 1, target: 0 },
+        ),
+        (
+            "LegacyDisconnect",
+            ScheduleEvent::LegacyDisconnect { by: 1, target: 0 },
+        ),
+    ];
+    for (label, prior_drop) in runtime_contingent_drops {
+        let mut schedule = spectator_host_kill_schedule(None, None);
+        schedule.events.push((90, prior_drop));
+        schedule
+            .events
+            .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        let result = std::panic::catch_unwind(|| {
+            let _ = run(&schedule, &RunOptions::default());
+        });
+        assert!(
+            result.is_ok(),
+            "{label} is a runtime-contingent API call and must not make a later \
+             SpectatorHostKill fail static validation"
+        );
     }
 }
 

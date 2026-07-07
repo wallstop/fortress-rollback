@@ -219,6 +219,9 @@ pub struct RunReport {
     /// Highest frame the configured spectator displayed. `None` when
     /// `SimConfig::spectator_hosts` is empty or the spectator never advanced.
     pub spectator_max_frame: Option<i32>,
+    /// Number of redundant hosts the configured spectator still had at the end of
+    /// the run. `None` when `SimConfig::spectator_hosts` is empty.
+    pub spectator_final_hosts: Option<usize>,
 }
 
 /// One peer's cumulative wire traffic, summed across every remote link it holds.
@@ -319,7 +322,7 @@ impl RunReport {
     pub fn expect_pass(&self, schedule: &Schedule) {
         assert!(
             self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nspectator_final_hosts={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
@@ -328,6 +331,7 @@ impl RunReport {
             self.recovered_within_b,
             self.spectator_applied_frames,
             self.spectator_max_frame,
+            self.spectator_final_hosts,
             self.verdict.violation_allowlist_hits,
             self.violation_census,
             self.net_stats,
@@ -456,6 +460,27 @@ fn update_spectator_required_min_frame<I: SimInput>(
     let required = live_floor.saturating_add(POST_HEAL_MIN_ADVANCE);
     *required_min_frame =
         Some(required_min_frame.map_or(required, |current| current.max(required)));
+}
+
+fn retire_peer_for_lifecycle<I: SimInput>(
+    peer: usize,
+    peers: &[PeerSlot<I>],
+    dead: &mut [bool],
+    net: &SimNet<Message>,
+    addrs: &[SocketAddr],
+    oracle: &mut Oracle,
+    spectator_required_min_frame: Option<&mut Option<i32>>,
+) {
+    if dead[peer] {
+        return;
+    }
+
+    dead[peer] = true;
+    net.detach(addrs[peer]);
+    oracle.mark_peer_dead(peer);
+    if let Some(required_min_frame) = spectator_required_min_frame {
+        update_spectator_required_min_frame(peers, dead, required_min_frame);
+    }
 }
 
 /// Pure per-peer input function: any deterministic mapping works; this one
@@ -722,6 +747,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 *peer < n,
                 "PeerKill peer {peer} out of range for a {n}-peer mesh"
             ),
+            ScheduleEvent::SpectatorHostKill { host } => assert!(
+                *host < n,
+                "SpectatorHostKill host {host} out of range for a {n}-peer mesh"
+            ),
             ScheduleEvent::HealAll => {},
         }
     }
@@ -756,6 +785,34 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             "duplicate spectator_hosts peer {peer}"
         );
         spectator_host_enabled[peer] = true;
+    }
+    // Only guaranteed harness kills can make a SpectatorHostKill malformed up
+    // front. User API drops retire only after the runtime call returns `Ok`.
+    let mut retired_by_guaranteed_kill = vec![false; n];
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
+            ScheduleEvent::PeerKill { peer } => {
+                retired_by_guaranteed_kill[*peer] = true;
+            },
+            ScheduleEvent::SpectatorHostKill { host } => {
+                assert!(
+                    spectator_host_enabled[*host],
+                    "SpectatorHostKill host {host} is not configured in spectator_hosts"
+                );
+                assert!(
+                    !retired_by_guaranteed_kill[*host],
+                    "SpectatorHostKill host {host} is already retired by an earlier kill event"
+                );
+                retired_by_guaranteed_kill[*host] = true;
+            },
+            ScheduleEvent::SetLink { .. }
+            | ScheduleEvent::Block { .. }
+            | ScheduleEvent::Hold { .. }
+            | ScheduleEvent::PeerStall { .. }
+            | ScheduleEvent::SetInputDelay { .. }
+            | ScheduleEvent::HealAll => {},
+        }
     }
     if let Some(size) = schedule.config.event_queue_size {
         assert!(
@@ -1020,16 +1077,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         if let Err(error) = peers[*by].session.remove_player(handle) {
                             oracle.observe_session_error("remove_player", *by, step, &error);
                         } else {
-                            dead[*target] = true;
-                            net.detach(addrs[*target]);
-                            oracle.mark_peer_dead(*target);
-                            if spectator_enabled {
-                                update_spectator_required_min_frame(
-                                    &peers,
-                                    &dead,
-                                    &mut spectator_required_min_frame,
-                                );
-                            }
+                            retire_peer_for_lifecycle(
+                                *target,
+                                &peers,
+                                &mut dead,
+                                &net,
+                                &addrs,
+                                &mut oracle,
+                                spectator_enabled.then_some(&mut spectator_required_min_frame),
+                            );
                         }
                     }
                 },
@@ -1045,16 +1101,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         if let Err(error) = peers[*by].session.disconnect_player(handle) {
                             oracle.observe_session_error("disconnect_player", *by, step, &error);
                         } else {
-                            dead[*target] = true;
-                            net.detach(addrs[*target]);
-                            oracle.mark_peer_dead(*target);
-                            if spectator_enabled {
-                                update_spectator_required_min_frame(
-                                    &peers,
-                                    &dead,
-                                    &mut spectator_required_min_frame,
-                                );
-                            }
+                            retire_peer_for_lifecycle(
+                                *target,
+                                &peers,
+                                &mut dead,
+                                &net,
+                                &addrs,
+                                &mut oracle,
+                                spectator_enabled.then_some(&mut spectator_required_min_frame),
+                            );
                         }
                     }
                 },
@@ -1064,18 +1119,30 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     // `UnattachedPolicy::Drop`), and exclude it from the oracle's
                     // liveness checks. Its remaining mesh survives per the
                     // configured `DisconnectBehavior`. Idempotent.
-                    if !dead[*peer] {
-                        dead[*peer] = true;
-                        net.detach(addrs[*peer]);
-                        oracle.mark_peer_dead(*peer);
-                        if spectator_enabled {
-                            update_spectator_required_min_frame(
-                                &peers,
-                                &dead,
-                                &mut spectator_required_min_frame,
-                            );
-                        }
-                    }
+                    retire_peer_for_lifecycle(
+                        *peer,
+                        &peers,
+                        &mut dead,
+                        &net,
+                        &addrs,
+                        &mut oracle,
+                        spectator_enabled.then_some(&mut spectator_required_min_frame),
+                    );
+                },
+                ScheduleEvent::SpectatorHostKill { host } => {
+                    // Spectator-focused crash: validation guarantees this peer is
+                    // one of the configured redundant spectator hosts. Killing it
+                    // should force the spectator to continue from the remaining
+                    // hosts while the mesh survives per `DisconnectBehavior`.
+                    retire_peer_for_lifecycle(
+                        *host,
+                        &peers,
+                        &mut dead,
+                        &net,
+                        &addrs,
+                        &mut oracle,
+                        spectator_enabled.then_some(&mut spectator_required_min_frame),
+                    );
                 },
                 ScheduleEvent::HealAll => net.heal_all(),
             }
@@ -1304,6 +1371,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         spectator_applied_inputs.map_or(0, std::collections::BTreeMap::len);
     let spectator_max_frame =
         spectator_applied_inputs.and_then(|records| records.keys().next_back().copied());
+    let spectator_final_hosts = spectator.as_ref().map(|slot| slot.session.num_hosts());
     let verdict = oracle.finalize_with_applied_inputs_and_spectator(
         &recorded,
         &applied_inputs,
@@ -1327,6 +1395,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         violation_census,
         spectator_applied_frames,
         spectator_max_frame,
+        spectator_final_hosts,
     }
 }
 
@@ -1378,6 +1447,10 @@ mod tests {
             explicit.spectator_applied_frames
         );
         assert_eq!(implicit.spectator_max_frame, explicit.spectator_max_frame);
+        assert_eq!(
+            implicit.spectator_final_hosts,
+            explicit.spectator_final_hosts
+        );
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
     }
 }
