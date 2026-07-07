@@ -35,10 +35,12 @@
 // Test infrastructure: not every test binary uses every helper.
 #![allow(dead_code)]
 
-use crate::common::stubs::{StateStub, StubInput};
+use crate::common::stubs::StateStub;
+use fortress_rollback::hash::DeterministicHasher;
 use fortress_rollback::telemetry::{SpecViolation, ViolationSeverity};
 use fortress_rollback::{Frame, InputStatus, SessionState};
 use std::collections::BTreeMap;
+use std::hash::Hasher;
 
 /// Minimum confirmed frames every peer must reach by end of run (c-lite).
 ///
@@ -66,8 +68,8 @@ pub enum OracleFailure {
         frame: i32,
         peer: usize,
         first_author: usize,
-        expected: Vec<u32>,
-        actual: Vec<u32>,
+        expected: Vec<InputFingerprint>,
+        actual: Vec<InputFingerprint>,
     },
     /// (b): a peer's recorded post-advance state for a globally confirmed
     /// frame differs from the canonical state.
@@ -152,7 +154,32 @@ pub enum OracleFailure {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct FreezePoint {
     pub frame: i32,
-    pub input: u32,
+    pub input: InputFingerprint,
+}
+
+/// Stable identity of one serialized input value.
+///
+/// The harness's game transition uses only a logical `u32` lane, but the oracle
+/// compares the full serialized input identity so the 32-byte sweep axis cannot
+/// hide divergence in padding bytes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InputFingerprint {
+    pub logical: u32,
+    pub len: u32,
+    pub hash: u64,
+}
+
+impl InputFingerprint {
+    #[must_use]
+    pub fn from_bytes(logical: u32, bytes: &[u8]) -> Self {
+        let mut hasher = DeterministicHasher::new();
+        hasher.write(bytes);
+        Self {
+            logical,
+            len: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+            hash: hasher.finish(),
+        }
+    }
 }
 
 /// Inputs for the (c) bounded post-heal liveness check, assembled by the runner
@@ -211,7 +238,7 @@ impl Verdict {
 pub struct Oracle {
     n_players: usize,
     /// frame → (first author, canonical per-slot inputs).
-    canonical_inputs: BTreeMap<i32, (usize, Vec<u32>)>,
+    canonical_inputs: BTreeMap<i32, (usize, Vec<InputFingerprint>)>,
     failures: Vec<OracleFailure>,
     /// Cap so a systemically broken run reports a readable prefix instead of
     /// millions of identical failures.
@@ -298,8 +325,12 @@ impl Oracle {
 
     /// (a): feed one peer's confirmed inputs for one frame, in ascending
     /// frame order per peer.
-    pub fn observe_confirmed_inputs(&mut self, peer: usize, frame: i32, inputs: &[StubInput]) {
-        let values: Vec<u32> = inputs.iter().map(|i| i.inp).collect();
+    pub fn observe_confirmed_inputs(
+        &mut self,
+        peer: usize,
+        frame: i32,
+        values: Vec<InputFingerprint>,
+    ) {
         match self.canonical_inputs.get(&frame) {
             None => {
                 self.canonical_inputs.insert(frame, (peer, values));
@@ -405,7 +436,7 @@ impl Oracle {
     pub fn finalize_with_applied_inputs(
         mut self,
         recorded: &[BTreeMap<i32, StateStub>],
-        applied_inputs: &[BTreeMap<i32, Vec<(StubInput, InputStatus)>>],
+        applied_inputs: &[BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>],
         end_confirmed: &[Frame],
         end_state: &[SessionState],
     ) -> Verdict {
@@ -619,7 +650,7 @@ impl Oracle {
 }
 
 fn stable_freeze_point(
-    records: &BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+    records: &BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
     slot: usize,
     max_frame: i32,
 ) -> Option<FreezePoint> {
@@ -631,12 +662,9 @@ fn stable_freeze_point(
         };
         if status == InputStatus::Disconnected {
             match candidate {
-                Some(point) if point.input == input.inp => {},
+                Some(point) if point.input == input => {},
                 _ => {
-                    candidate = Some(FreezePoint {
-                        frame,
-                        input: input.inp,
-                    });
+                    candidate = Some(FreezePoint { frame, input });
                 },
             }
         } else {
@@ -651,8 +679,16 @@ fn stable_freeze_point(
 mod tests {
     use super::*;
 
-    fn inputs(values: &[u32]) -> Vec<StubInput> {
-        values.iter().map(|&inp| StubInput { inp }).collect()
+    fn fp(input: u32) -> InputFingerprint {
+        InputFingerprint::from_bytes(input, &input.to_le_bytes())
+    }
+
+    fn fp_with_bytes(input: u32, bytes: &[u8]) -> InputFingerprint {
+        InputFingerprint::from_bytes(input, bytes)
+    }
+
+    fn inputs(values: &[u32]) -> Vec<InputFingerprint> {
+        values.iter().copied().map(fp).collect()
     }
 
     #[derive(Copy, Clone)]
@@ -669,16 +705,18 @@ mod tests {
         Slot2::Present(input, InputStatus::Disconnected)
     }
 
-    fn slot2_records(frames: &[(i32, Slot2)]) -> BTreeMap<i32, Vec<(StubInput, InputStatus)>> {
+    fn slot2_records(
+        frames: &[(i32, Slot2)],
+    ) -> BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>> {
         frames
             .iter()
             .map(|(frame, slot2)| {
                 let mut inputs = vec![
-                    (StubInput { inp: 1 }, InputStatus::Confirmed),
-                    (StubInput { inp: 2 }, InputStatus::Confirmed),
+                    (fp(1), InputStatus::Confirmed),
+                    (fp(2), InputStatus::Confirmed),
                 ];
                 if let Slot2::Present(input, status) = slot2 {
-                    inputs.push((StubInput { inp: *input }, *status));
+                    inputs.push((fp(*input), *status));
                 }
                 (*frame, inputs)
             })
@@ -686,8 +724,8 @@ mod tests {
     }
 
     fn freeze_verdict(
-        peer0: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
-        peer1: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+        peer0: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
+        peer1: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
     ) -> Verdict {
         freeze_verdict_with_states(
             peer0,
@@ -701,8 +739,8 @@ mod tests {
     }
 
     fn freeze_verdict_with_states(
-        peer0: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
-        peer1: BTreeMap<i32, Vec<(StubInput, InputStatus)>>,
+        peer0: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
+        peer1: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
         end_state: [SessionState; 3],
     ) -> Verdict {
         let mut oracle = Oracle::new(3);
@@ -729,7 +767,7 @@ mod tests {
             stable_freeze_point(&records, 2, 12),
             Some(FreezePoint {
                 frame: 11,
-                input: 31
+                input: fp(31)
             }),
             "value changes inside a Disconnected tail reset the stable freeze point"
         );
@@ -737,7 +775,7 @@ mod tests {
             stable_freeze_point(&records, 2, 12),
             Some(FreezePoint {
                 frame: 10,
-                input: 30
+                input: fp(30)
             }),
             "the first Disconnected status alone is not a stable frozen value"
         );
@@ -756,9 +794,42 @@ mod tests {
             stable_freeze_point(&records, 2, 12),
             Some(FreezePoint {
                 frame: 12,
-                input: 30
+                input: fp(30)
             }),
             "a missing slot breaks the stable Disconnected run"
+        );
+    }
+
+    #[test]
+    fn freeze_point_compares_full_input_fingerprint_not_only_logical_value() {
+        let first = fp_with_bytes(30, b"same-logical-a");
+        let second = fp_with_bytes(30, b"same-logical-b");
+        let records = BTreeMap::from([
+            (
+                10,
+                vec![
+                    (fp(1), InputStatus::Confirmed),
+                    (fp(2), InputStatus::Confirmed),
+                    (first, InputStatus::Disconnected),
+                ],
+            ),
+            (
+                11,
+                vec![
+                    (fp(1), InputStatus::Confirmed),
+                    (fp(2), InputStatus::Confirmed),
+                    (second, InputStatus::Disconnected),
+                ],
+            ),
+        ]);
+
+        assert_eq!(
+            stable_freeze_point(&records, 2, 11),
+            Some(FreezePoint {
+                frame: 11,
+                input: second,
+            }),
+            "a changed serialized fingerprint resets the freeze point even when the logical lane is unchanged",
         );
     }
 
@@ -767,10 +838,10 @@ mod tests {
     #[test]
     fn oracle_detects_confirmed_input_divergence() {
         let mut oracle = Oracle::new(2);
-        oracle.observe_confirmed_inputs(0, 5, &inputs(&[1, 2]));
-        oracle.observe_confirmed_inputs(1, 5, &inputs(&[1, 2]));
-        oracle.observe_confirmed_inputs(0, 6, &inputs(&[3, 4]));
-        oracle.observe_confirmed_inputs(1, 6, &inputs(&[3, 9]));
+        oracle.observe_confirmed_inputs(0, 5, inputs(&[1, 2]));
+        oracle.observe_confirmed_inputs(1, 5, inputs(&[1, 2]));
+        oracle.observe_confirmed_inputs(0, 6, inputs(&[3, 4]));
+        oracle.observe_confirmed_inputs(1, 6, inputs(&[3, 9]));
 
         let verdict = oracle.finalize(
             &[BTreeMap::new(), BTreeMap::new()],
@@ -792,6 +863,31 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, OracleFailure::ConfirmedInputDivergence { frame: 5, .. })),
             "agreeing frames must not fail"
+        );
+    }
+
+    #[test]
+    fn oracle_detects_confirmed_input_fingerprint_divergence() {
+        let mut oracle = Oracle::new(2);
+        oracle.observe_confirmed_inputs(0, 5, vec![fp_with_bytes(7, b"peer-a")]);
+        oracle.observe_confirmed_inputs(1, 5, vec![fp_with_bytes(7, b"peer-b")]);
+
+        let verdict = oracle.finalize(
+            &[BTreeMap::new(), BTreeMap::new()],
+            &[Frame::new(60), Frame::new(60)],
+            &[SessionState::Running, SessionState::Running],
+        );
+        assert!(
+            verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ConfirmedInputDivergence {
+                    frame: 5,
+                    peer: 1,
+                    ..
+                }
+            )),
+            "same logical input with different serialized identity must fail: {:?}",
+            verdict.failures
         );
     }
 
@@ -1087,15 +1183,10 @@ mod tests {
                     slot: 2,
                     peer: 1,
                     first_author: 0,
-                    expected: Some(FreezePoint {
-                        frame: 10,
-                        input: 30
-                    }),
-                    actual: Some(FreezePoint {
-                        frame: 10,
-                        input: 31
-                    }),
-                }
+                    expected,
+                    actual,
+                } if *expected == Some(FreezePoint { frame: 10, input: fp(30) })
+                    && *actual == Some(FreezePoint { frame: 10, input: fp(31) })
             )),
             "expected a freeze-frame disagreement failure, got {:?}",
             verdict.failures
@@ -1125,15 +1216,10 @@ mod tests {
                     slot: 2,
                     peer: 1,
                     first_author: 0,
-                    expected: Some(FreezePoint {
-                        frame: 10,
-                        input: 30
-                    }),
-                    actual: Some(FreezePoint {
-                        frame: 11,
-                        input: 30
-                    }),
-                }
+                    expected,
+                    actual,
+                } if *expected == Some(FreezePoint { frame: 10, input: fp(30) })
+                    && *actual == Some(FreezePoint { frame: 11, input: fp(30) })
             )),
             "expected a freeze-frame start disagreement, got {:?}",
             verdict.failures
@@ -1160,12 +1246,9 @@ mod tests {
                     slot: 2,
                     peer: 1,
                     first_author: 0,
-                    expected: Some(FreezePoint {
-                        frame: 10,
-                        input: 30
-                    }),
+                    expected,
                     actual: None,
-                }
+                } if *expected == Some(FreezePoint { frame: 10, input: fp(30) })
             )),
             "expected a mixed Some/None freeze-frame divergence, got {:?}",
             verdict.failures
@@ -1192,11 +1275,8 @@ mod tests {
                     peer: 1,
                     first_author: 0,
                     expected: None,
-                    actual: Some(FreezePoint {
-                        frame: 10,
-                        input: 30
-                    }),
-                }
+                    actual,
+                } if *actual == Some(FreezePoint { frame: 10, input: fp(30) })
             )),
             "expected a mixed None/Some freeze-frame divergence, got {:?}",
             verdict.failures
@@ -1305,10 +1385,10 @@ mod tests {
     #[test]
     fn oracle_caps_recorded_failures() {
         let mut oracle = Oracle::new(2);
-        oracle.observe_confirmed_inputs(0, 0, &inputs(&[1]));
+        oracle.observe_confirmed_inputs(0, 0, inputs(&[1]));
         for frame in 0..1000 {
-            oracle.observe_confirmed_inputs(0, frame, &inputs(&[1]));
-            oracle.observe_confirmed_inputs(1, frame, &inputs(&[2]));
+            oracle.observe_confirmed_inputs(0, frame, inputs(&[1]));
+            oracle.observe_confirmed_inputs(1, frame, inputs(&[2]));
         }
         let verdict = oracle.finalize(
             &[BTreeMap::new(), BTreeMap::new()],
