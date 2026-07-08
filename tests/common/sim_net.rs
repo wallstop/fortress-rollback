@@ -223,6 +223,7 @@ struct SimNetState<M> {
     inboxes: BTreeMap<SocketAddr, VecDeque<(SocketAddr, M)>>,
     unattached: UnattachedPolicy,
     stats: SimNetStats,
+    blocked_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
 }
 
 impl<M: Clone> SimNetState<M> {
@@ -300,6 +301,7 @@ impl<M: Clone> SimNetState<M> {
 
         if blocked {
             self.stats.dropped_blocked += 1;
+            *self.blocked_drop_counts.entry(key).or_default() += 1;
             return;
         }
         if holding {
@@ -453,6 +455,7 @@ impl<M: Clone> SimNet<M> {
                 inboxes: BTreeMap::new(),
                 unattached: UnattachedPolicy::Drop,
                 stats: SimNetStats::default(),
+                blocked_drop_counts: BTreeMap::new(),
             })),
         }
     }
@@ -565,6 +568,16 @@ impl<M: Clone> SimNet<M> {
     #[must_use]
     pub fn stats(&self) -> SimNetStats {
         self.lock().stats
+    }
+
+    /// Number of messages dropped because the directed link was blocked.
+    #[must_use]
+    pub fn blocked_drop_count(&self, from: SocketAddr, to: SocketAddr) -> u64 {
+        self.lock()
+            .blocked_drop_counts
+            .get(&(from, to))
+            .copied()
+            .unwrap_or(0)
     }
 }
 

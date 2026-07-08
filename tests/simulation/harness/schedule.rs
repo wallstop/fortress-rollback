@@ -17,7 +17,7 @@
 
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::rng::{Pcg32, SeedableRng};
-use fortress_rollback::DisconnectBehavior;
+use fortress_rollback::{DisconnectBehavior, SaveMode};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -37,6 +37,26 @@ impl From<DropPolicy> for DisconnectBehavior {
         match policy {
             DropPolicy::Halt => Self::Halt,
             DropPolicy::ContinueWithout => Self::ContinueWithout,
+        }
+    }
+}
+
+/// Serializable mirror of [`SaveMode`] (the production enum does not derive
+/// serde; schedules must round-trip as corpus artifacts).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavePolicy {
+    /// Mirror of [`SaveMode::EveryFrame`] (the library default).
+    #[default]
+    EveryFrame,
+    /// Mirror of [`SaveMode::Sparse`].
+    Sparse,
+}
+
+impl From<SavePolicy> for SaveMode {
+    fn from(policy: SavePolicy) -> Self {
+        match policy {
+            SavePolicy::EveryFrame => Self::EveryFrame,
+            SavePolicy::Sparse => Self::Sparse,
         }
     }
 }
@@ -123,6 +143,11 @@ pub struct SimConfig {
     /// replayable without a schema bump.
     #[serde(default)]
     pub disconnect_behavior: DropPolicy,
+    /// Game-state save strategy for every P2P session in the mesh.
+    /// `#[serde(default)]` (= `EveryFrame`, the library default) keeps
+    /// pre-existing corpus artifacts replayable without a schema bump.
+    #[serde(default)]
+    pub save_mode: SavePolicy,
     /// How every peer's app model reacts to `WaitRecommendation`.
     /// `#[serde(default)]` (= `Ignore`, the open-loop behavior every prior run
     /// used) keeps pre-existing corpus artifacts replayable without a bump.
@@ -182,6 +207,7 @@ impl SimConfig {
             desync_interval: 30,
             noise: BackgroundNoise::Mild,
             disconnect_behavior: DropPolicy::default(),
+            save_mode: SavePolicy::default(),
             app_model: AppModel::default(),
             clock_skew_ppm: Vec::new(),
             starve_events: Vec::new(),
@@ -803,10 +829,11 @@ mod tests {
 
     /// A corpus artifact predating the `#[serde(default)]` config axes (its
     /// `config` object lacks those fields) must deserialize to their defaults —
-    /// `app_model = Ignore` (open-loop) and `clock_skew_ppm = []` (no skew) —
-    /// so old schedules replay bit-identically. This pins the "no schema bump"
-    /// claim. Each field is asserted present-and-removed so the test can't pass
-    /// vacuously (a full config also deserializes fine).
+    /// including `save_mode = EveryFrame`, `app_model = Ignore` (open-loop), and
+    /// `clock_skew_ppm = []` (no skew) — so old schedules replay bit-identically.
+    /// This pins the "no schema bump" claim. Each field is asserted
+    /// present-and-removed so the test can't pass vacuously (a full config also
+    /// deserializes fine).
     #[test]
     fn config_without_serde_default_fields_uses_defaults() {
         let schedule = generate(42, SimConfig::smoke(2));
@@ -815,6 +842,10 @@ mod tests {
             .get_mut("config")
             .and_then(|c| c.as_object_mut())
             .expect("a serialized schedule must have a `config` object");
+        assert!(
+            config.remove("save_mode").is_some(),
+            "config must serialize a `save_mode` field for this test to remove"
+        );
         assert!(
             config.remove("app_model").is_some(),
             "config must serialize an `app_model` field for this test to remove"
@@ -836,6 +867,11 @@ mod tests {
             "config must serialize a `spectator_hosts` field for this test to remove"
         );
         let back: Schedule = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            back.config.save_mode,
+            SavePolicy::EveryFrame,
+            "a pre-axis config (no save_mode) must default to EveryFrame"
+        );
         assert_eq!(
             back.config.app_model,
             AppModel::Ignore,
