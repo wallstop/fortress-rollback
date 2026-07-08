@@ -453,12 +453,12 @@ fn probe_smoke_fleet_sixteen_player_mesh_holds_invariants() {
 }
 
 /// H-TCP-lite transport-model probe (PLAN.md §13 H-TCP): a reliable,
-/// in-order, loss-free link profile (TCP / WebRTC-reliable model) with
-/// head-of-line-blocking stalls approximated by capture-and-FIFO-release
-/// holds. Zero jitter keeps `SimNet`'s per-link FIFO exact, so delivery is
-/// in-order — the TCP contract. Each 25-step hold (≈400ms virtual) models a
-/// retransmit stall far exceeding the 8-frame prediction window, so the
-/// session must stall-and-catch-up, never diverge.
+/// in-order link profile (TCP / WebRTC-reliable model) with
+/// head-of-line-blocking stalls modeled by `LinkPolicy::retransmit_delay`.
+/// Zero jitter keeps `SimNet`'s per-link FIFO exact, so delivery is in-order —
+/// the TCP contract. Each retransmit window delays would-drop sends by 400 ms
+/// (> the 8-frame prediction window), so the session must stall-and-catch-up,
+/// never diverge.
 ///
 /// Expected green: the protocol's correctness must not depend on loss or
 /// reordering being present. A failure here is a real transport-model bug.
@@ -466,6 +466,7 @@ fn run_tcp_model_mesh(n: usize) {
     let config = SimConfig {
         n_players: n,
         steps: 900,
+        noise: BackgroundNoise::ReliableFifo,
         ..SimConfig::smoke(n)
     };
     let fifo = LinkPolicy {
@@ -475,6 +476,12 @@ fn run_tcp_model_mesh(n: usize) {
         jitter: Duration::ZERO,
         burst_rate: 0.0,
         burst_len: 0,
+        retransmit_delay: Duration::ZERO,
+    };
+    let hol = LinkPolicy {
+        drop_rate: 1.0,
+        retransmit_delay: Duration::from_millis(400),
+        ..fifo
     };
     let mut initial_links = Vec::new();
     for from in 0..n {
@@ -484,24 +491,24 @@ fn run_tcp_model_mesh(n: usize) {
             }
         }
     }
-    // Three HOL stalls on distinct directed links, well before heal.
+    // Three HOL retransmit windows on distinct directed links, well before heal.
     let hold_windows: [(usize, usize, u32); 3] = [(0, 1, 100), (1, 0, 250), (n - 1, 0, 400)];
     let mut events = Vec::new();
     for (from, to, start) in hold_windows {
         events.push((
             start,
-            ScheduleEvent::Hold {
+            ScheduleEvent::SetLink {
                 from,
                 to,
-                holding: true,
+                policy: hol.clone(),
             },
         ));
         events.push((
             start + 25,
-            ScheduleEvent::Hold {
+            ScheduleEvent::SetLink {
                 from,
                 to,
-                holding: false,
+                policy: fifo.clone(),
             },
         ));
     }
@@ -520,6 +527,17 @@ fn run_tcp_model_mesh(n: usize) {
     };
     let report = run(&schedule, &RunOptions::default());
     report.expect_pass(&schedule);
+    assert!(
+        report.net_stats.retransmit_delayed > 0,
+        "the TCP-model schedule must exercise reliable HOL retransmission: {:?}",
+        report.net_stats
+    );
+    assert_eq!(
+        report.net_stats.dropped_by_policy, 0,
+        "reliable retransmission mode must delay would-drop sends instead of \
+         dropping them: {:?}",
+        report.net_stats
+    );
 }
 
 #[test]
@@ -2205,6 +2223,7 @@ fn wait_rec_schedule(n: usize, app_model: AppModel) -> Schedule {
         jitter: Duration::ZERO,
         burst_rate: 0.0,
         burst_len: 0,
+        retransmit_delay: Duration::ZERO,
     };
     let mut initial_links = Vec::new();
     for from in 0..n {
@@ -2305,6 +2324,7 @@ fn clock_skew_schedule(n: usize, skew: Vec<i32>) -> Schedule {
         jitter: Duration::ZERO,
         burst_rate: 0.0,
         burst_len: 0,
+        retransmit_delay: Duration::ZERO,
     };
     let mut initial_links = Vec::new();
     for from in 0..n {
@@ -2382,6 +2402,7 @@ fn clock_skew_long_run_schedule(steps: u32, ppm: i32) -> Schedule {
         jitter: Duration::ZERO,
         burst_rate: 0.0,
         burst_len: 0,
+        retransmit_delay: Duration::ZERO,
     };
     let initial_links = vec![(0, 1, delayed.clone()), (1, 0, delayed)];
     Schedule {
