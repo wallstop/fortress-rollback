@@ -192,7 +192,7 @@ pub struct PeerEventKey {
 
 /// One `LoadGameState` request observed while driving a peer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RollbackLoadObservation {
+pub struct LoadGameStateObservation {
     pub step: u32,
     pub peer: usize,
     pub frame: i32,
@@ -213,8 +213,8 @@ pub struct RunReport {
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
     pub blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
-    /// Rollback load requests observed while driving peers.
-    pub rollback_loads: Vec<RollbackLoadObservation>,
+    /// `LoadGameState` requests observed while driving peers.
+    pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
@@ -1255,7 +1255,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
-    let mut rollback_loads: Vec<RollbackLoadObservation> = Vec::new();
+    let mut load_game_state_observations: Vec<LoadGameStateObservation> = Vec::new();
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
@@ -1537,7 +1537,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         match slot.session.advance_frame() {
                             Ok(requests) => {
                                 if let Some(frame) = SimGameStub::<I>::loaded_frame(&requests) {
-                                    rollback_loads.push(RollbackLoadObservation {
+                                    load_game_state_observations.push(LoadGameStateObservation {
                                         step,
                                         peer: i,
                                         frame: frame.as_i32(),
@@ -1732,15 +1732,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     );
     let recovered_within_b = verdict.recovered_within_b;
     let mut blocked_drops_by_link = BTreeMap::new();
-    for from in 0..n_players {
-        for to in 0..n_players {
-            if from == to {
-                continue;
-            }
-            let drops = net.blocked_drop_count(addrs[from], addrs[to]);
-            if drops > 0 {
-                blocked_drops_by_link.insert((from, to), drops);
-            }
+    let peer_by_addr: BTreeMap<SocketAddr, usize> = addrs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(peer, addr)| (addr, peer))
+        .collect();
+    for ((from_addr, to_addr), drops) in net.blocked_drop_counts() {
+        if let (Some(from), Some(to)) = (peer_by_addr.get(&from_addr), peer_by_addr.get(&to_addr)) {
+            blocked_drops_by_link.insert((*from, *to), drops);
         }
     }
     RunReport {
@@ -1750,7 +1750,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         probe_confirmed,
         net_stats: net.stats(),
         blocked_drops_by_link,
-        rollback_loads,
+        load_game_state_observations,
         metrics,
         peer_wire,
         confirmed_at_heal,
@@ -1997,7 +1997,10 @@ mod tests {
             implicit.blocked_drops_by_link,
             explicit.blocked_drops_by_link
         );
-        assert_eq!(implicit.rollback_loads, explicit.rollback_loads);
+        assert_eq!(
+            implicit.load_game_state_observations,
+            explicit.load_game_state_observations
+        );
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
         assert_eq!(implicit.violation_census, explicit.violation_census);
         assert_eq!(implicit.peer_event_counts, explicit.peer_event_counts);

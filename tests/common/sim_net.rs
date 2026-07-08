@@ -570,14 +570,10 @@ impl<M: Clone> SimNet<M> {
         self.lock().stats
     }
 
-    /// Number of messages dropped because the directed link was blocked.
+    /// Snapshot of per-directed-link blocked-drop counters.
     #[must_use]
-    pub fn blocked_drop_count(&self, from: SocketAddr, to: SocketAddr) -> u64 {
-        self.lock()
-            .blocked_drop_counts
-            .get(&(from, to))
-            .copied()
-            .unwrap_or(0)
+    pub fn blocked_drop_counts(&self) -> BTreeMap<(SocketAddr, SocketAddr), u64> {
+        self.lock().blocked_drop_counts.clone()
     }
 }
 

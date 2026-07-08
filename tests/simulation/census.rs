@@ -270,7 +270,7 @@ fn sparse_save_mode_survives_graceful_drop_rollback() {
     report.expect_pass(&schedule);
 
     let survivor_post_drop_loads: Vec<_> = report
-        .rollback_loads
+        .load_game_state_observations
         .iter()
         .filter(|load| load.step >= SPARSE_DROP_AT && [SURVIVOR_A, SURVIVOR_B].contains(&load.peer))
         .collect();
@@ -279,7 +279,7 @@ fn sparse_save_mode_survives_graceful_drop_rollback() {
             .iter()
             .any(|load| load.frame < load.step as i32),
         "sparse graceful-drop row must observe survivor LoadGameState after the drop: {:?}",
-        report.rollback_loads
+        report.load_game_state_observations
     );
     let rollbacks: u64 = report
         .metrics
@@ -346,7 +346,7 @@ fn same_step_multi_drop_after_asymmetric_block_converges() {
         );
     }
     let survivor_post_drop_loads: Vec<_> = report
-        .rollback_loads
+        .load_game_state_observations
         .iter()
         .filter(|load| load.step >= MULTI_DROP_AT && SURVIVORS.contains(&load.peer))
         .collect();
@@ -356,7 +356,7 @@ fn same_step_multi_drop_after_asymmetric_block_converges() {
                 .iter()
                 .any(|load| load.peer == survivor && load.frame < MULTI_DROP_AT as i32),
             "survivor {survivor} must load pre-drop state after same-step drops: {:?}",
-            report.rollback_loads
+            report.load_game_state_observations
         );
     }
     let rollbacks: u64 = report
