@@ -23,9 +23,10 @@ use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
-    Config, DesyncDetection, FortressError, FortressEvent, FortressRequest, Frame, GameStateCell,
-    InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
-    ProtocolConfig, RequestVec, SessionBuilder, SessionState, SpectatorSession,
+    Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
+    GameStateCell, InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics,
+    PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState,
+    SpectatorSession,
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
@@ -213,6 +214,13 @@ pub struct RunReport {
     /// census so warning-only signatures stay visible even though they do not
     /// fail the run.
     pub violation_census: BTreeMap<ViolationSignature, u64>,
+    /// User-facing peer events drained by the harness, counted by category.
+    /// Census rows use this to assert that a schedule exercised ordinary event
+    /// surfaces (for example `NetworkInterrupted`/`NetworkResumed`) instead of
+    /// only relying on end-state convergence.
+    pub peer_event_counts: BTreeMap<EventKind, u64>,
+    /// Same event counts split by observing peer. Indexed by peer.
+    pub peer_event_counts_by_peer: Vec<BTreeMap<EventKind, u64>>,
     /// Number of frames the configured spectator displayed and handed to the
     /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
     pub spectator_applied_frames: usize,
@@ -1177,6 +1185,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
+    let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
@@ -1416,6 +1426,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     let events: Vec<FortressEvent<I::SessionConfig>> =
                         slot.session.events().collect();
                     for event in &events {
+                        let kind = event.kind();
+                        *peer_event_counts.entry(kind).or_default() += 1;
+                        if let Some(counts) = peer_event_counts_by_peer.get_mut(i) {
+                            *counts.entry(kind).or_default() += 1;
+                        }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
                         }
@@ -1651,6 +1666,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         confirmed_after_recovery,
         recovered_within_b,
         violation_census,
+        peer_event_counts,
+        peer_event_counts_by_peer,
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
@@ -1885,6 +1902,11 @@ mod tests {
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
         assert_eq!(implicit.violation_census, explicit.violation_census);
+        assert_eq!(implicit.peer_event_counts, explicit.peer_event_counts);
+        assert_eq!(
+            implicit.peer_event_counts_by_peer,
+            explicit.peer_event_counts_by_peer
+        );
         assert_eq!(
             implicit.spectator_applied_frames,
             explicit.spectator_applied_frames
