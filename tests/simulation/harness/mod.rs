@@ -173,7 +173,7 @@ pub struct RunOptions {
     pub corrupt_spectator_status_from: Option<i32>,
 }
 
-/// Payload identity for user-facing peer events that name a remote endpoint.
+/// Payload identity for the endpoint-bearing peer events the harness records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PeerEventPayload {
     Addr(SocketAddr),
@@ -183,7 +183,7 @@ pub enum PeerEventPayload {
     },
 }
 
-/// Key used by census rows that need to prove which endpoint an event named.
+/// Key used by census rows that need to prove which recorded endpoint an event named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerEventKey {
     pub kind: EventKind,
@@ -1477,13 +1477,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     for event in &events {
                         let kind = event.kind();
                         *peer_event_counts.entry(kind).or_default() += 1;
-                        if let Some(counts) = peer_event_counts_by_peer.get_mut(i) {
-                            *counts.entry(kind).or_default() += 1;
-                        }
+                        *peer_event_counts_by_peer[i].entry(kind).or_default() += 1;
                         if let Some(key) = peer_event_key::<I>(event) {
-                            if let Some(counts) = peer_event_payload_counts_by_peer.get_mut(i) {
-                                *counts.entry(key).or_default() += 1;
-                            }
+                            *peer_event_payload_counts_by_peer[i].entry(key).or_default() += 1;
                         }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
