@@ -3,9 +3,9 @@
 use super::harness::schedule::{
     BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
-use super::harness::{run, RunOptions, RunReport};
+use super::harness::{peer_addr, run, PeerEventKey, PeerEventPayload, RunOptions, RunReport};
 use crate::common::sim_net::LinkPolicy;
-use fortress_rollback::EventKind;
+use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
@@ -20,13 +20,30 @@ fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     initial_links
 }
 
-fn peer_event_count(report: &RunReport, peer: usize, kind: EventKind) -> u64 {
+fn peer_event_payload_count(report: &RunReport, peer: usize, key: PeerEventKey) -> u64 {
     report
-        .peer_event_counts_by_peer
+        .peer_event_payload_counts_by_peer
         .get(peer)
-        .and_then(|counts| counts.get(&kind))
+        .and_then(|counts| counts.get(&key))
         .copied()
         .unwrap_or(0)
+}
+
+fn addr_event_key(kind: EventKind, peer: usize) -> PeerEventKey {
+    PeerEventKey {
+        kind,
+        payload: PeerEventPayload::Addr(peer_addr(peer)),
+    }
+}
+
+fn peer_dropped_key(peer: usize) -> PeerEventKey {
+    PeerEventKey {
+        kind: EventKind::PeerDropped,
+        payload: PeerEventPayload::PlayerAddr {
+            handle: PlayerHandle::new(peer),
+            addr: peer_addr(peer),
+        },
+    }
 }
 
 fn delayed_two_peer_schedule() -> Schedule {
@@ -64,7 +81,7 @@ fn frozen_queue_network_blip_schedule() -> Schedule {
     let drop_at = 140;
     let blip_start = 260;
     let blip_end = 335;
-    let heal_at = 520;
+    let heal_at = blip_end;
     let mut events = vec![
         (drop_at, ScheduleEvent::GracefulRemove { by: 0, target: 2 }),
         (
@@ -163,41 +180,30 @@ fn frozen_queue_survivors_resume_after_network_blip() {
         "network-blip census row must drop traffic on the blocked survivor link: {:?}",
         report.net_stats
     );
-    assert!(
-        report
-            .peer_event_counts
-            .get(&EventKind::PeerDropped)
-            .copied()
-            .unwrap_or(0)
-            > 0,
-        "frozen-queue census row must surface at least one PeerDropped event: {:?}",
-        report.peer_event_counts
-    );
     assert_eq!(
         report.recovered_within_b,
         Some(true),
         "network-blip census row must run and pass the bounded post-heal liveness oracle"
     );
-    assert!(
-        peer_event_count(&report, SURVIVOR_A, EventKind::NetworkInterrupted) > 0,
-        "survivor {SURVIVOR_A} must observe NetworkInterrupted on the blocked live link: {:?}",
-        report.peer_event_counts_by_peer
-    );
-    assert!(
-        peer_event_count(&report, SURVIVOR_B, EventKind::NetworkInterrupted) > 0,
-        "survivor {SURVIVOR_B} must observe NetworkInterrupted on the blocked live link: {:?}",
-        report.peer_event_counts_by_peer
-    );
-    assert!(
-        peer_event_count(&report, SURVIVOR_A, EventKind::NetworkResumed) > 0,
-        "survivor {SURVIVOR_A} must observe NetworkResumed after the live-link blip: {:?}",
-        report.peer_event_counts_by_peer
-    );
-    assert!(
-        peer_event_count(&report, SURVIVOR_B, EventKind::NetworkResumed) > 0,
-        "survivor {SURVIVOR_B} must observe NetworkResumed after the live-link blip: {:?}",
-        report.peer_event_counts_by_peer
-    );
+    for (observer, kind, remote) in [
+        (SURVIVOR_A, EventKind::NetworkInterrupted, SURVIVOR_B),
+        (SURVIVOR_B, EventKind::NetworkInterrupted, SURVIVOR_A),
+        (SURVIVOR_A, EventKind::NetworkResumed, SURVIVOR_B),
+        (SURVIVOR_B, EventKind::NetworkResumed, SURVIVOR_A),
+    ] {
+        assert!(
+            peer_event_payload_count(&report, observer, addr_event_key(kind, remote)) > 0,
+            "survivor {observer} must observe {kind:?} for survivor {remote}: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+    }
+    for observer in [SURVIVOR_A, SURVIVOR_B] {
+        assert!(
+            peer_event_payload_count(&report, observer, peer_dropped_key(2)) > 0,
+            "survivor {observer} must observe PeerDropped for removed peer 2: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+    }
     let survivor_0_confirmed = report.final_confirmed.first().copied().unwrap_or(i32::MIN);
     let survivor_1_confirmed = report.final_confirmed.get(1).copied().unwrap_or(i32::MIN);
     assert!(
