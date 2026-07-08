@@ -23,9 +23,10 @@ use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
-    Config, DesyncDetection, FortressError, FortressEvent, FortressRequest, Frame, GameStateCell,
-    InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics, PlayerHandle, PlayerType,
-    ProtocolConfig, RequestVec, SessionBuilder, SessionState, SpectatorSession,
+    Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
+    GameStateCell, InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics,
+    PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState,
+    SpectatorSession,
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
@@ -172,6 +173,23 @@ pub struct RunOptions {
     pub corrupt_spectator_status_from: Option<i32>,
 }
 
+/// Payload identity for the endpoint-bearing peer events the harness records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PeerEventPayload {
+    Addr(SocketAddr),
+    PlayerAddr {
+        handle: PlayerHandle,
+        addr: SocketAddr,
+    },
+}
+
+/// Key used by census rows that need to prove which recorded endpoint an event named.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerEventKey {
+    pub kind: EventKind,
+    pub payload: PeerEventPayload,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
@@ -213,6 +231,16 @@ pub struct RunReport {
     /// census so warning-only signatures stay visible even though they do not
     /// fail the run.
     pub violation_census: BTreeMap<ViolationSignature, u64>,
+    /// User-facing peer events drained by the harness, counted by category.
+    /// Census rows use this to assert that a schedule exercised ordinary event
+    /// surfaces (for example `NetworkInterrupted`/`NetworkResumed`) instead of
+    /// only relying on end-state convergence.
+    pub peer_event_counts: BTreeMap<EventKind, u64>,
+    /// Same event counts split by observing peer. Indexed by peer.
+    pub peer_event_counts_by_peer: Vec<BTreeMap<EventKind, u64>>,
+    /// Same event counts split by observing peer and relevant event payload.
+    /// Indexed by observing peer.
+    pub peer_event_payload_counts_by_peer: Vec<BTreeMap<PeerEventKey, u64>>,
     /// Number of frames the configured spectator displayed and handed to the
     /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
     pub spectator_applied_frames: usize,
@@ -718,7 +746,7 @@ fn record_spectator_requests<I: SimInput>(
 }
 
 /// Synthetic mesh addresses (never bound): `127.0.0.1:(20001 + i)`.
-fn peer_addr(i: usize) -> SocketAddr {
+pub(super) fn peer_addr(i: usize) -> SocketAddr {
     let port = 20001 + u16::try_from(i).expect("peer index fits in u16");
     ([127, 0, 0, 1], port).into()
 }
@@ -726,6 +754,34 @@ fn peer_addr(i: usize) -> SocketAddr {
 /// Folds one hashable item into the running trace digest.
 fn fold_trace<T: std::hash::Hash>(hash: &mut u64, item: &T) {
     *hash = fnv1a_hash(&(*hash, fnv1a_hash(item)));
+}
+
+fn peer_event_key<I: SimInput>(event: &FortressEvent<I::SessionConfig>) -> Option<PeerEventKey> {
+    let kind = event.kind();
+    let payload = match event {
+        FortressEvent::Synchronizing { addr, .. }
+        | FortressEvent::Synchronized { addr }
+        | FortressEvent::Disconnected { addr }
+        | FortressEvent::NetworkInterrupted { addr, .. }
+        | FortressEvent::NetworkResumed { addr }
+        | FortressEvent::DesyncDetected { addr, .. }
+        | FortressEvent::SyncTimeout { addr, .. } => PeerEventPayload::Addr(*addr),
+        FortressEvent::PeerDropped { handle, addr } => PeerEventPayload::PlayerAddr {
+            handle: *handle,
+            addr: *addr,
+        },
+        #[cfg(feature = "hot-join")]
+        FortressEvent::JoinRequested { handle, addr }
+        | FortressEvent::PeerJoined { handle, addr } => PeerEventPayload::PlayerAddr {
+            handle: *handle,
+            addr: *addr,
+        },
+        FortressEvent::WaitRecommendation { .. }
+        | FortressEvent::ReplayDesync { .. }
+        | FortressEvent::SpectatorDivergence { .. }
+        | FortressEvent::InputDelayRecommendation { .. } => return None,
+    };
+    Some(PeerEventKey { kind, payload })
 }
 
 /// Per-step progress dump for the diagnostic path.
@@ -1177,6 +1233,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
+    let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
+    let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
@@ -1416,6 +1475,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     let events: Vec<FortressEvent<I::SessionConfig>> =
                         slot.session.events().collect();
                     for event in &events {
+                        let kind = event.kind();
+                        *peer_event_counts.entry(kind).or_default() += 1;
+                        *peer_event_counts_by_peer[i].entry(kind).or_default() += 1;
+                        if let Some(key) = peer_event_key::<I>(event) {
+                            *peer_event_payload_counts_by_peer[i].entry(key).or_default() += 1;
+                        }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
                         }
@@ -1651,6 +1716,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         confirmed_after_recovery,
         recovered_within_b,
         violation_census,
+        peer_event_counts,
+        peer_event_counts_by_peer,
+        peer_event_payload_counts_by_peer,
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
@@ -1885,6 +1953,15 @@ mod tests {
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
         assert_eq!(implicit.violation_census, explicit.violation_census);
+        assert_eq!(implicit.peer_event_counts, explicit.peer_event_counts);
+        assert_eq!(
+            implicit.peer_event_counts_by_peer,
+            explicit.peer_event_counts_by_peer
+        );
+        assert_eq!(
+            implicit.peer_event_payload_counts_by_peer,
+            explicit.peer_event_payload_counts_by_peer
+        );
         assert_eq!(
             implicit.spectator_applied_frames,
             explicit.spectator_applied_frames
