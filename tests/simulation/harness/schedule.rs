@@ -82,13 +82,18 @@ pub enum AppModel {
 ///   crash/failover probe.
 /// - `8`: adds [`ScheduleEvent::HotJoin`], a returning-peer reactivation probe
 ///   driven through the public hot-join API.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 8;
+/// - `9`: adds [`BackgroundNoise::ReliableFifo`] and
+///   [`LinkPolicy::retransmit_delay`](crate::common::sim_net::LinkPolicy::retransmit_delay)
+///   for reliable-ordered transport probes.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 9;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackgroundNoise {
     /// Perfect links.
     Clean,
+    /// Reliable, ordered, loss-free links (TCP/WebRTC-reliable baseline).
+    ReliableFifo,
     /// LAN-to-good-WAN: ≤2% loss, 5–30ms delay, ≤10ms jitter, ≤1% dup.
     Mild,
     /// Bad WAN / mobile: 2–10% loss, 20–80ms delay, ≤30ms jitter, ≤3% dup,
@@ -389,6 +394,10 @@ impl Draw<'_> {
 fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPolicy {
     match noise {
         BackgroundNoise::Clean => LinkPolicy::clean(),
+        BackgroundNoise::ReliableFifo => LinkPolicy {
+            base_delay: Duration::from_millis(30),
+            ..LinkPolicy::clean()
+        },
         BackgroundNoise::Mild => LinkPolicy {
             drop_rate: draw.range_f64(0.0, 0.02),
             dup_rate: draw.range_f64(0.0, 0.01),
@@ -396,6 +405,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             jitter: Duration::from_millis(draw.range_u64(0, 10)),
             burst_rate: 0.0,
             burst_len: 0,
+            retransmit_delay: Duration::ZERO,
         },
         BackgroundNoise::Rough => LinkPolicy {
             drop_rate: draw.range_f64(0.02, 0.10),
@@ -404,6 +414,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             jitter: Duration::from_millis(draw.range_u64(0, 30)),
             burst_rate: draw.range_f64(0.0, 0.005),
             burst_len: u32::try_from(draw.range_u64(2, 5)).unwrap_or(3),
+            retransmit_delay: Duration::ZERO,
         },
     }
 }
@@ -458,7 +469,9 @@ pub fn generate(seed: u64, config: SimConfig) -> Schedule {
     // introduced deliberately in the lifecycle vocabulary, not by accident.
     let mut events: Vec<(u32, ScheduleEvent)> = Vec::new();
     let storyline_budget = heal_at.saturating_sub(20);
-    let n_storylines = if storyline_budget > 100 {
+    let n_storylines = if matches!(config.noise, BackgroundNoise::ReliableFifo) {
+        0
+    } else if storyline_budget > 100 {
         draw.range_u64(0, 3)
     } else {
         0
@@ -578,6 +591,36 @@ mod tests {
     }
 
     #[test]
+    fn reliable_fifo_profile_is_lossless_ordered_and_storyline_free() {
+        let schedule = generate(
+            42,
+            SimConfig {
+                noise: BackgroundNoise::ReliableFifo,
+                ..SimConfig::smoke(4)
+            },
+        );
+        for (from, to, policy) in &schedule.initial_links {
+            assert_ne!(from, to);
+            assert!(policy.drop_rate.abs() < f64::EPSILON);
+            assert!(policy.dup_rate.abs() < f64::EPSILON);
+            assert_eq!(policy.base_delay, Duration::from_millis(30));
+            assert_eq!(policy.jitter, Duration::ZERO);
+            assert!(policy.burst_rate.abs() < f64::EPSILON);
+            assert_eq!(policy.burst_len, 0);
+            assert_eq!(policy.retransmit_delay, Duration::ZERO);
+        }
+        assert_eq!(
+            schedule
+                .events
+                .iter()
+                .filter(|(_, event)| !matches!(event, ScheduleEvent::HealAll))
+                .count(),
+            0,
+            "ReliableFifo must not add random loss, partition, or reorder storylines"
+        );
+    }
+
+    #[test]
     fn generate_covers_every_directed_link() {
         for n in 2..=16 {
             let schedule = generate(7, SimConfig::smoke(n));
@@ -665,6 +708,31 @@ mod tests {
         assert_eq!(
             schedule, back,
             "corpus artifacts must round-trip losslessly"
+        );
+    }
+
+    #[test]
+    fn link_policy_without_retransmit_delay_uses_zero_default() {
+        let schedule = generate(42, SimConfig::smoke(2));
+        let mut value = serde_json::to_value(&schedule).unwrap();
+        let first_policy = value
+            .get_mut("initial_links")
+            .and_then(|links| links.as_array_mut())
+            .and_then(|links| links.first_mut())
+            .and_then(|link| link.as_array_mut())
+            .and_then(|link| link.get_mut(2))
+            .and_then(|policy| policy.as_object_mut())
+            .expect("initial link policy must serialize as an object");
+        assert!(
+            first_policy.remove("retransmit_delay").is_some(),
+            "policy must serialize retransmit_delay for this test to remove"
+        );
+
+        let back: Schedule = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            back.initial_links[0].2.retransmit_delay,
+            Duration::ZERO,
+            "old corpus artifacts without retransmit_delay must keep UDP-like loss semantics"
         );
     }
 

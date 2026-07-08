@@ -59,6 +59,11 @@ pub const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
 ///
 /// All probabilities are in `0.0..=1.0` and are rolled per send, in a fixed
 /// order (burst, drop, duplicate, jitter), from the net-wide seeded RNG.
+/// When [`Self::retransmit_delay`] is nonzero, a burst/drop roll models a
+/// reliable transport retransmission instead of packet loss: the would-be
+/// dropped send is delayed, and subsequent sends on the same link are held
+/// behind that retransmission deadline (TCP/WebRTC-reliable head-of-line
+/// blocking).
 /// Serializable so simulation schedules (which embed link policies) can be
 /// stored as reproducible corpus artifacts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -77,6 +82,10 @@ pub struct LinkPolicy {
     pub burst_rate: f64,
     /// Total sends dropped per burst, including the send that triggered it.
     pub burst_len: u32,
+    /// Reliable retransmission delay for would-be drops. `Duration::ZERO`
+    /// keeps UDP-like unreliable loss semantics.
+    #[serde(default)]
+    pub retransmit_delay: Duration,
 }
 
 impl LinkPolicy {
@@ -90,6 +99,7 @@ impl LinkPolicy {
             jitter: Duration::ZERO,
             burst_rate: 0.0,
             burst_len: 0,
+            retransmit_delay: Duration::ZERO,
         }
     }
 }
@@ -122,6 +132,8 @@ pub struct SimNetStats {
     pub delivered: u64,
     /// Copies dropped by drop-rate or burst rolls.
     pub dropped_by_policy: u64,
+    /// Would-be policy drops converted into reliable retransmission delays.
+    pub retransmit_delayed: u64,
     /// Copies dropped because the link was blocked.
     pub dropped_blocked: u64,
     /// Copies dropped on delivery because no socket was attached
@@ -139,6 +151,8 @@ struct LinkState {
     policy: LinkPolicy,
     /// Remaining sends to drop in the current loss burst.
     burst_remaining: u32,
+    /// Reliable transport head-of-line block deadline for this link.
+    retransmit_blocked_until: Option<Instant>,
     /// Black-hole: every send is dropped.
     blocked: bool,
     /// Capture-and-hold: sends bypass fault rolls and queue until release.
@@ -150,6 +164,7 @@ impl LinkState {
         Self {
             policy,
             burst_remaining: 0,
+            retransmit_blocked_until: None,
             blocked: false,
             holding: false,
         }
@@ -246,6 +261,29 @@ impl<M: Clone> SimNetState<M> {
         }));
     }
 
+    /// Returns `true` when a policy loss was converted into a reliable
+    /// retransmission and the payload should still be scheduled.
+    fn handle_policy_loss(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        retransmit_delay: Duration,
+    ) -> bool {
+        if retransmit_delay.is_zero() {
+            self.stats.dropped_by_policy += 1;
+            return false;
+        }
+
+        self.stats.retransmit_delayed += 1;
+        let deadline = self.now() + retransmit_delay;
+        if let Some(link) = self.links.get_mut(&key) {
+            link.retransmit_blocked_until = Some(
+                link.retransmit_blocked_until
+                    .map_or(deadline, |existing| existing.max(deadline)),
+            );
+        }
+        true
+    }
+
     fn send(&mut self, from: SocketAddr, to: SocketAddr, payload: M) {
         self.stats.sent += 1;
         let key = (from, to);
@@ -270,6 +308,11 @@ impl<M: Clone> SimNetState<M> {
             return;
         }
 
+        let policy = self
+            .links
+            .get(&key)
+            .map_or_else(LinkPolicy::clean, |link| link.policy.clone());
+
         // Burst state machine (mirrors the ChaosSocket semantics: the
         // triggering send and the following `burst_len - 1` sends drop).
         let in_burst = self
@@ -280,35 +323,29 @@ impl<M: Clone> SimNetState<M> {
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining -= 1;
             }
-            self.stats.dropped_by_policy += 1;
-            return;
-        }
-        let (burst_rate, burst_len, drop_rate, dup_rate, base_delay, jitter) =
-            match self.links.get(&key) {
-                Some(link) => (
-                    link.policy.burst_rate,
-                    link.policy.burst_len,
-                    link.policy.drop_rate,
-                    link.policy.dup_rate,
-                    link.policy.base_delay,
-                    link.policy.jitter,
-                ),
-                None => (0.0, 0, 0.0, 0.0, Duration::ZERO, Duration::ZERO),
-            };
-
-        if burst_rate > 0.0 && self.roll_unit() < burst_rate {
-            if let Some(link) = self.links.get_mut(&key) {
-                link.burst_remaining = burst_len.saturating_sub(1);
+            if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                return;
             }
-            self.stats.dropped_by_policy += 1;
-            return;
-        }
-        if drop_rate > 0.0 && self.roll_unit() < drop_rate {
-            self.stats.dropped_by_policy += 1;
-            return;
         }
 
-        let copies = if dup_rate > 0.0 && self.roll_unit() < dup_rate {
+        let burst_roll_hit =
+            !in_burst && policy.burst_rate > 0.0 && self.roll_unit() < policy.burst_rate;
+        if burst_roll_hit {
+            if let Some(link) = self.links.get_mut(&key) {
+                link.burst_remaining = policy.burst_len.saturating_sub(1);
+            }
+            if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                return;
+            }
+        } else {
+            let drop_roll_hit =
+                !in_burst && policy.drop_rate > 0.0 && self.roll_unit() < policy.drop_rate;
+            if drop_roll_hit && !self.handle_policy_loss(key, policy.retransmit_delay) {
+                return;
+            }
+        }
+
+        let copies = if policy.dup_rate > 0.0 && self.roll_unit() < policy.dup_rate {
             self.stats.duplicated += 1;
             2
         } else {
@@ -316,9 +353,17 @@ impl<M: Clone> SimNetState<M> {
         };
 
         let now = self.now();
+        let blocked_until = self
+            .links
+            .get(&key)
+            .and_then(|link| link.retransmit_blocked_until);
         for _ in 0..copies {
-            let delay = base_delay + self.roll_jitter(jitter);
-            self.schedule(from, to, payload.clone(), now + delay);
+            let delay = policy.base_delay + self.roll_jitter(policy.jitter);
+            let mut deliver_at = now + delay;
+            if let Some(deadline) = blocked_until {
+                deliver_at = deliver_at.max(deadline);
+            }
+            self.schedule(from, to, payload.clone(), deliver_at);
         }
     }
 
@@ -444,8 +489,8 @@ impl<M: Clone> SimNet<M> {
     }
 
     /// Sets (or replaces) the fault policy for the directed link `from → to`,
-    /// preserving its blocked/holding toggles and resetting any burst in
-    /// progress.
+    /// preserving its blocked/holding toggles and any current retransmission
+    /// head-of-line deadline, and resetting any burst in progress.
     pub fn set_link(&self, from: SocketAddr, to: SocketAddr, policy: LinkPolicy) {
         let mut state = self.lock();
         let link = state.links.entry((from, to)).or_default();
@@ -503,6 +548,7 @@ impl<M: Clone> SimNet<M> {
             if let Some(link) = state.links.get_mut(&key) {
                 link.policy = LinkPolicy::clean();
                 link.burst_remaining = 0;
+                link.retransmit_blocked_until = None;
                 link.blocked = false;
                 link.holding = false;
             }
@@ -620,6 +666,7 @@ mod tests {
             jitter: Duration::from_millis(25),
             burst_rate: 0.02,
             burst_len: 4,
+            retransmit_delay: Duration::ZERO,
         };
         let first = run_trace(42, policy.clone());
         let second = run_trace(42, policy.clone());
@@ -720,6 +767,55 @@ mod tests {
 
         offset.fetch_add(1, AtomicOrdering::Relaxed);
         assert_eq!(b.recv_payloads().len(), 1, "due exactly at base_delay");
+    }
+
+    #[test]
+    fn retransmit_delay_delivers_would_drop_and_holds_later_sends() {
+        let (clock, offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+
+        let reliable_loss = LinkPolicy {
+            drop_rate: 1.0,
+            retransmit_delay: Duration::from_millis(100),
+            ..LinkPolicy::clean()
+        };
+        let reliable_clean = LinkPolicy {
+            drop_rate: 0.0,
+            retransmit_delay: Duration::from_millis(100),
+            ..LinkPolicy::clean()
+        };
+
+        net.set_link(addr(1), addr(2), reliable_loss);
+        a.send_payload(addr(2), 1);
+        assert!(
+            b.recv_payloads().is_empty(),
+            "would-drop payload is retransmission-delayed, not delivered immediately"
+        );
+
+        net.set_link(addr(1), addr(2), reliable_clean);
+        offset.fetch_add(10, AtomicOrdering::Relaxed);
+        a.send_payload(addr(2), 2);
+        offset.fetch_add(89, AtomicOrdering::Relaxed);
+        assert!(
+            b.recv_payloads().is_empty(),
+            "later clean sends stay behind the retransmission deadline"
+        );
+
+        offset.fetch_add(1, AtomicOrdering::Relaxed);
+        let values: Vec<u32> = b.recv_payloads().into_iter().map(|(_, v)| v).collect();
+        assert_eq!(
+            values,
+            vec![1, 2],
+            "retransmitted and later clean sends deliver FIFO at the HOL deadline"
+        );
+
+        let stats = net.stats();
+        assert_eq!(stats.sent, 2);
+        assert_eq!(stats.retransmit_delayed, 1);
+        assert_eq!(stats.dropped_by_policy, 0);
+        assert_eq!(stats.delivered, 2);
     }
 
     #[test]

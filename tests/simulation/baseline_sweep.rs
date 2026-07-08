@@ -59,6 +59,7 @@ impl CellParams {
             jitter: Duration::from_millis(self.jitter_ms),
             burst_rate: 0.0,
             burst_len: 0,
+            retransmit_delay: Duration::ZERO,
         }
     }
 
