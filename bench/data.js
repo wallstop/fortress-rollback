@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783536318920,
+  "lastUpdate": 1783544457102,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "9b8b6bd4b4110795cf49fb235b2e4c2b69779b06",
-          "message": "Deterministic test infrastructure with injectable clocks and project reorganization (#119)\n\n## Summary\n\nIntroduce an injectable `ClockFn` abstraction and in-memory\n`ChannelSocket` transport to enable fully deterministic, fast, and\nplatform-independent integration tests — replacing real UDP sockets,\n`thread::sleep()`, and `#[serial]` test ordering throughout the test\nsuite. Also reorganizes scripts and LLM skills into domain-based\nsubdirectories.\n\n### Clock injection & deterministic time control\n- Add `ClockFn` type alias (`Arc<dyn Fn() -> Instant + Send + Sync>`)\nand `ProtocolConfig::clock` field for injectable time sources\n- Add `ChaosSocket::with_clock()` builder method for deterministic\nchaos/network-condition testing\n- Replace all `Instant::now()` calls in `Protocol` and `ChaosSocket`\nwith the injected clock (falling back to system time)\n- **Breaking:** `ProtocolConfig` no longer implements `Copy` (due to\n`Arc`-based clock field)\n\n### New test infrastructure\n- `ChannelSocket`: in-memory `NonBlockingSocket` using `mpsc` channels —\neliminates all real UDP I/O from tests\n- `TestClock`: manually-advanceable virtual clock with\n`advance(duration)`, `as_protocol_clock()`, and `as_chaos_clock()`\nhelpers\n- Deterministic test utilities: `synchronize_sessions_deterministic()`,\n`poll_with_advance()`, `run_p2p_frame_advancement_test_deterministic()`\n\n### Test suite migration\n- Converted all resilience, p2p, p2p_enum, and spectator tests from real\nsockets + `thread::sleep` + `#[serial]` to `ChannelSocket` + `TestClock`\n- Removed `serial_test` dependency and all `#[serial]` attributes from\nmigrated tests\n- Removed `#[cfg_attr(miri, ignore)]` from timing-dependent chaos socket\ntests (now virtual-time-based)\n\n### Scripts & skills reorganization\n- Reorganized `scripts/` into `build/`, `ci/`, `docs/`, `verification/`\nsubdirectories\n- Reorganized `.llm/skills/` into 8 category subdirectories\n(rust-language, testing, formal-verification, etc.)\n- Added 8 new workflow skills (code-review, adversarial-review,\ndev-pipeline, investigation, etc.)\n- Added `.llm/design-history/` and `.llm/templates/ask-user-question.md`\n\n### Documentation & CI\n- Updated user guide with custom clock documentation, new config\npresets, and expanded API reference\n- Updated all wiki pages with corrected examples, API signatures, and\nverification status\n- Updated all CI workflows and pre-commit hooks for new script paths\n- Expanded devcontainer with additional VS Code extensions and editor\nsettings\n- Added logo banner SVG\n\n## Test plan\n- [ ] `cargo nextest run --no-capture` — all tests pass with\ndeterministic infrastructure\n- [ ] `cargo clippy --all-targets --features tokio,json` — no warnings\n- [ ] CI workflows resolve scripts at new paths\n- [ ] Pre-commit hooks work with reorganized script layout\n- [ ] Verify no `#[serial]` tests remain in migrated test files\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-          "timestamp": "2026-03-20T18:23:48-07:00",
-          "tree_id": "0dce9ac3e595e1a3f2fd01090302bb85bc68a6cb",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/9b8b6bd4b4110795cf49fb235b2e4c2b69779b06"
-        },
-        "date": 1774056508166,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 456,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 679,
-            "range": "± 24",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 996,
-            "range": "± 40",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 106651,
-            "range": "± 3512",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 41134,
-            "range": "± 638",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 83",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ee8cb20a410f3a7403fba2dd11bda7b2a8efbc8a",
+          "message": "Add frozen-queue network blip census row (#214)\n\n## Summary\n\nAdds the next M3 section 6.4 premise-asserted simulation census row for\na frozen dropped slot plus a sub-timeout survivor link blip.\n\n## What changed\n\n- Adds harness-level drained peer event counters, both aggregate and\nsplit by observing peer.\n- Adds payload-keyed peer event counters by observing peer so census\nrows can assert the exact endpoint named by drained events.\n- Adds `frozen_queue_survivors_resume_after_network_blip`, a hand-built\nschedule that:\n- gracefully removes peer 2 under `ContinueWithout`, freezing the\ndeparted slot;\n- blocks live survivor traffic between peers 0 and 1 for a sub-timeout\nwindow;\n- heals at the actual blip restoration step, so bounded recovery is\nanchored to the real link restoration;\n  - asserts blocked traffic was actually dropped by the fabric;\n- asserts both live survivors observed `PeerDropped` for removed peer 2;\n- asserts each survivor observed `NetworkInterrupted` and\n`NetworkResumed` for the other survivor's address;\n  - asserts bounded post-heal recovery ran and passed;\n  - asserts survivor confirmation progress and deterministic replay.\n- Extends the harness default-vs-explicit input regression to cover the\nnew event counter fields.\n\n## Validation\n\n- `cargo test --test simulation\nfrozen_queue_survivors_resume_after_network_blip -- --nocapture`\n- `cargo test --test simulation census -- --nocapture`\n- `cargo test --test simulation\ndefault_run_matches_explicit_stub_input_run -- --nocapture`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `git diff --check`\n- `npx markdownlint PLAN.md\nprogress/session-088-frozen-queue-network-blip-census.md --config\n.markdownlint.json --fix`\n- `cargo nextest run --no-capture` -> `2442 passed, 58 skipped`\n\n## Review follow-up\n\nCursor bugbot findings from the first revision are addressed in commit\n`7a7c5b6`: recovery is anchored at `blip_end`, event assertions are\npayload-specific, and `PeerDropped` propagation is asserted for survivor\n1. A second adversarial sub-agent review reported zero issues.\n\n## Notes\n\nPLAN.md and progress logs are updated locally per agent workflow, but\nthis repository ignores `PLAN.md` and `progress/**`. The H-RING\ncandidate row was also explored and produced a real red result; it\nshould be handled as a separate red-green investigation rather than\nincluded here.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests and harness reporting;\nproduction rollback/session code is untouched.\n> \n> **Overview**\n> Extends the simulation **harness** so census rows can assert on\n**drained peer events**, not only end-state oracles. **`RunReport`** now\ncarries aggregate peer event counts, per-observer counts, and\n**payload-keyed** counts (`PeerEventKey` / `PeerEventPayload`) built\nwhile draining each peer’s event queue; **`peer_addr`** is exposed to\ntests for address-specific keys.\n> \n> Adds the M3 §6.4 census\n**`frozen_queue_survivors_resume_after_network_blip`**: a 3-peer\nschedule that gracefully removes peer 2 under **`ContinueWithout`**,\nblocks survivor traffic between peers 0 and 1 for a sub-timeout window,\nheals when links unblock, then asserts blocked drops, bounded post-heal\nrecovery, **`NetworkInterrupted`/`NetworkResumed`** per remote address,\n**`PeerDropped`** for the removed slot, survivor confirmation progress,\nand deterministic **`trace_hash`** replay.\n> \n> The default-vs-explicit stub input harness regression now also\ncompares the new event counter fields.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfb198c31267102f08c07e10ca9d4258471c150dc. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-08T13:56:20-07:00",
+          "tree_id": "bee5c93938c953f2f877122cb8b4ddc7a2157495",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ee8cb20a410f3a7403fba2dd11bda7b2a8efbc8a"
+        },
+        "date": 1783544455467,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 163,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 460,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 716,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1047,
+            "range": "± 68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 128279,
+            "range": "± 2362",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44197,
+            "range": "± 455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 84",
             "unit": "ns/iter"
           },
           {
