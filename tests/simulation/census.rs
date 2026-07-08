@@ -277,8 +277,8 @@ fn sparse_save_mode_survives_graceful_drop_rollback() {
     assert!(
         survivor_post_drop_loads
             .iter()
-            .any(|load| load.frame < load.step as i32),
-        "sparse graceful-drop row must observe survivor LoadGameState after the drop: {:?}",
+            .any(|load| load.frame < SPARSE_DROP_AT as i32),
+        "sparse graceful-drop row must observe survivor pre-drop LoadGameState after the drop: {:?}",
         report.load_game_state_observations
     );
     let rollbacks: u64 = report
