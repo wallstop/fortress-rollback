@@ -190,6 +190,14 @@ pub struct PeerEventKey {
     pub payload: PeerEventPayload,
 }
 
+/// One `LoadGameState` request observed while driving a peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadGameStateObservation {
+    pub step: u32,
+    pub peer: usize,
+    pub frame: i32,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
@@ -203,6 +211,10 @@ pub struct RunReport {
     pub probe_confirmed: Vec<i32>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
+    /// Blocked-drop counts split by directed peer index pair `(from, to)`.
+    pub blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
+    /// `LoadGameState` requests observed while driving peers.
+    pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
@@ -631,6 +643,7 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         .with_max_prediction_window(ctx.schedule.config.max_prediction)
         .with_input_delay(0)
         .expect("hot-join input delay is fixed at zero")
+        .with_save_mode(ctx.schedule.config.save_mode.into())
         .with_desync_detection_mode(DesyncDetection::On {
             interval: ctx.schedule.config.desync_interval,
         })
@@ -936,6 +949,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             "HotJoin schedules must use max_prediction >= 1 (got {})",
             schedule.config.max_prediction
         );
+        assert!(
+            n < 3 || schedule.config.save_mode == schedule::SavePolicy::EveryFrame,
+            "N-peer HotJoin schedules must use save_mode EveryFrame (got {:?})",
+            schedule.config.save_mode
+        );
     }
     let expected_links = n * (n - 1);
     assert_eq!(
@@ -1135,6 +1153,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .with_max_prediction_window(schedule.config.max_prediction)
                 .with_input_delay(schedule.config.input_delay)
                 .expect("valid input delay")
+                .with_save_mode(schedule.config.save_mode.into())
                 .with_desync_detection_mode(DesyncDetection::On {
                     interval: schedule.config.desync_interval,
                 })
@@ -1236,6 +1255,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
+    let mut load_game_state_observations: Vec<LoadGameStateObservation> = Vec::new();
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
@@ -1516,6 +1536,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         }
                         match slot.session.advance_frame() {
                             Ok(requests) => {
+                                if let Some(frame) = SimGameStub::<I>::loaded_frame(&requests) {
+                                    load_game_state_observations.push(LoadGameStateObservation {
+                                        step,
+                                        peer: i,
+                                        frame: frame.as_i32(),
+                                    });
+                                }
                                 if let Some(handoff_floor) = slot.pending_replacement_handoff_floor
                                 {
                                     if let Some(frame) =
@@ -1704,12 +1731,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         spectator_required_min_frame,
     );
     let recovered_within_b = verdict.recovered_within_b;
+    let mut blocked_drops_by_link = BTreeMap::new();
+    let peer_by_addr: BTreeMap<SocketAddr, usize> = addrs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(peer, addr)| (addr, peer))
+        .collect();
+    for ((from_addr, to_addr), drops) in net.blocked_drop_counts() {
+        if let (Some(from), Some(to)) = (peer_by_addr.get(&from_addr), peer_by_addr.get(&to_addr)) {
+            blocked_drops_by_link.insert((*from, *to), drops);
+        }
+    }
     RunReport {
         verdict,
         trace_hash,
         final_confirmed,
         probe_confirmed,
         net_stats: net.stats(),
+        blocked_drops_by_link,
+        load_game_state_observations,
         metrics,
         peer_wire,
         confirmed_at_heal,
@@ -1832,6 +1873,7 @@ mod tests {
             .with_max_prediction_window(1)
             .with_input_delay(0)
             .expect("valid input delay")
+            .with_save_mode(schedule.config.save_mode.into())
             .with_desync_detection_mode(DesyncDetection::On {
                 interval: schedule.config.desync_interval,
             })
@@ -1951,6 +1993,14 @@ mod tests {
         assert_eq!(implicit.trace_hash, explicit.trace_hash);
         assert_eq!(implicit.final_confirmed, explicit.final_confirmed);
         assert_eq!(implicit.net_stats, explicit.net_stats);
+        assert_eq!(
+            implicit.blocked_drops_by_link,
+            explicit.blocked_drops_by_link
+        );
+        assert_eq!(
+            implicit.load_game_state_observations,
+            explicit.load_game_state_observations
+        );
         assert_eq!(implicit.recovered_within_b, explicit.recovered_within_b);
         assert_eq!(implicit.violation_census, explicit.violation_census);
         assert_eq!(implicit.peer_event_counts, explicit.peer_event_counts);
