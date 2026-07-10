@@ -1642,8 +1642,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }),
         };
         // The digest and the artifact tail share one stable representation, so
-        // every captured observable (including lifecycle/dead state, event
-        // truncation, and network counters) participates exactly once.
+        // every captured step observable (including lifecycle/dead state,
+        // event truncation, and network counters) participates here. Selected
+        // final values are intentionally folded again in the final summary.
         fold_trace(&mut trace_hash, &snapshot);
         trace_tail.push_back(snapshot);
 

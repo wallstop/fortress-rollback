@@ -456,14 +456,43 @@ mod tests {
         std::fs::write(&artifact, b"{}\n").expect("dummy artifact writes");
         let fake_cargo = root.join("fake-cargo");
         let fake_log = root.join("fake-cargo.log");
+        let fake_bin = root.join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin creates");
+        let fake_ln = fake_bin.join("ln");
+        std::fs::write(
+            &fake_ln,
+            br#"#!/bin/sh
+set -eu
+if [ "${FORTRESS_FAKE_ROUTE:-default}" = signal-publish ]; then
+  kill -TERM "$PPID"
+  sleep 1
+fi
+exec /bin/ln "$@"
+"#,
+        )
+        .expect("fake ln writes");
+        std::fs::set_permissions(&fake_ln, std::fs::Permissions::from_mode(0o755))
+            .expect("fake ln is executable");
         std::fs::write(
             &fake_cargo,
             br#"#!/bin/sh
 set -eu
 printf '%s|%s|%s\n' "$FORTRESS_SIM_CORPUS_MODE" "${FORTRESS_FAKE_ROUTE:-default}" "$*" >> "$FORTRESS_FAKE_LOG"
 case "$FORTRESS_SIM_CORPUS_MODE" in
-  classify) printf '%s\n' "${FORTRESS_FAKE_ROUTE:-default}" > "$FORTRESS_SIM_CORPUS_ROUTE_OUTPUT" ;;
-  extract) printf '%s\n' '{"schema_version":9}' > "$FORTRESS_SIM_CORPUS_OUTPUT" ;;
+  classify)
+    route=${FORTRESS_FAKE_ROUTE:-default}
+    case "$route" in fail-extract|signal-extract|signal-publish) route=default ;; esac
+    printf '%s\n' "$route" > "$FORTRESS_SIM_CORPUS_ROUTE_OUTPUT"
+    ;;
+  extract)
+    [ "${FORTRESS_FAKE_ROUTE:-default}" = fail-extract ] && exit 91
+    if [ "${FORTRESS_FAKE_ROUTE:-default}" = signal-extract ]; then
+      kill -TERM "$PPID"
+      sleep 1
+      exit 92
+    fi
+    printf '%s\n' '{"schema_version":9}' > "$FORTRESS_SIM_CORPUS_OUTPUT"
+    ;;
   *) exit 90 ;;
 esac
 "#,
@@ -473,12 +502,19 @@ esac
             .expect("fake cargo is executable");
         let script =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/simulation/promote-artifact.sh");
+        let fake_path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").expect("PATH is set")
+        );
         let invoke = |route: &str, slug: &str| {
             std::process::Command::new(&script)
                 .args([artifact.as_os_str(), std::ffi::OsStr::new(slug)])
                 .current_dir(&outside)
                 .env("FORTRESS_SIM_CARGO", &fake_cargo)
                 .env("FORTRESS_SIM_CORPUS_ROOT", &corpus)
+                .env("RUNNER_TEMP", root.join("runner-temp"))
+                .env("PATH", &fake_path)
                 .env("FORTRESS_FAKE_ROUTE", route)
                 .env("FORTRESS_FAKE_LOG", &fake_log)
                 .output()
@@ -488,24 +524,48 @@ esac
         let first = invoke("default", "first-case");
         assert!(
             first.status.success(),
-            "{}",
-            String::from_utf8_lossy(&first.stderr)
+            "stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&first.stdout),
+            String::from_utf8_lossy(&first.stderr),
         );
         let second = invoke("default", "second-case");
         assert!(
             second.status.success(),
-            "{}",
-            String::from_utf8_lossy(&second.stderr)
+            "stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&second.stdout),
+            String::from_utf8_lossy(&second.stderr),
         );
         let hot_join = invoke("hot-join", "joined-case");
         assert!(
             hot_join.status.success(),
-            "{}",
-            String::from_utf8_lossy(&hot_join.stderr)
+            "stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&hot_join.stdout),
+            String::from_utf8_lossy(&hot_join.stderr),
         );
-        assert!(corpus.join("001-first-case.json").is_file());
-        assert!(corpus.join("002-second-case.json").is_file());
-        assert!(corpus.join("hot-join/001-joined-case.json").is_file());
+        let list_dir = |path: &Path| {
+            std::fs::read_dir(path)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path().display().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for (path, output) in [
+            (corpus.join("001-first-case.json"), &first),
+            (corpus.join("002-second-case.json"), &second),
+            (corpus.join("hot-join/001-joined-case.json"), &hot_join),
+        ] {
+            assert!(
+                path.is_file(),
+                "missing promoted file {}; corpus tree: {:?}; stdout: {}; stderr: {}",
+                path.display(),
+                (list_dir(&corpus), list_dir(&corpus.join("hot-join"))),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
         let invocations = std::fs::read_to_string(&fake_log).expect("fake cargo log reads");
         for line in invocations.lines() {
             let has_hot_join_feature = line.contains("--features hot-join");
@@ -525,16 +585,41 @@ esac
         std::fs::create_dir_all(corpus.join(".promotion.lock")).expect("competing lock creates");
         let locked = invoke("default", "locked-case");
         assert!(!locked.status.success(), "promotion ignored an active lock");
-        assert!(!corpus.join("003-locked-case.json").exists());
         assert!(
-            std::fs::read_dir(&corpus)
-                .expect("corpus reads")
-                .all(|entry| !entry
-                    .expect("entry reads")
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".candidate.")),
-            "failed promotion leaked a candidate"
+            corpus.join(".promotion.lock").is_dir(),
+            "failed promotion removed the competing lock"
+        );
+        assert!(!corpus.join("003-locked-case.json").exists());
+        std::fs::remove_dir(corpus.join(".promotion.lock")).expect("competing lock removes");
+
+        let failed_extract = invoke("fail-extract", "failed-case");
+        assert_eq!(failed_extract.status.code(), Some(91));
+        assert!(
+            !corpus.join(".promotion.lock").exists(),
+            "failed extraction leaked its candidate lock"
+        );
+
+        let signaled_extract = invoke("signal-extract", "signaled-case");
+        assert_eq!(signaled_extract.status.code(), Some(143));
+        assert!(
+            !corpus.join(".promotion.lock").exists(),
+            "signaled extraction leaked its candidate lock"
+        );
+
+        let signaled_publish = invoke("signal-publish", "signaled-publish");
+        assert!(
+            signaled_publish.status.success(),
+            "stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&signaled_publish.stdout),
+            String::from_utf8_lossy(&signaled_publish.stderr),
+        );
+        assert!(corpus.join("003-signaled-publish.json").is_file());
+        assert_eq!(
+            std::fs::read_dir(root.join("runner-temp"))
+                .expect("runner temp reads")
+                .count(),
+            0,
+            "promotion leaked route scratch state"
         );
         std::fs::remove_dir_all(root).expect("script temp tree removes");
     }

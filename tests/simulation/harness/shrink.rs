@@ -563,10 +563,10 @@ where
                     break;
                 }
                 checkpoints.insert(candidate.max(2));
-                delta = delta.saturating_mul(2);
-                if delta == 0 {
+                let Some(doubled) = delta.checked_mul(2) else {
                     break;
-                }
+                };
+                delta = doubled;
             }
         }
     }
