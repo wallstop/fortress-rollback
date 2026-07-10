@@ -26,6 +26,7 @@ mod common;
 mod simulation {
     pub mod baseline_sweep;
     pub mod census;
+    pub mod corpus_replay;
     pub mod fleet;
     pub mod harness;
 }

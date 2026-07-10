@@ -58,6 +58,8 @@ states.dot
 loom-tests/target/**
 mutants.out/**
 progress/**
+/tests/simulation/corpus/**/.candidate.*
+/tests/simulation/corpus/**/.promotion.lock/
 # Lychee link checker cache
 .lycheecache
 

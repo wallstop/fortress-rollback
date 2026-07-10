@@ -537,6 +537,8 @@ pessimistic ack is received (`AsyncAckSoundRound`, PASS) is the sound consumer.
 **Safety:**
 
 - Halt transitions to `Synchronizing` after any dropped peer
+- Halt caps reported confirmation at the pre-drop ceiling even if the raw
+  post-drop fold rises into the speculative window
 - ContinueWithout freezes dropped players and keeps survivors independent
 - `PeerDropped` events are emitted only by ContinueWithout
 - Dropped players are excluded from survivor progress

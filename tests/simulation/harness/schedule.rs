@@ -17,8 +17,9 @@
 
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::rng::{Pcg32, SeedableRng};
-use fortress_rollback::{DisconnectBehavior, SaveMode};
+use fortress_rollback::{__internal::MAX_FRAME_DELAY, DisconnectBehavior, SaveMode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// Serializable mirror of [`DisconnectBehavior`] (the production enum does
@@ -81,6 +82,22 @@ pub enum AppModel {
     Obey,
 }
 
+/// Which storyline vocabulary the deterministic generator may use.
+///
+/// `NetworkOnly` is the default so every pre-existing generated seed and every
+/// serialized schedule that predates this axis keeps the exact same network
+/// policies and event stream. `Lifecycle` opts into one substantive peer/app
+/// lifecycle operation in addition to the existing network storylines.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ScenarioMix {
+    /// Generate only link-policy and link-state storylines.
+    #[default]
+    NetworkOnly,
+    /// Add one valid lifecycle operation selected deterministically by seed.
+    Lifecycle,
+}
+
 /// Schema version for serialized schedules (bump on breaking layout change).
 ///
 /// - `1`: network-fault vocabulary only (`SetLink`/`Block`/`Hold`/`HealAll`).
@@ -106,6 +123,18 @@ pub enum AppModel {
 ///   [`LinkPolicy::retransmit_delay`](crate::common::sim_net::LinkPolicy::retransmit_delay)
 ///   for reliable-ordered transport probes.
 pub const SCHEDULE_SCHEMA_VERSION: u32 = 9;
+/// Hard execution bound for one materialized harness schedule.
+///
+/// This is 20× the 5,000-step nightly cells and 10× the longest current
+/// deterministic stress run, while preventing an untrusted corpus entry from
+/// turning the runner's `0..steps` loop into an effectively unbounded job.
+pub const MAX_SIMULATION_STEPS: u32 = 100_000;
+/// Maximum virtual time advanced by one harness step.
+pub const MAX_SIMULATION_STEP_DT_MS: u64 = 1_000;
+/// Maximum delay accepted on any materialized simulated link.
+pub const MAX_SIMULATION_LINK_DELAY: Duration = Duration::from_secs(60);
+/// Maximum number of timed operations in one materialized schedule.
+pub const MAX_SIMULATION_EVENTS: usize = 100_000;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +152,7 @@ pub enum BackgroundNoise {
 
 /// Static configuration of one simulation run — the fleet's axes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimConfig {
     /// Number of P2P peers in the mesh (2..=16).
     pub n_players: usize,
@@ -138,6 +168,11 @@ pub struct SimConfig {
     pub desync_interval: u32,
     /// Background link noise.
     pub noise: BackgroundNoise,
+    /// Storyline vocabulary available to the generator. `#[serde(default)]`
+    /// preserves the exact pre-lifecycle generator behavior for old corpus
+    /// schedules and existing callers.
+    #[serde(default)]
+    pub scenario_mix: ScenarioMix,
     /// Peer-drop policy for every session in the mesh. `#[serde(default)]`
     /// (= `Halt`, the library default) keeps pre-existing corpus artifacts
     /// replayable without a schema bump.
@@ -206,6 +241,7 @@ impl SimConfig {
             max_prediction: 8,
             desync_interval: 30,
             noise: BackgroundNoise::Mild,
+            scenario_mix: ScenarioMix::default(),
             disconnect_behavior: DropPolicy::default(),
             save_mode: SavePolicy::default(),
             app_model: AppModel::default(),
@@ -278,10 +314,9 @@ pub enum ScheduleEvent {
     /// reports) while frozen and resumes exactly where it left off.
     ///
     /// The stall must stay shorter than the mesh's disconnect timeout, or the
-    /// silence tips the peer into a genuine disconnect. The planted lifecycle
-    /// tests keep it well under that bound so the hitch is a recoverable pause,
-    /// not a drop; the random generator does not emit this event yet (it lands
-    /// with the M3 storyline overhaul, which re-blesses seed baselines).
+    /// silence tips the peer into a genuine disconnect. Planted and generated
+    /// lifecycle schedules keep it well under that bound so the hitch is a
+    /// recoverable pause, not a drop.
     PeerStall { peer: usize, steps: u32 },
     /// Set peer `peer`'s local input delay to `delay` frames mid-run
     /// (`P2PSession::set_input_delay`). A mid-session *increase* is the
@@ -290,8 +325,7 @@ pub enum ScheduleEvent {
     /// path a fixed-delay fleet never exercises. Values are per-peer local, so
     /// the mesh must still agree on every confirmed frame across the change.
     ///
-    /// Like `PeerStall`, this is planted by lifecycle tests, not yet emitted by
-    /// the random generator (that lands with the §6.1 storyline overhaul).
+    /// Covered by both planted and generated lifecycle schedules.
     SetInputDelay { peer: usize, delay: usize },
     /// A live peer `by` explicitly removes remote player `target` via
     /// `P2PSession::remove_player`, then the target leaves the harness. This is
@@ -299,7 +333,7 @@ pub enum ScheduleEvent {
     /// call and the remaining live mesh must learn the drop through protocol
     /// gossip, freeze the target slot to an agreed value, and keep confirming.
     ///
-    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    /// Covered by both planted and generated lifecycle schedules.
     GracefulRemove { by: usize, target: usize },
     /// A live peer `by` explicitly disconnects remote player `target` via
     /// `P2PSession::disconnect_player`. If the API call succeeds, the target
@@ -307,11 +341,12 @@ pub enum ScheduleEvent {
     /// `SessionError` and keeps the target live. This is the legacy GGRS-style
     /// user path: unlike
     /// [`ScheduleEvent::GracefulRemove`], it does not freeze the dropped slot or
-    /// emit `PeerDropped`; with today's `Halt` path it reports non-recovery
-    /// and remains part of the D13 "not fully fail-closed" defect surface. That
-    /// makes it a Halt/D13 probe rather than a graceful-convergence contract.
+    /// emit `PeerDropped`; the fail-closed `Halt` path reports non-recovery.
+    /// This makes it a Halt terminal-semantics probe rather than a
+    /// graceful-convergence contract.
     ///
-    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    /// Planted only; the random generator deliberately excludes this terminal
+    /// operation from its green lifecycle mix.
     LegacyDisconnect { by: usize, target: usize },
     /// Permanently kill peer `peer`: the harness stops driving its session and
     /// detaches it from the fabric (its inbox is discarded; further traffic to
@@ -324,13 +359,11 @@ pub enum ScheduleEvent {
     ///
     /// Survivor byte-consistency after a kill is a property of
     /// `DisconnectBehavior::ContinueWithout` over a clean-enough link (the
-    /// freeze-convergence path). Under `Halt` the mesh instead halts with
-    /// fabricated frames (defect D13), and under heavy loss a survivor could
-    /// confirm a fabricated slot value the dead peer had already contributed —
-    /// so the oracle's unmasked confirmed-input agreement is only sound for the
-    /// `ContinueWithout` case the planted tests use.
+    /// freeze-convergence path). Under `Halt` the mesh instead freezes each
+    /// session at its pre-disconnect confirmation ceiling. The planted crash
+    /// tests use `ContinueWithout` because they assert survivor availability.
     ///
-    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    /// Covered by both planted and generated lifecycle schedules.
     PeerKill { peer: usize },
     /// Permanently kill a peer that is configured as one of the redundant
     /// spectator hosts. The runtime effect is the same crash model as
@@ -339,7 +372,7 @@ pub enum ScheduleEvent {
     /// `host` must appear in [`SimConfig::spectator_hosts`]. This pins spectator
     /// failover coverage separately from ordinary mesh crash coverage.
     ///
-    /// Planted by lifecycle tests, not yet emitted by the random generator.
+    /// Covered by both planted and generated lifecycle schedules.
     SpectatorHostKill { host: usize },
     /// Reactivate player slot `slot` through the public hot-join path. The
     /// runner first constructs a fresh hot-joiner for that slot; once that
@@ -350,15 +383,46 @@ pub enum ScheduleEvent {
     ///
     /// Requires the crate's `hot-join` feature at runtime. Hot-join schedules
     /// must use input delay 0 and `max_prediction >= 1`, matching
-    /// `SessionBuilder::start_hot_join_session`'s public contract. Planted by
-    /// lifecycle tests, not yet emitted by the random generator.
+    /// `SessionBuilder::start_hot_join_session`'s public contract. Covered by
+    /// planted schedules and generated two-player lifecycle cells.
     HotJoin { slot: usize },
     /// Reset every link to clean and release all held traffic.
     HealAll,
 }
 
+/// Stable classifier for schedule operations that change peer/application
+/// lifecycle rather than only link behavior.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LifecycleEventKind {
+    PeerStall,
+    SetInputDelay,
+    GracefulRemove,
+    LegacyDisconnect,
+    PeerKill,
+    SpectatorHostKill,
+    HotJoin,
+}
+
+impl ScheduleEvent {
+    /// Returns the stable lifecycle class for this event, if any.
+    #[must_use]
+    pub const fn lifecycle_kind(&self) -> Option<LifecycleEventKind> {
+        match self {
+            Self::PeerStall { .. } => Some(LifecycleEventKind::PeerStall),
+            Self::SetInputDelay { .. } => Some(LifecycleEventKind::SetInputDelay),
+            Self::GracefulRemove { .. } => Some(LifecycleEventKind::GracefulRemove),
+            Self::LegacyDisconnect { .. } => Some(LifecycleEventKind::LegacyDisconnect),
+            Self::PeerKill { .. } => Some(LifecycleEventKind::PeerKill),
+            Self::SpectatorHostKill { .. } => Some(LifecycleEventKind::SpectatorHostKill),
+            Self::HotJoin { .. } => Some(LifecycleEventKind::HotJoin),
+            Self::SetLink { .. } | Self::Block { .. } | Self::Hold { .. } | Self::HealAll => None,
+        }
+    }
+}
+
 /// A fully materialized simulation plan. Serializable (corpus format).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Schedule {
     /// Serialized-layout version.
     pub schema_version: u32,
@@ -375,6 +439,472 @@ pub struct Schedule {
     /// Step at which [`ScheduleEvent::HealAll`] fires (always present in
     /// `events`); the remaining steps are the clean drain window.
     pub heal_at: u32,
+}
+
+impl Schedule {
+    /// Counts lifecycle operations after validating that the materialized
+    /// schedule is structurally executable.
+    ///
+    /// This is the fleet's non-vacuity premise: a `Lifecycle` generator cell
+    /// must report at least one effective operation rather than silently
+    /// falling back to link-only noise.
+    pub fn effective_lifecycle_event_count(&self) -> Result<usize, String> {
+        validate_schedule(self)?;
+        Ok(self
+            .events
+            .iter()
+            .filter(|(_, event)| event.lifecycle_kind().is_some())
+            .count())
+    }
+}
+
+/// Returns the deterministic hot-join coordinator for `slot`.
+///
+/// Materialized schedules are validated before this is used, so a valid
+/// hot-join event always has at least one peer other than `slot` available as
+/// an initial coordinator. Runtime lifecycle events may subsequently retire
+/// that coordinator; those sequences are validated separately below when the
+/// retirement is guaranteed by the harness.
+pub(super) fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<usize> {
+    (0..n_players).find(|&peer| peer != slot)
+}
+
+fn link_policy_required_schema(policy: &LinkPolicy) -> u32 {
+    if policy.retransmit_delay.is_zero() {
+        1
+    } else {
+        9
+    }
+}
+
+fn event_required_schema(event: &ScheduleEvent) -> u32 {
+    match event {
+        ScheduleEvent::SetLink { policy, .. } => link_policy_required_schema(policy),
+        ScheduleEvent::Block { .. } | ScheduleEvent::Hold { .. } | ScheduleEvent::HealAll => 1,
+        ScheduleEvent::PeerStall { .. } => 2,
+        ScheduleEvent::SetInputDelay { .. } => 3,
+        ScheduleEvent::PeerKill { .. } => 4,
+        ScheduleEvent::GracefulRemove { .. } => 5,
+        ScheduleEvent::LegacyDisconnect { .. } => 6,
+        ScheduleEvent::SpectatorHostKill { .. } => 7,
+        ScheduleEvent::HotJoin { .. } => 8,
+    }
+}
+
+fn required_schema_version(schedule: &Schedule) -> u32 {
+    let mut required = if schedule.config.noise == BackgroundNoise::ReliableFifo {
+        9
+    } else {
+        1
+    };
+    for (_, _, policy) in &schedule.initial_links {
+        required = required.max(link_policy_required_schema(policy));
+    }
+    for (_, event) in &schedule.events {
+        required = required.max(event_required_schema(event));
+    }
+    required
+}
+
+fn validate_probability(value: f64, field: &str, context: &str) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!(
+            "{context} {field} must be finite and within 0.0..=1.0 (got {value:?})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_link_policy(policy: &LinkPolicy, context: &str) -> Result<(), String> {
+    validate_probability(policy.drop_rate, "drop_rate", context)?;
+    validate_probability(policy.dup_rate, "dup_rate", context)?;
+    validate_probability(policy.burst_rate, "burst_rate", context)?;
+    let burst_rate_enabled = policy.burst_rate > 0.0;
+    let burst_len_enabled = policy.burst_len > 0;
+    if burst_rate_enabled != burst_len_enabled {
+        return Err(format!(
+            "{context} burst_rate/burst_len must both be zero or both be enabled \
+             (got burst_rate={:?}, burst_len={})",
+            policy.burst_rate, policy.burst_len
+        ));
+    }
+    for (field, value) in [
+        ("base_delay", policy.base_delay),
+        ("jitter", policy.jitter),
+        ("retransmit_delay", policy.retransmit_delay),
+    ] {
+        if value > MAX_SIMULATION_LINK_DELAY {
+            return Err(format!(
+                "{context} {field} must be <= {MAX_SIMULATION_LINK_DELAY:?} (got {value:?})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a materialized schedule before replay, shrinking, or execution.
+///
+/// Generated schedules satisfy these invariants by construction. Serialized
+/// corpus entries and shrink candidates are untrusted inputs, however, so this
+/// function returns a diagnostic instead of relying on indexing panics deep in
+/// the runner. [`super::run`] preserves the existing fail-loud test behavior by
+/// turning the returned diagnostic into one boundary panic.
+pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
+    if schedule.schema_version == 0 || schedule.schema_version > SCHEDULE_SCHEMA_VERSION {
+        return Err(format!(
+            "schedule schema_version must be within 1..={SCHEDULE_SCHEMA_VERSION} (got {})",
+            schedule.schema_version
+        ));
+    }
+    let required_schema = required_schema_version(schedule);
+    if schedule.schema_version < required_schema {
+        return Err(format!(
+            "schedule schema_version {} under-declares capability requiring schema_version \
+             {required_schema}",
+            schedule.schema_version
+        ));
+    }
+
+    let n = schedule.config.n_players;
+    if !(2..=16).contains(&n) {
+        return Err(format!(
+            "materialized simulation schedules must use 2..=16 players (got {n})"
+        ));
+    }
+    if !(2..=MAX_SIMULATION_STEPS).contains(&schedule.config.steps) {
+        return Err(format!(
+            "materialized simulation schedules need 2..={MAX_SIMULATION_STEPS} steps (got {})",
+            schedule.config.steps
+        ));
+    }
+    if schedule.config.input_delay > MAX_FRAME_DELAY {
+        return Err(format!(
+            "input_delay must be <= {MAX_FRAME_DELAY} (got {})",
+            schedule.config.input_delay
+        ));
+    }
+    if schedule.config.max_prediction > MAX_FRAME_DELAY {
+        return Err(format!(
+            "max_prediction must be <= {MAX_FRAME_DELAY} (got {})",
+            schedule.config.max_prediction
+        ));
+    }
+    if schedule.config.desync_interval == 0 {
+        return Err("desync_interval must be >= 1 when desync detection is enabled".to_owned());
+    }
+
+    if schedule.events.len() > MAX_SIMULATION_EVENTS {
+        return Err(format!(
+            "schedule has {} events (maximum {MAX_SIMULATION_EVENTS})",
+            schedule.events.len()
+        ));
+    }
+
+    if !schedule
+        .events
+        .windows(2)
+        .all(|pair| pair[0].0 <= pair[1].0)
+    {
+        return Err("schedule events must be sorted by nondecreasing step".to_owned());
+    }
+    for (step, _) in &schedule.events {
+        if *step >= schedule.config.steps {
+            return Err(format!(
+                "schedule event at step {step} is outside the run (0..{})",
+                schedule.config.steps
+            ));
+        }
+    }
+    if let Some(last_heal) = schedule
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
+        .map(|(step, _)| *step)
+        .max()
+    {
+        for (step, event) in &schedule.events {
+            if *step > last_heal && !matches!(event, ScheduleEvent::HealAll) {
+                return Err(format!(
+                    "non-HealAll event at step {step} occurs after the last HealAll at {last_heal}"
+                ));
+            }
+        }
+    }
+
+    let has_hot_join = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { .. }));
+    #[cfg(not(feature = "hot-join"))]
+    if has_hot_join {
+        return Err("ScheduleEvent::HotJoin requires the crate's `hot-join` feature".to_owned());
+    }
+    if has_hot_join {
+        if schedule.config.input_delay != 0 {
+            return Err(format!(
+                "HotJoin schedules must use input_delay 0 (got {})",
+                schedule.config.input_delay
+            ));
+        }
+        if schedule.config.max_prediction < 1 {
+            return Err(format!(
+                "HotJoin schedules must use max_prediction >= 1 (got {})",
+                schedule.config.max_prediction
+            ));
+        }
+        if n >= 3 && schedule.config.save_mode != SavePolicy::EveryFrame {
+            return Err(format!(
+                "N-peer HotJoin schedules must use save_mode EveryFrame (got {:?})",
+                schedule.config.save_mode
+            ));
+        }
+    }
+
+    let expected_links = n * (n - 1);
+    if schedule.initial_links.len() != expected_links {
+        return Err(
+            "initial_links must contain exactly one directed policy for every non-self pair"
+                .to_owned(),
+        );
+    }
+    let mut seen_links = BTreeSet::new();
+    for (from, to, _) in &schedule.initial_links {
+        if *from >= n || *to >= n {
+            return Err(format!(
+                "initial link ({from} -> {to}) out of range for a {n}-peer mesh"
+            ));
+        }
+        if from == to {
+            return Err(format!(
+                "initial link ({from} -> {to}) must not target itself"
+            ));
+        }
+        if !seen_links.insert((*from, *to)) {
+            return Err(format!("duplicate initial link ({from} -> {to})"));
+        }
+    }
+    for (from, to, policy) in &schedule.initial_links {
+        validate_link_policy(policy, &format!("initial link ({from} -> {to})"))?;
+    }
+
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::SetLink { from, to, .. }
+            | ScheduleEvent::Block { from, to, .. }
+            | ScheduleEvent::Hold { from, to, .. } => {
+                if *from >= n || *to >= n {
+                    return Err(format!(
+                        "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
+                    ));
+                }
+                if from == to {
+                    return Err(format!(
+                        "schedule event link ({from} -> {to}) must not target itself"
+                    ));
+                }
+            },
+            ScheduleEvent::PeerStall { peer, steps } => {
+                if *peer >= n {
+                    return Err(format!(
+                        "PeerStall peer {peer} out of range for a {n}-peer mesh"
+                    ));
+                }
+                if *steps == 0 {
+                    return Err(
+                        "PeerStall steps must be > 0 (a 0-step stall freezes nothing)".to_owned(),
+                    );
+                }
+            },
+            ScheduleEvent::SetInputDelay { peer, delay } => {
+                if *peer >= n {
+                    return Err(format!(
+                        "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
+                    ));
+                }
+                if *delay > MAX_FRAME_DELAY {
+                    return Err(format!(
+                        "SetInputDelay delay must be <= {MAX_FRAME_DELAY} (got {delay})"
+                    ));
+                }
+            },
+            ScheduleEvent::GracefulRemove { by, target }
+            | ScheduleEvent::LegacyDisconnect { by, target } => {
+                if *by >= n || *target >= n {
+                    return Err(format!(
+                        "lifecycle drop ({by} -> {target}) out of range for a {n}-peer mesh"
+                    ));
+                }
+                if by == target {
+                    return Err(format!(
+                        "lifecycle drop target must be remote (by={by}, target={target})"
+                    ));
+                }
+            },
+            ScheduleEvent::PeerKill { peer } => {
+                if *peer >= n {
+                    return Err(format!(
+                        "PeerKill peer {peer} out of range for a {n}-peer mesh"
+                    ));
+                }
+            },
+            ScheduleEvent::SpectatorHostKill { host } => {
+                if *host >= n {
+                    return Err(format!(
+                        "SpectatorHostKill host {host} out of range for a {n}-peer mesh"
+                    ));
+                }
+            },
+            ScheduleEvent::HotJoin { slot } => {
+                if *slot >= n {
+                    return Err(format!(
+                        "HotJoin slot {slot} out of range for a {n}-peer mesh"
+                    ));
+                }
+            },
+            ScheduleEvent::HealAll => {},
+        }
+    }
+    for (_, event) in &schedule.events {
+        if let ScheduleEvent::SetLink { from, to, policy } = event {
+            validate_link_policy(policy, &format!("SetLink ({from} -> {to})"))?;
+        }
+    }
+
+    // Events execute in their stable serialized order at step-top. A stalled
+    // application does not poll, advance, or invoke local configuration APIs,
+    // so SetInputDelay cannot occur inside that peer's half-open stall window.
+    // Same-step SetInputDelay-before-PeerStall is valid; the reverse order is
+    // rejected, matching the runner's event application order exactly.
+    let mut stalled_until = vec![0u32; n];
+    for (step, event) in &schedule.events {
+        match event {
+            ScheduleEvent::PeerStall { peer, steps } => {
+                stalled_until[*peer] = stalled_until[*peer].max(step.saturating_add(*steps));
+            },
+            ScheduleEvent::SetInputDelay { peer, .. } if *step < stalled_until[*peer] => {
+                return Err(format!(
+                    "SetInputDelay for peer {peer} at step {step} overlaps its PeerStall window \
+                     ending at step {} (a stalled application cannot invoke local config APIs)",
+                    stalled_until[*peer]
+                ));
+            },
+            ScheduleEvent::SetLink { .. }
+            | ScheduleEvent::Block { .. }
+            | ScheduleEvent::Hold { .. }
+            | ScheduleEvent::SetInputDelay { .. }
+            | ScheduleEvent::GracefulRemove { .. }
+            | ScheduleEvent::LegacyDisconnect { .. }
+            | ScheduleEvent::PeerKill { .. }
+            | ScheduleEvent::SpectatorHostKill { .. }
+            | ScheduleEvent::HotJoin { .. }
+            | ScheduleEvent::HealAll => {},
+        }
+    }
+
+    if schedule.config.clock_skew_ppm.len() > n {
+        return Err(format!(
+            "clock_skew_ppm has {} entries for a {n}-peer mesh",
+            schedule.config.clock_skew_ppm.len()
+        ));
+    }
+    for &ppm in &schedule.config.clock_skew_ppm {
+        if ppm < -1_000_000 {
+            return Err(format!(
+                "clock_skew_ppm must be >= -1_000_000 (-100% = a frozen clock); a \
+                 lower value would run time backwards (got {ppm})"
+            ));
+        }
+    }
+    let mut starved_peers = BTreeSet::new();
+    for &peer in &schedule.config.starve_events {
+        if peer >= n {
+            return Err(format!(
+                "starve_events peer {peer} out of range for a {n}-peer mesh"
+            ));
+        }
+        if !starved_peers.insert(peer) {
+            return Err(format!("duplicate starve_events peer {peer}"));
+        }
+    }
+
+    let mut spectator_host_enabled = vec![false; n];
+    for &peer in &schedule.config.spectator_hosts {
+        if peer >= n {
+            return Err(format!(
+                "spectator_hosts peer {peer} out of range for a {n}-peer mesh"
+            ));
+        }
+        if spectator_host_enabled[peer] {
+            return Err(format!("duplicate spectator_hosts peer {peer}"));
+        }
+        spectator_host_enabled[peer] = true;
+    }
+
+    // Only guaranteed harness kills can make a later SpectatorHostKill or
+    // HotJoin malformed up front. User API drops retire only after the runtime
+    // call returns `Ok`, so they do not update this mask.
+    let mut retired_by_guaranteed_kill = vec![false; n];
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
+            ScheduleEvent::PeerKill { peer } => {
+                retired_by_guaranteed_kill[*peer] = true;
+            },
+            ScheduleEvent::SpectatorHostKill { host } => {
+                if !spectator_host_enabled[*host] {
+                    return Err(format!(
+                        "SpectatorHostKill host {host} is not configured in spectator_hosts"
+                    ));
+                }
+                if retired_by_guaranteed_kill[*host] {
+                    return Err(format!(
+                        "SpectatorHostKill host {host} is already retired by an earlier kill event"
+                    ));
+                }
+                retired_by_guaranteed_kill[*host] = true;
+            },
+            ScheduleEvent::HotJoin { slot } => {
+                if retired_by_guaranteed_kill[*slot] {
+                    return Err(format!(
+                        "HotJoin slot {slot} is already retired by an earlier kill event"
+                    ));
+                }
+                let Some(host) = hot_join_host_for_slot(n, *slot) else {
+                    return Err(format!(
+                        "HotJoin requires at least two players; got n_players={n}, slot={slot}"
+                    ));
+                };
+                if retired_by_guaranteed_kill[host] {
+                    return Err(format!(
+                        "HotJoin slot {slot}'s coordinator peer {host} is already retired by an \
+                         earlier kill event"
+                    ));
+                }
+            },
+            ScheduleEvent::SetLink { .. }
+            | ScheduleEvent::Block { .. }
+            | ScheduleEvent::Hold { .. }
+            | ScheduleEvent::PeerStall { .. }
+            | ScheduleEvent::SetInputDelay { .. }
+            | ScheduleEvent::HealAll => {},
+        }
+    }
+
+    if let Some(size) = schedule.config.event_queue_size {
+        if size < 10 {
+            return Err(format!(
+                "event_queue_size must be >= 10 (SessionBuilder rejects smaller); got {size}"
+            ));
+        }
+    }
+    if !(1..=MAX_SIMULATION_STEP_DT_MS).contains(&schedule.config.step_dt_ms) {
+        return Err(format!(
+            "step_dt_ms must be within 1..={MAX_SIMULATION_STEP_DT_MS} (got {})",
+            schedule.config.step_dt_ms
+        ));
+    }
+
+    Ok(())
 }
 
 /// Storyline kinds — multi-step fault narratives layered over the background
@@ -445,11 +975,112 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
     }
 }
 
+const GENERATED_LIFECYCLE_KINDS: [LifecycleEventKind; 5] = [
+    LifecycleEventKind::PeerStall,
+    LifecycleEventKind::SetInputDelay,
+    LifecycleEventKind::PeerKill,
+    LifecycleEventKind::GracefulRemove,
+    LifecycleEventKind::SpectatorHostKill,
+];
+
+fn generated_lifecycle_kind(seed: u64, config: &SimConfig) -> Option<LifecycleEventKind> {
+    if config.scenario_mix == ScenarioMix::NetworkOnly {
+        return None;
+    }
+
+    let mut eligible = GENERATED_LIFECYCLE_KINDS.to_vec();
+    if config.input_delay >= MAX_FRAME_DELAY {
+        eligible.retain(|kind| *kind != LifecycleEventKind::SetInputDelay);
+    }
+    #[cfg(feature = "hot-join")]
+    if config.n_players == 2 && config.max_prediction >= 1 {
+        eligible.push(LifecycleEventKind::HotJoin);
+    }
+
+    let index = usize::try_from(seed % u64::try_from(eligible.len()).unwrap_or(1)).unwrap_or(0);
+    eligible.get(index).copied()
+}
+
+fn prepare_lifecycle_config(seed: u64, config: &mut SimConfig) -> Option<LifecycleEventKind> {
+    let kind = generated_lifecycle_kind(seed, config)?;
+    let subject = usize::try_from(seed % u64::try_from(config.n_players).unwrap_or(1)).unwrap_or(0);
+
+    match kind {
+        LifecycleEventKind::PeerKill | LifecycleEventKind::GracefulRemove => {
+            // Retirement stories are graceful-degradation probes; Halt
+            // intentionally stops the whole mesh and is covered by the Halt
+            // fail-closed production pin.
+            config.disconnect_behavior = DropPolicy::ContinueWithout;
+        },
+        LifecycleEventKind::SpectatorHostKill => {
+            config.disconnect_behavior = DropPolicy::ContinueWithout;
+            let surviving_host = (subject + 1) % config.n_players;
+            for host in [subject, surviving_host] {
+                if !config.spectator_hosts.contains(&host) {
+                    config.spectator_hosts.push(host);
+                }
+            }
+        },
+        LifecycleEventKind::HotJoin => {
+            // Public hot-join construction requires zero input delay. N-peer
+            // snapshot/ack convergence also needs the established 900-step
+            // lifecycle budget (the planted hot-join schedule heals at 650);
+            // shorter smoke schedules can end while the joiner is legitimately
+            // still HotJoining.
+            config.input_delay = 0;
+            config.steps = config.steps.max(900);
+            config.disconnect_behavior = DropPolicy::ContinueWithout;
+        },
+        LifecycleEventKind::PeerStall | LifecycleEventKind::SetInputDelay => {},
+        LifecycleEventKind::LegacyDisconnect => {
+            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        },
+    }
+    Some(kind)
+}
+
+fn lifecycle_event_step(seed: u64, heal_at: u32) -> u32 {
+    let last_pre_heal = heal_at.saturating_sub(1);
+    let first = last_pre_heal.min(100);
+    let width = last_pre_heal.saturating_sub(first).saturating_add(1);
+    first.saturating_add(u32::try_from(seed % u64::from(width.max(1))).unwrap_or(0))
+}
+
+fn materialize_lifecycle_event(
+    kind: LifecycleEventKind,
+    seed: u64,
+    config: &SimConfig,
+) -> ScheduleEvent {
+    let n = config.n_players;
+    let subject = usize::try_from(seed % u64::try_from(n).unwrap_or(1)).unwrap_or(0);
+    let other = (subject + 1) % n;
+    match kind {
+        LifecycleEventKind::PeerStall => ScheduleEvent::PeerStall {
+            peer: subject,
+            steps: 20 + u32::try_from(seed % 21).unwrap_or(0),
+        },
+        LifecycleEventKind::SetInputDelay => ScheduleEvent::SetInputDelay {
+            peer: subject,
+            delay: config.input_delay.saturating_add(1).min(MAX_FRAME_DELAY),
+        },
+        LifecycleEventKind::PeerKill => ScheduleEvent::PeerKill { peer: subject },
+        LifecycleEventKind::GracefulRemove => ScheduleEvent::GracefulRemove {
+            by: subject,
+            target: other,
+        },
+        LifecycleEventKind::SpectatorHostKill => ScheduleEvent::SpectatorHostKill { host: subject },
+        LifecycleEventKind::HotJoin => ScheduleEvent::HotJoin { slot: subject },
+        LifecycleEventKind::LegacyDisconnect => {
+            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        },
+    }
+}
+
 /// Generates the fully materialized schedule for `(seed, config)`.
 ///
 /// Pure and deterministic: same inputs, same schedule, always.
 #[must_use]
-pub fn generate(seed: u64, config: SimConfig) -> Schedule {
+pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
     assert!(
         (2..=16).contains(&config.n_players),
         "simulation supports 2..=16 players (got {})",
@@ -466,6 +1097,7 @@ pub fn generate(seed: u64, config: SimConfig) -> Schedule {
          the run (got {})",
         config.steps
     );
+    let lifecycle_kind = prepare_lifecycle_config(seed, &mut config);
     // Domain-separated generator stream; link noise gets its own stream so
     // shrinking events never perturbs background rolls.
     let mut rng = Pcg32::seed_from_u64(seed ^ 0x5EED_5EED_0000_0001);
@@ -582,6 +1214,12 @@ pub fn generate(seed: u64, config: SimConfig) -> Schedule {
         }
     }
 
+    if let Some(kind) = lifecycle_kind {
+        events.push((
+            lifecycle_event_step(seed, heal_at),
+            materialize_lifecycle_event(kind, seed, &config),
+        ));
+    }
     events.push((heal_at, ScheduleEvent::HealAll));
     // Stable sort: same-step events keep their push order.
     events.sort_by_key(|(step, _)| *step);
@@ -738,6 +1376,839 @@ mod tests {
     }
 
     #[test]
+    fn validator_accepts_generated_and_valid_hand_authored_schedules() {
+        for n_players in 2..=16 {
+            let schedule = generate(42, SimConfig::smoke(n_players));
+            assert_eq!(
+                validate_schedule(&schedule),
+                Ok(()),
+                "generated n={n_players} schedule must validate"
+            );
+        }
+
+        let mut hand_authored = generate(7, SimConfig::smoke(3));
+        hand_authored.config.spectator_hosts = vec![0, 1];
+        hand_authored
+            .events
+            .push((100, ScheduleEvent::PeerStall { peer: 2, steps: 20 }));
+        hand_authored
+            .events
+            .push((150, ScheduleEvent::SetInputDelay { peer: 1, delay: 2 }));
+        hand_authored
+            .events
+            .push((200, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        hand_authored.events.sort_by_key(|(step, _)| *step);
+        assert_eq!(
+            validate_schedule(&hand_authored),
+            Ok(()),
+            "a structurally valid hand-authored lifecycle schedule must validate"
+        );
+    }
+
+    #[test]
+    fn network_only_default_preserves_representative_generated_schedules() {
+        for (seed, n_players) in [(1, 2), (7, 4), (34, 8), (99, 16)] {
+            let default_config = SimConfig::smoke(n_players);
+            let explicit_config = SimConfig {
+                scenario_mix: ScenarioMix::NetworkOnly,
+                ..default_config.clone()
+            };
+            assert_eq!(
+                generate(seed, default_config.clone()),
+                generate(seed, explicit_config),
+                "the default scenario axis must not perturb seed {seed} n={n_players}"
+            );
+
+            let mut old_value = serde_json::to_value(&default_config).unwrap();
+            assert!(
+                old_value
+                    .as_object_mut()
+                    .and_then(|config| config.remove("scenario_mix"))
+                    .is_some(),
+                "serialized SimConfig must contain scenario_mix before migration removal"
+            );
+            let defaulted: SimConfig = serde_json::from_value(old_value).unwrap();
+            assert_eq!(defaulted.scenario_mix, ScenarioMix::NetworkOnly);
+            assert_eq!(
+                generate(seed, default_config),
+                generate(seed, defaulted),
+                "an old/defaulted config must preserve seed {seed} n={n_players} exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn validator_accepts_supported_legacy_schema_versions_when_capabilities_fit() {
+        let mut v1_value = serde_json::to_value(generate(7, SimConfig::smoke(3))).unwrap();
+        *v1_value
+            .get_mut("schema_version")
+            .expect("schedule serializes schema_version") = serde_json::json!(1);
+        let v1_config = v1_value
+            .get_mut("config")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("schedule serializes config");
+        assert!(v1_config.remove("scenario_mix").is_some());
+        let v1: Schedule = serde_json::from_value(v1_value).unwrap();
+        assert_eq!(validate_schedule(&v1), Ok(()));
+
+        let mut v8 = generate(
+            8,
+            SimConfig {
+                input_delay: 0,
+                ..SimConfig::smoke(3)
+            },
+        );
+        v8.schema_version = 8;
+        #[cfg(feature = "hot-join")]
+        {
+            v8.events.push((100, ScheduleEvent::HotJoin { slot: 1 }));
+            v8.events.sort_by_key(|(step, _)| *step);
+        }
+        let v8_json = serde_json::to_vec(&v8).unwrap();
+        let v8_round_trip: Schedule = serde_json::from_slice(&v8_json).unwrap();
+        assert_eq!(validate_schedule(&v8_round_trip), Ok(()));
+
+        let mut under_declared_v8 = v8_round_trip;
+        under_declared_v8.config.noise = BackgroundNoise::ReliableFifo;
+        assert!(validate_schedule(&under_declared_v8)
+            .expect_err("schema v8 cannot claim the v9 reliable-FIFO capability")
+            .contains("requiring schema_version 9"));
+    }
+
+    #[test]
+    fn schema_capability_floor_tracks_every_versioned_event() {
+        let cases = [
+            (ScheduleEvent::PeerStall { peer: 1, steps: 10 }, 2),
+            (ScheduleEvent::SetInputDelay { peer: 1, delay: 2 }, 3),
+            (ScheduleEvent::PeerKill { peer: 1 }, 4),
+            (ScheduleEvent::GracefulRemove { by: 0, target: 1 }, 5),
+            (ScheduleEvent::LegacyDisconnect { by: 0, target: 1 }, 6),
+            (ScheduleEvent::SpectatorHostKill { host: 0 }, 7),
+            (ScheduleEvent::HotJoin { slot: 1 }, 8),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        retransmit_delay: Duration::from_millis(200),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                9,
+            ),
+        ];
+
+        for (event, required) in cases {
+            let mut schedule = generate(7, SimConfig::smoke(2));
+            schedule
+                .events
+                .retain(|(_, existing)| matches!(existing, ScheduleEvent::HealAll));
+            if matches!(event, ScheduleEvent::SpectatorHostKill { .. }) {
+                schedule.config.spectator_hosts = vec![0, 1];
+            }
+            if matches!(event, ScheduleEvent::HotJoin { .. }) {
+                schedule.config.input_delay = 0;
+            }
+            schedule.events.push((100, event));
+            schedule.events.sort_by_key(|(step, _)| *step);
+
+            schedule.schema_version = required - 1;
+            let error = validate_schedule(&schedule)
+                .expect_err("a schedule cannot under-declare a versioned capability");
+            assert!(
+                error.contains(&format!("requiring schema_version {required}")),
+                "wrong capability floor for schema v{required}: {error}"
+            );
+
+            schedule.schema_version = required;
+            #[cfg(feature = "hot-join")]
+            assert_eq!(
+                validate_schedule(&schedule),
+                Ok(()),
+                "schema v{required} must accept its declared capability"
+            );
+            #[cfg(not(feature = "hot-join"))]
+            if required == 8 {
+                assert!(validate_schedule(&schedule)
+                    .expect_err("HotJoin still requires the build feature")
+                    .contains("requires the crate's `hot-join` feature"));
+            } else {
+                assert_eq!(
+                    validate_schedule(&schedule),
+                    Ok(()),
+                    "schema v{required} must accept its declared capability"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_schedule_envelopes_reject_unknown_fields() {
+        let schedule = generate(7, SimConfig::smoke(3));
+
+        let mut unknown_schedule = serde_json::to_value(&schedule).unwrap();
+        unknown_schedule
+            .as_object_mut()
+            .expect("Schedule serializes as an object")
+            .insert("unknown_schedule_field".to_owned(), serde_json::json!(true));
+        let schedule_error = serde_json::from_value::<Schedule>(unknown_schedule)
+            .expect_err("unknown Schedule fields must be rejected");
+        assert!(schedule_error.to_string().contains("unknown field"));
+
+        let mut unknown_config = serde_json::to_value(&schedule).unwrap();
+        unknown_config
+            .get_mut("config")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("Schedule config serializes as an object")
+            .insert("unknown_config_field".to_owned(), serde_json::json!(true));
+        let config_error = serde_json::from_value::<Schedule>(unknown_config)
+            .expect_err("unknown SimConfig fields must be rejected");
+        assert!(config_error.to_string().contains("unknown field"));
+
+        let scenario_error = serde_json::from_str::<ScenarioMix>(r#""FutureMix""#)
+            .expect_err("unknown ScenarioMix variants must be rejected");
+        assert!(scenario_error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn lifecycle_generator_respects_input_delay_and_hot_join_boundaries() {
+        for seed in 0..60u64 {
+            let max_delay = generate(
+                seed,
+                SimConfig {
+                    input_delay: MAX_FRAME_DELAY,
+                    scenario_mix: ScenarioMix::Lifecycle,
+                    ..SimConfig::smoke(4)
+                },
+            );
+            assert_eq!(validate_schedule(&max_delay), Ok(()));
+            assert!(
+                max_delay
+                    .events
+                    .iter()
+                    .all(|(_, event)| !matches!(event, ScheduleEvent::SetInputDelay { .. })),
+                "seed {seed} generated a non-substantive increase at the maximum input delay"
+            );
+
+            #[cfg(feature = "hot-join")]
+            {
+                let no_prediction = generate(
+                    seed,
+                    SimConfig {
+                        max_prediction: 0,
+                        scenario_mix: ScenarioMix::Lifecycle,
+                        ..SimConfig::smoke(2)
+                    },
+                );
+                assert_eq!(validate_schedule(&no_prediction), Ok(()));
+                assert!(
+                    no_prediction
+                        .events
+                        .iter()
+                        .all(|(_, event)| !matches!(event, ScheduleEvent::HotJoin { .. })),
+                    "seed {seed} generated HotJoin with max_prediction=0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_generator_covers_every_eligible_class_with_effective_valid_events() {
+        let mut seen = std::collections::BTreeSet::new();
+
+        for n_players in [4usize, 2] {
+            for seed in 0..60u64 {
+                let schedule = generate(
+                    seed,
+                    SimConfig {
+                        scenario_mix: ScenarioMix::Lifecycle,
+                        ..SimConfig::smoke(n_players)
+                    },
+                );
+                assert_eq!(
+                    validate_schedule(&schedule),
+                    Ok(()),
+                    "lifecycle seed {seed} n={n_players} must materialize a valid schedule"
+                );
+                assert_eq!(
+                    schedule.effective_lifecycle_event_count(),
+                    Ok(1),
+                    "lifecycle seed {seed} n={n_players} must contain one effective operation"
+                );
+
+                let (step, event) = schedule
+                    .events
+                    .iter()
+                    .find(|(_, event)| event.lifecycle_kind().is_some())
+                    .expect("the effective lifecycle event must be present");
+                assert!(
+                    *step < schedule.heal_at,
+                    "lifecycle event must occur before heal: seed={seed}, step={step}, heal={} ",
+                    schedule.heal_at
+                );
+                let kind = event.lifecycle_kind().expect("event was selected by kind");
+                let _ = seen.insert(kind);
+
+                match event {
+                    ScheduleEvent::PeerKill { .. } => assert_eq!(
+                        schedule.config.disconnect_behavior,
+                        DropPolicy::ContinueWithout,
+                        "generated crash must leave at least one survivor able to continue"
+                    ),
+                    ScheduleEvent::SpectatorHostKill { host } => {
+                        assert!(schedule.config.spectator_hosts.contains(host));
+                        assert!(
+                            schedule.config.spectator_hosts.len() >= 2,
+                            "generated spectator kill must retain a redundant live host"
+                        );
+                        assert_eq!(
+                            schedule.config.disconnect_behavior,
+                            DropPolicy::ContinueWithout
+                        );
+                    },
+                    ScheduleEvent::HotJoin { .. } => {
+                        assert_eq!(n_players, 2);
+                        assert_eq!(schedule.config.input_delay, 0);
+                    },
+                    ScheduleEvent::PeerStall { .. }
+                    | ScheduleEvent::SetInputDelay { .. }
+                    | ScheduleEvent::GracefulRemove { .. } => {},
+                    ScheduleEvent::LegacyDisconnect { .. }
+                    | ScheduleEvent::SetLink { .. }
+                    | ScheduleEvent::Block { .. }
+                    | ScheduleEvent::Hold { .. }
+                    | ScheduleEvent::HealAll => {
+                        panic!("unexpected generated lifecycle event: {event:?}")
+                    },
+                }
+            }
+        }
+
+        let expected = std::collections::BTreeSet::from([
+            LifecycleEventKind::PeerStall,
+            LifecycleEventKind::SetInputDelay,
+            LifecycleEventKind::PeerKill,
+            LifecycleEventKind::GracefulRemove,
+            LifecycleEventKind::SpectatorHostKill,
+            #[cfg(feature = "hot-join")]
+            LifecycleEventKind::HotJoin,
+        ]);
+        assert_eq!(
+            seen, expected,
+            "bounded lifecycle seeds must cover every eligible generated class"
+        );
+    }
+
+    #[test]
+    fn lifecycle_generator_classes_execute_under_full_oracle() {
+        let mut executed = std::collections::BTreeSet::new();
+
+        for n_players in [4usize, 2] {
+            for seed in 0..60u64 {
+                let schedule = generate(
+                    seed,
+                    SimConfig {
+                        noise: BackgroundNoise::Clean,
+                        scenario_mix: ScenarioMix::Lifecycle,
+                        ..SimConfig::smoke(n_players)
+                    },
+                );
+                let kind = schedule
+                    .events
+                    .iter()
+                    .find_map(|(_, event)| event.lifecycle_kind())
+                    .expect("Lifecycle mode materializes one classified event");
+                if !executed.insert(kind) {
+                    continue;
+                }
+
+                let report = super::super::run(&schedule, &super::super::RunOptions::default());
+                report.expect_pass(&schedule);
+            }
+        }
+
+        let expected = std::collections::BTreeSet::from([
+            LifecycleEventKind::PeerStall,
+            LifecycleEventKind::SetInputDelay,
+            LifecycleEventKind::PeerKill,
+            LifecycleEventKind::GracefulRemove,
+            LifecycleEventKind::SpectatorHostKill,
+            #[cfg(feature = "hot-join")]
+            LifecycleEventKind::HotJoin,
+        ]);
+        assert_eq!(
+            executed, expected,
+            "every eligible lifecycle class must execute through the full oracle"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_set_input_delay_during_peer_stall() {
+        let base = generate(7, SimConfig::smoke(3));
+        let cases = [(100, 100), (100, 120), (100, 149)];
+
+        for (stall_at, delay_at) in cases {
+            let mut schedule = base.clone();
+            schedule
+                .events
+                .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+            schedule
+                .events
+                .push((stall_at, ScheduleEvent::PeerStall { peer: 1, steps: 50 }));
+            schedule
+                .events
+                .push((delay_at, ScheduleEvent::SetInputDelay { peer: 1, delay: 2 }));
+            schedule.events.sort_by_key(|(step, _)| *step);
+            let error = validate_schedule(&schedule)
+                .expect_err("SetInputDelay inside a stall window must be rejected");
+            assert!(
+                error.contains("overlaps its PeerStall window"),
+                "unexpected overlap diagnostic: {error}"
+            );
+        }
+
+        let mut at_boundary = base.clone();
+        at_boundary
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        at_boundary
+            .events
+            .push((100, ScheduleEvent::PeerStall { peer: 1, steps: 50 }));
+        at_boundary
+            .events
+            .push((150, ScheduleEvent::SetInputDelay { peer: 1, delay: 2 }));
+        at_boundary.events.sort_by_key(|(step, _)| *step);
+        assert_eq!(
+            validate_schedule(&at_boundary),
+            Ok(()),
+            "the half-open stall window must permit reconfiguration at its end"
+        );
+
+        let mut before_same_step_stall = base;
+        before_same_step_stall
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        before_same_step_stall
+            .events
+            .push((100, ScheduleEvent::SetInputDelay { peer: 1, delay: 2 }));
+        before_same_step_stall
+            .events
+            .push((100, ScheduleEvent::PeerStall { peer: 1, steps: 50 }));
+        before_same_step_stall.events.sort_by_key(|(step, _)| *step);
+        assert_eq!(
+            validate_schedule(&before_same_step_stall),
+            Ok(()),
+            "stable same-step ordering invokes SetInputDelay before the stall begins"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_malformed_materialized_schedules_with_diagnostics() {
+        let valid = generate(7, SimConfig::smoke(3));
+        let mut cases: Vec<(Schedule, &str)> = Vec::new();
+
+        let mut zero_schema = valid.clone();
+        zero_schema.schema_version = 0;
+        cases.push((zero_schema, "schema_version must be within"));
+
+        let mut future_schema = valid.clone();
+        future_schema.schema_version = SCHEDULE_SCHEMA_VERSION + 1;
+        cases.push((future_schema, "schema_version must be within"));
+
+        let mut under_declared = valid.clone();
+        under_declared.schema_version = 1;
+        under_declared
+            .events
+            .push((100, ScheduleEvent::PeerStall { peer: 1, steps: 10 }));
+        under_declared.events.sort_by_key(|(step, _)| *step);
+        cases.push((under_declared, "under-declares capability"));
+
+        let mut too_few_players = valid.clone();
+        too_few_players.config.n_players = 1;
+        cases.push((too_few_players, "2..=16 players"));
+
+        let mut too_few_steps = valid.clone();
+        too_few_steps.config.steps = 1;
+        cases.push((too_few_steps, "2..="));
+
+        let mut excessive_input_delay = valid.clone();
+        excessive_input_delay.config.input_delay = MAX_FRAME_DELAY + 1;
+        cases.push((excessive_input_delay, "input_delay must be <="));
+
+        let mut zero_desync_interval = valid.clone();
+        zero_desync_interval.config.desync_interval = 0;
+        cases.push((zero_desync_interval, "desync_interval must be >= 1"));
+
+        let mut unsorted = valid.clone();
+        unsorted.events = vec![(10, ScheduleEvent::HealAll), (9, ScheduleEvent::HealAll)];
+        cases.push((unsorted, "sorted by nondecreasing step"));
+
+        let mut event_outside_run = valid.clone();
+        event_outside_run
+            .events
+            .push((event_outside_run.config.steps, ScheduleEvent::HealAll));
+        event_outside_run.events.sort_by_key(|(step, _)| *step);
+        cases.push((event_outside_run, "outside the run"));
+
+        let mut post_heal_fault = valid.clone();
+        post_heal_fault.events.push((
+            post_heal_fault.heal_at + 1,
+            ScheduleEvent::Block {
+                from: 0,
+                to: 1,
+                blocked: true,
+            },
+        ));
+        post_heal_fault.events.sort_by_key(|(step, _)| *step);
+        cases.push((post_heal_fault, "after the last HealAll"));
+
+        let mut missing_link = valid.clone();
+        let _ = missing_link.initial_links.pop();
+        cases.push((missing_link, "exactly one directed policy"));
+
+        let mut out_of_range_link = valid.clone();
+        out_of_range_link.initial_links[0].0 = 9;
+        cases.push((out_of_range_link, "initial link (9 ->"));
+
+        let mut self_link = valid.clone();
+        self_link.initial_links[0].1 = self_link.initial_links[0].0;
+        cases.push((self_link, "must not target itself"));
+
+        let mut duplicate_link = valid.clone();
+        let duplicate_pair = (
+            duplicate_link.initial_links[0].0,
+            duplicate_link.initial_links[0].1,
+        );
+        duplicate_link.initial_links[1].0 = duplicate_pair.0;
+        duplicate_link.initial_links[1].1 = duplicate_pair.1;
+        cases.push((duplicate_link, "duplicate initial link"));
+
+        for (field, value, expected) in [
+            ("drop_rate", f64::NAN, "drop_rate must be finite"),
+            ("dup_rate", -0.1, "dup_rate must be finite"),
+            ("burst_rate", 1.1, "burst_rate must be finite"),
+        ] {
+            let mut invalid_probability = valid.clone();
+            let policy = &mut invalid_probability.initial_links[0].2;
+            match field {
+                "drop_rate" => policy.drop_rate = value,
+                "dup_rate" => policy.dup_rate = value,
+                "burst_rate" => policy.burst_rate = value,
+                _ => unreachable!("table contains only policy probability fields"),
+            }
+            cases.push((invalid_probability, expected));
+        }
+
+        let mut burst_rate_without_length = valid.clone();
+        burst_rate_without_length.initial_links[0].2.burst_rate = 0.1;
+        burst_rate_without_length.initial_links[0].2.burst_len = 0;
+        cases.push((
+            burst_rate_without_length,
+            "burst_rate/burst_len must both be zero or both be enabled",
+        ));
+
+        let mut burst_length_without_rate = valid.clone();
+        burst_length_without_rate.initial_links[0].2.burst_rate = 0.0;
+        burst_length_without_rate.initial_links[0].2.burst_len = 3;
+        cases.push((
+            burst_length_without_rate,
+            "burst_rate/burst_len must both be zero or both be enabled",
+        ));
+
+        let event_cases = [
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        drop_rate: f64::INFINITY,
+                        ..LinkPolicy::clean()
+                    },
+                },
+                "SetLink (0 -> 1) drop_rate must be finite",
+            ),
+            (
+                ScheduleEvent::Block {
+                    from: 0,
+                    to: 0,
+                    blocked: true,
+                },
+                "schedule event link (0 -> 0) must not target itself",
+            ),
+            (
+                ScheduleEvent::PeerStall { peer: 9, steps: 1 },
+                "PeerStall peer 9 out of range",
+            ),
+            (
+                ScheduleEvent::PeerStall { peer: 1, steps: 0 },
+                "PeerStall steps must be > 0",
+            ),
+            (
+                ScheduleEvent::SetInputDelay { peer: 9, delay: 1 },
+                "SetInputDelay peer 9 out of range",
+            ),
+            (
+                ScheduleEvent::SetInputDelay {
+                    peer: 1,
+                    delay: MAX_FRAME_DELAY + 1,
+                },
+                "SetInputDelay delay must be <=",
+            ),
+            (
+                ScheduleEvent::GracefulRemove { by: 1, target: 1 },
+                "lifecycle drop target must be remote",
+            ),
+            (
+                ScheduleEvent::LegacyDisconnect { by: 9, target: 1 },
+                "lifecycle drop (9 -> 1) out of range",
+            ),
+            (
+                ScheduleEvent::PeerKill { peer: 9 },
+                "PeerKill peer 9 out of range",
+            ),
+            (
+                ScheduleEvent::SpectatorHostKill { host: 9 },
+                "SpectatorHostKill host 9 out of range",
+            ),
+        ];
+        for (event, expected) in event_cases {
+            let mut malformed = valid.clone();
+            malformed.events.push((100, event));
+            malformed.events.sort_by_key(|(step, _)| *step);
+            cases.push((malformed, expected));
+        }
+
+        let mut bad_skew = valid.clone();
+        bad_skew.config.clock_skew_ppm = vec![-1_000_001];
+        cases.push((bad_skew, "would run time backwards"));
+
+        let mut too_many_skews = valid.clone();
+        too_many_skews.config.clock_skew_ppm = vec![0; 4];
+        cases.push((too_many_skews, "entries for a 3-peer mesh"));
+
+        let mut bad_starved_peer = valid.clone();
+        bad_starved_peer.config.starve_events = vec![9];
+        cases.push((bad_starved_peer, "starve_events peer 9 out of range"));
+
+        let mut duplicate_starved_peer = valid.clone();
+        duplicate_starved_peer.config.starve_events = vec![1, 1];
+        cases.push((duplicate_starved_peer, "duplicate starve_events peer 1"));
+
+        let mut bad_spectator_peer = valid.clone();
+        bad_spectator_peer.config.spectator_hosts = vec![9];
+        cases.push((bad_spectator_peer, "spectator_hosts peer 9 out of range"));
+
+        let mut duplicate_spectator = valid.clone();
+        duplicate_spectator.config.spectator_hosts = vec![0, 0];
+        cases.push((duplicate_spectator, "duplicate spectator_hosts peer 0"));
+
+        let mut unconfigured_spectator_kill = valid.clone();
+        unconfigured_spectator_kill
+            .events
+            .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        unconfigured_spectator_kill
+            .events
+            .sort_by_key(|(step, _)| *step);
+        cases.push((
+            unconfigured_spectator_kill,
+            "is not configured in spectator_hosts",
+        ));
+
+        let mut already_killed_spectator = valid.clone();
+        already_killed_spectator.config.spectator_hosts = vec![0];
+        already_killed_spectator
+            .events
+            .push((90, ScheduleEvent::PeerKill { peer: 0 }));
+        already_killed_spectator
+            .events
+            .push((100, ScheduleEvent::SpectatorHostKill { host: 0 }));
+        already_killed_spectator
+            .events
+            .sort_by_key(|(step, _)| *step);
+        cases.push((already_killed_spectator, "already retired"));
+
+        let mut small_event_queue = valid.clone();
+        small_event_queue.config.event_queue_size = Some(9);
+        cases.push((small_event_queue, "event_queue_size must be >= 10"));
+
+        let mut zero_step_duration = valid;
+        zero_step_duration.config.step_dt_ms = 0;
+        cases.push((zero_step_duration, "step_dt_ms must be within"));
+
+        for (schedule, expected) in cases {
+            let error = validate_schedule(&schedule)
+                .expect_err("a malformed materialized schedule must be rejected");
+            assert!(
+                error.contains(expected),
+                "expected diagnostic containing {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validator_rejects_out_of_domain_scalar_bounds() {
+        type Mutation = fn(&mut Schedule);
+        let cases: [(Mutation, &str); 7] = [
+            (
+                |schedule| schedule.config.steps = MAX_SIMULATION_STEPS + 1,
+                "2..=100000 steps",
+            ),
+            (
+                |schedule| schedule.config.max_prediction = MAX_FRAME_DELAY + 1,
+                "max_prediction must be <=",
+            ),
+            (
+                |schedule| schedule.config.step_dt_ms = MAX_SIMULATION_STEP_DT_MS + 1,
+                "step_dt_ms must be within",
+            ),
+            (
+                |schedule| {
+                    schedule.initial_links[0].2.base_delay =
+                        MAX_SIMULATION_LINK_DELAY + Duration::from_millis(1);
+                },
+                "base_delay must be <=",
+            ),
+            (
+                |schedule| {
+                    schedule.initial_links[0].2.jitter =
+                        MAX_SIMULATION_LINK_DELAY + Duration::from_millis(1);
+                },
+                "jitter must be <=",
+            ),
+            (
+                |schedule| {
+                    schedule.initial_links[0].2.retransmit_delay =
+                        MAX_SIMULATION_LINK_DELAY + Duration::from_millis(1);
+                },
+                "retransmit_delay must be <=",
+            ),
+            (
+                |schedule| {
+                    schedule.events = vec![(0, ScheduleEvent::HealAll); MAX_SIMULATION_EVENTS + 1];
+                },
+                "maximum 100000",
+            ),
+        ];
+
+        for (mutate, expected) in cases {
+            let mut schedule = generate(7, SimConfig::smoke(3));
+            mutate(&mut schedule);
+            let error = validate_schedule(&schedule)
+                .expect_err("an out-of-domain scalar must be rejected before execution");
+            assert!(
+                error.contains(expected),
+                "expected diagnostic containing {expected:?}, got {error:?}"
+            );
+        }
+
+        let mut nightly_boundary = generate(9, SimConfig::smoke(3));
+        nightly_boundary.config.steps = 5_000;
+        nightly_boundary.heal_at = 4_999;
+        nightly_boundary.events = vec![(4_999, ScheduleEvent::HealAll)];
+        assert_eq!(validate_schedule(&nightly_boundary), Ok(()));
+    }
+
+    #[test]
+    fn runner_boundary_panic_identifies_schedule_seed_and_schema() {
+        let mut schedule = generate(0x5EED, SimConfig::smoke(2));
+        schedule.schema_version = SCHEDULE_SCHEMA_VERSION + 1;
+        let result = std::panic::catch_unwind(|| {
+            let _ = super::super::run(&schedule, &super::super::RunOptions::default());
+        });
+        let payload = result.expect_err("an invalid schedule must fail at the runner boundary");
+        let message = payload.downcast_ref::<String>().map_or_else(
+            || {
+                payload.downcast_ref::<&'static str>().map_or_else(
+                    || "<non-string panic>".to_owned(),
+                    |text| (*text).to_owned(),
+                )
+            },
+            Clone::clone,
+        );
+        assert!(message.contains("seed=24301"), "missing seed: {message}");
+        assert!(
+            message.contains(&format!("schema_version={}", SCHEDULE_SCHEMA_VERSION + 1)),
+            "missing schema: {message}"
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn validator_enforces_hot_join_preconditions_and_kill_ordering() {
+        let mut valid = generate(
+            7,
+            SimConfig {
+                input_delay: 0,
+                ..SimConfig::smoke(3)
+            },
+        );
+        valid.events.push((100, ScheduleEvent::HotJoin { slot: 1 }));
+        valid.events.sort_by_key(|(step, _)| *step);
+        assert_eq!(validate_schedule(&valid), Ok(()));
+
+        let mut cases: Vec<(Schedule, &str)> = Vec::new();
+
+        let mut bad_slot = valid.clone();
+        bad_slot
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::HotJoin { .. }));
+        bad_slot
+            .events
+            .push((100, ScheduleEvent::HotJoin { slot: 9 }));
+        bad_slot.events.sort_by_key(|(step, _)| *step);
+        cases.push((bad_slot, "HotJoin slot 9 out of range"));
+
+        let mut input_delay = valid.clone();
+        input_delay.config.input_delay = 1;
+        cases.push((input_delay, "must use input_delay 0"));
+
+        let mut zero_prediction = valid.clone();
+        zero_prediction.config.max_prediction = 0;
+        cases.push((zero_prediction, "max_prediction >= 1"));
+
+        let mut sparse = valid.clone();
+        sparse.config.save_mode = SavePolicy::Sparse;
+        cases.push((sparse, "save_mode EveryFrame"));
+
+        let mut killed_slot = valid.clone();
+        killed_slot
+            .events
+            .push((90, ScheduleEvent::PeerKill { peer: 1 }));
+        killed_slot.events.sort_by_key(|(step, _)| *step);
+        cases.push((killed_slot, "slot 1 is already retired"));
+
+        let mut killed_coordinator = valid;
+        killed_coordinator
+            .events
+            .push((90, ScheduleEvent::PeerKill { peer: 0 }));
+        killed_coordinator.events.sort_by_key(|(step, _)| *step);
+        cases.push((killed_coordinator, "coordinator peer 0 is already retired"));
+
+        for (schedule, expected) in cases {
+            let error = validate_schedule(&schedule)
+                .expect_err("a malformed HotJoin schedule must be rejected");
+            assert!(
+                error.contains(expected),
+                "expected diagnostic containing {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "hot-join"))]
+    #[test]
+    fn validator_rejects_hot_join_without_feature() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule
+            .events
+            .push((100, ScheduleEvent::HotJoin { slot: 1 }));
+        schedule.events.sort_by_key(|(step, _)| *step);
+        assert_eq!(
+            validate_schedule(&schedule),
+            Err("ScheduleEvent::HotJoin requires the crate's `hot-join` feature".to_owned())
+        );
+    }
+
+    #[test]
     fn link_policy_without_retransmit_delay_uses_zero_default() {
         let schedule = generate(42, SimConfig::smoke(2));
         let mut value = serde_json::to_value(&schedule).unwrap();
@@ -847,6 +2318,10 @@ mod tests {
             "config must serialize a `save_mode` field for this test to remove"
         );
         assert!(
+            config.remove("scenario_mix").is_some(),
+            "config must serialize a `scenario_mix` field for this test to remove"
+        );
+        assert!(
             config.remove("app_model").is_some(),
             "config must serialize an `app_model` field for this test to remove"
         );
@@ -871,6 +2346,11 @@ mod tests {
             back.config.save_mode,
             SavePolicy::EveryFrame,
             "a pre-axis config (no save_mode) must default to EveryFrame"
+        );
+        assert_eq!(
+            back.config.scenario_mix,
+            ScenarioMix::NetworkOnly,
+            "a pre-axis config (no scenario_mix) must default to NetworkOnly"
         );
         assert_eq!(
             back.config.app_model,

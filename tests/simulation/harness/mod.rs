@@ -14,13 +14,15 @@
 // Test infrastructure: not every test binary uses every helper.
 #![allow(dead_code)]
 
+pub mod artifact;
 pub mod oracle;
 pub mod schedule;
+pub mod shrink;
 
 use crate::common::sim_net::{SimNet, SimSocket};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
-use fortress_rollback::hash::fnv1a_hash;
+use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
@@ -29,12 +31,13 @@ use fortress_rollback::{
     SpectatorSession,
 };
 use oracle::{
-    validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, Verdict,
+    validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, OracleFailure, Verdict,
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
-use schedule::{AppModel, Schedule, ScheduleEvent};
+use schedule::{hot_join_host_for_slot, validate_schedule, AppModel, Schedule, ScheduleEvent};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, VecDeque};
+use std::hash::Hasher as _;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -148,7 +151,8 @@ impl SimInput for WideStubInput {
 
 /// Options for fault-injection *inside the harness itself* — used by the
 /// oracle's negative controls to prove the invariants actually fire.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunOptions {
     /// Corrupt `(peer, from_frame)`'s simulated **state** from that frame on
     /// (a real divergence: state, checksums, and downstream frames all split).
@@ -198,14 +202,141 @@ pub struct LoadGameStateObservation {
     pub frame: i32,
 }
 
+/// Maximum number of final simulation steps retained in a failure artifact.
+pub const TRACE_TAIL_CAPACITY: usize = 64;
+/// Maximum scheduled or observed event summaries retained per trace step.
+pub const TRACE_STEP_EVENT_CAPACITY: usize = 32;
+/// Maximum UTF-8 bytes retained for one event summary field.
+pub const TRACE_EVENT_TEXT_CAPACITY: usize = 512;
+
+/// Serializable mirror of [`SessionState`] for stable failure artifacts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceSessionState {
+    Synchronizing,
+    Running,
+    #[cfg(feature = "hot-join")]
+    HotJoining,
+}
+
+/// Serializable game state summary for one peer at one step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceGameState {
+    pub frame: i32,
+    pub value: i32,
+}
+
+/// Source of one drained event in a trace snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceEventSource {
+    Peer(usize),
+    Spectator,
+}
+
+/// Compact stable event summary retained at a fault/effect boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceObservedEvent {
+    pub source: TraceEventSource,
+    pub kind: String,
+    pub details: String,
+}
+
+/// Serializable mirror of cumulative [`crate::common::sim_net::SimNetStats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceNetStats {
+    pub sent: u64,
+    pub delivered: u64,
+    pub dropped_by_policy: u64,
+    pub retransmit_delayed: u64,
+    pub dropped_blocked: u64,
+    pub dropped_unattached: u64,
+    pub duplicated: u64,
+    pub held: u64,
+}
+
+impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
+    fn from(stats: crate::common::sim_net::SimNetStats) -> Self {
+        Self {
+            sent: stats.sent,
+            delivered: stats.delivered,
+            dropped_by_policy: stats.dropped_by_policy,
+            retransmit_delayed: stats.retransmit_delayed,
+            dropped_blocked: stats.dropped_blocked,
+            dropped_unattached: stats.dropped_unattached,
+            duplicated: stats.duplicated,
+            held: stats.held,
+        }
+    }
+}
+
+impl From<SessionState> for TraceSessionState {
+    fn from(state: SessionState) -> Self {
+        match state {
+            SessionState::Synchronizing => Self::Synchronizing,
+            SessionState::Running => Self::Running,
+            #[cfg(feature = "hot-join")]
+            SessionState::HotJoining => Self::HotJoining,
+        }
+    }
+}
+
+/// One stable, bounded end-of-step snapshot retained for failure diagnosis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceSnapshot {
+    pub step: u32,
+    pub confirmed_frames: Vec<i32>,
+    pub session_states: Vec<TraceSessionState>,
+    pub dead: Vec<bool>,
+    pub game_states: Vec<TraceGameState>,
+    pub scheduled_events: Vec<String>,
+    pub scheduled_events_truncated: u32,
+    pub observed_events: Vec<TraceObservedEvent>,
+    pub observed_events_truncated: u32,
+    pub net: TraceNetStats,
+    pub spectator: Option<TraceSpectatorState>,
+}
+
+/// Stable per-step spectator progress included in trace identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceSpectatorState {
+    pub current_frame: i32,
+    pub num_hosts: usize,
+    pub applied_frames: usize,
+    pub max_applied_frame: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct TraceFinalSummary {
+    failure_classes: Vec<&'static str>,
+    final_confirmed: Vec<i32>,
+    probe_confirmed: Vec<i32>,
+    confirmed_at_heal: Vec<i32>,
+    confirmed_after_recovery: Vec<i32>,
+    recovered_within_b: Option<bool>,
+    spectator_applied_frames: usize,
+    spectator_max_frame: Option<i32>,
+    spectator_final_hosts: Option<usize>,
+    net: TraceNetStats,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
+    /// Exact harness fault/probe options required to reproduce this run.
+    pub replay_options: RunOptions,
+    /// Serialized input width selecting the deterministic harness input type.
+    pub replay_input_width_bytes: u32,
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
     /// Each peer's final confirmed frame.
     pub final_confirmed: Vec<i32>,
+    /// Final [`TRACE_TAIL_CAPACITY`] end-of-step snapshots.
+    pub trace_tail: Vec<TraceSnapshot>,
     /// Each peer's confirmed frame sampled at [`RunOptions::probe_confirmed_at`]
     /// (empty when no probe step was requested). Indexed by peer.
     pub probe_confirmed: Vec<i32>,
@@ -273,7 +404,7 @@ pub struct RunReport {
 /// headers). The `messages_{sent,received}_by_kind` arrays are positional in
 /// [`MessageKind::ALL`] order; read them by category with
 /// [`sent_by_kind`](Self::sent_by_kind) / [`received_by_kind`](Self::received_by_kind).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeerWireTotals {
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -360,13 +491,23 @@ impl RunReport {
     /// Panics with a reproducible failure report if the run failed.
     #[track_caller]
     pub fn expect_pass(&self, schedule: &Schedule) {
-        assert!(
-            self.verdict.passed(),
-            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nspectator_final_hosts={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
+        if self.verdict.passed() {
+            return;
+        }
+        let test_name = std::thread::current()
+            .name()
+            .map_or_else(|| "unknown-test".to_owned(), ToOwned::to_owned);
+        let artifact_status = match artifact::write_report_artifact(&test_name, schedule, self) {
+            Ok(path) => format!("artifact={}", path.display()),
+            Err(error) => format!("artifact_write_error={error}"),
+        };
+        panic!(
+            "simulation failed — reproduce with:\n  FORTRESS_SIM_REPRO seed={} n_players={} steps={} noise={:?}\n{}\nfinal_confirmed={:?}\nrecovered_within_b={:?}\nspectator_applied_frames={}\nspectator_max_frame={:?}\nspectator_final_hosts={:?}\nallowlist_hits={:?}\nviolation_census={:?}\nnet={:?}\nfailures ({}):\n{}",
             schedule.seed,
             schedule.config.n_players,
             schedule.config.steps,
             schedule.config.noise,
+            artifact_status,
             self.final_confirmed,
             self.recovered_within_b,
             self.spectator_applied_frames,
@@ -543,10 +684,6 @@ fn peer_protocol_config(schedule: &Schedule, peer: usize, clock: &TestClock) -> 
         protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, peer))),
         ..ProtocolConfig::default()
     }
-}
-
-fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<usize> {
-    (0..n_players).find(|&peer| peer != slot)
 }
 
 fn update_spectator_required_min_frame<I: SimInput>(
@@ -764,9 +901,66 @@ pub(super) fn peer_addr(i: usize) -> SocketAddr {
     ([127, 0, 0, 1], port).into()
 }
 
-/// Folds one hashable item into the running trace digest.
-fn fold_trace<T: std::hash::Hash>(hash: &mut u64, item: &T) {
-    *hash = fnv1a_hash(&(*hash, fnv1a_hash(item)));
+/// Folds one schema-stable JSON representation into the running trace digest.
+///
+/// Rust's derived [`std::hash::Hash`] encoding is not a persistence format:
+/// enum discriminants and `usize` writes can vary by target. Artifact DTO JSON
+/// is the reviewed, cross-platform representation shared by trace replay.
+fn fold_trace<T: Serialize>(hash: &mut u64, item: &T, scratch: &mut Vec<u8>) {
+    scratch.clear();
+    serde_json::to_writer(&mut *scratch, item).expect("trace DTO serializes");
+    let mut hasher = DeterministicHasher::new();
+    hasher.write(&hash.to_le_bytes());
+    hasher.write(
+        &u64::try_from(scratch.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.write(scratch);
+    *hash = hasher.finish();
+}
+
+fn push_trace_summary<T>(items: &mut Vec<T>, truncated: &mut u32, item: T) {
+    if items.len() < TRACE_STEP_EVENT_CAPACITY {
+        items.push(item);
+    } else {
+        *truncated = truncated.saturating_add(1);
+    }
+}
+
+fn bounded_trace_text(mut text: String) -> String {
+    const SUFFIX: &str = "...<truncated>";
+    if text.len() <= TRACE_EVENT_TEXT_CAPACITY {
+        return text;
+    }
+    let mut end = TRACE_EVENT_TEXT_CAPACITY.saturating_sub(SUFFIX.len());
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    text.truncate(end);
+    text.push_str(SUFFIX);
+    text
+}
+
+fn stable_schedule_event_text(event: &ScheduleEvent) -> String {
+    // `ScheduleEvent` is the schema-versioned corpus representation. Its JSON
+    // form is therefore the stable trace identity; `Debug` is diagnostic-only
+    // and may change without a schedule-schema bump.
+    serde_json::to_string(event)
+        .unwrap_or_else(|error| format!("schedule-event-serialization-error:{error}"))
+}
+
+fn stable_observed_event<I: SimInput>(
+    source: TraceEventSource,
+    event: &FortressEvent<I::SessionConfig>,
+) -> TraceObservedEvent {
+    TraceObservedEvent {
+        source,
+        kind: event.kind().as_str().to_owned(),
+        // FortressEvent's Display implementation is an explicit, exhaustive,
+        // payload-bearing representation. Keep Debug out of the digest.
+        details: bounded_trace_text(event.to_string()),
+    }
 }
 
 fn peer_event_key<I: SimInput>(event: &FortressEvent<I::SessionConfig>) -> Option<PeerEventKey> {
@@ -824,7 +1018,8 @@ fn drive_spectator<I: SimInput>(
     step: u32,
     options: &RunOptions,
     oracle: &mut Oracle,
-    trace_hash: &mut u64,
+    observed_events: &mut Vec<TraceObservedEvent>,
+    observed_events_truncated: &mut u32,
 ) {
     let start_frame = spectator.session.current_frame().as_i32().saturating_add(1);
     match spectator.session.advance_frame() {
@@ -841,22 +1036,15 @@ fn drive_spectator<I: SimInput>(
 
     let events: Vec<FortressEvent<I::SessionConfig>> = spectator.session.events().collect();
     for event in &events {
+        push_trace_summary(
+            observed_events,
+            observed_events_truncated,
+            stable_observed_event::<I>(TraceEventSource::Spectator, event),
+        );
         if let FortressEvent::SpectatorDivergence { frame, player, .. } = event {
             oracle.observe_spectator_divergence_event(*frame, *player);
         }
-        fold_trace(trace_hash, &format!("spectator:{event:?}"));
     }
-
-    fold_trace(
-        trace_hash,
-        &(
-            step,
-            "spectator",
-            spectator.session.current_state(),
-            spectator.session.current_frame().as_i32(),
-            spectator.session.num_hosts(),
-        ),
-    );
 }
 
 /// Diagnostic variant of [`run`]: prints per-peer progress every 50 steps.
@@ -885,155 +1073,14 @@ pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) ->
 }
 
 fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
+    validate_schedule(schedule).unwrap_or_else(|error| {
+        panic!(
+            "invalid materialized schedule seed={} schema_version={}: {error}",
+            schedule.seed, schedule.schema_version
+        )
+    });
+
     let n = schedule.config.n_players;
-    assert!(
-        (2..=16).contains(&n),
-        "materialized simulation schedules must use 2..=16 players (got {n})"
-    );
-    assert!(
-        schedule.config.steps >= 2,
-        "materialized simulation schedules need at least 2 steps (got {})",
-        schedule.config.steps
-    );
-
-    let clock = TestClock::new();
-    let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
-
-    let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
-
-    assert!(
-        schedule
-            .events
-            .windows(2)
-            .all(|pair| pair[0].0 <= pair[1].0),
-        "schedule events must be sorted by nondecreasing step"
-    );
-    for (step, _) in &schedule.events {
-        assert!(
-            *step < schedule.config.steps,
-            "schedule event at step {step} is outside the run (0..{})",
-            schedule.config.steps
-        );
-    }
-    if let Some(last_heal) = schedule
-        .events
-        .iter()
-        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
-        .map(|(step, _)| *step)
-        .max()
-    {
-        for (step, event) in &schedule.events {
-            assert!(
-                *step <= last_heal || matches!(event, ScheduleEvent::HealAll),
-                "non-HealAll event at step {step} occurs after the last HealAll at {last_heal}"
-            );
-        }
-    }
-    let has_hot_join = schedule
-        .events
-        .iter()
-        .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { .. }));
-    #[cfg(not(feature = "hot-join"))]
-    assert!(
-        !has_hot_join,
-        "ScheduleEvent::HotJoin requires the crate's `hot-join` feature"
-    );
-    if has_hot_join {
-        assert!(
-            schedule.config.input_delay == 0,
-            "HotJoin schedules must use input_delay 0 (got {})",
-            schedule.config.input_delay
-        );
-        assert!(
-            schedule.config.max_prediction >= 1,
-            "HotJoin schedules must use max_prediction >= 1 (got {})",
-            schedule.config.max_prediction
-        );
-        assert!(
-            n < 3 || schedule.config.save_mode == schedule::SavePolicy::EveryFrame,
-            "N-peer HotJoin schedules must use save_mode EveryFrame (got {:?})",
-            schedule.config.save_mode
-        );
-    }
-    let expected_links = n * (n - 1);
-    assert_eq!(
-        schedule.initial_links.len(),
-        expected_links,
-        "initial_links must contain exactly one directed policy for every non-self pair"
-    );
-    let mut seen_links = BTreeSet::new();
-    // Validate every peer index up front so a malformed or hand-edited corpus
-    // schedule fails loudly with a clear message instead of panicking on a raw
-    // slice index deep in the run (or, for `PeerStall` steps, silently in a
-    // release build). Covers initial links, every event, and the probe step.
-    for (from, to, _) in &schedule.initial_links {
-        assert!(
-            *from < n && *to < n,
-            "initial link ({from} -> {to}) out of range for a {n}-peer mesh"
-        );
-        assert!(
-            *from != *to,
-            "initial link ({from} -> {to}) must not target itself"
-        );
-        assert!(
-            seen_links.insert((*from, *to)),
-            "duplicate initial link ({from} -> {to})"
-        );
-    }
-    for (_, event) in &schedule.events {
-        match event {
-            ScheduleEvent::SetLink { from, to, .. }
-            | ScheduleEvent::Block { from, to, .. }
-            | ScheduleEvent::Hold { from, to, .. } => {
-                assert!(
-                    *from < n && *to < n,
-                    "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
-                );
-                assert!(
-                    *from != *to,
-                    "schedule event link ({from} -> {to}) must not target itself"
-                );
-            },
-            ScheduleEvent::PeerStall { peer, steps } => {
-                assert!(
-                    *peer < n,
-                    "PeerStall peer {peer} out of range for a {n}-peer mesh"
-                );
-                assert!(
-                    *steps > 0,
-                    "PeerStall steps must be > 0 (a 0-step stall freezes nothing)"
-                );
-            },
-            ScheduleEvent::SetInputDelay { peer, .. } => assert!(
-                *peer < n,
-                "SetInputDelay peer {peer} out of range for a {n}-peer mesh"
-            ),
-            ScheduleEvent::GracefulRemove { by, target }
-            | ScheduleEvent::LegacyDisconnect { by, target } => {
-                assert!(
-                    *by < n && *target < n,
-                    "lifecycle drop ({by} -> {target}) out of range for a {n}-peer mesh"
-                );
-                assert!(
-                    by != target,
-                    "lifecycle drop target must be remote (by={by}, target={target})"
-                );
-            },
-            ScheduleEvent::PeerKill { peer } => assert!(
-                *peer < n,
-                "PeerKill peer {peer} out of range for a {n}-peer mesh"
-            ),
-            ScheduleEvent::SpectatorHostKill { host } => assert!(
-                *host < n,
-                "SpectatorHostKill host {host} out of range for a {n}-peer mesh"
-            ),
-            ScheduleEvent::HotJoin { slot } => assert!(
-                *slot < n,
-                "HotJoin slot {slot} out of range for a {n}-peer mesh"
-            ),
-            ScheduleEvent::HealAll => {},
-        }
-    }
     if let Some(probe) = options.probe_confirmed_at {
         assert!(
             probe < schedule.config.steps,
@@ -1041,29 +1088,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             schedule.config.steps
         );
     }
-    for &ppm in &schedule.config.clock_skew_ppm {
-        assert!(
-            ppm >= -1_000_000,
-            "clock_skew_ppm must be >= -1_000_000 (-100% = a frozen clock); a \
-             lower value would run time backwards (got {ppm})"
-        );
-    }
-    for &peer in &schedule.config.starve_events {
-        assert!(
-            peer < n,
-            "starve_events peer {peer} out of range for a {n}-peer mesh"
-        );
-    }
+
+    let clock = TestClock::new();
+    let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
+    let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+
     let mut spectator_host_enabled = vec![false; n];
     for &peer in &schedule.config.spectator_hosts {
-        assert!(
-            peer < n,
-            "spectator_hosts peer {peer} out of range for a {n}-peer mesh"
-        );
-        assert!(
-            !spectator_host_enabled[peer],
-            "duplicate spectator_hosts peer {peer}"
-        );
         spectator_host_enabled[peer] = true;
     }
     let mut hot_join_host_enabled = vec![false; n];
@@ -1076,62 +1107,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     }
     #[cfg(not(feature = "hot-join"))]
     let _ = &hot_join_host_enabled;
-    // Only guaranteed harness kills can make a SpectatorHostKill malformed up
-    // front. User API drops retire only after the runtime call returns `Ok`.
-    let mut retired_by_guaranteed_kill = vec![false; n];
-    for (_, event) in &schedule.events {
-        match event {
-            ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
-            ScheduleEvent::PeerKill { peer } => {
-                retired_by_guaranteed_kill[*peer] = true;
-            },
-            ScheduleEvent::SpectatorHostKill { host } => {
-                assert!(
-                    spectator_host_enabled[*host],
-                    "SpectatorHostKill host {host} is not configured in spectator_hosts"
-                );
-                assert!(
-                    !retired_by_guaranteed_kill[*host],
-                    "SpectatorHostKill host {host} is already retired by an earlier kill event"
-                );
-                retired_by_guaranteed_kill[*host] = true;
-            },
-            ScheduleEvent::HotJoin { slot } => {
-                assert!(
-                    !retired_by_guaranteed_kill[*slot],
-                    "HotJoin slot {slot} is already retired by an earlier kill event"
-                );
-                let Some(host) = hot_join_host_for_slot(n, *slot) else {
-                    panic!("HotJoin requires at least two players; got n_players={n}, slot={slot}");
-                };
-                assert!(
-                    !retired_by_guaranteed_kill[host],
-                    "HotJoin slot {slot}'s coordinator peer {host} is already retired by an \
-                     earlier kill event"
-                );
-            },
-            ScheduleEvent::SetLink { .. }
-            | ScheduleEvent::Block { .. }
-            | ScheduleEvent::Hold { .. }
-            | ScheduleEvent::PeerStall { .. }
-            | ScheduleEvent::SetInputDelay { .. }
-            | ScheduleEvent::HealAll => {},
-        }
-    }
-    if let Some(size) = schedule.config.event_queue_size {
-        assert!(
-            size >= 10,
-            "event_queue_size must be >= 10 (SessionBuilder rejects smaller); got {size}"
-        );
-    }
-    // A 0ms step never advances virtual time and makes the derived (c) recovery
-    // window (`RECOVERY_WINDOW_MS / step_dt_ms`) meaningless — reject it loudly
-    // rather than let `recovery_window_steps()`'s `.max(1)` div-by-zero guard
-    // silently paper over a broken config.
-    assert!(
-        schedule.config.step_dt_ms >= 1,
-        "step_dt_ms must be >= 1 (a 0ms step never advances virtual time)"
-    );
 
     for (from, to, policy) in &schedule.initial_links {
         net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -1252,6 +1227,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut trace_scratch = Vec::new();
+    let mut trace_tail: VecDeque<TraceSnapshot> = VecDeque::with_capacity(TRACE_TAIL_CAPACITY);
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
@@ -1335,11 +1312,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut spectator_required_min_frame: Option<i32> = None;
 
     for step in 0..schedule.config.steps {
+        let mut step_confirmed = Vec::with_capacity(n);
+        let mut scheduled_events = Vec::new();
+        let mut scheduled_events_truncated = 0u32;
+        let mut observed_events = Vec::new();
+        let mut observed_events_truncated = 0u32;
         // Apply control-plane events due at this step.
         while let Some((event_step, event)) = schedule.events.get(next_event) {
             if *event_step > step {
                 break;
             }
+            push_trace_summary(
+                &mut scheduled_events,
+                &mut scheduled_events_truncated,
+                bounded_trace_text(stable_schedule_event_text(event)),
+            );
             match event {
                 ScheduleEvent::SetLink { from, to, policy } => {
                     net.set_link(addrs[*from], addrs[*to], policy.clone());
@@ -1391,8 +1378,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     // kicks the target through the older Halt-oriented API. On
                     // success the target stops participating; on error it
                     // stays live and the oracle records the failed API call.
-                    // This deliberately does not assert graceful convergence;
-                    // D13 tracks the current fabricated-frame Halt behavior.
+                    // This deliberately does not assert graceful convergence:
+                    // Halt preserves the shared confirmed prefix but remains
+                    // terminal, so the expected observation is non-recovery.
                     if !dead[*by] && !dead[*target] {
                         let handle = PlayerHandle::new(*target);
                         if let Err(error) = peers[*by].session.disconnect_player(handle) {
@@ -1496,6 +1484,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         slot.session.events().collect();
                     for event in &events {
                         let kind = event.kind();
+                        push_trace_summary(
+                            &mut observed_events,
+                            &mut observed_events_truncated,
+                            stable_observed_event::<I>(TraceEventSource::Peer(i), event),
+                        );
                         *peer_event_counts.entry(kind).or_default() += 1;
                         *peer_event_counts_by_peer[i].entry(kind).or_default() += 1;
                         if let Some(key) = peer_event_key::<I>(event) {
@@ -1511,7 +1504,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 wait_skip[i] = wait_skip[i].max(*skip_frames);
                             }
                         }
-                        fold_trace(&mut trace_hash, &format!("{event:?}"));
                     }
                 }
 
@@ -1592,12 +1584,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 slot.session.confirmed_frame()
             };
 
-            // Fold each peer's (possibly frozen) frame + confirmed state so the
-            // trace digest is defined every step, stalled or not.
-            fold_trace(
-                &mut trace_hash,
-                &(step, i, slot.game.gs, confirmed.as_i32()),
-            );
+            step_confirmed.push(confirmed.as_i32());
 
             // Optional mid-run confirmation snapshot for recovery-dynamics
             // tests, reusing the value already read for this peer above.
@@ -1620,8 +1607,52 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         }
 
         if let Some(spectator) = spectator.as_mut() {
-            drive_spectator(spectator, step, options, &mut oracle, &mut trace_hash);
+            drive_spectator(
+                spectator,
+                step,
+                options,
+                &mut oracle,
+                &mut observed_events,
+                &mut observed_events_truncated,
+            );
         }
+
+        if trace_tail.len() == TRACE_TAIL_CAPACITY {
+            let _ = trace_tail.pop_front();
+        }
+        let snapshot = TraceSnapshot {
+            step,
+            confirmed_frames: step_confirmed,
+            session_states: peers
+                .iter()
+                .map(|slot| TraceSessionState::from(slot.session.current_state()))
+                .collect(),
+            dead: dead.clone(),
+            game_states: peers
+                .iter()
+                .map(|slot| TraceGameState {
+                    frame: slot.game.gs.frame,
+                    value: slot.game.gs.state,
+                })
+                .collect(),
+            scheduled_events,
+            scheduled_events_truncated,
+            observed_events,
+            observed_events_truncated,
+            net: TraceNetStats::from(net.stats()),
+            spectator: spectator.as_ref().map(|slot| TraceSpectatorState {
+                current_frame: slot.session.current_frame().as_i32(),
+                num_hosts: slot.session.num_hosts(),
+                applied_frames: slot.applied_inputs.len(),
+                max_applied_frame: slot.applied_inputs.keys().next_back().copied(),
+            }),
+        };
+        // The digest and the artifact tail share one stable representation, so
+        // every captured step observable (including lifecycle/dead state,
+        // event truncation, and network counters) participates here. Selected
+        // final values are intentionally folded again in the final summary.
+        fold_trace(&mut trace_hash, &snapshot, &mut trace_scratch);
+        trace_tail.push_back(snapshot);
 
         if diagnose && step % 50 == 0 {
             print_step_summary(step, &peers, &net);
@@ -1671,9 +1702,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .map(|slot| slot.session.current_state())
         .collect();
     let final_confirmed: Vec<i32> = end_confirmed.iter().map(|frame| frame.as_i32()).collect();
-    for confirmed in &final_confirmed {
-        fold_trace(&mut trace_hash, confirmed);
-    }
 
     // Aggregate each peer's per-remote wire metrics into one per-player total.
     // Peer `i` holds a remote handle `PlayerHandle::new(j)` for every `j != i`
@@ -1743,10 +1771,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             blocked_drops_by_link.insert((*from, *to), drops);
         }
     }
+    let final_trace_summary = TraceFinalSummary {
+        failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
+        final_confirmed: final_confirmed.clone(),
+        probe_confirmed: probe_confirmed.clone(),
+        confirmed_at_heal: confirmed_at_heal.clone(),
+        confirmed_after_recovery: confirmed_after_recovery.clone(),
+        recovered_within_b,
+        spectator_applied_frames,
+        spectator_max_frame,
+        spectator_final_hosts,
+        net: TraceNetStats::from(net.stats()),
+    };
+    fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
     RunReport {
+        replay_options: options.clone(),
+        replay_input_width_bytes: I::WIDTH_BYTES,
         verdict,
         trace_hash,
         final_confirmed,
+        trace_tail: trace_tail.into(),
         probe_confirmed,
         net_stats: net.stats(),
         blocked_drops_by_link,
@@ -1772,6 +1816,97 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn trace_event_text_is_utf8_safe_and_bounded() {
+        let text = "🧱".repeat(TRACE_EVENT_TEXT_CAPACITY);
+        let bounded = bounded_trace_text(text);
+        assert!(bounded.len() <= TRACE_EVENT_TEXT_CAPACITY);
+        assert!(bounded.ends_with("...<truncated>"));
+    }
+
+    fn snapshot_hash(snapshot: &TraceSnapshot) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        fold_trace(&mut hash, snapshot, &mut Vec::new());
+        hash
+    }
+
+    #[test]
+    fn trace_hash_preserves_length_prefixed_json_identity() {
+        let initial_hash = 0xcbf2_9ce4_8422_2325;
+        let mut actual = initial_hash;
+        let mut scratch = Vec::new();
+
+        fold_trace(&mut actual, &vec![1_u8, 2], &mut scratch);
+        fold_trace(&mut actual, &vec![3_u8, 4, 5], &mut scratch);
+
+        let first_bytes = b"[1,2]";
+        let mut first_expected = DeterministicHasher::new();
+        first_expected.write(&initial_hash.to_le_bytes());
+        first_expected.write(&(first_bytes.len() as u64).to_le_bytes());
+        first_expected.write(first_bytes);
+
+        let second_bytes = b"[3,4,5]";
+        let mut second_expected = DeterministicHasher::new();
+        second_expected.write(&first_expected.finish().to_le_bytes());
+        second_expected.write(&(second_bytes.len() as u64).to_le_bytes());
+        second_expected.write(second_bytes);
+        assert_eq!(actual, second_expected.finish());
+    }
+
+    #[test]
+    fn trace_hash_changes_when_previously_omitted_dead_state_changes() {
+        let snapshot = TraceSnapshot {
+            step: 7,
+            confirmed_frames: vec![5, 5],
+            session_states: vec![TraceSessionState::Running; 2],
+            dead: vec![false, false],
+            game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            scheduled_events: vec!["\"HealAll\"".to_owned()],
+            scheduled_events_truncated: 0,
+            observed_events: Vec::new(),
+            observed_events_truncated: 0,
+            net: TraceNetStats::default(),
+            spectator: None,
+        };
+        let mut changed = snapshot.clone();
+        changed.dead[1] = true;
+
+        assert_ne!(
+            snapshot_hash(&snapshot),
+            snapshot_hash(&changed),
+            "dead/lifecycle state is part of the complete step identity"
+        );
+    }
+
+    #[test]
+    fn trace_hash_changes_when_spectator_progress_changes() {
+        let mut snapshot = TraceSnapshot {
+            step: 7,
+            confirmed_frames: vec![5, 5],
+            session_states: vec![TraceSessionState::Running; 2],
+            dead: vec![false, false],
+            game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            scheduled_events: Vec::new(),
+            scheduled_events_truncated: 0,
+            observed_events: Vec::new(),
+            observed_events_truncated: 0,
+            net: TraceNetStats::default(),
+            spectator: Some(TraceSpectatorState {
+                current_frame: 4,
+                num_hosts: 2,
+                applied_frames: 4,
+                max_applied_frame: Some(3),
+            }),
+        };
+        let before = snapshot_hash(&snapshot);
+        snapshot
+            .spectator
+            .as_mut()
+            .expect("spectator exists")
+            .current_frame = 5;
+        assert_ne!(before, snapshot_hash(&snapshot));
+    }
 
     fn assert_input_width<I: SimInput>(input: I) {
         let encoded = codec::encode(&input).expect("harness input serializes");

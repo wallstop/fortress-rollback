@@ -1,0 +1,92 @@
+name: CI - Simulation Tests (Nightly)
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: simulation-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORTRESS_SIM_TIER: nightly
+  FORTRESS_SIM_SEED_BASE: ${{ github.run_id }}
+
+jobs:
+  simulation-nightly:
+    name: Deterministic Simulation Fleet
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/ci/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outputs.working != 'true'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        continue-on-error: true
+        timeout-minutes: 5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: simulation-nightly-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            simulation-nightly-${{ runner.os }}-cargo-
+            network-nightly-${{ runner.os }}-cargo-
+
+      - name: Run sharded deterministic simulation fleet
+        run: >-
+          cargo nextest run
+          --profile ci-simulation-nightly
+          --release
+          --run-ignored ignored-only
+          -E 'test(simulation::fleet::nightly_seed_shard_)'
+          --test simulation
+          --features hot-join
+          --no-capture
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Upload simulation failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simulation-nightly-failures-${{ github.run_id }}
+          path: target/sim-artifacts/
+          if-no-files-found: warn
+          retention-days: 7

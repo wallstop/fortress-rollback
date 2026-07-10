@@ -1,0 +1,480 @@
+{
+  "schema_version": 9,
+  "seed": 91001018,
+  "link_seed": 1229801703585338622,
+  "config": {
+    "n_players": 5,
+    "steps": 650,
+    "step_dt_ms": 16,
+    "input_delay": 0,
+    "max_prediction": 8,
+    "desync_interval": 30,
+    "noise": "Rough",
+    "scenario_mix": "Lifecycle",
+    "disconnect_behavior": "ContinueWithout",
+    "save_mode": "EveryFrame",
+    "app_model": "Ignore",
+    "clock_skew_ppm": [],
+    "starve_events": [],
+    "event_queue_size": null,
+    "spectator_hosts": []
+  },
+  "initial_links": [
+    [
+      0,
+      1,
+      {
+        "drop_rate": 0.0,
+        "dup_rate": 0.013046906401868908,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 37000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 23000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      0,
+      2,
+      {
+        "drop_rate": 0.023589751813560725,
+        "dup_rate": 0.016521700476296246,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 45000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 12000000
+        },
+        "burst_rate": 0.0028774475364480166,
+        "burst_len": 2,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      0,
+      3,
+      {
+        "drop_rate": 0.09146831247955561,
+        "dup_rate": 0.02434952065581456,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 54000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 6000000
+        },
+        "burst_rate": 0.003257174431346357,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      0,
+      4,
+      {
+        "drop_rate": 0.04734148832038045,
+        "dup_rate": 0.005766692371107638,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 33000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0018197039887309075,
+        "burst_len": 3,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      0,
+      {
+        "drop_rate": 0.08402960434556007,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 29000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 14000000
+        },
+        "burst_rate": 0.004541404689662159,
+        "burst_len": 4,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      2,
+      {
+        "drop_rate": 0.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      3,
+      {
+        "drop_rate": 0.02315511979162693,
+        "dup_rate": 0.026997259205672888,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 57000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.004328653896227479,
+        "burst_len": 3,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      4,
+      {
+        "drop_rate": 0.02462888853624463,
+        "dup_rate": 0.0141988195781596,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 46000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 22000000
+        },
+        "burst_rate": 0.0030778507969807835,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      0,
+      {
+        "drop_rate": 0.08453570740297436,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 20000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 28000000
+        },
+        "burst_rate": 0.00468009528820403,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      1,
+      {
+        "drop_rate": 0.0,
+        "dup_rate": 0.014094421660993247,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 26000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 30000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      3,
+      {
+        "drop_rate": 0.028873604387044907,
+        "dup_rate": 0.01892089249100536,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 69000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 13000000
+        },
+        "burst_rate": 0.0003785753156989813,
+        "burst_len": 2,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      4,
+      {
+        "drop_rate": 0.08932324619963765,
+        "dup_rate": 0.018843035493046046,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 68000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0012546519946772606,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      0,
+      {
+        "drop_rate": 0.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      1,
+      {
+        "drop_rate": 0.06839882461354137,
+        "dup_rate": 0.004763113860972225,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 44000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 20000000
+        },
+        "burst_rate": 0.00008203204139135778,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      2,
+      {
+        "drop_rate": 0.04818859625607729,
+        "dup_rate": 0.019946408970281482,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 50000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 24000000
+        },
+        "burst_rate": 0.001681488797767088,
+        "burst_len": 3,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      4,
+      {
+        "drop_rate": 0.029335916507989168,
+        "dup_rate": 0.00336365201510489,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 80000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 20000000
+        },
+        "burst_rate": 0.001863547518150881,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      4,
+      0,
+      {
+        "drop_rate": 0.07707115979865194,
+        "dup_rate": 0.003932699030265212,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 33000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 18000000
+        },
+        "burst_rate": 0.003106822236441076,
+        "burst_len": 5,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      4,
+      1,
+      {
+        "drop_rate": 0.05373616168275475,
+        "dup_rate": 0.010595310847274959,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 11000000
+        },
+        "burst_rate": 0.0038895342301111667,
+        "burst_len": 3,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      4,
+      2,
+      {
+        "drop_rate": 0.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      4,
+      3,
+      {
+        "drop_rate": 0.04411414030939341,
+        "dup_rate": 0.00008546870900318026,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 19000000
+        },
+        "burst_rate": 0.0043994485249277205,
+        "burst_len": 4,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ]
+  ],
+  "events": [
+    [
+      618,
+      {
+        "GracefulRemove": {
+          "by": 3,
+          "target": 4
+        }
+      }
+    ],
+    [
+      649,
+      "HealAll"
+    ]
+  ],
+  "heal_at": 649
+}

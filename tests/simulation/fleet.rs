@@ -6,8 +6,8 @@
 //! proves nothing.
 
 use super::harness::schedule::{
-    generate, AppModel, BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig,
-    SCHEDULE_SCHEMA_VERSION,
+    generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, ScenarioMix, Schedule,
+    ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
@@ -17,16 +17,270 @@ use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
 use std::{collections::BTreeSet, time::Duration};
 
-/// Fixed PR-smoke seed set. Nightly fleets (later milestone) randomize seeds
-/// from the CI run id; the PR set is fixed so PR failures are reproducible
-/// verbatim from the log.
+/// Fixed PR-smoke seed set. Nightly fleets derive disjoint seeds from the CI
+/// run id; the PR set stays fixed so PR failures reproduce verbatim.
 const PR_SMOKE_SEEDS: [u64; 8] = [1, 2, 3, 5, 8, 13, 21, 34];
+
+const NIGHTLY_SHARDS: u64 = 8;
+const NIGHTLY_SEEDS_PER_SHARD: u64 = 125;
+const NIGHTLY_STEPS: u32 = 5_000;
 
 fn run_smoke_fleet(n_players: usize) {
     for seed in PR_SMOKE_SEEDS {
         let schedule = generate(seed, SimConfig::smoke(n_players));
         let report = run(&schedule, &RunOptions::default());
         report.expect_pass(&schedule);
+    }
+}
+
+fn nightly_seed(run_id: u64, shard: u64, offset: u64) -> u64 {
+    let seeds_per_run = NIGHTLY_SHARDS.saturating_mul(NIGHTLY_SEEDS_PER_SHARD);
+    run_id
+        .wrapping_mul(seeds_per_run)
+        .wrapping_add(shard.saturating_mul(NIGHTLY_SEEDS_PER_SHARD))
+        .wrapping_add(offset)
+}
+
+fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Schedule {
+    let config = SimConfig {
+        steps: NIGHTLY_STEPS,
+        noise,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        scenario_mix: ScenarioMix::Lifecycle,
+        ..SimConfig::smoke(n_players)
+    };
+    let mut schedule = generate(seed, config);
+
+    // D14 is specifically retirement under lossy background traffic. Preserve
+    // lossy lifecycle exploration for stalls and live reconfiguration while
+    // keeping the known-red retirement cross-product out of the green tier.
+    if noise != BackgroundNoise::Clean {
+        for (_, event) in &mut schedule.events {
+            let retired_peer = match event {
+                ScheduleEvent::PeerKill { peer } => Some(*peer),
+                ScheduleEvent::GracefulRemove { target, .. } => Some(*target),
+                ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+                _ => None,
+            };
+            if let Some(peer) = retired_peer {
+                *event = ScheduleEvent::PeerStall {
+                    peer,
+                    steps: 20 + u32::try_from(seed % 21).expect("stall window fits u32"),
+                };
+            }
+        }
+    }
+
+    if noise == BackgroundNoise::ReliableFifo {
+        let retired = schedule
+            .events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                ScheduleEvent::PeerKill { peer }
+                | ScheduleEvent::GracefulRemove { target: peer, .. }
+                | ScheduleEvent::LegacyDisconnect { target: peer, .. }
+                | ScheduleEvent::SpectatorHostKill { host: peer } => Some(*peer),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut eligible = (0..n_players)
+            .filter(|peer| !retired.contains(peer))
+            .collect::<Vec<_>>();
+        if eligible.len() < 2 {
+            // Two-player retirement stories have no pair that remains live;
+            // their generated lifecycle event occurs after the early HOL
+            // window below, so both initial endpoints remain meaningful.
+            // This branch is structural rather than silently skipping the
+            // reliable-FIFO assertion.
+            eligible.clear();
+            eligible.extend(0..n_players);
+        }
+        let from_index =
+            usize::try_from(seed % u64::try_from(eligible.len()).expect("endpoint count fits u64"))
+                .expect("peer index fits usize");
+        let from = eligible[from_index];
+        let peer_offset = 1 + usize::try_from(
+            (seed / u64::try_from(eligible.len()).expect("endpoint count fits u64"))
+                % u64::try_from(eligible.len() - 1).expect("remote count fits u64"),
+        )
+        .expect("peer offset fits usize");
+        let to = eligible[(from_index + peer_offset) % eligible.len()];
+        let start = 100 + u32::try_from((seed / 17) % 150).expect("HOL start fits u32");
+        let window = 20 + u32::try_from((seed / 31) % 40).expect("HOL window fits u32");
+        let fifo = schedule
+            .initial_links
+            .iter()
+            .find_map(|(link_from, link_to, policy)| {
+                (*link_from == from && *link_to == to).then(|| policy.clone())
+            })
+            .expect("nightly reliable mesh contains every directed link");
+        let hol = LinkPolicy {
+            drop_rate: 1.0,
+            retransmit_delay: Duration::from_millis(400),
+            ..fifo
+        };
+        schedule.events.extend([
+            (
+                start,
+                ScheduleEvent::SetLink {
+                    from,
+                    to,
+                    policy: hol,
+                },
+            ),
+            (
+                start + window,
+                ScheduleEvent::SetLink {
+                    from,
+                    to,
+                    policy: fifo,
+                },
+            ),
+        ]);
+        schedule.events.sort_by_key(|(step, _)| *step);
+    }
+
+    schedule
+}
+
+/// Runs one disjoint shard of the long simulation fleet. The explicit tier
+/// gate prevents a manually selected ignored test from silently running a
+/// costly workload with an accidental/default seed base.
+fn run_nightly_shard(shard: u64) {
+    assert!(
+        shard < NIGHTLY_SHARDS,
+        "nightly shard {shard} is out of range"
+    );
+    assert_eq!(
+        std::env::var("FORTRESS_SIM_TIER").as_deref(),
+        Ok("nightly"),
+        "nightly simulation tests require FORTRESS_SIM_TIER=nightly"
+    );
+    let run_id = std::env::var("FORTRESS_SIM_SEED_BASE")
+        .expect("nightly simulation tests require FORTRESS_SIM_SEED_BASE")
+        .parse::<u64>()
+        .expect("FORTRESS_SIM_SEED_BASE must be an unsigned integer");
+
+    for offset in 0..NIGHTLY_SEEDS_PER_SHARD {
+        let seed = nightly_seed(run_id, shard, offset);
+        let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+        let noise = match seed % 4 {
+            0 => BackgroundNoise::Clean,
+            1 => BackgroundNoise::Mild,
+            2 => BackgroundNoise::Rough,
+            _ => BackgroundNoise::ReliableFifo,
+        };
+        let schedule = nightly_schedule(seed, n_players, noise);
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+        if noise == BackgroundNoise::ReliableFifo {
+            assert!(
+                report.net_stats.retransmit_delayed > 0,
+                "nightly reliable-FIFO seed {seed} must exercise HOL retransmission: {:?}",
+                report.net_stats
+            );
+        }
+    }
+}
+
+macro_rules! nightly_shard_test {
+    ($name:ident, $shard:expr) => {
+        #[test]
+        #[ignore = "long release-mode simulation fleet; nightly CI only"]
+        fn $name() {
+            run_nightly_shard($shard);
+        }
+    };
+}
+
+nightly_shard_test!(nightly_seed_shard_0_holds_invariants, 0);
+nightly_shard_test!(nightly_seed_shard_1_holds_invariants, 1);
+nightly_shard_test!(nightly_seed_shard_2_holds_invariants, 2);
+nightly_shard_test!(nightly_seed_shard_3_holds_invariants, 3);
+nightly_shard_test!(nightly_seed_shard_4_holds_invariants, 4);
+nightly_shard_test!(nightly_seed_shard_5_holds_invariants, 5);
+nightly_shard_test!(nightly_seed_shard_6_holds_invariants, 6);
+nightly_shard_test!(nightly_seed_shard_7_holds_invariants, 7);
+
+/// Known production defect discovered by the first lifecycle nightly shard:
+/// a lossy one-caller graceful removal can lower the victim's eventual freeze
+/// below a frame another survivor already returned as confirmed, rewriting
+/// that survivor's historical input query. This remains ignored/known-red
+/// until removal gains a coordinated receipt/backfill barrier; the green
+/// nightly matrix excludes only this unsupported retirement × lossy-noise
+/// cross-product above.
+#[test]
+#[ignore = "known confirmed-history rewrite under lossy graceful removal"]
+fn lossy_graceful_remove_rewrites_confirmed_history_known_defect() {
+    let schedule: Schedule = serde_json::from_str(include_str!(
+        "known_failures/d14-lossy-graceful-remove.json"
+    ))
+    .expect("checked-in D14 schedule must deserialize");
+    validate_schedule(&schedule).expect("checked-in D14 schedule must be valid");
+    assert_eq!((schedule.config.n_players, schedule.config.steps), (5, 650));
+    assert!(schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { by: 3, target: 4 })));
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { frame: 327, .. }
+        )),
+        "known defect no longer reproduces; flip this to a green regression: {:?}",
+        report.verdict.failures
+    );
+}
+
+#[test]
+fn nightly_seed_windows_are_disjoint_and_repeatable() {
+    let window = |run_id| {
+        (0..NIGHTLY_SHARDS)
+            .flat_map(|shard| {
+                (0..NIGHTLY_SEEDS_PER_SHARD).map(move |offset| nightly_seed(run_id, shard, offset))
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let first = window(41);
+    let repeat = window(41);
+    let next = window(42);
+
+    assert_eq!(first, repeat, "a rerun must use the identical seed window");
+    assert_eq!(
+        first.len(),
+        usize::try_from(NIGHTLY_SHARDS * NIGHTLY_SEEDS_PER_SHARD).unwrap(),
+        "every shard/offset pair must map to a distinct seed"
+    );
+    assert!(
+        first.is_disjoint(&next),
+        "adjacent CI run ids must not overlap nightly seed windows"
+    );
+}
+
+#[test]
+fn non_clean_nightly_lifecycle_rewrites_only_retirement_stories() {
+    for noise in [
+        BackgroundNoise::Mild,
+        BackgroundNoise::Rough,
+        BackgroundNoise::ReliableFifo,
+    ] {
+        for seed in [2, 3, 4] {
+            let schedule = nightly_schedule(seed, 5, noise);
+            assert!(
+                !schedule.events.iter().any(|(_, event)| matches!(
+                    event,
+                    ScheduleEvent::PeerKill { .. }
+                        | ScheduleEvent::GracefulRemove { .. }
+                        | ScheduleEvent::SpectatorHostKill { .. }
+                )),
+                "non-clean retirement escaped quarantine: noise={noise:?} seed={seed}"
+            );
+            assert!(
+                schedule.effective_lifecycle_event_count().unwrap_or(0) > 0,
+                "retirement rewrite erased lifecycle coverage: noise={noise:?} seed={seed}"
+            );
+        }
     }
 }
 
@@ -372,23 +626,6 @@ fn inband_detector_fires_on_checksum_lies_while_states_agree() {
     );
 }
 
-/// Pinned regression: the cold-start gossip-mute mesh deadlock found by this
-/// fleet on its first four-player run (seed 1). Transient startup loss froze
-/// third-party connect-status caches at `Frame::NULL`; once every peer
-/// exhausted its prediction window with fully-acked send queues, no gossip
-/// carrier remained and the mesh deadlocked permanently at `confirmed == -1`
-/// on a healed network with every session `Running`. Fixed by generalizing
-/// the connect-status nudge to fire whenever the mesh-gossip fold holds
-/// confirmation below local receipts (`P2PSession::
-/// gossip_holds_confirmation_below_receipts`). Pinned separately from
-/// `PR_SMOKE_SEEDS` so seed-set evolution can never unpin it.
-#[test]
-fn regression_cold_start_gossip_stall_seed1_four_players() {
-    let schedule = generate(1, SimConfig::smoke(4));
-    let report = run(&schedule, &RunOptions::default());
-    report.expect_pass(&schedule);
-}
-
 /// Oracle-integrity negative control at N=16 (PLAN.md Part V): the Part III
 /// H-16P "green at 16" verdict is only meaningful if the oracle still has
 /// teeth at that scale — a corrupted peer in a 16-mesh must fail the run
@@ -607,30 +844,20 @@ fn split_brain_schedule(policy: DropPolicy) -> Schedule {
     }
 }
 
-/// Red-documentation test for defect D13 (PLAN.md Part IV): `Halt` is not
-/// fully fail-closed. Its rustdoc promises "no further frames advance once
-/// any peer drops", but when the disconnect lands, the dropped slots are
-/// excluded from the confirmation fold and the session confirms up to
-/// `max_prediction` further frames with **fabricated default inputs** in the
-/// dropped slots — divergently across the mesh. Observed on this schedule
-/// (partition {0,1}×{2,3} at step 100, timeout ≈ frame 95): peer 1 confirmed
-/// frames 96..=103 as `[3101, 3108, 0, 0]`… while peer 3 confirmed the same
-/// frames as `[0, 0, 3115, 3122]`…, and end-of-run confirmation is
-/// asymmetric even within a half (95 vs 103). This pins today's defective
-/// behavior; the divergence assertions flip when the M4 fix lands (the
-/// confirmed prefix must never extend past the last globally-agreed frame
-/// under `Halt`).
+/// D13 regression: `Halt` freezes each public confirmed prefix at its safe
+/// pre-drop local bound. Removing dropped slots from the ordinary
+/// fold must not expose the speculative default-input tail as confirmed.
 #[test]
-fn partition_under_halt_confirms_fabricated_frames_divergently_d13() {
+fn partition_under_halt_preserves_one_shared_confirmed_prefix_d13() {
     let schedule = split_brain_schedule(DropPolicy::Halt);
     let report = run(&schedule, &RunOptions::default());
     let failures = &report.verdict.failures;
-    // RED (defect D13): the confirmed prefix forks by max_prediction frames.
     assert!(
-        failures
-            .iter()
-            .any(|f| matches!(f, OracleFailure::ConfirmedInputDivergence { .. })),
-        "expected today's defective fabricated-frame divergence: {failures:?}"
+        !failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "Halt exposed a divergent speculative tail as confirmed: {failures:?}"
     );
     // Halt does end the session on every peer (that half of the contract
     // holds): all four stall in Synchronizing and fail end-progress.
@@ -642,15 +869,28 @@ fn partition_under_halt_confirms_fabricated_frames_divergently_d13() {
         stalled, 4,
         "all four peers must halt (EndProgress in Synchronizing): {failures:?}"
     );
-    // The fabricated tail is bounded by the prediction window: no peer's
-    // confirmation may exceed another's by more than max_prediction.
+    let post_heal = failures
+        .iter()
+        .filter(|failure| matches!(failure, OracleFailure::PostHealLiveness { .. }))
+        .count();
+    assert_eq!(post_heal, 4, "every halted peer must report non-recovery");
+    assert_eq!(
+        failures.len(),
+        8,
+        "unexpected Halt failure surface: {failures:?}"
+    );
+    assert!(
+        failures.iter().all(|failure| matches!(
+            failure,
+            OracleFailure::EndProgress { .. } | OracleFailure::PostHealLiveness { .. }
+        )),
+        "Halt emitted an unexpected failure class: {failures:?}"
+    );
     let min = report.final_confirmed.iter().copied().min().unwrap_or(-1);
     let max = report.final_confirmed.iter().copied().max().unwrap_or(-1);
-    assert!(
-        (max - min) as usize <= schedule.config.max_prediction,
-        "fabricated tail must be bounded by max_prediction ({} vs {}): {:?}",
-        max - min,
-        schedule.config.max_prediction,
+    assert_eq!(
+        min, max,
+        "this symmetric partition must retain one consistent shared prefix: {:?}",
         report.final_confirmed
     );
 }
@@ -1120,8 +1360,8 @@ fn hot_join_after_runtime_remove_schedule() -> Schedule {
 /// calls the older `disconnect_player(target)` API at step 100. On success the
 /// target leaves the harness; on error it stays live and the oracle records the
 /// failed API call. This is intentionally not a graceful-convergence contract:
-/// today's `disconnect_player` path is Halt-oriented and intersects D13, so the
-/// useful property is that the op is executable, deterministic, and reported as
+/// `disconnect_player` is Halt-oriented and terminal, so the useful property
+/// is that the op is executable, deterministic, and reported as
 /// the expected post-heal non-recovery. `None` yields the identical schedule
 /// without the disconnect, the control the premise compares to.
 fn legacy_disconnect_schedule(disconnect: Option<(usize, usize)>) -> Schedule {
@@ -1826,8 +2066,8 @@ fn oracle_catches_seeded_divergence_under_graceful_remove() {
 /// (`ScheduleEvent::LegacyDisconnect`). Unlike `GracefulRemove`,
 /// `disconnect_player` takes the Halt-oriented path, so this test does NOT
 /// assert survivor convergence. It pins the executable harness vocabulary and
-/// the current D13-adjacent observation: after a clean network heal, the live
-/// peers do not recover within B and the oracle reports that non-recovery.
+/// the fail-closed observation: after a clean network heal, the live peers do
+/// not recover within B and the oracle reports that non-recovery.
 #[test]
 fn legacy_disconnect_reports_halt_non_recovery() {
     let base = legacy_disconnect_schedule(None);
@@ -2647,7 +2887,7 @@ fn run_rejects_too_small_event_queue_size() {
 /// must reject it up front rather than let `recovery_window_steps()`'s
 /// div-by-zero `.max(1)` guard silently paper over a broken config.
 #[test]
-#[should_panic(expected = "step_dt_ms must be >= 1")]
+#[should_panic(expected = "step_dt_ms must be within 1..=1000")]
 fn run_rejects_zero_step_dt() {
     let config = SimConfig {
         n_players: 2,
