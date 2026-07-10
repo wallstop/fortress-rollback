@@ -1,0 +1,334 @@
+{
+  "schema_version": 9,
+  "seed": 1,
+  "link_seed": 1229801703532086341,
+  "config": {
+    "n_players": 4,
+    "steps": 600,
+    "step_dt_ms": 16,
+    "input_delay": 1,
+    "max_prediction": 8,
+    "desync_interval": 30,
+    "noise": "Mild",
+    "disconnect_behavior": "Halt",
+    "save_mode": "EveryFrame",
+    "app_model": "Ignore",
+    "clock_skew_ppm": [],
+    "starve_events": [],
+    "event_queue_size": null,
+    "spectator_hosts": []
+  },
+  "initial_links": [
+    [
+      0,
+      1,
+      {
+        "drop_rate": 0.016387720815837385,
+        "dup_rate": 0.007866379199549555,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 26000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      0,
+      2,
+      {
+        "drop_rate": 0.015169808501377701,
+        "dup_rate": 0.007181540080346167,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 6000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 8000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      0,
+      3,
+      {
+        "drop_rate": 0.01623971971217543,
+        "dup_rate": 0.006031526422593743,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 30000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 3000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      0,
+      {
+        "drop_rate": 0.0028179157199338077,
+        "dup_rate": 0.007056954747531563,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 11000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      2,
+      {
+        "drop_rate": 0.014392073405906558,
+        "dup_rate": 0.007801824784837663,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 9000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 5000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      3,
+      {
+        "drop_rate": 0.003951714551076293,
+        "dup_rate": 0.005298006685916334,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 24000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 7000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      0,
+      {
+        "drop_rate": 0.004678518516011536,
+        "dup_rate": 0.0019890171685256063,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 5000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 8000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      1,
+      {
+        "drop_rate": 0.013702970584854484,
+        "dup_rate": 0.0030585661809891464,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 15000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      3,
+      {
+        "drop_rate": 0.01656982977874577,
+        "dup_rate": 0.0029778601322323086,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 26000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 4000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      0,
+      {
+        "drop_rate": 0.013705648933537304,
+        "dup_rate": 0.0007237301790155471,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 24000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      1,
+      {
+        "drop_rate": 0.0030151215055957436,
+        "dup_rate": 0.00325433598831296,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      2,
+      {
+        "drop_rate": 0.015123618049547077,
+        "dup_rate": 0.0005082885571755469,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 5000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 6000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ]
+  ],
+  "events": [
+    [
+      79,
+      {
+        "Block": {
+          "from": 0,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      89,
+      {
+        "Block": {
+          "from": 0,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      195,
+      {
+        "Hold": {
+          "from": 3,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      224,
+      {
+        "Hold": {
+          "from": 3,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      350,
+      "HealAll"
+    ]
+  ],
+  "heal_at": 350
+}

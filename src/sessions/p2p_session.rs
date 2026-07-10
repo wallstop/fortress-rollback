@@ -228,6 +228,11 @@ where
     /// Controls how the session reacts when a peer disconnects.
     /// See [`DisconnectBehavior`] for options.
     disconnect_behavior: DisconnectBehavior,
+    /// Permanent public-confirmation ceiling latched when this session fails
+    /// closed on a player disconnect. `Halt` sacrifices availability; removing
+    /// dropped slots from the ordinary confirmation fold must not turn their
+    /// speculative default-input tail into newly confirmed history.
+    halt_confirmed_ceiling: Option<Frame>,
 
     /// Cumulative, always-on session metrics (see [`P2PSession::metrics`]).
     metrics: SessionMetrics,
@@ -962,6 +967,7 @@ impl<T: Config> P2PSession<T> {
             recording: recording.then(|| ReplayRecorder::new(num_players)),
             last_recorded_frame: Frame::NULL,
             disconnect_behavior,
+            halt_confirmed_ceiling: None,
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
             #[cfg(feature = "hot-join")]
@@ -5892,7 +5898,9 @@ impl<T: Config> P2PSession<T> {
     /// (an endpoint starting, stopping, or a slot re-entering the minimum on
     /// hot-join reactivation) can transiently lower the result relative to an
     /// earlier call. Callers must not assume `confirmed_frame()` never
-    /// decreases.
+    /// decreases. After a fail-closed [`DisconnectBehavior::Halt`] drop, the
+    /// value is permanently capped at the pre-drop bound; rebuilding the
+    /// session is the recovery boundary.
     #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
         // This public accessor can itself emit a violation (the all-disconnected
@@ -5955,9 +5963,12 @@ impl<T: Config> P2PSession<T> {
                 ViolationKind::FrameSync,
                 "No connected players found when computing confirmed_frame - returning 0 as fallback"
             );
-            return Frame::new(0);
+            confirmed_frame = Frame::new(0);
         }
-        confirmed_frame
+        self.halt_confirmed_ceiling
+            .map_or(confirmed_frame, |ceiling| {
+                std::cmp::min(confirmed_frame, ceiling)
+            })
     }
 
     /// Returns the current frame of a session.
@@ -7406,27 +7417,32 @@ impl<T: Config> P2PSession<T> {
     /// were still healthy. That is the worst possible outcome: the simulation
     /// silently desyncs without surfacing the disconnect to the caller.
     ///
-    /// Fail-closed semantics: we transition to `SessionState::Synchronizing`,
-    /// which causes subsequent `advance_frame()` calls to return
-    /// `NotSynchronized` until the caller takes action. The transition is
-    /// idempotent. It is **not durable by itself**: only `check_initial_sync`
-    /// re-enters `Running`, but `is_synchronized()` LATCHES true once an
-    /// endpoint has ever completed its handshake (`Running | Disconnected |
-    /// Shutdown`), so on an established session the next disconnect-path
-    /// event can flip the state straight back — no fresh handshake is
-    /// required. Callers for whom resuming is UNSOUND (rather than merely
-    /// premature) must latch separately; the N-peer joiner's
-    /// baseline-violation path does so via the terminal teardown
-    /// ([`JoinerState::torn_down`], honored inside `check_initial_sync`).
+    /// Fail-closed semantics are durable: transition to
+    /// `SessionState::Synchronizing`, latch the earliest safe public
+    /// confirmation ceiling, and make `check_initial_sync` refuse to resurrect
+    /// the session from endpoints' latched synchronization state. Recovery
+    /// requires rebuilding the session. Repeated calls only tighten the
+    /// ceiling.
     ///
     /// Callers are responsible for emitting their own `report_violation!` with
     /// the contextual details that triggered the fail-closed; this helper only
     /// mutates state so it can be called from any error branch without forcing
     /// each call site to construct a synthetic `FortressError`.
-    fn enter_fail_closed_disconnect_state(&mut self) {
+    fn enter_fail_closed_disconnect_state_at(&mut self, confirmed_ceiling: Frame) {
+        self.halt_confirmed_ceiling = Some(
+            self.halt_confirmed_ceiling
+                .map_or(confirmed_ceiling, |existing| {
+                    std::cmp::min(existing, confirmed_ceiling)
+                }),
+        );
         if self.state != SessionState::Synchronizing {
             self.state = SessionState::Synchronizing;
         }
+    }
+
+    fn enter_fail_closed_disconnect_state(&mut self) {
+        let confirmed_ceiling = self.confirmed_frame();
+        self.enter_fail_closed_disconnect_state_at(confirmed_ceiling);
     }
 
     fn disconnect_player_with_policy(
@@ -7439,6 +7455,7 @@ impl<T: Config> P2PSession<T> {
     ) -> Result<(), FortressError> {
         let (addr, handles, earliest_last_frame) =
             self.remote_disconnect_snapshot(player_handle, last_frame_overrides)?;
+        let confirmed_before_disconnect = self.confirmed_frame();
 
         let mut graceful_drop_error = None;
         if behavior == DisconnectBehavior::ContinueWithout
@@ -7494,7 +7511,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         if behavior == DisconnectBehavior::Halt || graceful_drop_error.is_some() {
-            self.state = SessionState::Synchronizing;
+            self.enter_fail_closed_disconnect_state_at(confirmed_before_disconnect);
         }
 
         if event_policy == DisconnectEventPolicy::Emit {
@@ -7825,6 +7842,13 @@ impl<T: Config> P2PSession<T> {
     fn check_initial_sync(&mut self) {
         // if we are not synchronizing, we don't need to do anything
         if self.state != SessionState::Synchronizing {
+            return;
+        }
+
+        // Endpoint synchronization is latched through Disconnected/Shutdown.
+        // A player-disconnect Halt is terminal for this session, so it cannot
+        // use that stale handshake fact to resurrect the frozen timeline.
+        if self.halt_confirmed_ceiling.is_some() {
             return;
         }
 
@@ -10092,6 +10116,7 @@ impl<T: Config> fmt::Debug for P2PSession<T> {
             .field("state", &self.state)
             .field("disconnect_frame", &self.disconnect_frame)
             .field("disconnect_behavior", &self.disconnect_behavior)
+            .field("halt_confirmed_ceiling", &self.halt_confirmed_ceiling)
             .field("current_frame", &self.sync_layer.current_frame())
             .field("frames_ahead", &self.frames_ahead)
             .field("desync_detection", &self.desync_detection)
@@ -12776,12 +12801,14 @@ mod tests {
         // Default for a session with remotes is already Synchronizing.
         assert_eq!(session.current_state(), SessionState::Synchronizing);
 
-        // Repeated calls must be a no-op; we should never accidentally re-enter
-        // any "transition" side effects (the helper only mutates `state`).
+        // Repeated calls preserve the durable state and can only tighten the
+        // already-latched confirmation ceiling.
         session.enter_fail_closed_disconnect_state();
+        let first_ceiling = session.halt_confirmed_ceiling;
         session.enter_fail_closed_disconnect_state();
 
         assert_eq!(session.current_state(), SessionState::Synchronizing);
+        assert_eq!(session.halt_confirmed_ceiling, first_ceiling);
     }
 
     #[test]
@@ -12797,6 +12824,25 @@ mod tests {
         assert!(
             matches!(result, Err(FortressError::NotSynchronized)),
             "expected NotSynchronized after fail-closed",
+        );
+    }
+
+    #[test]
+    fn fail_closed_confirmation_ceiling_is_durable_and_only_tightens() {
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+
+        session.enter_fail_closed_disconnect_state_at(Frame::new(7));
+        session.enter_fail_closed_disconnect_state_at(Frame::new(3));
+        session.enter_fail_closed_disconnect_state_at(Frame::new(5));
+        assert_eq!(session.halt_confirmed_ceiling, Some(Frame::new(3)));
+        assert!(session.confirmed_frame() <= Frame::new(3));
+
+        session.check_initial_sync();
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "latched endpoint synchronization must not resurrect a Halt session"
         );
     }
 

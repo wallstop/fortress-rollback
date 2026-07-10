@@ -2307,6 +2307,19 @@ impl<T: Config> UdpProtocol<T> {
                     "UdpProtocol::on_input history prune"
                 )
             });
+        } else {
+            // A stale retransmission can outlive its delta reference after the
+            // receiver prunes old input history. The frames are already known,
+            // so decoding/staging is unnecessary, but silence here strands the
+            // sender if our earlier cumulative InputAck was lost: it retains
+            // the old front forever, keeps `pending_output` nonempty, and both
+            // peers can exhaust their prediction windows. Re-ack the receiver's
+            // contiguous high-water and consume the independent piggyback ACK;
+            // neither operation depends on the missing input reference.
+            if ack_disposition == AckDisposition::Apply {
+                self.apply_ack_frame(body.ack_frame);
+            }
+            self.send_input_ack();
         }
     }
 
@@ -4538,6 +4551,10 @@ mod tests {
             },
         );
         assert_eq!(protocol.last_recv_frame(), Frame::new(100));
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0; 12],
+        });
 
         // A STALE retransmission for start_frame 50 (decode ref = frame 49, long
         // pruned). It passes the gap-too-large check (50 <= 100 + 1) but the
@@ -4545,12 +4562,13 @@ mod tests {
         // sender's CURRENT gossip ("C disconnected @ 49").
         let stale = Input {
             start_frame: Frame::new(50),
-            ack_frame: Frame::NULL,
+            ack_frame: Frame::new(0),
             bytes: encode_one_frame(&bytes, 1),
             disconnect_requested: false,
             peer_connect_status: status_slot2(true, 49),
         };
         let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
+        protocol.send_queue.clear();
         protocol.on_input(&stale);
 
         // POST-HOIST: the gossip is merged even though inputs can't be decoded.
@@ -4565,6 +4583,34 @@ mod tests {
         // No inputs were staged (decode still gated; stale frames are redundant).
         let keys_after: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
         assert_eq!(keys_after, keys_before, "stale packet stages nothing");
+        assert!(matches!(
+            protocol.send_queue.back().map(|message| &message.body),
+            Some(MessageBody::InputAck(InputAck { ack_frame })) if *ack_frame == Frame::new(100)
+        ), "a stale retransmission with a pruned reference must re-ack the contiguous receive high-water");
+        assert!(
+            protocol.pending_output.is_empty(),
+            "the packet's independent piggyback ACK must drain local pending output"
+        );
+
+        // End-to-end half of the lost-ACK recovery: route the emitted
+        // cumulative ACK back to a sender still retaining the stale 50..=100
+        // batch. One retry must drain the whole already-received prefix.
+        let mut sender = running_protocol_three_slots();
+        for frame in 50..=100 {
+            sender.pending_output.push_back(InputBytes {
+                frame: Frame::new(frame),
+                bytes: vec![0; 4],
+            });
+        }
+        let ack = match &protocol.send_queue.back().expect("re-ack queued").body {
+            MessageBody::InputAck(ack) => *ack,
+            other => panic!("expected cumulative InputAck, got {other:?}"),
+        };
+        sender.on_input_ack(ack);
+        assert!(
+            sender.pending_output.is_empty(),
+            "retry re-ack must release the sender's stale pending front"
+        );
     }
 
     // (c) The COMMON case the finding's literal target conflates: a packet with a

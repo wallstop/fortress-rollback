@@ -413,6 +413,7 @@ fn p2p_halt_propagated_disconnect_transitions_to_synchronizing() -> Result<(), F
         advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 100)?;
         poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
         let frame_before_detecting_call = sess1.current_frame();
+        let confirmed_before_detecting_call = sess1.confirmed_frame();
         sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 200 })?;
         match sess1.advance_frame() {
             Err(FortressError::NotSynchronized) => {
@@ -420,6 +421,10 @@ fn p2p_halt_propagated_disconnect_transitions_to_synchronizing() -> Result<(), F
                     sess1.current_frame(),
                     frame_before_detecting_call,
                     "detecting a propagated Halt drop must not advance one extra frame"
+                );
+                assert!(
+                    sess1.confirmed_frame() <= confirmed_before_detecting_call,
+                    "detecting a propagated Halt drop must not expose a speculative confirmed tail"
                 );
                 detected_without_advance = true;
                 break;

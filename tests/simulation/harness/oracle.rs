@@ -198,6 +198,37 @@ pub enum OracleFailure {
     },
 }
 
+impl OracleFailure {
+    /// Stable, serialization-friendly name for this invariant class.
+    ///
+    /// Artifact replay and shrinking compare this value rather than the
+    /// variant's `Debug` output, whose diagnostic fields deliberately change
+    /// as a schedule is minimized.
+    #[must_use]
+    pub const fn class(&self) -> &'static str {
+        match self {
+            Self::ConfirmedInputDivergence { .. } => "ConfirmedInputDivergence",
+            Self::StateDivergence { .. } => "StateDivergence",
+            Self::InbandDesyncDetected { .. } => "InbandDesyncDetected",
+            Self::ChecksumMismatchMetric { .. } => "ChecksumMismatchMetric",
+            Self::ConfirmedInputUnavailable { .. } => "ConfirmedInputUnavailable",
+            Self::SessionError { .. } => "SessionError",
+            Self::Violation { .. } => "Violation",
+            Self::InvalidViolationSource { .. } => "InvalidViolationSource",
+            Self::EndProgress { .. } => "EndProgress",
+            Self::NoLivePeers { .. } => "NoLivePeers",
+            Self::PostHealLiveness { .. } => "PostHealLiveness",
+            Self::FreezeFrameDivergence { .. } => "FreezeFrameDivergence",
+            Self::FreezeFrameMissing { .. } => "FreezeFrameMissing",
+            Self::SpectatorDivergenceEvent { .. } => "SpectatorDivergenceEvent",
+            Self::SpectatorSessionError { .. } => "SpectatorSessionError",
+            Self::SpectatorProgressMissing { .. } => "SpectatorProgressMissing",
+            Self::SpectatorMeshCanonMissing { .. } => "SpectatorMeshCanonMissing",
+            Self::SpectatorInputDivergence { .. } => "SpectatorInputDivergence",
+        }
+    }
+}
+
 /// A survivor's stable dropped-slot freeze observation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct FreezePoint {
@@ -801,14 +832,21 @@ impl Oracle {
         // the result of simulating frame N with confirmed inputs ≤ N), so a
         // frame's state is final once the *previous* frame is confirmed;
         // comparing up to `global_confirmed` stays strictly inside the final
-        // region. Retired peers are NOT skipped here: their *pre-retirement*
-        // recorded states are real observations for the frames they produced, so
-        // a peer that diverged before leaving is still caught. They only lack
-        // states past retirement, so they never contribute past the survivor
-        // prefix.
+        // region for every live peer. Retired peers are NOT skipped: their
+        // *confirmed pre-retirement* observations are real and a peer that
+        // diverged before leaving must still be caught. Their own frozen
+        // confirmed frame caps that comparison, however; speculative states
+        // recorded immediately before a crash never became final and must not
+        // be compared merely because the survivors later advanced past them.
         let mut canonical_states: BTreeMap<i32, (usize, StateStub)> = BTreeMap::new();
         for (peer, states) in recorded.iter().enumerate() {
-            for (&frame, &state) in states.range(..=global_confirmed) {
+            let peer_confirmed = end_confirmed
+                .get(peer)
+                .copied()
+                .unwrap_or(Frame::NULL)
+                .as_i32();
+            let comparison_ceiling = global_confirmed.min(peer_confirmed);
+            for (&frame, &state) in states.range(..=comparison_ceiling) {
                 match canonical_states.get(&frame) {
                     None => {
                         canonical_states.insert(frame, (peer, state));
@@ -1612,6 +1650,44 @@ mod tests {
                 .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
             "a live peer with the same shortfall must fail: {:?}",
             control.failures
+        );
+    }
+
+    /// A retired peer remains evidence through its own confirmed prefix, but
+    /// its speculative tail cannot become final retroactively when survivors
+    /// continue. This is the N>4 PeerKill shape found by the nightly fleet.
+    #[test]
+    fn oracle_caps_retired_peer_state_comparison_at_its_confirmed_frame() {
+        let states = |values: &[(i32, i32)]| {
+            values
+                .iter()
+                .map(|&(frame, state)| (frame, StateStub { frame, state }))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let recorded = [
+            states(&[(8, 80), (9, 90), (12, 120)]),
+            states(&[(8, 80), (9, 91), (12, 121)]),
+        ];
+        let mut oracle = Oracle::new(2);
+        oracle.mark_peer_dead(1);
+        let verdict = oracle.finalize(
+            &recorded,
+            &[Frame::new(500), Frame::new(10)],
+            &[SessionState::Running, SessionState::Synchronizing],
+        );
+        let divergences = verdict
+            .failures
+            .iter()
+            .filter_map(|failure| match failure {
+                OracleFailure::StateDivergence { frame, .. } => Some(*frame),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            divergences,
+            vec![9],
+            "confirmed pre-retirement divergence must fire, speculative tail must not: {:?}",
+            verdict.failures
         );
     }
 
