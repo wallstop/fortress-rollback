@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     impl TestClock {
-        /// Creates a new `TestClock` starting at the current wall-clock time.
+        /// Creates a new `TestClock` starting at the current monotonic instant.
         fn new() -> Self {
             Self {
                 current: Arc::new(Mutex::new(Instant::now())),

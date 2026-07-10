@@ -53,10 +53,10 @@ pub struct TestClock {
 // not a recoverable condition, so .expect() is appropriate here.
 #[allow(clippy::expect_used)]
 impl TestClock {
-    /// Creates a new `TestClock` starting at the current wall-clock time.
+    /// Creates a new `TestClock` starting at the current monotonic instant.
     ///
     /// The initial time is captured from `Instant::now()` to ensure that
-    /// duration calculations (which rely on the monotonic clock epoch) work
+    /// duration calculations (which rely on a common monotonic origin) work
     /// correctly.
     pub fn new() -> Self {
         Self {

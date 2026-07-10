@@ -531,7 +531,7 @@ pub struct ProtocolConfig {
     /// };
     /// ```
     ///
-    /// Default: `None` (uses system clock)
+    /// Default: `None` (uses the platform's monotonic clock)
     pub clock: Option<ClockFn>,
 }
 

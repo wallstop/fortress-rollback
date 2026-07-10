@@ -7,6 +7,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 scripts_dir = Path(__file__).parent.parent
 spec = importlib.util.spec_from_file_location(
     "check_network_timing_invariants",
@@ -59,10 +61,6 @@ fn deterministic_protocol_test() {
     let raw = r#"thread::sleep(Duration::from_millis(1))"#;
     let quote = '\\'';
     // thread::sleep(Duration::from_millis(1));
-}
-
-fn millis_since_epoch_advances_over_time() {
-    std::thread::sleep(std::time::Duration::from_millis(1));
 }
 """
 
@@ -130,25 +128,29 @@ fn staggered_test() {
     assert "direct wait_for_peer()" in issues[0]
 
 
-def test_flags_protocol_thread_sleep_with_protocol_duration(tmp_path: Path) -> None:
-    protocol = VALID_PROTOCOL + """
-fn flaky_protocol_test() {
-    std::thread::sleep(Duration::from_millis(1));
-}
-"""
-    write_fixture(tmp_path, protocol=protocol)
-
-    issues = check_repo(tmp_path)
-
-    assert len(issues) == 1
-    assert "ProtocolConfig.clock" in issues[0]
-
-
-def test_flags_protocol_thread_sleep_with_fully_qualified_duration(tmp_path: Path) -> None:
-    protocol = VALID_PROTOCOL + """
-fn fully_qualified_flaky_protocol_test() {
-    std::thread::sleep(std::time::Duration::from_millis(1));
-}
+@pytest.mark.parametrize(
+    ("function_name", "sleep_call"),
+    [
+        ("flaky_protocol_test", "thread::sleep(Duration::from_millis(1));"),
+        (
+            "fully_qualified_flaky_protocol_test",
+            "std::thread::sleep(std::time::Duration::from_millis(1));",
+        ),
+        (
+            "millis_since_epoch_advances_over_time",
+            "std::thread::sleep(Duration::from_millis(1));",
+        ),
+    ],
+)
+def test_flags_any_protocol_thread_sleep(
+    tmp_path: Path,
+    function_name: str,
+    sleep_call: str,
+) -> None:
+    protocol = VALID_PROTOCOL + f"""
+fn {function_name}() {{
+    {sleep_call}
+}}
 """
     write_fixture(tmp_path, protocol=protocol)
 

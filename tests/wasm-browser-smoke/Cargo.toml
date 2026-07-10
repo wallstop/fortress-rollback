@@ -8,5 +8,5 @@ rust-version = "1.86"
 [dependencies]
 fortress-rollback = { path = "../.." }
 
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = "=0.3.56"

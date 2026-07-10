@@ -280,12 +280,6 @@ def _check_protocol_source(source: str) -> list[str]:
     errors: list[str] = []
     sleep_pattern = re.compile(r"\b(?:std::)?thread::sleep\s*\(", re.MULTILINE)
     for match in sleep_pattern.finditer(stripped):
-        function_matches = list(
-            re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*\(", stripped[: match.start()])
-        )
-        function_name = function_matches[-1].group(1) if function_matches else "<module>"
-        if function_name == "millis_since_epoch_advances_over_time":
-            continue
         errors.append(
             f"{PROTOCOL_MODULE}:{_line_number(stripped, match.start())}: "
             "protocol tests must use ProtocolConfig.clock and virtual time instead of thread::sleep()"

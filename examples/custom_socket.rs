@@ -159,8 +159,9 @@ pub struct WebSocketPeerId(pub String);
 /// Skeleton showing how to wrap a WebSocket library.
 ///
 /// This is a **template** - you'll need to fill in the actual WebSocket
-/// implementation based on your chosen library (e.g., `tungstenite`, `tokio-tungstenite`,
-/// `ws` for WASM, etc.).
+/// implementation based on your chosen library (e.g., `tungstenite`,
+/// `tokio-tungstenite`, or a browser-capable WebSocket crate under
+/// `wasm32-unknown-unknown`).
 ///
 /// ## Design Considerations
 ///
@@ -255,42 +256,52 @@ impl NonBlockingSocket<WebSocketPeerId> for WebSocketAdapter {
 }
 
 // =============================================================================
-// Example 3: Matchbox Integration Reference
+// Example 3: Matchbox Adapter Reference
 // =============================================================================
 
-/// This module shows the pattern for Matchbox integration.
+/// This module outlines the adapter boundary for Matchbox 0.14.
 ///
-/// Matchbox already implements `NonBlockingSocket` when you enable the `ggrs` feature,
-/// so you don't need to write this yourself. This is just for reference.
+/// Matchbox's `ggrs` feature implements the upstream GGRS trait for
+/// `WebRtcChannel`; it does not implement Fortress Rollback's trait. Browser
+/// applications should leave that feature disabled, take a raw channel from the
+/// socket, and wrap it in their own bounded `NonBlockingSocket` implementation.
 mod matchbox_reference {
     #![allow(dead_code)]
 
-    /// With Matchbox, the integration is simple:
+    /// A browser-only Matchbox integration has this shape:
     ///
     /// ```ignore
     /// use matchbox_socket::WebRtcSocket;
     ///
-    /// // Connect to signaling server
-    /// let (socket, message_loop) = WebRtcSocket::new_ggrs("wss://matchbox.example.com/room");
+    /// // Connect to the signaling server with one unreliable data channel.
+    /// let (mut socket, message_loop) =
+    ///     WebRtcSocket::new_unreliable("wss://matchbox.example.com/room");
     ///
-    /// // Spawn message loop (required)
-    /// #[cfg(target_arch = "wasm32")]
-    /// wasm_bindgen_futures::spawn_local(message_loop);
-    /// #[cfg(not(target_arch = "wasm32"))]
-    /// std::thread::spawn(move || futures::executor::block_on(message_loop));
+    /// // The browser executor must keep the Matchbox message loop running.
+    /// wasm_bindgen_futures::spawn_local(async move {
+    ///     if let Err(error) = message_loop.await {
+    ///         report_matchbox_error(error); // application logger/error handler
+    ///     }
+    /// });
     ///
-    /// // Wait for peers...
-    /// while socket.connected_peers().count() < num_players - 1 {
-    ///     // Poll and wait
-    /// }
+    /// // Split the channel so the adapter can poll a fixed maximum from the
+    /// // receiver per call, leaving excess packets queued for later. Calling
+    /// // channel.receive() would drain Matchbox's entire queue into a new Vec.
+    /// let channel = socket.take_channel(0)?;
+    /// let (sender, receiver) = channel.split();
+    /// let fortress_socket = FortressMatchboxAdapter::new(sender, receiver);
     ///
-    /// // Create session - socket already implements NonBlockingSocket!
     /// let session = SessionBuilder::<GameConfig>::new()
-    ///     .with_num_players(2).unwrap()
+    ///     .with_num_players(2)?
     ///     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     ///     .add_player(PlayerType::Remote(peer_id), PlayerHandle::new(1))?
-    ///     .start_p2p_session(socket)?;
+    ///     .start_p2p_session(fortress_socket)?;
     /// ```
+    ///
+    /// Declare Matchbox only under
+    /// `cfg(all(target_arch = "wasm32", target_os = "unknown"))`. Godot Web
+    /// GDExtensions target Emscripten and need an engine/Godot transport adapter
+    /// with no wasm-bindgen-family dependencies in their normal graph.
     pub struct MatchboxReference;
 }
 
@@ -309,7 +320,7 @@ fn main() {
     println!("1. Define an address type (impl Clone + PartialEq + Eq + Ord + Hash + Debug)");
     println!("2. Implement send_to() - serialize and send the Message");
     println!("3. Implement receive_all_messages() - return a bounded batch without blocking");
-    println!("\nFor browser games, use Matchbox which handles all of this for you!");
+    println!("\nFor browser games, adapt a raw Matchbox channel with the same codec pattern.");
 }
 
 fn demo_channel_socket() {
@@ -321,7 +332,7 @@ fn demo_channel_socket() {
     // Note: In a real application, you would use these sockets with SessionBuilder:
     //
     // let session = SessionBuilder::<GameConfig>::new()
-    //     .with_num_players(2).unwrap()
+    //     .with_num_players(2)?
     //     .add_player(PlayerType::Local, PlayerHandle::new(0))?
     //     .add_player(PlayerType::Remote(ChannelPeerId(2)), PlayerHandle::new(1))?
     //     .start_p2p_session(socket1)?;

@@ -1,4 +1,4 @@
-#[cfg(all(test, target_family = "wasm", target_os = "unknown"))]
+#[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
 mod tests {
     use fortress_rollback::{ChaosConfig, ChaosSocket, Message, NonBlockingSocket};
     use wasm_bindgen_test::wasm_bindgen_test;
