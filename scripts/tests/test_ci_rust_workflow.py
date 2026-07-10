@@ -251,6 +251,43 @@ def test_wasm_job_rejects_browser_dependencies_only_on_emscripten() -> None:
         assert EMSCRIPTEN_DEPENDENCY_CHECK in _workflow_paths(workflow, event)
 
 
+def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
+    """The browser row must execute the clock path with matching bindgen tools."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["wasm-check"]["steps"]
+
+    install_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Install wasm-bindgen CLI for browser runtime tests"
+    )
+    assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
+    assert install_step["uses"] == "taiki-e/install-action@v2"
+    assert install_step["with"]["tool"] == "wasm-bindgen-cli@0.2.106"
+
+    test_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Run browser WASM runtime smoke test"
+    )
+    assert test_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
+    assert (
+        test_step["env"]["CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER"]
+        == "wasm-bindgen-test-runner"
+    )
+
+    commands = _cargo_commands([test_step], "test")
+    assert len(commands) == 1
+    command = commands[0]
+    assert _option_values(command, "--package") + _option_values(command, "-p") == [
+        "wasm-browser-smoke"
+    ]
+    assert _option_values(command, "--target") == [MATRIX_TARGET_EXPRESSION]
+    assert command.count("--lib") == 1
+    test_args = command[command.index("--") + 1 :]
+    assert "--nocapture" in test_args
+
+
 def test_emscripten_dependency_check_quotes_configured_cargo_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

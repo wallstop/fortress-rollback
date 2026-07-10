@@ -38,7 +38,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::hash::Hash;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::network::messages::Message;
 use crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
@@ -570,10 +572,11 @@ where
     /// ```rust
     /// use std::sync::Arc;
     /// use std::sync::atomic::{AtomicU64, Ordering};
-    /// use std::time::{Duration, Instant};
+    /// use std::time::Duration;
     /// use fortress_rollback::{ChaosSocket, ChaosConfig, NonBlockingSocket};
     /// use fortress_rollback::Message;
     /// use std::net::SocketAddr;
+    /// use web_time::Instant;
     ///
     /// # struct TestSocket;
     /// # impl NonBlockingSocket<SocketAddr> for TestSocket {

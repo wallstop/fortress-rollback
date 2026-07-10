@@ -559,6 +559,12 @@ jobs:
         with:
           cache-key: wasm-${{ matrix.target }}
 
+      - name: Install wasm-bindgen CLI for browser runtime tests
+        if: matrix.target == 'wasm32-unknown-unknown'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.106
+
       - name: Check WASM build (no default features)
         run: cargo check --target ${{ matrix.target }} --no-default-features
 
@@ -576,6 +582,12 @@ jobs:
 
       - name: Run clippy for WASM target
         run: cargo clippy --target ${{ matrix.target }} --no-default-features -- -D warnings
+
+      - name: Run browser WASM runtime smoke test
+        if: matrix.target == 'wasm32-unknown-unknown'
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p wasm-browser-smoke --target ${{ matrix.target }} --lib -- --nocapture
 
       - name: Reject browser-only dependencies on Emscripten
         if: matrix.target == 'wasm32-unknown-emscripten'
