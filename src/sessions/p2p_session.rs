@@ -22456,6 +22456,44 @@ mod tests {
             (c2, snapshot_frame, activation_frame)
         }
 
+        /// A matching lifecycle close that was already in flight when a
+        /// buffered N-peer joiner halted must not apply the snapshot and
+        /// resurrect the session. Removing the halt-ceiling guard from
+        /// `poll_hot_join_joiner_npeer` makes this test transition to Running.
+        #[test]
+        fn npeer_buffered_snapshot_cannot_resume_halt_closed_joiner() {
+            let (mut c2, snapshot_frame, activation_frame) = seam_staged_real_joiner();
+            c2.session
+                .enter_fail_closed_disconnect_state_at(snapshot_frame);
+            c2.coordinator_proto_mut()
+                .set_received_join_committed_for_test(JoinCommitted {
+                    handle: 2,
+                    frame: activation_frame,
+                });
+
+            c2.poll();
+
+            assert_eq!(
+                c2.session.current_state(),
+                SessionState::Synchronizing,
+                "a matching late commit must not resume a halt-closed joiner"
+            );
+            assert_eq!(
+                c2.buffered_frames(),
+                Some((snapshot_frame, activation_frame)),
+                "the halt guard must run before consuming the buffered attempt"
+            );
+            assert!(
+                c2.session
+                    .hot_join
+                    .joiner
+                    .as_ref()
+                    .is_some_and(|joiner| joiner.pending_requests.is_empty()),
+                "a halted joiner must not expose snapshot-load requests"
+            );
+            assert!(c2.session.confirmed_frame() <= snapshot_frame);
+        }
+
         /// N4 buffer-then-apply, lifecycle-discrimination half (seam-staged):
         /// the joiner BUFFERS a received snapshot (stays HotJoining, emits no
         /// LoadGameState), ignores stale `JoinCommitted`/`JoinAborted`
@@ -22811,6 +22849,64 @@ mod tests {
                     .is_some_and(|joiner| joiner.applied_frame.is_none()),
                 "nothing was applied"
             );
+        }
+
+        /// A valid snapshot that was already in flight when a two-player
+        /// joiner halted must not load state and flip the terminal session
+        /// back to Running. Removing the halt-ceiling guard from
+        /// `poll_hot_join_joiner` makes this test apply the snapshot.
+        #[test]
+        fn two_peer_late_snapshot_cannot_resume_halt_closed_joiner() {
+            let bus = MeshBus::new();
+            let clock = MeshClock::new();
+            let mut session = SessionBuilder::<TestConfig>::new()
+                .with_num_players(2)
+                .expect("num players")
+                .with_protocol_config(clock.protocol_config())
+                .add_player(PlayerType::Remote(addr_a()), PlayerHandle::new(0))
+                .expect("joiner remote host")
+                .add_player(PlayerType::Local, PlayerHandle::new(1))
+                .expect("joiner local")
+                .start_hot_join_session(bus.socket(addr_c()), addr_a())
+                .expect("2-peer joiner builds through the public API");
+            assert!(
+                session
+                    .hot_join
+                    .joiner
+                    .as_ref()
+                    .is_some_and(|joiner| !joiner.npeer),
+                "one remote machine selects the 2-peer joiner role"
+            );
+            let halt_ceiling = Frame::new(4);
+            session.enter_fail_closed_disconnect_state_at(halt_ceiling);
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("host endpoint exists")
+                .set_received_snapshot_for_test(StateSnapshot {
+                    frame: Frame::new(5),
+                    num_players: 2,
+                    state_bytes: crate::network::codec::encode(&7_u8).expect("state encodes"),
+                    bridge_inputs: Vec::new(),
+                    bridge_statuses: Vec::new(),
+                    checksum: None,
+                });
+
+            session.poll_remote_clients();
+
+            assert_eq!(
+                session.current_state(),
+                SessionState::Synchronizing,
+                "a valid late snapshot must not resume a halt-closed joiner"
+            );
+            assert!(
+                session.hot_join.joiner.as_ref().is_some_and(|joiner| {
+                    joiner.applied_frame.is_none() && joiner.pending_requests.is_empty()
+                }),
+                "a halted joiner must neither apply nor expose the snapshot"
+            );
+            assert!(session.confirmed_frame() <= halt_ceiling);
         }
 
         /// N4 flagship — the full 3-peer happy path through the REAL joiner
