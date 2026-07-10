@@ -4284,6 +4284,12 @@ impl<T: Config> P2PSession<T> {
             self.poll_hot_join_joiner_npeer();
             return;
         }
+        // A halt-closed session must never transition to Running via a buffered
+        // late snapshot. The confirmed ceiling is permanently frozen and
+        // rebuilding the session is the only recovery boundary.
+        if self.halt_confirmed_ceiling.is_some() {
+            return;
+        }
         let host_addr = joiner.host_addr.clone();
         let local_handle = joiner.local_handle;
         let applied_frame = joiner.applied_frame;
@@ -4554,6 +4560,12 @@ impl<T: Config> P2PSession<T> {
         // teardown the app has already observed). See
         // [`JoinerState::torn_down`].
         if joiner.torn_down {
+            return;
+        }
+        // A halt-closed session must never transition to Running via a buffered
+        // late snapshot. The confirmed ceiling is permanently frozen and
+        // rebuilding the session is the only recovery boundary.
+        if self.halt_confirmed_ceiling.is_some() {
             return;
         }
         let host_addr = joiner.host_addr.clone();
