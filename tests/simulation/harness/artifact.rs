@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn run_report_retains_only_final_sixty_four_event_bearing_steps() {
+    fn run_report_retains_only_final_sixty_four_contiguous_steps() {
         let mut config = SimConfig::smoke(2);
         config.steps = 80;
         config.noise = BackgroundNoise::Clean;
