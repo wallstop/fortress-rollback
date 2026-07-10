@@ -14,6 +14,7 @@ on:
       - 'rustfmt.toml'
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
+      - 'scripts/ci/check-emscripten-dependencies.sh'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -28,6 +29,7 @@ on:
       - 'rustfmt.toml'
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
+      - 'scripts/ci/check-emscripten-dependencies.sh'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -533,9 +535,15 @@ jobs:
 
   # WASM build verification
   wasm-check:
-    name: WASM Build Check
+    name: WASM Build Check (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - wasm32-unknown-unknown
+          - wasm32-unknown-emscripten
 
     steps:
       - uses: actions/checkout@v7
@@ -543,28 +551,35 @@ jobs:
       - name: Install Rust toolchain with WASM target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: ${{ matrix.target }}
           components: clippy
 
       - name: Setup Rust cache
         uses: ./.github/actions/setup-rust-cache
         with:
-          cache-key: wasm
+          cache-key: wasm-${{ matrix.target }}
 
       - name: Check WASM build (no default features)
-        run: cargo check --target wasm32-unknown-unknown --no-default-features
+        run: cargo check --target ${{ matrix.target }} --no-default-features
 
       - name: Check WASM build (with sync-send feature)
-        run: cargo check --target wasm32-unknown-unknown --features sync-send
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features sync-send
 
       - name: Check WASM build (with paranoid feature)
-        run: cargo check --target wasm32-unknown-unknown --features paranoid
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features paranoid
 
       - name: Check WASM build (with json feature)
-        run: cargo check --target wasm32-unknown-unknown --features json
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features json
+
+      - name: Check WASM build (with hot-join feature)
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features hot-join
 
       - name: Run clippy for WASM target
-        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} --no-default-features -- -D warnings
+
+      - name: Reject browser-only dependencies on Emscripten
+        if: matrix.target == 'wasm32-unknown-emscripten'
+        run: ./scripts/ci/check-emscripten-dependencies.sh
 
   # ARM64 (aarch64) cross-compilation verification
   arm64-cross:
