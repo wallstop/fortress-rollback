@@ -22,6 +22,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
+ROOT_CARGO_MANIFEST = REPO_ROOT / "Cargo.toml"
+NETWORK_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 EMSCRIPTEN_DEPENDENCY_CHECK = "scripts/ci/check-emscripten-dependencies.sh"
 EMSCRIPTEN_DEPENDENCY_CHECK_PATH = REPO_ROOT / EMSCRIPTEN_DEPENDENCY_CHECK
 GODOT_FIXTURE = "tests/godot-emscripten"
@@ -89,6 +91,19 @@ def _load_cargo_config() -> dict:
     return tomllib.loads(CARGO_CONFIG.read_text(encoding="utf-8"))
 
 
+def _docker_copy_sources(dockerfile: str) -> tuple[Path, ...]:
+    """Return sources from shell-form COPY instructions."""
+    sources: list[Path] = []
+    for line in dockerfile.splitlines():
+        if not line.lstrip().upper().startswith("COPY "):
+            continue
+
+        tokens = shlex.split(line, comments=True)
+        arguments = [token for token in tokens[1:] if not token.startswith("--")]
+        sources.extend(Path(source.rstrip("/")) for source in arguments[:-1])
+    return tuple(sources)
+
+
 def _shell_commands(step: dict) -> list[list[str]]:
     """Tokenize non-comment command lines without depending on shell whitespace."""
     run = step.get("run")
@@ -151,6 +166,43 @@ def test_cargo_network_config_hardens_registry_fetches(
     config = _load_cargo_config()
 
     assert config[section][key] == expected
+
+
+def test_network_docker_cache_build_covers_workspace_manifests_and_fails_closed() -> None:
+    """The cache build must include every member and surface preparation errors."""
+    if tomllib is None:
+        pytest.skip("tomllib/tomli not available")
+
+    cargo_manifest = tomllib.loads(ROOT_CARGO_MANIFEST.read_text(encoding="utf-8"))
+    required_sources = {
+        Path("Cargo.toml"),
+        Path("Cargo.lock"),
+    }
+    required_sources.update(
+        Path(member) / "Cargo.toml"
+        for member in cargo_manifest["workspace"]["members"]
+        if member != "."
+    )
+    dockerfile = NETWORK_DOCKERFILE.read_text(encoding="utf-8")
+    cache_context, separator, cache_build_tail = dockerfile.partition("RUN cargo build")
+    assert separator, "Dockerfile is missing its dependency-cache Cargo build"
+    copy_sources = _docker_copy_sources(cache_context)
+
+    assert set(copy_sources) == required_sources, (
+        "Docker cache build must copy only Cargo.lock and workspace manifests; "
+        f"expected {sorted(map(str, required_sources))}, "
+        f"found {sorted(map(str, copy_sources))}"
+    )
+
+    cache_build = ["cargo", "build", *shlex.split(cache_build_tail.splitlines()[0])]
+    assert cache_build == [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "network-test-peer",
+    ]
 
 
 def test_semver_failure_summary_distinguishes_infra_from_api_breaks() -> None:

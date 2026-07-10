@@ -22,28 +22,34 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy manifests first for better caching
+# Copy manifests first for dependency-layer caching. Cargo loads every workspace
+# member and discovers implicit bench targets before selecting the package.
 COPY Cargo.toml Cargo.lock ./
 COPY tests/network-peer/Cargo.toml tests/network-peer/Cargo.toml
+COPY tests/wasm-browser-smoke/Cargo.toml tests/wasm-browser-smoke/Cargo.toml
 
-# Create dummy source files to build dependencies
-RUN mkdir -p src tests/network-peer/src && \
-    echo "fn main() {}" > src/lib.rs && \
-    echo "fn main() {}" > tests/network-peer/src/main.rs
+# Create every target Cargo must discover while keeping real source changes out
+# of the dependency cache key.
+RUN mkdir -p src benches tests/network-peer/src tests/wasm-browser-smoke/src && \
+    echo "pub fn placeholder() {}" > src/lib.rs && \
+    echo "fn main() {}" > tests/network-peer/src/main.rs && \
+    echo "pub fn placeholder() {}" > tests/wasm-browser-smoke/src/lib.rs && \
+    for bench in compression input_queue p2p_session sync_layer; do \
+        echo "fn main() {}" > "benches/$bench.rs"; \
+    done
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release -p network-test-peer 2>/dev/null || true
+RUN cargo build --locked --release -p network-test-peer
 
 # Now copy the real source code (this overwrites the dummy files)
 COPY src ./src
-COPY benches ./benches
-COPY tests/network-peer ./tests/network-peer
+COPY tests/network-peer/src ./tests/network-peer/src
 
 # Touch source files to ensure they're newer than cached dependencies
 RUN touch src/lib.rs tests/network-peer/src/main.rs
 
 # Build the actual binary
-RUN cargo build --release -p network-test-peer
+RUN cargo build --locked --release -p network-test-peer
 
 # Runtime image
 FROM debian:bookworm-slim
