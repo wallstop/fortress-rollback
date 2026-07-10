@@ -7905,11 +7905,11 @@ impl<T: Config> P2PSession<T> {
 
         // everyone is synchronized, so we can change state and accept input
         self.state = SessionState::Running;
-        // A hot-join joiner that was fail-closed to `Synchronizing` mid-handshake
-        // (before applying a snapshot) resumes to `Running` here rather than via
-        // the snapshot-apply sites — instrument this path too so a joiner's
-        // `hot_join_metrics().completed` is never stuck false while `Running`.
-        // Idempotent and a no-op for a non-joiner.
+        // Defensive hot-join metrics coverage. Durable fail-closed joiners are
+        // rejected above and the reachable joiner transitions record at their
+        // snapshot-apply sites. Keep this idempotent call so a future valid
+        // synchronization path cannot leave a Running joiner's metrics partial;
+        // it remains a no-op for ordinary sessions.
         #[cfg(feature = "hot-join")]
         self.record_hot_join_activation();
     }
@@ -23216,6 +23216,12 @@ mod tests {
             let mut duo = mesh_with_dropped_slot_public_api(600, 6);
             let mut c2 = RealJoiner::new_public(&duo.bus.clone(), &duo.clock.clone());
             assert_eq!(c2.session.current_state(), SessionState::HotJoining);
+            let metrics_before = c2
+                .session
+                .hot_join_metrics()
+                .expect("the public N-peer joiner has hot-join metrics");
+            assert!(!metrics_before.completed);
+            assert_eq!(metrics_before.millis_to_running, 0);
             assert!(matches!(
                 c2.session.advance_frame(),
                 Err(FortressError::NotSynchronized)
@@ -23268,6 +23274,19 @@ mod tests {
                 saw_buffered,
                 "the joiner observably buffered before the commit (late-apply lifecycle)"
             );
+            let completed_metrics = c2
+                .session
+                .hot_join_metrics()
+                .expect("the public N-peer joiner retains hot-join metrics");
+            assert!(completed_metrics.completed);
+            assert!(
+                completed_metrics.polls_to_running > 1,
+                "the public N-peer join spans multiple polls: {completed_metrics:?}"
+            );
+            assert!(
+                completed_metrics.millis_to_running > 0,
+                "the injected clock advances during the public N-peer join: {completed_metrics:?}"
+            );
 
             // Un-defer-all at the apply: every remote endpoint.
             for endpoint in c2.session.player_reg.remotes.values() {
@@ -23280,6 +23299,11 @@ mod tests {
             // First advance: [LoadGameState(S), AdvanceFrame(bridge)] -> real
             // from F.
             let requests = c2.session.advance_frame().expect("post-commit advance");
+            assert_eq!(
+                c2.session.hot_join_metrics(),
+                Some(completed_metrics),
+                "completed N-peer hot-join metrics stay stable after later session work"
+            );
             assert_eq!(requests.len(), 2, "load + bridge advance, in order");
             assert!(matches!(
                 requests.first(),
