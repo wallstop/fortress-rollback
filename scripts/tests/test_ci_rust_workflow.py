@@ -24,6 +24,29 @@ CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 EMSCRIPTEN_DEPENDENCY_CHECK = "scripts/ci/check-emscripten-dependencies.sh"
 EMSCRIPTEN_DEPENDENCY_CHECK_PATH = REPO_ROOT / EMSCRIPTEN_DEPENDENCY_CHECK
+GODOT_FIXTURE = "tests/godot-emscripten"
+GODOT_FIXTURE_PATH_FILTER = f"{GODOT_FIXTURE}/**"
+GODOT_EDITOR_SHA256 = (
+    "d0bc2113065e481c9c2c2b2c37daa4e8be3fe9e27f0ab9ab0b6096e9a37907f3"
+)
+GODOT_TEMPLATES_SHA256 = (
+    "3fbe2c0e2dec9d537ab9ec97bcf8da91dcf23357fc51f67092dd068d839290a8"
+)
+GODOT_CACHE_KEY = (
+    "godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA256 }}-"
+    "${{ env.GODOT_TEMPLATES_SHA256 }}"
+)
+GODOT_CACHE_PATHS = {
+    "${{ env.GODOT4_BIN }}",
+    (
+        "${{ env.XDG_DATA_HOME }}/godot/export_templates/"
+        "${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_debug.zip"
+    ),
+    (
+        "${{ env.XDG_DATA_HOME }}/godot/export_templates/"
+        "${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_nothreads_debug.zip"
+    ),
+}
 MATRIX_TARGET_EXPRESSION = "${{ matrix.target }}"
 CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS = (
     REPO_ROOT / ".github" / "workflows" / "ci-benchmarks.yml",
@@ -286,6 +309,175 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
     assert command.count("--lib") == 1
     test_args = command[command.index("--") + 1 :]
     assert "--nocapture" in test_args
+
+
+def test_godot_fixture_changes_trigger_rust_ci() -> None:
+    """Every fixture input must schedule its browser integration gate."""
+    workflow = _load_ci_rust_workflow()
+
+    for event in ("push", "pull_request"):
+        assert GODOT_FIXTURE_PATH_FILTER in _workflow_paths(workflow, event)
+
+
+def test_godot_browser_job_pins_its_toolchain() -> None:
+    """The integration gate must reproduce the supported Godot toolchain."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["godot-emscripten"]
+    steps = job["steps"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 60
+
+    rust_step = next(
+        step for step in steps if step.get("name") == "Install Godot Rust toolchain"
+    )
+    assert (
+        rust_step["uses"]
+        == "dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88"
+    )
+    assert rust_step["with"]["toolchain"] == "nightly-2026-07-08"
+    assert set(str(rust_step["with"]["components"]).split(",")) == {
+        "clippy",
+        "rust-src",
+        "rustfmt",
+    }
+    assert rust_step["with"]["targets"] == "wasm32-unknown-emscripten"
+
+    emsdk_step = next(
+        step for step in steps if step.get("name") == "Install Emscripten SDK"
+    )
+    assert (
+        emsdk_step["uses"]
+        == "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984"
+    )
+    assert str(emsdk_step["with"]["version"]) == "4.0.11"
+    assert emsdk_step["with"]["actions-cache-folder"] == "emsdk-cache"
+
+    node_step = next(step for step in steps if step.get("name") == "Install Node.js")
+    assert node_step["uses"] == "actions/setup-node@v6"
+    assert str(node_step["with"]["node-version"]) == "24"
+    assert node_step["with"]["package-manager-cache"] is False
+
+
+def test_godot_download_cache_contains_only_verified_runtime_files() -> None:
+    """Cache the three runtime inputs, never the template or browser archives."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["godot-emscripten"]
+    steps = job["steps"]
+
+    assert job["env"]["GODOT_VERSION"] == "4.6.3"
+    assert job["env"]["GODOT_EDITOR_SHA256"] == GODOT_EDITOR_SHA256
+    assert job["env"]["GODOT_TEMPLATES_SHA256"] == GODOT_TEMPLATES_SHA256
+
+    restore_step = next(
+        step for step in steps if step.get("name") == "Restore Godot runtime files"
+    )
+    save_step = next(
+        step for step in steps if step.get("name") == "Save verified Godot runtime files"
+    )
+    assert restore_step["uses"] == "actions/cache/restore@v6"
+    assert save_step["uses"] == "actions/cache/save@v6"
+    assert restore_step["continue-on-error"] is True
+    assert save_step["continue-on-error"] is True
+
+    for cache_step in (restore_step, save_step):
+        cache_entries = {
+            line.strip()
+            for line in cache_step["with"]["path"].splitlines()
+            if line.strip()
+        }
+        assert cache_entries == GODOT_CACHE_PATHS
+        assert cache_step["with"]["key"] == GODOT_CACHE_KEY
+
+    download_step = next(
+        step for step in steps if step.get("name") == "Install verified Godot files"
+    )
+    assert download_step["if"] == "steps.godot-cache.outputs.cache-hit != 'true'"
+    assert save_step["if"] == "steps.godot-cache.outputs.cache-hit != 'true'"
+    assert steps.index(save_step) == steps.index(download_step) + 1
+
+    script = download_step["run"]
+    assert "github.com/godotengine/godot-builds/releases/download/" in script
+    checksum_lines = [
+        line for line in script.splitlines() if "sha256sum --check" in line
+    ]
+    assert any(
+        "GODOT_EDITOR_SHA256" in line and "editor_archive" in line
+        for line in checksum_lines
+    )
+    assert any(
+        "GODOT_TEMPLATES_SHA256" in line and "templates_archive" in line
+        for line in checksum_lines
+    )
+    assert "templates/web_dlink_debug.zip" in script
+    assert "templates/web_dlink_nothreads_debug.zip" in script
+    assert "GODOT_EDITOR_VERSION" in script
+    assert 'unzip -tq "${template_dir}/web_dlink_debug.zip"' in script
+    assert 'unzip -tq "${template_dir}/web_dlink_nothreads_debug.zip"' in script
+
+
+def test_godot_browser_job_lints_runs_and_preserves_failures() -> None:
+    """Static checks must precede the two-mode browser runner with diagnostics."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["godot-emscripten"]["steps"]
+    step_names = [step.get("name") for step in steps]
+
+    fmt_step = next(
+        step for step in steps if step.get("name") == "Check Godot fixture formatting"
+    )
+    fmt_command = _shell_commands(fmt_step)
+    assert len(fmt_command) == 1
+    assert fmt_command[0][:3] == ["cargo", "+nightly-2026-07-08", "fmt"]
+    assert _option_values(fmt_command[0], "--manifest-path") == [
+        f"{GODOT_FIXTURE}/Cargo.toml"
+    ]
+    assert "--check" in fmt_command[0]
+
+    clippy_step = next(
+        step for step in steps if step.get("name") == "Lint Godot fixture"
+    )
+    clippy_command = _shell_commands(clippy_step)
+    assert len(clippy_command) == 1
+    assert clippy_command[0][:3] == ["cargo", "+nightly-2026-07-08", "clippy"]
+    assert _option_values(clippy_command[0], "--manifest-path") == [
+        f"{GODOT_FIXTURE}/Cargo.toml"
+    ]
+    assert "--all-targets" in clippy_command[0]
+    assert "--all-features" in clippy_command[0]
+    assert "--locked" in clippy_command[0]
+    assert clippy_command[0][-2:] == ["-D", "warnings"]
+
+    rust_index = step_names.index("Install Godot Rust toolchain")
+    fmt_index = step_names.index(fmt_step["name"])
+    clippy_index = step_names.index(clippy_step["name"])
+    assert fmt_index == rust_index + 1
+    assert clippy_index == fmt_index + 1
+    for expensive_step in (
+        "Install Emscripten SDK",
+        "Install Node.js",
+        "Restore Godot runtime files",
+        "Install Xvfb authentication",
+    ):
+        assert clippy_index < step_names.index(expensive_step)
+
+    xauth_step = next(
+        step for step in steps if step.get("name") == "Install Xvfb authentication"
+    )
+    assert any("xauth" in command for command in _shell_commands(xauth_step))
+
+    run_step = next(
+        step for step in steps if step.get("name") == "Run Godot browser fixture"
+    )
+    assert run_step["run"] == f"./{GODOT_FIXTURE}/run.sh"
+    assert str(run_step["env"]["INSTALL_PLAYWRIGHT"]) == "1"
+    assert clippy_index < step_names.index(run_step["name"])
+
+    artifact_step = next(
+        step for step in steps if step.get("name") == "Upload browser failure results"
+    )
+    assert artifact_step["if"] == "failure()"
+    assert artifact_step["uses"] == "actions/upload-artifact@v7"
+    assert artifact_step["with"]["path"] == f"{GODOT_FIXTURE}/test-results/"
 
 
 def test_emscripten_dependency_check_quotes_configured_cargo_binary(

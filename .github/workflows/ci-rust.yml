@@ -15,6 +15,7 @@ on:
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
+      - 'tests/godot-emscripten/**'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
+      - 'tests/godot-emscripten/**'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -592,6 +594,138 @@ jobs:
       - name: Reject browser-only dependencies on Emscripten
         if: matrix.target == 'wasm32-unknown-emscripten'
         run: ./scripts/ci/check-emscripten-dependencies.sh
+
+  # Real Godot web exports exercise the dynamic-linking boundary that compile
+  # checks cannot validate. Both threaded and non-threaded modes run in Chromium.
+  godot-emscripten:
+    name: Godot Emscripten Browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GODOT_VERSION: "4.6.3"
+      GODOT_RELEASE: "4.6.3-stable"
+      GODOT_TEMPLATE_VERSION: "4.6.3.stable"
+      GODOT_EDITOR_ARCHIVE: "Godot_v4.6.3-stable_linux.x86_64.zip"
+      GODOT_TEMPLATES_ARCHIVE: "Godot_v4.6.3-stable_export_templates.tpz"
+      GODOT_EDITOR_SHA256: "d0bc2113065e481c9c2c2b2c37daa4e8be3fe9e27f0ab9ab0b6096e9a37907f3"
+      GODOT_TEMPLATES_SHA256: "3fbe2c0e2dec9d537ab9ec97bcf8da91dcf23357fc51f67092dd068d839290a8"
+      GODOT_EDITOR_VERSION: "4.6.3.stable.official.7d41c59c4"
+      GODOT_ROOT: ${{ github.workspace }}/.godot-ci/godot-4.6.3
+      GODOT4_BIN: ${{ github.workspace }}/.godot-ci/godot-4.6.3/Godot_v4.6.3-stable_linux.x86_64
+      XDG_DATA_HOME: ${{ github.workspace }}/.godot-ci/godot-4.6.3/xdg-data
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Godot Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master snapshot
+        with:
+          toolchain: nightly-2026-07-08
+          components: clippy,rust-src,rustfmt
+          targets: wasm32-unknown-emscripten
+
+      - name: Check Godot fixture formatting
+        run: cargo +nightly-2026-07-08 fmt --manifest-path tests/godot-emscripten/Cargo.toml -- --check
+
+      - name: Lint Godot fixture
+        run: cargo +nightly-2026-07-08 clippy --manifest-path tests/godot-emscripten/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Install Emscripten SDK
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: "4.0.11"
+          actions-cache-folder: emsdk-cache
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Restore Godot runtime files
+        id: godot-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: |
+            ${{ env.GODOT4_BIN }}
+            ${{ env.XDG_DATA_HOME }}/godot/export_templates/${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_debug.zip
+            ${{ env.XDG_DATA_HOME }}/godot/export_templates/${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_nothreads_debug.zip
+          key: godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA256 }}-${{ env.GODOT_TEMPLATES_SHA256 }}
+
+      - name: Install verified Godot files
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          readonly download_dir="${RUNNER_TEMP}/godot-downloads"
+          readonly editor_archive="${download_dir}/${GODOT_EDITOR_ARCHIVE}"
+          readonly templates_archive="${download_dir}/${GODOT_TEMPLATES_ARCHIVE}"
+          readonly template_dir="${XDG_DATA_HOME}/godot/export_templates/${GODOT_TEMPLATE_VERSION}"
+          readonly release_url="https://github.com/godotengine/godot-builds/releases/download/${GODOT_RELEASE}"
+
+          rm -rf "${download_dir}"
+          mkdir -p "${download_dir}" "${GODOT_ROOT}" "${template_dir}"
+          trap 'rm -rf "${download_dir}"' EXIT
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "${editor_archive}" \
+            "${release_url}/${GODOT_EDITOR_ARCHIVE}"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "${templates_archive}" \
+            "${release_url}/${GODOT_TEMPLATES_ARCHIVE}"
+
+          printf '%s  %s\n' "${GODOT_EDITOR_SHA256}" "${editor_archive}" | sha256sum --check
+          printf '%s  %s\n' "${GODOT_TEMPLATES_SHA256}" "${templates_archive}" | sha256sum --check
+
+          unzip -q "${editor_archive}" -d "${GODOT_ROOT}"
+          unzip -p "${templates_archive}" templates/web_dlink_debug.zip \
+            > "${template_dir}/web_dlink_debug.zip"
+          unzip -p "${templates_archive}" templates/web_dlink_nothreads_debug.zip \
+            > "${template_dir}/web_dlink_nothreads_debug.zip"
+          chmod +x "${GODOT4_BIN}"
+
+          actual_version="$("${GODOT4_BIN}" --version)"
+          if [[ "${actual_version}" != "${GODOT_EDITOR_VERSION}" ]]; then
+            printf 'error: expected Godot %s, got %s\n' \
+              "${GODOT_EDITOR_VERSION}" "${actual_version}" >&2
+            exit 1
+          fi
+          unzip -tq "${template_dir}/web_dlink_debug.zip"
+          unzip -tq "${template_dir}/web_dlink_nothreads_debug.zip"
+
+      - name: Save verified Godot runtime files
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: |
+            ${{ env.GODOT4_BIN }}
+            ${{ env.XDG_DATA_HOME }}/godot/export_templates/${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_debug.zip
+            ${{ env.XDG_DATA_HOME }}/godot/export_templates/${{ env.GODOT_TEMPLATE_VERSION }}/web_dlink_nothreads_debug.zip
+          key: godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA256 }}-${{ env.GODOT_TEMPLATES_SHA256 }}
+
+      - name: Install Xvfb authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xauth
+
+      - name: Run Godot browser fixture
+        env:
+          INSTALL_PLAYWRIGHT: "1"
+        run: ./tests/godot-emscripten/run.sh
+
+      - name: Upload browser failure results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: godot-emscripten-browser-results
+          path: tests/godot-emscripten/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ARM64 (aarch64) cross-compilation verification
   arm64-cross:
