@@ -5910,9 +5910,11 @@ impl<T: Config> P2PSession<T> {
     /// (an endpoint starting, stopping, or a slot re-entering the minimum on
     /// hot-join reactivation) can transiently lower the result relative to an
     /// earlier call. Callers must not assume `confirmed_frame()` never
-    /// decreases. After a fail-closed [`DisconnectBehavior::Halt`] drop, the
-    /// value is permanently capped at the pre-drop bound; rebuilding the
-    /// session is the recovery boundary.
+    /// decreases. After any fail-closed transition, the value is permanently
+    /// capped at the pre-transition bound; rebuilding the session is the
+    /// recovery boundary. Fail-closed transitions include an explicit
+    /// [`DisconnectBehavior::Halt`] drop, an error while applying disconnect
+    /// knowledge, and a hot-join disconnect fold below the snapshot baseline.
     #[must_use]
     pub fn confirmed_frame(&self) -> Frame {
         // This public accessor can itself emit a violation (the all-disconnected

@@ -906,12 +906,17 @@ pub(super) fn peer_addr(i: usize) -> SocketAddr {
 /// Rust's derived [`std::hash::Hash`] encoding is not a persistence format:
 /// enum discriminants and `usize` writes can vary by target. Artifact DTO JSON
 /// is the reviewed, cross-platform representation shared by trace replay.
-fn fold_trace<T: Serialize>(hash: &mut u64, item: &T) {
-    let bytes = serde_json::to_vec(item).expect("trace DTO serializes");
+fn fold_trace<T: Serialize>(hash: &mut u64, item: &T, scratch: &mut Vec<u8>) {
+    scratch.clear();
+    serde_json::to_writer(&mut *scratch, item).expect("trace DTO serializes");
     let mut hasher = DeterministicHasher::new();
     hasher.write(&hash.to_le_bytes());
-    hasher.write(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
-    hasher.write(&bytes);
+    hasher.write(
+        &u64::try_from(scratch.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.write(scratch);
     *hash = hasher.finish();
 }
 
@@ -1222,6 +1227,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
     let mut trace_hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut trace_scratch = Vec::new();
     let mut trace_tail: VecDeque<TraceSnapshot> = VecDeque::with_capacity(TRACE_TAIL_CAPACITY);
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
@@ -1645,7 +1651,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         // every captured step observable (including lifecycle/dead state,
         // event truncation, and network counters) participates here. Selected
         // final values are intentionally folded again in the final summary.
-        fold_trace(&mut trace_hash, &snapshot);
+        fold_trace(&mut trace_hash, &snapshot, &mut trace_scratch);
         trace_tail.push_back(snapshot);
 
         if diagnose && step % 50 == 0 {
@@ -1777,7 +1783,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         spectator_final_hosts,
         net: TraceNetStats::from(net.stats()),
     };
-    fold_trace(&mut trace_hash, &final_trace_summary);
+    fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
     RunReport {
         replay_options: options.clone(),
         replay_input_width_bytes: I::WIDTH_BYTES,
@@ -1821,8 +1827,31 @@ mod tests {
 
     fn snapshot_hash(snapshot: &TraceSnapshot) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325;
-        fold_trace(&mut hash, snapshot);
+        fold_trace(&mut hash, snapshot, &mut Vec::new());
         hash
+    }
+
+    #[test]
+    fn trace_hash_preserves_length_prefixed_json_identity() {
+        let initial_hash = 0xcbf2_9ce4_8422_2325;
+        let mut actual = initial_hash;
+        let mut scratch = Vec::new();
+
+        fold_trace(&mut actual, &vec![1_u8, 2], &mut scratch);
+        fold_trace(&mut actual, &vec![3_u8, 4, 5], &mut scratch);
+
+        let first_bytes = b"[1,2]";
+        let mut first_expected = DeterministicHasher::new();
+        first_expected.write(&initial_hash.to_le_bytes());
+        first_expected.write(&(first_bytes.len() as u64).to_le_bytes());
+        first_expected.write(first_bytes);
+
+        let second_bytes = b"[3,4,5]";
+        let mut second_expected = DeterministicHasher::new();
+        second_expected.write(&first_expected.finish().to_le_bytes());
+        second_expected.write(&(second_bytes.len() as u64).to_le_bytes());
+        second_expected.write(second_bytes);
+        assert_eq!(actual, second_expected.finish());
     }
 
     #[test]
