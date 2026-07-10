@@ -1,0 +1,19 @@
+[package]
+name = "fortress-godot-probe"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+nothreads = ["godot/experimental-wasm-nothreads"]
+
+[dependencies]
+fortress-rollback = { path = "../.." }
+godot = { version = "=0.5.4", features = ["api-4-6", "experimental-wasm", "lazy-function-tables"] }
+web-time = "1.1"

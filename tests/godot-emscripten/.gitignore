@@ -1,0 +1,10 @@
+/dist/
+/godot/.godot/
+/godot/bin/
+/node_modules/
+/playwright-report/
+/target/
+/target-*/
+/test-results/
+!package-lock.json
+!package.json
