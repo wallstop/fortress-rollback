@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783704237619,
+  "lastUpdate": 1783726449495,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "e499999ee9e94229caf51bac8441709d1a8a444f",
-          "message": "Replay integration (#123)\n\n## Description\n\nThis PR delivers a full replay + telemetry feature set and hardens\ndocs/wiki synchronization.\n\nIt solves two core gaps:\n1. No first-class way to record, serialize, and replay real P2P matches\nfor deterministic debugging and validation.\n2. Wiki mirror generation and SYNC-header validation were easier to\ndrift or fail with less-actionable diagnostics.\n\n### What changed\n\n- Added replay domain types and serialization:\n  - `Replay<I>` and `ReplayMetadata`\n- `Replay::to_bytes()`, `Replay::from_bytes()`, `Replay::validate()`,\n`Replay::total_frames()`\n- Added replay playback session:\n  - `ReplaySession<T>` implementing `Session<T>`\n  - `ReplaySession::new()` and `ReplaySession::new_with_validation()`\n- Validation mode emits `SaveGameState` before `AdvanceFrame` and\ncompares checksums frame-by-frame\n- Added replay recording support to P2P sessions:\n  - `SessionBuilder::with_recording(bool)`\n- `P2PSession::is_recording()`, `P2PSession::into_replay()`,\n`P2PSession::take_replay()`\n  - Recording now captures confirmed inputs and recorded checksums\n- Added session telemetry API and built-in collector:\n  - `SessionTelemetry` trait\n- `TelemetryEvent` enum (`Rollback`, `PredictionMiss`,\n`NetworkStatsUpdate`, `FrameAdvance`)\n  - `CollectingTelemetry`\n  - `SessionBuilder::with_telemetry(...)`\n- P2P telemetry emission integrated in rollback, prediction miss,\nnetwork stats polling, and frame advance paths\n- Added sync-layer helper used for telemetry:\n  - `players_with_incorrect_predictions(...)`\n- Expanded public exports and docs:\n  - Re-exports for replay/telemetry in `lib.rs` and prelude\n  - New docs: replay and telemetry guides\n  - Added MkDocs nav entries and wiki mirror pages/sidebar links\n- Hardened docs/wiki synchronization pipeline:\n  - Added pre-commit `sync-wiki` hook before wiki consistency checks\n  - `sync-wiki.py` now:\n    - injects/normalizes reciprocal wiki SYNC headers\n    - validates sidebar coverage before writing files\n    - normalizes generated markdown EOF/newline format deterministically\n- `check-sync-headers.py` now reports case-mismatch hints and\nremediation guidance\n  - Added/expanded script tests for sync behavior and diagnostics\n- Added `.gitignore` entries for local pre-commit/pre-push log artifacts\n\n### Breaking change\n\n- Added `FortressEvent::ReplayDesync { frame, expected_checksum,\nactual_checksum }`.\n- Because `FortressEvent` is not `#[non_exhaustive]`, downstream\nexhaustive `match` statements must add a branch for `ReplayDesync`.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Added replay model tests in `src/replay.rs` (serialization roundtrip,\nvalidation invariants, metadata/display, recorder behavior)\n- Added replay session tests in `src/sessions/replay_session.rs`\n(playback flow, completion behavior, validation mode, checksum mismatch\nevent emission)\n- Added event display coverage for `ReplayDesync` in `src/lib.rs`\n- Added builder/session tests in `src/sessions/builder.rs` and\n`src/sessions/p2p_session.rs` for replay-session creation and recording\nAPI behavior\n- Added new script tests in `scripts/tests/test_check_sync_headers.py`\n- Expanded `scripts/tests/test_sync_wiki.py` coverage for SYNC header\ngeneration, sidebar coverage validation, idempotent output\nnormalization, and fail-before-write behavior\n\n**Manual testing performed:**\n\n- Reviewed API docs and migration impact for new replay + telemetry APIs\n- Verified docs navigation additions and wiki mirror wiring in this\nbranch\n- Full local command status (`cargo fmt`, `cargo clippy`, `cargo\nnextest`) intentionally left unchecked in checklist for final author\nconfirmation\n\n## Related Issues\n\n- N/A (no issue links provided in branch metadata)\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->",
-          "timestamp": "2026-03-29T16:35:11-07:00",
-          "tree_id": "15feb05b7686bdbc232233a67eec695a0138b41b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/e499999ee9e94229caf51bac8441709d1a8a444f"
-        },
-        "date": 1774827618945,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 122,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 170,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 463,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 757,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1097,
-            "range": "± 59",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 97303,
-            "range": "± 428",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 36703,
-            "range": "± 615",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1607,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "abd2a7febab3e63358fb1324e20150be07a6e12c",
+          "message": "Build simulation failure pipeline and harden disconnect recovery (#218)\n\n## Summary\n\n- build a stable, bounded simulation failure-artifact pipeline with\ndeterministic trace identities, replay, shrinking, corpus promotion, and\nstrict validation\n- expand lifecycle simulation coverage and add a release-mode nightly\nfleet spanning 8 shards, 1,000 disjoint seeds, N=2..16, 5,000 steps, and\nclean/mild/rough/reliable-FIFO networks\n- fix two production failures exposed by the new fleet: Halt\nconfirmation could rise after peer loss (D13), and stale delta-reference\nretransmissions could fail to re-ACK received history (D15)\n- pin the remaining lossy one-caller graceful-removal history rewrite as\nan explicit minimized known defect (D14) without weakening the oracle\n- extend the PeerDrop TLA+ model and update the deterministic sweep cost\nledger\n\n## Root causes\n\nD13 removed disconnected peers from the confirmation fold before\npreserving the last safe public confirmation bound. Later fold values\ncould therefore expose speculative fabricated-input frames as confirmed.\nThe session now latches and min-tightens a durable pre-mutation\nconfirmation ceiling across explicit, timeout, and propagated\nfail-closed paths.\n\nD15's missing-delta-reference input branch merged gossip but neither\napplied the packet's independent piggyback ACK nor re-emitted the\ncurrent cumulative ACK. One lost earlier ACK could leave an\nalready-received pending front forever and exhaust prediction. The\nbranch now applies valid piggyback ACK state and re-ACKs the receive\nhigh-water.\n\n## Test machinery\n\nFailure artifacts use a stable schema, bounded diagnostic payloads, full\nschedules, exact replay options, atomic publication, and a stable\nfinal-step trace. The shrinker preserves failure classes,\ndouble-confirms candidates, catches candidate panics, remaps peers, and\nuses bounded ddmin plus event-adjacent/geometric schedule checkpoints.\nCorpus promotion validates and reproduces through Rust before a locked\nno-clobber publish.\n\nSerialized schedules are bounded before execution: 2..=100,000 steps,\nprediction <=127, 1..=1,000 ms step duration, <=60 s link-delay fields,\n<=100,000 events, and <=8 MiB corpus JSON.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture` — 2,494 passed, 69 skipped\n- ignored D14 exact fixture — frame-327 ConfirmedInputDivergence\nreproduced repeatedly\n- full nightly shard replay — 125/125 seeds at 5,000 steps in release\nmode\n- `scripts/verification/verify-tla.sh --quick PeerDrop` — 4,372\ngenerated / 1,190 distinct states\n- `cargo doc --no-deps`\n- `actionlint`, Markdown lint, shell syntax, and repository agent\npreflight\n- repeated adversarial review — zero remaining issues, including minor\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes core P2P session disconnect/Halt semantics, input-protocol ACK\nbehavior, and hot-join recovery paths—areas where subtle regressions\ncause desync or permanent stalls.\n> \n> **Overview**\n> Adds a **nightly deterministic simulation fleet** (8 shards × 125\nrelease-mode 5,000-step seeds), a **failure-artifact → corpus\npromotion** pipeline, and fixes two rollback/network bugs found by that\ncoverage.\n> \n> **`DisconnectBehavior::Halt`** now latches a durable\n**`halt_confirmed_ceiling`** at the pre-disconnect safe bound so\n`confirmed_frame()` cannot rise into speculative default-input territory\nafter drops; fail-closed paths capture the ceiling before mutation,\n**`check_initial_sync`** and hot-join snapshot apply no longer resurrect\na halted session, and **PeerDrop.tla** models the capped confirmation\nfold.\n> \n> **Stale input retransmissions** whose delta reference was pruned still\nmerge gossip but previously skipped ACK handling; the protocol now\n**applies piggyback ACKs** and **re-emits cumulative `InputAck`** at the\nreceive high-water so a lost earlier ACK cannot strand `pending_output`\nand deadlock prediction windows.\n> \n> Simulation harness gains **bounded failure artifacts**, **corpus\nreplay** (including a pinned cold-start gossip stall schedule), nightly\nlifecycle matrices with retirement quarantined under lossy noise, and an\nexplicit **ignored known defect** for lossy graceful removal rewriting\nconfirmed history; D13 partition-under-Halt tests flip from red to\ngreen.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n382f8fc568020eeb469dd2f15311d4ba68234b16. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-07-10T16:29:31-07:00",
+          "tree_id": "e8a8d876fe74696427a1ccd860f97391cc6ae31c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/abd2a7febab3e63358fb1324e20150be07a6e12c"
+        },
+        "date": 1783726448248,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 112,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 434,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 708,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1025,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 136213,
+            "range": "± 524",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45259,
+            "range": "± 1258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 90",
             "unit": "ns/iter"
           },
           {
