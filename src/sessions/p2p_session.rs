@@ -7452,11 +7452,6 @@ impl<T: Config> P2PSession<T> {
         }
     }
 
-    fn enter_fail_closed_disconnect_state(&mut self) {
-        let confirmed_ceiling = self.confirmed_frame();
-        self.enter_fail_closed_disconnect_state_at(confirmed_ceiling);
-    }
-
     fn disconnect_player_with_policy(
         &mut self,
         player_handle: PlayerHandle,
@@ -7624,6 +7619,12 @@ impl<T: Config> P2PSession<T> {
         earliest_last_frame: Frame,
         last_frame_overrides: Option<&BTreeMap<PlayerHandle, Frame>>,
     ) {
+        // Capture before endpoint/status/frozen-input mutation. Disconnect
+        // folds can remove or lower terms in confirmed_frame(), so recomputing
+        // the ceiling in a later fail-closed branch can expose speculative
+        // post-mutation history as confirmed.
+        #[cfg(feature = "hot-join")]
+        let confirmed_before_disconnect = self.confirmed_frame();
         // N-peer joiner snapshot baseline (chunk N5, S34 R2 MINOR-B): a
         // committed N-peer joiner's entire history starts at the applied
         // snapshot frame `S` — the snapshot bytes are its oldest state, its
@@ -7838,7 +7839,7 @@ impl<T: Config> P2PSession<T> {
                 converged,
                 npeer_joiner_baseline
             );
-            self.enter_fail_closed_disconnect_state();
+            self.enter_fail_closed_disconnect_state_at(confirmed_before_disconnect);
             self.teardown_npeer_joiner_terminal();
         }
     }
@@ -9181,6 +9182,11 @@ impl<T: Config> P2PSession<T> {
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
+        // Lazily captured immediately before the first mutation. One update
+        // can apply several endpoint folds, so every later failure must retain
+        // the prefix safe before the first fold. Keeping this lazy avoids a
+        // second full confirmed-frame mesh fold on every healthy advance.
+        let mut confirmed_before_disconnects = None;
         let mut propagated_by_addr: BTreeMap<T::Address, BTreeMap<PlayerHandle, Frame>> =
             BTreeMap::new();
         let mut representative_by_addr: BTreeMap<T::Address, PlayerHandle> = BTreeMap::new();
@@ -9313,6 +9319,9 @@ impl<T: Config> P2PSession<T> {
                             .as_ref()
                             .is_some_and(|pending| !pending.reopened && pending.handle == handle)
                     {
+                        if confirmed_before_disconnects.is_none() {
+                            confirmed_before_disconnects = Some(self.confirmed_frame());
+                        }
                         self.converge_reserved_slot_freeze(handle, queue_min_confirmed);
                         continue;
                     }
@@ -9348,7 +9357,9 @@ impl<T: Config> P2PSession<T> {
                     "Missing representative handle for propagated disconnect at {:?}",
                     addr
                 );
-                self.enter_fail_closed_disconnect_state();
+                let confirmed_ceiling =
+                    *confirmed_before_disconnects.get_or_insert_with(|| self.confirmed_frame());
+                self.enter_fail_closed_disconnect_state_at(confirmed_ceiling);
                 continue;
             };
             let event_policy = if newly_disconnected_by_addr
@@ -9360,6 +9371,8 @@ impl<T: Config> P2PSession<T> {
             } else {
                 DisconnectEventPolicy::Suppress
             };
+            let confirmed_ceiling =
+                *confirmed_before_disconnects.get_or_insert_with(|| self.confirmed_frame());
             if let Err(e) = self.disconnect_player_with_policy(
                 representative,
                 Some(overrides),
@@ -9378,7 +9391,7 @@ impl<T: Config> P2PSession<T> {
                 // not be fully applied. Returning to Synchronizing prevents
                 // subsequent `advance_frame()` calls from continuing the
                 // simulation as if every peer were still healthy.
-                self.enter_fail_closed_disconnect_state();
+                self.enter_fail_closed_disconnect_state_at(confirmed_ceiling);
             }
         }
         // Propagated auto-disconnects (disconnect_timeout + ContinueWithout) emit
@@ -9649,6 +9662,9 @@ impl<T: Config> P2PSession<T> {
             },
             // disconnect the player, then forward to user
             Event::Disconnected => {
+                // Capture before the hot-join pending-close path or ordinary
+                // disconnect machinery mutates endpoint/status/freeze state.
+                let confirmed_before_disconnect = self.confirmed_frame();
                 // N-peer survivor: a REOPENED pending reactivation whose JOINER
                 // endpoint died is closed locally FIRST — the abort-evidence
                 // arm re-freezes + re-reserves the slot (the reserved-slot
@@ -9779,7 +9795,7 @@ impl<T: Config> P2PSession<T> {
                             // disconnect that we could not fully apply.
                             // Leaving the session Running would let the
                             // simulation advance with stale connection state.
-                            self.enter_fail_closed_disconnect_state();
+                            self.enter_fail_closed_disconnect_state_at(confirmed_before_disconnect);
                         }
                     },
                     Some(PlayerType::Spectator(_)) => {
@@ -9803,7 +9819,7 @@ impl<T: Config> P2PSession<T> {
                         // Registry state is reported as potentially corrupt;
                         // fail closed rather than continue advancing on a
                         // disconnect observation we could not apply.
-                        self.enter_fail_closed_disconnect_state();
+                        self.enter_fail_closed_disconnect_state_at(confirmed_before_disconnect);
                     },
                 }
             },
@@ -12785,7 +12801,7 @@ mod tests {
     // ==========================================
     //
     // These regression tests pin the contract that
-    // `enter_fail_closed_disconnect_state` provides to the two call sites in
+    // `enter_fail_closed_disconnect_state_at` provides to disconnect error paths in
     // `update_player_disconnects` and `handle_event(Event::Disconnected)`:
     // when applying a disconnect observation fails partway, the session must
     // transition out of `Running` so subsequent `advance_frame()` calls fail
@@ -12798,7 +12814,8 @@ mod tests {
         // would have happened via `check_initial_sync`.
         session.state = SessionState::Running;
 
-        session.enter_fail_closed_disconnect_state();
+        let ceiling = session.confirmed_frame();
+        session.enter_fail_closed_disconnect_state_at(ceiling);
 
         assert_eq!(
             session.current_state(),
@@ -12815,9 +12832,10 @@ mod tests {
 
         // Repeated calls preserve the durable state and can only tighten the
         // already-latched confirmation ceiling.
-        session.enter_fail_closed_disconnect_state();
+        let ceiling = session.confirmed_frame();
+        session.enter_fail_closed_disconnect_state_at(ceiling);
         let first_ceiling = session.halt_confirmed_ceiling;
-        session.enter_fail_closed_disconnect_state();
+        session.enter_fail_closed_disconnect_state_at(ceiling);
 
         assert_eq!(session.current_state(), SessionState::Synchronizing);
         assert_eq!(session.halt_confirmed_ceiling, first_ceiling);
@@ -12830,7 +12848,8 @@ mod tests {
         let mut session = create_two_player_session();
         session.state = SessionState::Running;
 
-        session.enter_fail_closed_disconnect_state();
+        let ceiling = session.confirmed_frame();
+        session.enter_fail_closed_disconnect_state_at(ceiling);
 
         let result = session.advance_frame();
         assert!(
@@ -13223,7 +13242,7 @@ mod tests {
     //
     // The decisive question (crux): under Halt, B transitions to
     // `SessionState::Synchronizing` and `advance_frame()` returns
-    // `NotSynchronized` (see `enter_fail_closed_disconnect_state` and the
+    // `NotSynchronized` (see `enter_fail_closed_disconnect_state_at` and the
     // state gate at the top of `advance_frame`). A Halted survivor therefore
     // produces NO further confirmed frames and is NOT a live participant — so
     // it cannot be in a *confirmed-stream* desync with the still-live A/C.
@@ -27038,6 +27057,43 @@ mod tests {
         /// echo is the in-era sibling. The injected cache value is
         /// byte-identical to that delivery (the sticky-disconnected merge
         /// adopts it from any Input packet).
+        #[test]
+        fn npeer_baseline_violation_latches_pre_fold_confirmation_ceiling() {
+            let mut duo = quad_mesh_with_dead_d_and_dropped_c(600, 6);
+            let mut c2 = RealJoiner::new_quad(&duo.bus.clone(), &duo.clock.clone());
+            let (serve_s, serve_f, _bridged) = drive_quad_join_to_running(&mut duo, &mut c2);
+            advance_quad_trio_until_confirmed(&mut duo, &mut c2, Frame::new(serve_f.as_i32() + 2));
+
+            // Stage a below-S connected term in the joiner's confirmation
+            // fold. Disconnecting it removes that low term, so computing the
+            // fail-closed ceiling after mutation would expose the higher
+            // surviving terms as newly confirmed.
+            let f_low = c2.session.local_connect_status[3].last_frame;
+            assert!(f_low < serve_s, "staging requires a term below S");
+            let status = &mut c2.session.local_connect_status[3];
+            P2PSession::<TestConfig>::arm_status_epoch(status, false);
+            status.last_frame = f_low;
+            let confirmed_before_fold = c2.session.confirmed_frame();
+            assert!(
+                confirmed_before_fold < serve_s,
+                "the connected below-S term must bound confirmation before the fold"
+            );
+
+            c2.session
+                .disconnect_player_at_frames(PlayerHandle::new(3), f_low, None);
+
+            assert_eq!(
+                c2.session.current_state(),
+                SessionState::Synchronizing,
+                "the below-baseline fold fails closed"
+            );
+            assert_eq!(
+                c2.session.halt_confirmed_ceiling,
+                Some(confirmed_before_fold),
+                "the ceiling must preserve the prefix safe before disconnect mutation"
+            );
+        }
+
         #[test]
         fn npeer_quad_committed_joiner_fold_below_snapshot_baseline_fails_closed_for_rejoin() {
             let mut duo = quad_mesh_with_dead_d_and_dropped_c(600, 6);
