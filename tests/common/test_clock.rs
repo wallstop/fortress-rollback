@@ -53,10 +53,10 @@ pub struct TestClock {
 // not a recoverable condition, so .expect() is appropriate here.
 #[allow(clippy::expect_used)]
 impl TestClock {
-    /// Creates a new `TestClock` starting at the current wall-clock time.
+    /// Creates a new `TestClock` starting at the current monotonic instant.
     ///
     /// The initial time is captured from `Instant::now()` to ensure that
-    /// duration calculations (which rely on the monotonic clock epoch) work
+    /// duration calculations (which rely on a common monotonic origin) work
     /// correctly.
     pub fn new() -> Self {
         Self {
@@ -152,9 +152,8 @@ impl TestClock {
 
     /// Creates a clock function for [`ChaosSocket::with_clock()`](fortress_rollback::ChaosSocket::with_clock).
     ///
-    /// On non-WASM targets, `web_time::Instant` is the same type as
-    /// `std::time::Instant`, so this returns the same underlying clock
-    /// as [`as_protocol_clock()`](TestClock::as_protocol_clock).
+    /// This returns the same underlying clock as
+    /// [`as_protocol_clock()`](TestClock::as_protocol_clock) on every target.
     ///
     /// # Panics
     ///
@@ -167,7 +166,7 @@ impl TestClock {
     /// let chaos_socket = ChaosSocket::new(inner, config)
     ///     .with_clock(clock.as_chaos_clock());
     /// ```
-    pub fn as_chaos_clock(&self) -> Arc<dyn Fn() -> std::time::Instant + Send + Sync> {
+    pub fn as_chaos_clock(&self) -> Arc<dyn Fn() -> Instant + Send + Sync> {
         let current = Arc::clone(&self.current);
         Arc::new(move || *current.lock().expect("TestClock mutex poisoned"))
     }
@@ -277,8 +276,6 @@ mod tests {
         let protocol_clock = clock.as_protocol_clock();
         let chaos_clock = clock.as_chaos_clock();
 
-        // On non-WASM, web_time::Instant == std::time::Instant,
-        // so both clocks should return the same value.
         let t_protocol = protocol_clock();
         let t_chaos = chaos_clock();
         assert_eq!(t_protocol, t_chaos);

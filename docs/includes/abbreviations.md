@@ -14,7 +14,7 @@
 *[RNG]: Random Number Generator
 *[RLE]: Run-Length Encoding - A compression algorithm
 *[CRC]: Cyclic Redundancy Check - An error-detecting code
-*[WASM]: WebAssembly - A binary instruction format for web browsers
+*[WASM]: WebAssembly - A portable binary instruction format used in browsers and other runtimes
 *[CLI]: Command Line Interface
 *[CI]: Continuous Integration
 *[CD]: Continuous Deployment

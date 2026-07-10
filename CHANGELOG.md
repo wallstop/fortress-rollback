@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `ChaosSocket::with_clock()` callbacks now return `web_time::Instant` instead of `std::time::Instant`, allowing the default clock to run on browser `wasm32-unknown-unknown` without panicking. Browser callers with an injected clock must return `web_time::Instant`; native and Emscripten callers require no change because `web_time` re-exports `std::time::Instant` on those targets.
+
+### Fixed
+
+- **Pre-existing:** `NetworkStats::ping` (the quality-report round-trip time) is now measured on the protocol's local monotonic clock, honoring an injected `ProtocolConfig::clock`, instead of the system wall clock. Wall-clock adjustments (NTP steps, VM snapshot restores) can no longer corrupt RTT, and virtual-clock sessions measure simulated latency exactly instead of leaking scheduler noise. The peer still echoes the opaque timestamp verbatim, so the wire format and mixed-build interoperability are unchanged; the value is elapsed monotonic time, not a shared epoch. The direct `js-sys` dependency used only for the old timestamp calculation was removed. Browser `wasm32-unknown-unknown` builds may still select `js-sys`, `web-sys`, and `wasm-bindgen` transitively through browser timing, testing, or transport crates, while the normal `wasm32-unknown-emscripten` dependency graph now contains none of those unsupported JavaScript bridge packages.
+
 ## [0.9.0] - 2026-06-22
 
 ### Added
@@ -203,16 +211,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Input` injected into the join handshake interferes with the joiner's deferred input processing),
   so actively-advancing sessions' packet streams are unchanged. Two-player sessions were never
   affected (the fold collapses to the local receipt).
-- **Pre-existing:** `NetworkStats::ping` (the quality-report round-trip time) is now measured on the
-  protocol's monotonic clock — honoring an injected `ProtocolConfig::clock` — instead of the system
-  wall clock. Wall-clock adjustments (NTP steps, VM snapshot restores) can no longer corrupt the
-  reported RTT, and sessions driven by a virtual clock (deterministic tests and simulations) now
-  measure virtual network latency exactly and reproducibly instead of leaking wall-clock scheduling
-  noise. The previous behavior of silently skipping a quality report or RTT update while the system
-  clock was in an abnormal state is gone entirely (a monotonic elapsed reading cannot fail). The wire
-  format is unchanged — the peer echoes the timestamp verbatim, so mixed builds across this change
-  interoperate — and as a consequence `js-sys` is no longer a dependency on `wasm32` targets (its
-  only use was reading the wall clock for these timestamps).
 - `SessionBuilder::with_violation_observer` now routes specification violations to the
   configured observer for **every** session type — `P2PSession`, `SyncTestSession`, and `SpectatorSession`.
   Previously `P2PSession` and `SyncTestSession` emitted every specification violation through the global
@@ -391,7 +389,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ClockFn` type alias (`Arc<dyn Fn() -> Instant + Send + Sync>`) for injectable time sources, enabling deterministic time control in tests and simulations
-- `ProtocolConfig::clock` field for overriding the system clock in the network protocol, allowing deterministic simulation testing (DST) and controlled time progression
+- `ProtocolConfig::clock` field for overriding the default monotonic protocol clock, allowing deterministic simulation testing (DST) and controlled time progression
 - `ChaosSocket::with_clock()` builder method for injecting a custom clock into the chaos socket, enabling deterministic latency simulation
 
 ### Changed

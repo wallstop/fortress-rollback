@@ -223,7 +223,7 @@ fn test_frame_map_determinism() {
 
     // This is critical for rollback - we need to process frames in order
     let mut last_frame = -1;
-    for (&frame, _) in frame_map.iter() {
+    for &frame in frame_map.keys() {
         assert!(frame > last_frame, "Frames must be in ascending order");
         last_frame = frame;
     }

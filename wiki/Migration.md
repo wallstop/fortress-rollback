@@ -14,6 +14,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
+- **Browser clock migration in Unreleased:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#unreleased-browser-chaossocket-clock-callbacks).
 - **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
@@ -427,6 +428,44 @@ Key differences when using the trait:
 The trait is available in the prelude: `use fortress_rollback::prelude::*;`
 
 For comprehensive examples including a generic game loop, see the [User Guide — Using the Session Trait](User-Guide#using-the-session-trait).
+
+## Unreleased: Browser ChaosSocket Clock Callbacks
+
+`ChaosSocket::with_clock()` now accepts callbacks that return
+`web_time::Instant`. The default clock needs no migration. Browser
+`wasm32-unknown-unknown` callers with an injected clock must replace an explicit
+`std::time::Instant` import and add `web-time` as a direct dependency:
+
+```toml
+[dependencies]
+web-time = "1.1"
+```
+
+### Before / After: browser custom clock
+
+```rust
+// Before: this callback returns std::time::Instant.
+use std::{sync::Arc, time::Instant};
+
+let base = Instant::now();
+let socket = ChaosSocket::new(inner_socket, chaos_config)
+    .with_clock(Arc::new(move || base));
+```
+
+```rust
+// After: this callback returns web_time::Instant on browser WASM.
+use std::sync::Arc;
+use web_time::Instant;
+
+let base = Instant::now();
+let socket = ChaosSocket::new(inner_socket, chaos_config)
+    .with_clock(Arc::new(move || base));
+```
+
+Native and `wasm32-unknown-emscripten` callers remain source-compatible because
+`web_time` re-exports `std::time::Instant` on those targets. Using the
+cross-platform import everywhere keeps one clock implementation portable across
+native, browser, and Godot Web builds.
 
 ## Unreleased: Runtime Input Delay, Disconnect Behavior, Graceful Peer Removal, and Spectator Divergence
 

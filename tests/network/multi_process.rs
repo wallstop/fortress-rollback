@@ -970,7 +970,7 @@ impl NetworkScenario {
 }
 
 fn effective_path_loss(send_loss: f64, receive_loss: f64) -> f64 {
-    1.0 - ((1.0 - send_loss) * (1.0 - receive_loss))
+    (1.0 - send_loss).mul_add(-(1.0 - receive_loss), 1.0)
 }
 
 /// The binary name for the network test peer (platform-specific).
@@ -4815,7 +4815,8 @@ mod infrastructure_tests {
 
         for (bidirectional, expected_effective, _recommendation) in test_cases {
             // Formula: effective = 1 - (1 - p)²
-            let actual_effective: f64 = 1.0 - (1.0 - bidirectional).powi(2);
+            let survival = 1.0 - bidirectional;
+            let actual_effective: f64 = survival.mul_add(-survival, 1.0);
             assert!(
                 (actual_effective - expected_effective).abs() < 0.001,
                 "For {}% bidirectional loss, expected ~{}% effective, got {}%",

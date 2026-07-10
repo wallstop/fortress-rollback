@@ -1697,9 +1697,9 @@ socket.reset_stats();
 
 ### Custom Clock (Time Control)
 
-Protocol timers -- sync retries, keepalives, disconnect timeouts, quality reports -- all depend on wall-clock time via `Instant::now()`. In automated tests, especially on slow or loaded CI runners, this causes flakiness: a thread that doesn't get scheduled quickly enough can trigger a spurious disconnect, and tests that rely on `thread::sleep()` to advance timers are slow and non-deterministic.
+Protocol timers -- sync retries, keepalives, disconnect timeouts, and quality reports -- use real monotonic elapsed time via `web_time::Instant::now()`. In automated tests, especially on slow or loaded CI runners, scheduling delays can still trigger a spurious timeout, and tests that rely on `thread::sleep()` to advance timers are slow and non-deterministic.
 
-The **clock abstraction** solves this by letting you inject a custom time source into the protocol. Instead of reading the real system clock, the protocol calls your function, and you control when time advances.
+The **clock abstraction** solves this by letting you inject a custom monotonic time source into the protocol. Instead of reading the default real-time source, the protocol calls your function, and you control when time advances.
 
 **Key types:**
 
@@ -1709,7 +1709,7 @@ The **clock abstraction** solves this by letting you inject a custom time source
 | `ProtocolConfig::clock`     | `Option<ClockFn>` -- when `Some`, the protocol uses this clock for all timing |
 | `ChaosSocket::with_clock()` | Injects a custom clock into ChaosSocket for deterministic latency simulation  |
 
-When `clock` is `None` (the default), the protocol uses `Instant::now()` directly. This is the correct setting for production.
+When `clock` is `None` (the default), the protocol uses `web_time::Instant::now()` directly. Quality reports encode a local monotonic elapsed timestamp that the peer echoes verbatim; it is not an epoch, `Date`, or synchronized wall-clock value. This is the correct setting for production.
 
 #### Creating a Controllable Clock
 
@@ -1778,7 +1778,7 @@ let socket = ChaosSocket::new(inner, ChaosConfig::poor_network())
     }));
 ```
 
-> **Note:** `ChaosSocket::with_clock()` uses `std::time::Instant` internally. On native platforms, this is the same type as `web_time::Instant`, so the same clock function works for both. On WASM targets, these types may differ.
+> **Note:** `ProtocolConfig` and `ChaosSocket::with_clock()` both use `web_time::Instant`, so one clock function can drive both. On native and Emscripten targets `web_time` delegates to the standard monotonic clock; browser `wasm32-unknown-unknown` uses the browser performance clock.
 
 #### Complete Test Example
 
@@ -1840,16 +1840,16 @@ advance(&current_time, Duration::from_secs(5));
 
 #### Production Usage
 
-In production, leave the `clock` field as `None` (the default). The protocol will use `Instant::now()` for all timing, which is the correct behavior for real-time gameplay:
+In production, leave the `clock` field as `None` (the default). The protocol will use the platform's real monotonic `web_time::Instant` for elapsed-time measurements, which is the correct behavior for real-time gameplay:
 
 ```rust
 use fortress_rollback::ProtocolConfig;
 
-// Default config uses the system clock -- correct for production
+// Default config uses the real monotonic clock -- correct for production
 let config = ProtocolConfig::default();
 ```
 
-The clock abstraction is purely additive and non-breaking. Existing code that does not set the `clock` field continues to work exactly as before.
+`ProtocolConfig::clock` remains additive, and existing code that uses default clocks needs no change. In the next release, browser callers that inject `ChaosSocket::with_clock()` must return `web_time::Instant`; native and Emscripten callers are source-compatible because `web_time` re-exports the standard `Instant` there. The default Chaos clock now also works in browser `wasm32-unknown-unknown` instead of panicking.
 
 ### SessionState
 
@@ -2068,7 +2068,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
 | `graphical-examples`      | Enables the ex_game graphical examples                | Running visual demos              | `macroquad` crate   |
 
-> **Note:** WASM support is automatic — no feature flag needed. See [Web / WASM Integration](#web--wasm-integration) below.
+> **Note:** The core library needs no WASM feature flag, but browser and Godot Web builds require different ABI, dependency, toolchain, and transport integration. See [Web / WASM Integration](#web--wasm-integration) below.
 
 ### Feature Details
 
@@ -2295,57 +2295,40 @@ fortress-rollback = { version = "0.9", features = ["sync-send", "graphical-examp
 
 ### Web / WASM Integration
 
-Fortress Rollback works in the browser with **no feature flags required**. The library automatically detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs.
+Fortress Rollback's core rollback logic requires no WASM feature flag. Choose the integration by target, however: browser `wasm32-unknown-unknown` and Godot Web GDExtension `wasm32-unknown-emscripten` are different ABI and dependency environments.
 
 #### What Works Automatically
 
-| Component              | Native       | WASM                   |
-| ---------------------- | ------------ | ---------------------- |
-| Time (`Instant`)       | `std::time`  | `web_time` crate       |
-| Epoch time             | `SystemTime` | `js_sys::Date`         |
-| Core rollback logic    | ✅            | ✅                      |
-| `UdpNonBlockingSocket` | ✅            | ❌ (no UDP in browsers) |
+| Environment | Protocol and chaos clock | JavaScript bridge dependencies | Transport |
+| --- | --- | --- | --- |
+| Native | `web_time::Instant` delegates to `std::time::Instant` | Not selected | Built-in UDP, Tokio UDP, or a custom socket |
+| Browser `wasm32-unknown-unknown` | Browser performance clock through `web_time` | `wasm-bindgen`, `js-sys`, and `web-sys` may be legitimate transitive dependencies | WebRTC or WebSocket adapter |
+| Godot Web `wasm32-unknown-emscripten` | `web_time::Instant` delegates to the Emscripten standard monotonic clock | The normal dependency graph must contain none of `wasm-bindgen*`, `js-sys`, or `web-sys` | A Godot/application-provided `NonBlockingSocket` adapter |
+
+Protocol timers and quality-report timestamps are local monotonic elapsed values in every environment. A peer only echoes the opaque quality timestamp, so no epoch, JavaScript `Date`, or synchronized wall clock is involved.
 
 #### Networking in the Browser
 
-Browsers don't support raw UDP sockets. For browser games, you need WebRTC or WebSockets. The recommended solution is **[Matchbox](https://github.com/johanhelsing/matchbox)**:
+Browsers don't support raw UDP sockets. [Matchbox](https://github.com/johanhelsing/matchbox) 0.14 provides WebRTC data channels. Declare it only for the browser target so its JavaScript dependencies cannot leak into a Godot Web Emscripten GDExtension:
 
 ```toml
-[dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send"] }
-matchbox_socket = { version = "0.13", features = ["ggrs"] }
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+matchbox_socket = "0.14"
+wasm-bindgen-futures = "0.4"
 ```
 
 Matchbox provides:
 
 - **WebRTC peer-to-peer connections** — Direct data channels between browsers
 - **Signaling server** — Only needed during connection establishment
-- **Cross-platform** — Same API works on native and WASM
-- **GGRS compatibility** — The `ggrs` feature implements `NonBlockingSocket`
+- **Low-latency unreliable channels** — Unordered delivery with no retransmits, matching rollback traffic; use separate reliable channels only for application data that needs them
 
-#### Basic Matchbox Integration
+Matchbox's optional `ggrs` feature implements the upstream GGRS `NonBlockingSocket` trait only, not Fortress Rollback's trait. Leave that feature disabled and build a local adapter around a raw `WebRtcChannel`:
 
-```rust
-use fortress_rollback::{Config, PlayerHandle, PlayerType, SessionBuilder};
-use matchbox_socket::WebRtcSocket;
-
-// Create matchbox socket (connects to signaling server)
-let (socket, message_loop) = WebRtcSocket::new_ggrs("wss://matchbox.example.com/my_game");
-
-// Spawn the message loop (required for WASM)
-#[cfg(target_arch = "wasm32")]
-wasm_bindgen_futures::spawn_local(message_loop);
-
-// Wait for peers to connect...
-// (In practice, poll socket.connected_peers() until you have enough)
-
-// Create session with matchbox socket
-let session = SessionBuilder::<GameConfig>::new()
-    .with_num_players(2)?
-    .add_player(PlayerType::Local, PlayerHandle::new(0))?
-    .add_player(PlayerType::Remote(peer_id), PlayerHandle::new(1))?
-    .start_p2p_session(socket)?;
-```
+1. Create the rollback channel with `WebRtcSocket::new_unreliable`, take channel `0`, call `WebRtcChannel::split`, and run the socket's message-loop future on the browser executor.
+2. In the adapter's `send_to`, serialize Fortress `Message` values with `fortress_rollback::network::codec::encode` and pass the bytes through the split sender.
+3. In `receive_all_messages`, poll at most a fixed number of items from the split receiver and decode each with `codec::decode_message`, leaving excess packets queued for later. Do not use `WebRtcChannel::receive()` here because it drains the entire Matchbox queue into a new `Vec`.
+4. Implement Fortress Rollback's `NonBlockingSocket<matchbox_socket::PeerId>` for that local adapter and pass it to `SessionBuilder`.
 
 #### Custom Transport (WebSockets, etc.)
 
@@ -2384,7 +2367,7 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 
 See the [custom socket example](https://github.com/wallstop/fortress-rollback/blob/main/examples/custom_socket.rs) for a complete implementation guide.
 
-#### Building for WASM
+#### Building for Browser WASM
 
 ```bash
 # Install wasm-pack
@@ -2397,6 +2380,14 @@ wasm-pack build --target web
 cargo install trunk
 trunk serve
 ```
+
+These tools target `wasm32-unknown-unknown` and are appropriate when JavaScript initializes the module. Browser-only `wasm-bindgen` dependencies are expected in this path.
+
+#### Building a Godot Web GDExtension
+
+Godot browser exports load Rust GDExtensions as `wasm32-unknown-emscripten` side modules. Build them with the Emscripten and Godot export-template versions required by your Godot release; do not process the side module with wasm-bindgen or wasm-pack.
+
+Before export, inspect the target-specific normal dependency graph. It must contain no `wasm-bindgen` family package, `js-sys`, or `web-sys`; any such edge indicates that a browser-only dependency was gated too broadly. Fortress Rollback's CI enforces this invariant separately from the browser build, where those packages remain valid.
 
 #### Binary Size Optimization
 
@@ -2413,17 +2404,19 @@ This trades some runtime performance for smaller binaries. Test both `"s"` and `
 
 Fortress Rollback automatically adapts to different platforms:
 
-| Platform                     | Time Source             | Socket Support                 | Notes                   |
-| ---------------------------- | ----------------------- | ------------------------------ | ----------------------- |
-| Native (Linux/macOS/Windows) | `std::time::SystemTime` | UDP via `std::net`             | Full support            |
-| WebAssembly                  | `js_sys::Date`          | Custom via `NonBlockingSocket` | Use Matchbox for WebRTC |
-| No-std                       | ❌ Not supported         | ❌                              | Requires allocator      |
+| Platform | Time source | Socket support | Notes |
+| --- | --- | --- | --- |
+| Native (Linux/macOS/Windows) | Monotonic `web_time::Instant` backed by `std` | UDP via `std::net`, Tokio, or custom | Full support |
+| Browser `wasm32-unknown-unknown` | Browser performance clock | Custom `NonBlockingSocket` | Target-gate Matchbox or another browser transport |
+| Godot Web `wasm32-unknown-emscripten` | Emscripten standard monotonic clock | Custom `NonBlockingSocket` | Keep the graph free of JavaScript bridge crates |
+| No-std | Not supported | Not supported | Requires the standard library and an allocator |
 
 **WASM considerations:**
 
-- The library automatically uses JavaScript's `Date.getTime()` for time functions
-- Implement `NonBlockingSocket` using WebRTC (see [Matchbox](https://github.com/johanhelsing/matchbox))
-- Determinism is maintained across platforms with the same inputs
+- Use the full target predicate `cfg(all(target_arch = "wasm32", target_os = "unknown"))` for browser-only code; the `target_os = "unknown"` condition excludes Emscripten.
+- Browser transports may use JavaScript bridge crates, but Godot Web Emscripten GDExtensions may not.
+- Implement `NonBlockingSocket` at the application boundary using the transport available in that environment.
+- Fortress's protocol logic is deterministic; verify the game's arithmetic, system ordering, and checksums on every target combination you ship
 
 ---
 
@@ -3466,12 +3459,12 @@ let config = ProtocolConfig {
     pending_output_limit: 128,                           // Output queue warning + decode cap
     sync_retry_warning_threshold: 10,                    // Warn after N sync retries
     sync_duration_warning_ms: 3000,                      // Warn if sync takes longer
-    clock: None,                                         // None = system clock (see below)
+    clock: None,                                         // None = real monotonic clock (see below)
     ..Default::default()
 };
 ```
 
-The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses `Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
+The `clock` field accepts an `Option<ClockFn>` for injecting a custom time source. When `None` (the default), the protocol uses the platform's monotonic `web_time::Instant::now()`. See [Custom Clock (Time Control)](#custom-clock-time-control) for details and test examples.
 
 `pending_output_limit` also caps how many input frames a received packet may decode into. Values above `ProtocolConfig::MAX_PENDING_OUTPUT_LIMIT` are rejected during configuration validation.
 

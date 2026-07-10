@@ -20,8 +20,8 @@ This document summarizes the key differences between **Fortress Rollback** (this
 | **Dependencies**          | `bitfield-rle`, `varinteger`, `rand`              | Internal implementations (fewer deps)     |
 | **Type Safety**           | `Config::Address` requires `Hash`                 | `Config::Address` requires `Hash` + `Ord` |
 | **Desync Detection**      | Off by default (opt-in)                           | On by default (`interval: 60`)            |
-| **WASM Support**          | Requires `wasm-bindgen` + `getrandom/js` features | Works out of the box, no special features |
-| **Time API**              | `std::time::Instant` (not WASM-compatible)        | `web_time::Instant` (cross-platform)      |
+| **WASM Support**          | Browser builds enable GGRS's `wasm-bindgen` feature and any application transport JS support | Core browser and Emscripten builds need no Fortress feature; target-specific dependencies still differ |
+| **Time API**              | `instant::Instant` (optional wasm-bindgen backend) | `web_time::Instant` with browser and non-browser backends |
 | **Spectator Handles**     | May include local players in spectator lists      | Explicit `is_spectator_for()` validation  |
 | **Error Types**           | String-based allocation on hot paths              | Dual-variant pattern (Copy for hot paths) |
 | **Build-time Validation** | Some panics at runtime                            | Returns `Result` at build time            |
@@ -228,9 +228,9 @@ pub fn add_spectator(
 
 ### WASM Compilation Simplification
 
-**GGRS WASM considerations:** While GGRS uses the `instant` crate for cross-platform time (which works on WASM), it still depends on the `rand` crate which may require additional configuration for WASM targets depending on your RNG needs.
+**GGRS WASM considerations:** GGRS uses the cross-platform `instant` crate and exposes an optional `wasm-bindgen` feature for its browser backend. Applications may also need browser configuration for their own randomness and transport dependencies.
 
-**Fortress solution:** Works on WASM out of the box with no special features needed:
+**Fortress solution:** The core library builds for both browser `wasm32-unknown-unknown` and Godot Web `wasm32-unknown-emscripten` without a Fortress feature flag:
 
 ```toml
 # Fortress - just works
@@ -241,16 +241,18 @@ fortress-rollback = "0.9"
 **How this works:**
 
 1. **Custom PCG32 RNG** - Eliminates the `rand` crate dependency entirely
-2. **`web_time::Instant`** - Cross-platform timing that works on native and WASM without conditional compilation
+2. **`web_time::Instant`** - Provides one monotonic API with a browser performance backend and a standard backend elsewhere
+3. **Target-specific dependency gates** - Browser builds may retain transitive `wasm-bindgen`, `js-sys`, and `web-sys`; Emscripten's normal graph contains none of them
 
-### Cross-Platform Time Synchronization
+### Cross-Platform Monotonic Time
 
-Both GGRS (via the `instant` crate) and Fortress (via `web_time`) provide cross-platform `Instant`. Fortress uses `web_time::Instant` which provides a unified API:
+Both GGRS (via the `instant` crate) and Fortress (via `web_time`) provide a cross-platform `Instant`. Fortress uses one monotonic `web_time::Instant` API with target-specific implementations:
 
 - **Native platforms**: Delegates to `std::time::Instant`
-- **WASM**: Uses `performance.now()` from the Web Performance API
+- **Browser `wasm32-unknown-unknown`**: Uses the browser performance clock; JavaScript bridge crates are valid here
+- **Godot Web `wasm32-unknown-emscripten`**: Delegates to the Emscripten standard monotonic clock and has no JavaScript bridge crates in the normal dependency graph
 
-This means the same code works across all platforms without feature flags or conditional compilation.
+The public timing code stays the same across these targets, but browser-only transports and JavaScript dependencies must use the full `cfg(all(target_arch = "wasm32", target_os = "unknown"))` gate.
 
 ---
 
@@ -271,10 +273,10 @@ let range_value: u32 = rng.gen_range(1..100);
 **Why not use `rand`?**
 
 - **Fewer dependencies** - `rand` pulls in `getrandom` and platform-specific crates
-- **No WASM complexity** - `getrandom` requires `features = ["js"]` for WASM
-- **Full determinism** - No platform-specific entropy sources that could differ
+- **Less browser feature wiring** - GGRS 0.11 browser consumers enable `ggrs = { version = "0.11", features = ["wasm-bindgen"] }`; that feature is browser-only, while GGRS's direct `js-sys` target selection still applies across `wasm32` and does not make it Emscripten-compatible
+- **Explicit deterministic seeds** - Fortress's PCG supplies protocol nonces and ChaosSocket simulation; game simulation should use it only with a fixed seed shared by every peer
 
-**Important:** The RNG is only used for testing and network simulation (ChaosSocket). Game state should never depend on this RNG - games must implement their own seeded RNG synchronized across peers.
+**Important:** Fortress also uses this RNG for seeded protocol values such as synchronization magic. Game state should not consume an independently seeded stream; use a fixed, synchronized game RNG and verify it with cross-target checksums.
 
 ### Deterministic Hashing Module
 
@@ -499,8 +501,8 @@ ChaosConfig::intercontinental() // High-latency stable connection
 | `bitfield-rle` | Required              | Internal RLE implementation |
 | `varinteger`   | Required              | Internal implementation     |
 | `rand`         | Required              | Internal PCG32 RNG          |
-| `getrandom`    | Required (transitive) | Not needed                  |
-| Time handling  | `std::time::Instant`  | `web_time::Instant`         |
+| `getrandom`    | Required (transitive) | Not used by Fortress core   |
+| Time handling  | `instant::Instant`     | `web_time::Instant`         |
 
 ---
 
@@ -510,7 +512,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 - [ ] Update imports: `use ggrs::*` -> `use fortress_rollback::*`
 - [ ] Rename types: `GgrsError` -> `FortressError`, etc.
 - [ ] Add `Ord` + `PartialOrd` to your `Config::Address` type
-- [ ] Remove WASM-specific feature flags (`wasm-bindgen`, `getrandom/js`)
+- [ ] Remove `features = ["wasm-bindgen"]` from the old `ggrs` dependency when replacing it; retain application and transport JavaScript features, gated to browser `wasm32-unknown-unknown`
 - [ ] (Optional) Update to new configuration APIs for better presets
 - [ ] (Optional) Add violation observer for debugging
 
@@ -526,9 +528,9 @@ Fortress Rollback is a **correctness-first fork** of GGRS. The main benefits are
 2. **Panic-free** - All library code returns `Result` types
 3. **Battle-tested** - ~1600 tests and formal verification
 4. **Better debugging** - Violation observers and deterministic hashing
-5. **WASM-ready** - Works on all platforms without special feature flags
+5. **Target-aware WASM** - Core browser and Emscripten builds need no Fortress feature, while keeping their incompatible dependency graphs separate
 6. **Zero-allocation hot paths** - Structured error types avoid heap allocation
 
-For most users, migration is straightforward: rename imports, add `Ord` to your address type, remove WASM feature flags, and enjoy more reliable netcode.
+For most users, migration is straightforward: rename imports, add `Ord` to the address type, remove the old GGRS browser feature, and retain any browser-only application or transport setup under its precise target gate.
 
 See the [Migration Guide](Migration) for step-by-step instructions.

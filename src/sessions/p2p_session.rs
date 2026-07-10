@@ -269,7 +269,7 @@ struct HotJoinTiming {
 }
 
 /// Reads the current instant from the injected protocol clock, falling back to
-/// the system clock when none is configured — the same rule the protocol
+/// the platform's monotonic clock when none is configured — the same rule the protocol
 /// endpoints use, so session-level and endpoint-level timings share a basis and
 /// stay deterministic under the simulation harness.
 #[cfg(feature = "hot-join")]
@@ -5720,7 +5720,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// The current instant on this session's injectable protocol clock (or the
-    /// system clock if none was configured). Deterministic under the DST harness.
+    /// platform's monotonic clock if none was configured). Deterministic under the DST harness.
     #[cfg(feature = "hot-join")]
     fn now(&self) -> web_time::Instant {
         clock_now(self.protocol_config.clock.as_ref())
@@ -7174,17 +7174,13 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             any_connected = true;
-            match remote.last_verified_frame {
-                // An unverified connected peer makes the whole-mesh verified
-                // frame undefined.
-                None => return None,
-                Some(frame) => {
-                    min_verified = Some(match min_verified {
-                        Some(current) => std::cmp::min(current, frame),
-                        None => frame,
-                    });
-                },
-            }
+            // An unverified connected peer makes the whole-mesh verified
+            // frame undefined.
+            let frame = remote.last_verified_frame?;
+            min_verified = Some(match min_verified {
+                Some(current) => std::cmp::min(current, frame),
+                None => frame,
+            });
         }
         if any_connected {
             min_verified

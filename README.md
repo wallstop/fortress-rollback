@@ -137,23 +137,27 @@ Moving from the original `ggrs` crate? See the step-by-step guide in [migration.
 
 ### Web / WASM Support
 
-Fortress Rollback works in the browser! WASM support is **automatic** — no feature flags needed. The library detects `target_arch = "wasm32"` at compile time and uses browser-compatible APIs (`web_time` for timing, `js_sys::Date` for epoch timestamps).
+Fortress Rollback's core logic needs no WASM feature flag, but the two Web/WASM integration paths covered here have different requirements:
 
-For networking in the browser, use **[Matchbox](https://github.com/johanhelsing/matchbox)** — it provides WebRTC sockets that implement `NonBlockingSocket` and work seamlessly with Fortress Rollback:
+- Browser `wasm32-unknown-unknown` uses `web_time`'s browser clock. Its dependency graph may legitimately include `wasm-bindgen`, `js-sys`, and `web-sys` through browser-only timing or transport crates.
+- Godot Web GDExtensions use `wasm32-unknown-emscripten`. Their normal dependency graph must contain none of those JavaScript bridge crates because Godot's Web export loads the Rust output as an Emscripten side module, not through wasm-bindgen.
+
+Native, browser, and Emscripten builds all measure protocol intervals and quality-report RTT with a local monotonic `web_time::Instant`; no shared epoch timestamp is required.
+
+For browser networking, [Matchbox](https://github.com/johanhelsing/matchbox) 0.14 provides WebRTC data channels. Keep it behind the browser-only target gate so it cannot enter a Godot Web Emscripten build:
 
 ```toml
-[dependencies]
-fortress-rollback = "0.9"
-matchbox_socket = { version = "0.13", features = ["ggrs"] }
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+matchbox_socket = "0.14"
 ```
 
-> **Note:** The `ggrs` feature of `matchbox_socket` implements the **original GGRS crate's** `NonBlockingSocket` trait, not Fortress Rollback's. You'll need a thin adapter wrapper to bridge the two traits. See the [custom socket example](./examples/custom_socket.rs) for the recommended approach to implementing your own `NonBlockingSocket`.
+Matchbox's optional `ggrs` feature implements the upstream GGRS trait only, not Fortress Rollback's `NonBlockingSocket`. Leave that feature disabled and wrap a raw Matchbox channel in a local adapter that uses `fortress_rollback::network::codec` to encode and decode messages. Split the channel and poll a fixed maximum from its receiver per call; `WebRtcChannel::receive()` drains the entire queue. The [custom socket example](./examples/custom_socket.rs) shows the generic codec and bounded-socket pattern such an adapter should follow.
 
 Matchbox handles:
 
 - **WebRTC peer-to-peer connections** — direct data channels between browsers
 - **Signaling server** — connection establishment (only needed during setup)
-- **Cross-platform** — works on native and WASM with the same API
+- **Low-latency unreliable channels** — unordered delivery with no retransmits, matching rollback traffic; reserve reliable channels for separate application data
 
 See the [custom socket example](./examples/custom_socket.rs) for implementing your own transport (WebSockets, custom protocols, etc.)
 

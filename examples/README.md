@@ -62,7 +62,7 @@ Demonstrates how to implement the `NonBlockingSocket` trait for custom networkin
 
 - Channel-based socket for local testing
 - WebSocket adapter skeleton
-- Matchbox integration reference
+- Matchbox 0.14 browser adapter guidance using a raw channel and the Fortress codec pattern
 
 This is essential reading if you're:
 
