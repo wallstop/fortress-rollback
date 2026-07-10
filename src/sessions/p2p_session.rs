@@ -7174,17 +7174,13 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             any_connected = true;
-            match remote.last_verified_frame {
-                // An unverified connected peer makes the whole-mesh verified
-                // frame undefined.
-                None => return None,
-                Some(frame) => {
-                    min_verified = Some(match min_verified {
-                        Some(current) => std::cmp::min(current, frame),
-                        None => frame,
-                    });
-                },
-            }
+            // An unverified connected peer makes the whole-mesh verified
+            // frame undefined.
+            let frame = remote.last_verified_frame?;
+            min_verified = Some(match min_verified {
+                Some(current) => std::cmp::min(current, frame),
+                None => frame,
+            });
         }
         if any_connected {
             min_verified

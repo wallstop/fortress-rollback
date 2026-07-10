@@ -412,7 +412,7 @@ impl Draw<'_> {
 
     /// Uniform `f64` in `[lo, hi)`.
     fn range_f64(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + self.unit() * (hi - lo)
+        self.unit().mul_add(hi - lo, lo)
     }
 }
 

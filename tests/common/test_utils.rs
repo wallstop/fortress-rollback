@@ -961,13 +961,13 @@ where
         .add_player(PlayerType::Local, PlayerHandle::new(1))?
         .start_p2p_session(socket2)?;
 
-    assert!(sess1.current_state() == SessionState::Synchronizing);
-    assert!(sess2.current_state() == SessionState::Synchronizing);
+    assert_eq!(sess1.current_state(), SessionState::Synchronizing);
+    assert_eq!(sess2.current_state(), SessionState::Synchronizing);
 
     synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())?;
 
-    assert!(sess1.current_state() == SessionState::Running);
-    assert!(sess2.current_state() == SessionState::Running);
+    assert_eq!(sess1.current_state(), SessionState::Running);
+    assert_eq!(sess2.current_state(), SessionState::Running);
 
     let mut stub1 = S::new();
     let mut stub2 = S::new();

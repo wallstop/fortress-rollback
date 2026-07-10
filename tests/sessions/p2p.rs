@@ -114,14 +114,14 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
         .start_p2p_session(s2)?;
 
-    assert!(sess1.current_state() == SessionState::Synchronizing);
-    assert!(sess2.current_state() == SessionState::Synchronizing);
+    assert_eq!(sess1.current_state(), SessionState::Synchronizing);
+    assert_eq!(sess2.current_state(), SessionState::Synchronizing);
 
     synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
         .expect("Sessions should synchronize");
 
-    assert!(sess1.current_state() == SessionState::Running);
-    assert!(sess2.current_state() == SessionState::Running);
+    assert_eq!(sess1.current_state(), SessionState::Running);
+    assert_eq!(sess2.current_state(), SessionState::Running);
 
     Ok(())
 }

@@ -415,7 +415,7 @@ mod compression_tests {
         let encoded = encode(&ref_input, pend_inp.iter());
         let decoded = decode(&ref_input, &encoded).unwrap();
 
-        assert!(pend_inp == decoded);
+        assert_eq!(pend_inp, decoded);
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod compression_tests {
         let encoded = encode(&ref_input, pend_inp.iter());
         let decoded = decode(&ref_input, &encoded).unwrap();
 
-        assert!(pend_inp == decoded);
+        assert_eq!(pend_inp, decoded);
     }
 
     #[test]
@@ -441,7 +441,7 @@ mod compression_tests {
         let encoded = encode(&ref_input, pend_inp.iter());
         let decoded = decode(&ref_input, &encoded).unwrap();
 
-        assert!(pend_inp == decoded);
+        assert_eq!(pend_inp, decoded);
     }
 
     #[test]

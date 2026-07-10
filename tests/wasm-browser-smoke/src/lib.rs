@@ -14,10 +14,11 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn default_chaos_socket_receive_uses_browser_clock() {
+    fn default_clock_receive_does_not_panic_in_browser() {
         let config = ChaosConfig::builder().seed(42).build();
         let mut socket = ChaosSocket::new(EmptySocket, config);
 
+        // Checking for ready packets reads the default clock even when the queue is empty.
         let messages = socket.receive_all_messages();
 
         assert!(messages.is_empty(), "empty inner socket returned messages");
