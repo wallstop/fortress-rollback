@@ -243,6 +243,32 @@ pub struct ProgressSample {
     pub prediction_miss_count: Vec<u64>,
     pub frame_opportunities: Vec<u64>,
     pub wait_frames_obeyed: Vec<u64>,
+    /// Per-directed-endpoint control-loop gauges in `(from, to)` order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointControlSample>,
+    /// Per-directed-link live bandwidth queues in `(from, to)` order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_queues: Vec<LinkQueueSample>,
+}
+
+/// Instantaneous protocol gauges for one directed endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointControlSample {
+    pub from: usize,
+    pub to: usize,
+    pub ping_ms: u128,
+    pub remote_frame_advantage: i32,
+    pub pending_output_len: u64,
+}
+
+/// Instantaneous bandwidth-queue gauges for one directed simulated link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkQueueSample {
+    pub from: usize,
+    pub to: usize,
+    pub queued_bytes: u64,
+    pub queued_datagrams: u64,
+    pub drain_delay_ns: u64,
 }
 
 /// Maximum number of final simulation steps retained in a failure artifact.
@@ -713,6 +739,81 @@ fn collect_peer_wire_by_link<I: SimInput>(
         }
     }
     by_link
+}
+
+fn collect_endpoint_control_samples<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    n_players: usize,
+) -> Vec<EndpointControlSample> {
+    let mut samples = Vec::with_capacity(n_players.saturating_mul(n_players.saturating_sub(1)));
+    for (from, slot) in peers.iter().enumerate() {
+        for to in 0..n_players {
+            if from == to {
+                continue;
+            }
+            let metrics = slot
+                .session
+                .peer_metrics(PlayerHandle::new(to))
+                .unwrap_or_default();
+            samples.push(EndpointControlSample {
+                from,
+                to,
+                ping_ms: metrics.ping_ms,
+                remote_frame_advantage: metrics.remote_frame_advantage,
+                pending_output_len: metrics.pending_output_len,
+            });
+        }
+    }
+    samples
+}
+
+fn collect_link_queue_samples<I: SimInput>(
+    net: &SimNet<Message>,
+    peers: &[PeerSlot<I>],
+    canonical_addrs: &[SocketAddr],
+) -> Vec<LinkQueueSample> {
+    let peer_by_addr: BTreeMap<SocketAddr, usize> = peers
+        .iter()
+        .enumerate()
+        .flat_map(|(peer, slot)| {
+            slot.source_addrs
+                .iter()
+                .copied()
+                .map(move |addr| (addr, peer))
+        })
+        .collect();
+    let mut by_link: BTreeMap<(usize, usize), LinkQueueSample> = BTreeMap::new();
+    for from in 0..canonical_addrs.len() {
+        for to in 0..canonical_addrs.len() {
+            if from != to {
+                by_link.insert(
+                    (from, to),
+                    LinkQueueSample {
+                        from,
+                        to,
+                        queued_bytes: 0,
+                        queued_datagrams: 0,
+                        drain_delay_ns: 0,
+                    },
+                );
+            }
+        }
+    }
+    for ((from_addr, to_addr), state) in net.bandwidth_states() {
+        let (Some(&from), Some(&to)) = (peer_by_addr.get(&from_addr), peer_by_addr.get(&to_addr))
+        else {
+            continue;
+        };
+        let Some(sample) = by_link.get_mut(&(from, to)) else {
+            continue;
+        };
+        sample.queued_bytes = sample.queued_bytes.saturating_add(state.queued_bytes);
+        sample.queued_datagrams = sample
+            .queued_datagrams
+            .saturating_add(state.queued_datagrams);
+        sample.drain_delay_ns = sample.drain_delay_ns.max(state.drain_delay_ns);
+    }
+    by_link.into_values().collect()
 }
 
 impl RunReport {
@@ -1627,6 +1728,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let app_model = schedule.config.app_model;
     let mut wait_skip: Vec<u32> = vec![0; n];
     let frame_model = schedule.config.frame_model;
+    let sample_control_loop = (schedule.schema_version >= 15
+        && frame_model == FrameModel::SkewGated60Hz)
+        || (schedule.schema_version >= 16
+            && (app_model == AppModel::Obey
+                || schedule
+                    .initial_links
+                    .iter()
+                    .any(|(_, _, policy)| policy.bandwidth.is_some())
+                || schedule.events.iter().any(|(_, event)| {
+                    matches!(
+                        event,
+                        ScheduleEvent::SetLink { policy, .. } if policy.bandwidth.is_some()
+                    )
+                })));
+    let sample_control_gauges = schedule.schema_version >= 16;
     let mut frame_opportunities = vec![0_u64; n];
     let mut skew_targets_seen = vec![0_u64; n];
     let mut wait_frames_obeyed = vec![0_u64; n];
@@ -2049,9 +2165,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
-        if frame_model == FrameModel::SkewGated60Hz
-            && ((step + 1) % progress_interval == 0 || step == last_step)
-        {
+        if sample_control_loop && ((step + 1) % progress_interval == 0 || step == last_step) {
             let sample_metrics: Vec<_> = peers.iter().map(|slot| slot.session.metrics()).collect();
             progress_samples.push(ProgressSample {
                 step,
@@ -2082,6 +2196,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .collect(),
                 frame_opportunities: frame_opportunities.clone(),
                 wait_frames_obeyed: wait_frames_obeyed.clone(),
+                endpoints: if sample_control_gauges {
+                    collect_endpoint_control_samples(&peers, n)
+                } else {
+                    Vec::new()
+                },
+                link_queues: if sample_control_gauges {
+                    collect_link_queue_samples(&net, &peers, &addrs)
+                } else {
+                    Vec::new()
+                },
             });
         }
 

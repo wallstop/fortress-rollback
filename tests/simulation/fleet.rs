@@ -2537,6 +2537,40 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
         );
 
         let obey_again = run(&obey, &RunOptions::default());
+        assert!(!obey_report.progress_samples.is_empty(), "n={n}");
+        assert!(obey_report.progress_samples.len() <= 12, "n={n}");
+        assert_eq!(
+            obey_report.progress_samples, obey_again.progress_samples,
+            "bounded control-loop samples must replay exactly (n={n})"
+        );
+        for sample in &obey_report.progress_samples {
+            assert_eq!(sample.endpoints.len(), n * (n - 1), "n={n}");
+            assert_eq!(sample.link_queues.len(), n * (n - 1), "n={n}");
+            assert!(
+                sample
+                    .endpoints
+                    .windows(2)
+                    .all(|pair| (pair[0].from, pair[0].to) < (pair[1].from, pair[1].to)),
+                "endpoint samples must use stable directed-link order (n={n})"
+            );
+            assert!(
+                sample
+                    .link_queues
+                    .iter()
+                    .all(|queue| queue.queued_bytes == 0
+                        && queue.queued_datagrams == 0
+                        && queue.drain_delay_ns == 0),
+                "delay-only links must not report bandwidth debt (n={n})"
+            );
+        }
+        assert!(
+            obey_report
+                .progress_samples
+                .iter()
+                .flat_map(|sample| &sample.endpoints)
+                .any(|endpoint| endpoint.ping_ms > 0),
+            "the control-loop series must observe measured RTT (n={n})"
+        );
         assert_eq!(
             obey_report.trace_hash, obey_again.trace_hash,
             "an Obey run must reproduce its exact trace (n={n})"
@@ -2547,6 +2581,146 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
              actually happen (n={n})"
         );
     }
+}
+
+/// H-OSC symmetric control: identical 100 ms one-way links do not activate
+/// the discrete sleep controller in the deterministic equal-rate workload.
+/// This falsifies the original perfectly-symmetric mutual-sleep premise; a
+/// perturbation/jitter treatment is still required to test oscillation after
+/// the loop is actually activated.
+#[test]
+fn symmetric_delay_does_not_create_mutual_sleep_h_osc() {
+    for n in [2usize, 4] {
+        let mut schedule = wait_rec_schedule(n, AppModel::Obey);
+        schedule.config.steps = 900;
+        for (_, _, policy) in &mut schedule.initial_links {
+            policy.base_delay = Duration::from_millis(100);
+        }
+        schedule.events.clear();
+        schedule.heal_at = schedule.config.steps;
+
+        let first = run(&schedule, &RunOptions::default());
+        let replay = run(&schedule, &RunOptions::default());
+        first.expect_pass(&schedule);
+        assert_eq!(first.trace_hash, replay.trace_hash, "n={n}");
+        assert_eq!(first.progress_samples, replay.progress_samples, "n={n}");
+        assert!(!first.progress_samples.is_empty(), "n={n}");
+        assert_eq!(first.wait_frames_obeyed, vec![0; n], "n={n}");
+        assert!(
+            first
+                .metrics
+                .iter()
+                .all(|metrics| metrics.wait_recommendations == 0),
+            "perfectly symmetric delay must not manufacture a peer lead: {:?}",
+            first.metrics
+        );
+        assert!(
+            first.progress_samples.last().is_some_and(|sample| sample
+                .endpoints
+                .iter()
+                .all(|endpoint| (190..=230).contains(&endpoint.ping_ms))),
+            "every endpoint must observe the intended ≈200 ms RTT (n={n}): {:?}",
+            first.progress_samples
+        );
+    }
+}
+
+/// H-ASYM matched experiment: a 10/200 ms one-way split has the same 210 ms
+/// RTT as its symmetric control. It creates a measurable throughput/stall
+/// asymmetry, but the reported advantages stay below the sleep dead band and
+/// falsify the predicted one-sided `WaitRecommendation` mechanism.
+#[test]
+fn h_asym_biases_throughput_without_wait_recommendations() {
+    let build = |asymmetric: bool| {
+        let mut schedule = wait_rec_schedule(2, AppModel::Obey);
+        for (from, to, policy) in &mut schedule.initial_links {
+            policy.base_delay = if asymmetric {
+                if from < to {
+                    Duration::from_millis(10)
+                } else {
+                    Duration::from_millis(200)
+                }
+            } else {
+                Duration::from_millis(105)
+            };
+        }
+        schedule.events.clear();
+        schedule.heal_at = schedule.config.steps;
+        schedule
+    };
+    let symmetric = build(false);
+    let asymmetric = build(true);
+    let symmetric_report = run(&symmetric, &RunOptions::default());
+    let asymmetric_report = run(&asymmetric, &RunOptions::default());
+    let replay = run(&asymmetric, &RunOptions::default());
+    symmetric_report.expect_pass(&symmetric);
+    asymmetric_report.expect_pass(&asymmetric);
+    assert_eq!(asymmetric_report.trace_hash, replay.trace_hash);
+    assert_eq!(asymmetric_report.progress_samples, replay.progress_samples);
+    assert_eq!(symmetric_report.wait_frames_obeyed, vec![0, 0]);
+    assert_eq!(asymmetric_report.wait_frames_obeyed, vec![0, 0]);
+    assert!(symmetric_report
+        .metrics
+        .iter()
+        .all(|metrics| metrics.wait_recommendations == 0));
+    assert!(asymmetric_report
+        .metrics
+        .iter()
+        .all(|metrics| metrics.wait_recommendations == 0));
+    assert_eq!(
+        symmetric_report.metrics[0].visual_frames,
+        symmetric_report.metrics[1].visual_frames
+    );
+    assert_eq!(
+        symmetric_report.metrics[0].stall_count,
+        symmetric_report.metrics[1].stall_count
+    );
+    assert!(
+        asymmetric_report.metrics[1].visual_frames > asymmetric_report.metrics[0].visual_frames
+    );
+    assert!(asymmetric_report.metrics[0].stall_count > asymmetric_report.metrics[1].stall_count);
+    let final_sample = asymmetric_report
+        .progress_samples
+        .last()
+        .expect("matched asymmetric run records bounded samples");
+    let symmetric_final = symmetric_report
+        .progress_samples
+        .last()
+        .expect("matched symmetric control records bounded samples");
+    assert_eq!(
+        final_sample.current_frames[1] - final_sample.current_frames[0],
+        7,
+        "10/200 ms paths should produce the measured seven-frame throughput split"
+    );
+    assert_eq!(
+        symmetric_final
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .collect::<Vec<_>>(),
+        final_sample
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .collect::<Vec<_>>(),
+        "control and treatment must observe the same RTT"
+    );
+    assert!(
+        final_sample
+            .endpoints
+            .iter()
+            .all(|endpoint| (210..=240).contains(&endpoint.ping_ms)),
+        "both treatment endpoints must observe the matched ≈210 ms RTT"
+    );
+    assert_eq!(
+        final_sample
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.remote_frame_advantage)
+            .collect::<Vec<_>>(),
+        vec![-1, 1],
+        "the latest wire gauges stay below the three-frame recommendation dead band"
+    );
 }
 
 /// Builds a clock-skew schedule: an `n`-mesh over clean links with a small
@@ -2752,6 +2926,27 @@ fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
     assert!(!skewed_report.progress_samples.is_empty());
     assert!(skewed_report.progress_samples.len() <= 12);
     assert_ne!(exact_report.trace_hash, skewed_report.trace_hash);
+}
+
+#[test]
+fn schema_v15_skew_progress_preserves_legacy_trace_shape() {
+    let mut schedule = skew_gated_schedule(1_200, 1_000, AppModel::Obey);
+    schedule.schema_version = 15;
+    schedule.config.step_dt_ms = 8;
+
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert!(!first.progress_samples.is_empty());
+    assert!(first
+        .progress_samples
+        .iter()
+        .all(|sample| sample.endpoints.is_empty() && sample.link_queues.is_empty()));
+    let encoded = serde_json::to_string(&first.progress_samples)
+        .expect("legacy progress samples serialize deterministically");
+    assert!(!encoded.contains("endpoints"));
+    assert!(!encoded.contains("link_queues"));
 }
 
 /// H-SKEW hour-equivalent experiment: +0.1% produces exactly 216 additional

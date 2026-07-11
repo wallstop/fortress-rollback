@@ -142,6 +142,17 @@ pub struct SimLinkStats {
     pub bandwidth_max_queue_delay_ns: u64,
 }
 
+/// Read-only instantaneous bandwidth-queue state for one directed link.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SimBandwidthState {
+    /// Bytes whose shaped departure remains in the future.
+    pub queued_bytes: u64,
+    /// Datagrams whose shaped departure remains in the future.
+    pub queued_datagrams: u64,
+    /// Virtual nanoseconds until the final queued departure.
+    pub drain_delay_ns: u64,
+}
+
 impl SimLinkStats {
     /// Merges another source-address generation of the same logical link.
     pub fn merge(&mut self, other: Self) {
@@ -1574,6 +1585,31 @@ impl<M: Clone> SimNet<M> {
             .map(|(&key, link)| (key, link.stats))
             .collect()
     }
+
+    /// Snapshot of live bandwidth queues without advancing or mutating them.
+    #[must_use]
+    pub fn bandwidth_states(&self) -> BTreeMap<(SocketAddr, SocketAddr), SimBandwidthState> {
+        let state = self.lock();
+        let now = state.now();
+        state
+            .links
+            .iter()
+            .map(|(&key, link)| {
+                let mut snapshot = SimBandwidthState::default();
+                for &(departure, bytes) in &link.bandwidth_reservations {
+                    if departure <= now {
+                        continue;
+                    }
+                    snapshot.queued_bytes = snapshot.queued_bytes.saturating_add(bytes);
+                    snapshot.queued_datagrams = snapshot.queued_datagrams.saturating_add(1);
+                    let delay_ns =
+                        u64::try_from(departure.duration_since(now).as_nanos()).unwrap_or(u64::MAX);
+                    snapshot.drain_delay_ns = snapshot.drain_delay_ns.max(delay_ns);
+                }
+                (key, snapshot)
+            })
+            .collect()
+    }
 }
 
 /// Why a simulated socket cannot move to a requested address.
@@ -2616,6 +2652,56 @@ mod tests {
         assert_eq!(link.bandwidth_tail_dropped_bytes, 100);
         assert_eq!(link.bandwidth_max_queue_bytes, 200);
         assert_eq!(link.bandwidth_max_queue_delay_ns, 200_000_000);
+    }
+
+    #[test]
+    fn bandwidth_state_snapshot_tracks_drain_without_mutation() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 100,
+                queue_capacity_bytes: 200,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        for id in 1..=3 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+
+        let initial = SimBandwidthState {
+            queued_bytes: 200,
+            queued_datagrams: 2,
+            drain_delay_ns: 200_000_000,
+        };
+        assert_eq!(net.bandwidth_states()[&(addr(1), addr(2))], initial);
+        assert_eq!(net.bandwidth_states()[&(addr(1), addr(2))], initial);
+
+        offset.store(100, AtomicOrdering::Relaxed);
+        assert_eq!(
+            net.bandwidth_states()[&(addr(1), addr(2))],
+            SimBandwidthState {
+                queued_bytes: 100,
+                queued_datagrams: 1,
+                drain_delay_ns: 100_000_000,
+            }
+        );
+        offset.store(200, AtomicOrdering::Relaxed);
+        assert_eq!(
+            net.bandwidth_states()[&(addr(1), addr(2))],
+            SimBandwidthState::default()
+        );
     }
 
     #[test]

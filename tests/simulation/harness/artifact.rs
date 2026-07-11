@@ -270,6 +270,56 @@ impl FailureArtifact {
                     sample.step
                 ));
             }
+            let directed_links = n.saturating_mul(n.saturating_sub(1));
+            for (name, len) in [
+                ("endpoints", sample.endpoints.len()),
+                ("link_queues", sample.link_queues.len()),
+            ] {
+                let expected = if self.schedule.schema_version >= 16 {
+                    directed_links
+                } else {
+                    0
+                };
+                if len != expected {
+                    return Err(format!(
+                        "artifact progress sample at step {} has {len} {name} entries \
+                         (expected {expected} for schedule schema {})",
+                        sample.step, self.schedule.schema_version
+                    ));
+                }
+            }
+            for (index, endpoint) in sample.endpoints.iter().enumerate() {
+                let expected_from = index / n.saturating_sub(1);
+                let expected_offset = index % n.saturating_sub(1);
+                let expected_to = if expected_offset >= expected_from {
+                    expected_offset.saturating_add(1)
+                } else {
+                    expected_offset
+                };
+                if (endpoint.from, endpoint.to) != (expected_from, expected_to) {
+                    return Err(format!(
+                        "artifact progress endpoint {index} is {}->{} (expected \
+                         {expected_from}->{expected_to})",
+                        endpoint.from, endpoint.to
+                    ));
+                }
+            }
+            for (index, queue) in sample.link_queues.iter().enumerate() {
+                let expected_from = index / n.saturating_sub(1);
+                let expected_offset = index % n.saturating_sub(1);
+                let expected_to = if expected_offset >= expected_from {
+                    expected_offset.saturating_add(1)
+                } else {
+                    expected_offset
+                };
+                if (queue.from, queue.to) != (expected_from, expected_to) {
+                    return Err(format!(
+                        "artifact progress link queue {index} is {}->{} (expected \
+                         {expected_from}->{expected_to})",
+                        queue.from, queue.to
+                    ));
+                }
+            }
         }
         let expected_tail_len = usize::try_from(self.schedule.config.steps)
             .unwrap_or(usize::MAX)
@@ -562,7 +612,8 @@ mod tests {
         BackgroundNoise, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
     };
     use crate::simulation::harness::{
-        run, RunOptions, TraceGameState, TraceNetStats, TraceSessionState, TRACE_TAIL_CAPACITY,
+        run, EndpointControlSample, LinkQueueSample, ProgressSample, RunOptions, TraceGameState,
+        TraceNetStats, TraceSessionState, TRACE_TAIL_CAPACITY,
     };
 
     fn temp_artifact_root(label: &str) -> PathBuf {
@@ -777,6 +828,81 @@ mod tests {
             error.contains("unsupported failure artifact schema 2"),
             "wrong diagnostic: {error}"
         );
+    }
+
+    #[test]
+    fn progress_control_samples_validate_order_and_preserve_legacy_defaults() {
+        let sample = ProgressSample {
+            step: 1,
+            current_frames: vec![1, 1],
+            confirmed_frames: vec![0, 0],
+            confirmation_lag: vec![1, 1],
+            wait_recommendations: vec![0, 0],
+            rollback_count: vec![0, 0],
+            resimulated_frames: vec![0, 0],
+            prediction_miss_count: vec![0, 0],
+            frame_opportunities: vec![1, 1],
+            wait_frames_obeyed: vec![0, 0],
+            endpoints: vec![
+                EndpointControlSample {
+                    from: 0,
+                    to: 1,
+                    ping_ms: 10,
+                    remote_frame_advantage: 1,
+                    pending_output_len: 2,
+                },
+                EndpointControlSample {
+                    from: 1,
+                    to: 0,
+                    ping_ms: 10,
+                    remote_frame_advantage: -1,
+                    pending_output_len: 2,
+                },
+            ],
+            link_queues: vec![
+                LinkQueueSample {
+                    from: 0,
+                    to: 1,
+                    queued_bytes: 100,
+                    queued_datagrams: 1,
+                    drain_delay_ns: 1_000,
+                },
+                LinkQueueSample {
+                    from: 1,
+                    to: 0,
+                    queued_bytes: 0,
+                    queued_datagrams: 0,
+                    drain_delay_ns: 0,
+                },
+            ],
+        };
+        let mut artifact = sample_artifact();
+        artifact.progress_samples.push(sample.clone());
+        assert!(artifact.validate().is_ok());
+
+        let mut incomplete = artifact.clone();
+        let _ = incomplete.progress_samples[0].endpoints.pop();
+        assert!(incomplete.validate().is_err());
+        let mut stripped_endpoints = artifact.clone();
+        stripped_endpoints.progress_samples[0].endpoints.clear();
+        assert!(stripped_endpoints.validate().is_err());
+        let mut stripped_queues = artifact.clone();
+        stripped_queues.progress_samples[0].link_queues.clear();
+        assert!(stripped_queues.validate().is_err());
+        let mut misordered = artifact.clone();
+        misordered.progress_samples[0].link_queues.swap(0, 1);
+        assert!(misordered.validate().is_err());
+
+        let mut value = serde_json::to_value(sample).expect("progress sample serializes");
+        let object = value
+            .as_object_mut()
+            .expect("progress sample serializes as an object");
+        assert!(object.remove("endpoints").is_some());
+        assert!(object.remove("link_queues").is_some());
+        let legacy: ProgressSample =
+            serde_json::from_value(value).expect("legacy progress sample uses defaults");
+        assert!(legacy.endpoints.is_empty());
+        assert!(legacy.link_queues.is_empty());
     }
 
     #[test]
