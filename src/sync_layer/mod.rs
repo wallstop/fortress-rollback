@@ -1097,6 +1097,12 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
+    /// Test-only invariant fault injection for disconnect error-path regressions.
+    #[cfg(test)]
+    pub(crate) fn truncate_input_queues_for_test(&mut self, len: usize) {
+        self.input_queues.truncate(len);
+    }
+
     /// Resets the prediction state for all input queues.
     ///
     /// # Note

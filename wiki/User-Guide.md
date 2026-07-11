@@ -847,6 +847,23 @@ fn handle_event(event: FortressEvent<GameConfig>) {
 }
 ```
 
+### Bounded Event Retention
+
+P2P, spectator, and replay sessions keep events in a bounded queue (100 events
+by default, configurable with `with_event_queue_size`). When an event arrives at
+capacity, Fortress Rollback evicts the oldest queued routine progress or advisory
+event first. If the queue contains only durable events, an incoming routine event
+is discarded; an incoming durable event replaces the oldest durable event.
+Routine events are `Synchronizing`,
+`WaitRecommendation`, `InputDelayRecommendation`, and (with hot join)
+`JoinRequested`. All other event kinds are durable.
+
+The bound always wins, and relative order among retained events does not change. Read
+`SessionMetrics::events_discarded_total` and `events_discarded_by_kind` to detect
+loss, and compare `event_queue_high_water` with the configured cap when sizing
+the queue. Drain `events()` regularly; increasing the cap reduces burst loss but
+does not create backpressure or guarantee unlimited retention.
+
 ---
 
 ## Determinism Requirements
@@ -3407,7 +3424,7 @@ This section documents all configuration options available when building a sessi
 | `with_spectator_config(config)`          | `SpectatorConfig::default()`  | Spectator session behavior                                                                         |
 | `with_time_sync_config(config)`          | `TimeSyncConfig::default()`   | Time synchronization averaging                                                                     |
 | `with_input_queue_config(config)`        | `InputQueueConfig::default()` | Input queue buffer sizing                                                                          |
-| `with_event_queue_size(size)`            | 100                           | Maximum buffered events before dropping                                                            |
+| `with_event_queue_size(size)`            | 100                           | Hard event bound; queued routine first, else incoming routine or oldest durable is discarded        |
 | `with_max_frames_behind(frames)`         | 10                            | When spectator starts catching up                                                                  |
 | `with_catchup_speed(speed)`              | 1                             | Frames per step when spectator catches up                                                          |
 | `with_sparse_saving_mode(bool)`          | `false`                       | Deprecated: use `with_save_mode()` instead                                                         |

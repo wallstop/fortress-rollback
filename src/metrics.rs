@@ -297,9 +297,11 @@ impl Serialize for RollbackDepthHistogram {
 
 /// A cumulative snapshot of session-level metrics.
 ///
-/// In normal use you read a snapshot from [`P2PSession::metrics`] or
-/// [`SpectatorSession::metrics`]; every counter is monotonic for the life of the
-/// session and cheap to read (the type is `Copy`).
+/// In normal use you read a snapshot from [`P2PSession::metrics`],
+/// [`SpectatorSession::metrics`], or [`ReplaySession::metrics`]. Cumulative
+/// counters and high-water marks are monotonic for the life of the session;
+/// current-value gauges may move in either direction. Every snapshot is cheap to
+/// read (the type is `Copy`).
 ///
 /// This type is `#[non_exhaustive]`: future library versions may add counters
 /// without a breaking change, so it cannot be built with a struct literal
@@ -307,13 +309,14 @@ impl Serialize for RollbackDepthHistogram {
 ///
 /// # Which counters each session type populates
 ///
-/// The rollback and pacing counters (everything except the
-/// `events_discarded_*` family) are populated by [`P2PSession`]. A
-/// [`SpectatorSession`] shares this type but currently records only the
-/// event-discard counters (plus its own `frames_behind_host`, exposed
-/// separately); its rollback/pacing counters stay at their default `0`.
+/// Rollback, pacing, checksum, and checksum-history counters are populated by
+/// [`P2PSession`]. [`SpectatorSession`] and [`ReplaySession`] populate
+/// `event_queue_high_water` plus the `events_discarded_*` counters; their other
+/// fields stay at the default `0`. Spectators expose `frames_behind_host`
+/// separately.
 ///
 /// [`P2PSession`]: crate::P2PSession
+/// [`ReplaySession`]: crate::ReplaySession
 /// [`SpectatorSession`]: crate::SpectatorSession
 ///
 /// # Example
@@ -326,6 +329,7 @@ impl Serialize for RollbackDepthHistogram {
 /// ```
 ///
 /// [`P2PSession::metrics`]: crate::P2PSession::metrics
+/// [`ReplaySession::metrics`]: crate::ReplaySession::metrics
 /// [`SpectatorSession::metrics`]: crate::SpectatorSession::metrics
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -58,14 +58,19 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::error::allocation_failed;
 use crate::replay::Replay;
+use crate::sessions::builder::DEFAULT_EVENT_QUEUE_SIZE;
+use crate::sessions::event_drain::enqueue_event_bounded;
 use crate::sessions::session_trait::Session;
 use crate::sync_layer::GameStateCell;
+use crate::telemetry::{ViolationKind, ViolationObserver, ViolationSeverity};
 use crate::{
-    Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
-    InputStatus, InputVec, InvalidRequestKind, PlayerHandle, RequestVec, SessionState,
+    report_violation_to, Config, EventDrain, FortressError, FortressEvent, FortressRequest,
+    FortressResult, Frame, InputStatus, InputVec, InvalidRequestKind, PlayerHandle, RequestVec,
+    SessionMetrics, SessionState,
 };
 
 /// A session that plays back a recorded [`Replay`] deterministically.
@@ -135,6 +140,15 @@ where
     current_frame: Frame,
     /// Event queue for desync detection and other events.
     event_queue: VecDeque<FortressEvent<T>>,
+    /// Hard event-queue bound, configured by `SessionBuilder` or the shared
+    /// default for direct constructors.
+    max_event_queue_size: usize,
+    /// Event overflow counters and high-water mark.
+    metrics: SessionMetrics,
+    /// Whether this drain gap already reported its rate-limited overflow warning.
+    event_discard_warned: bool,
+    /// Optional session-specific violation observer supplied by the builder.
+    violation_observer: Option<Arc<dyn ViolationObserver>>,
     /// Whether checksum validation is enabled.
     validate_checksums: bool,
     /// Pending validation cell from the previous frame's `SaveGameState` request.
@@ -189,16 +203,9 @@ impl<T: Config> ReplaySession<T> {
     /// # Errors
     ///
     /// Returns an error if the replay fails internal consistency validation
-    /// (see [`Replay::validate`]).
+    /// (see [`Replay::validate`]) or the default event queue cannot be reserved.
     pub fn new(replay: Replay<T::Input>) -> FortressResult<Self> {
-        replay.validate()?;
-        Ok(Self {
-            replay,
-            current_frame: Frame::NULL,
-            event_queue: VecDeque::new(),
-            validate_checksums: false,
-            pending_validation: None,
-        })
+        Self::new_with_options(replay, false, DEFAULT_EVENT_QUEUE_SIZE, None)
     }
 
     /// Creates a new [`ReplaySession`] with checksum validation enabled.
@@ -255,14 +262,32 @@ impl<T: Config> ReplaySession<T> {
     /// # Errors
     ///
     /// Returns an error if the replay fails internal consistency validation
-    /// (see [`Replay::validate`]).
+    /// (see [`Replay::validate`]) or the default event queue cannot be reserved.
     pub fn new_with_validation(replay: Replay<T::Input>) -> FortressResult<Self> {
+        Self::new_with_options(replay, true, DEFAULT_EVENT_QUEUE_SIZE, None)
+    }
+
+    /// Shared construction tail for public direct constructors and builder paths.
+    pub(crate) fn new_with_options(
+        replay: Replay<T::Input>,
+        validate_checksums: bool,
+        max_event_queue_size: usize,
+        violation_observer: Option<Arc<dyn ViolationObserver>>,
+    ) -> FortressResult<Self> {
         replay.validate()?;
+        let mut event_queue = VecDeque::new();
+        event_queue
+            .try_reserve_exact(max_event_queue_size)
+            .map_err(|_err| allocation_failed("replay.event_queue", max_event_queue_size))?;
         Ok(Self {
             replay,
             current_frame: Frame::NULL,
-            event_queue: VecDeque::new(),
-            validate_checksums: true,
+            event_queue,
+            max_event_queue_size,
+            metrics: SessionMetrics::new(),
+            event_discard_warned: false,
+            violation_observer,
+            validate_checksums,
             pending_validation: None,
         })
     }
@@ -283,7 +308,7 @@ impl<T: Config> ReplaySession<T> {
 
             if let (Some(expected), Some(actual)) = (replay_checksum, actual_checksum) {
                 if expected != actual {
-                    self.event_queue.push_back(FortressEvent::ReplayDesync {
+                    self.enqueue_event(FortressEvent::ReplayDesync {
                         frame: prev_frame,
                         expected_checksum: expected,
                         actual_checksum: actual,
@@ -571,16 +596,61 @@ impl<T: Config> ReplaySession<T> {
 
     /// Returns all events that happened since last queried for events.
     ///
+    /// Replay validation events use the same configured hard bound as P2P and
+    /// spectator sessions: evict the oldest queued routine first; otherwise
+    /// discard an incoming routine or replace the oldest durable with an incoming
+    /// durable. Replay currently emits only durable `ReplayDesync` events, so an
+    /// arrival at capacity replaces and records the oldest mismatch in [`metrics`](Self::metrics).
+    ///
     /// When replay validation is enabled and playback has completed, this method
     /// also flushes any final pending checksum validation that is ready. This makes
     /// last-frame desyncs observable for the common `while !is_complete()` loop
     /// pattern without requiring an additional failing `advance_frame()` call.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
+        // A drain starts a fresh overflow episode. Re-arm before resolving the
+        // final pending checksum because that resolution may itself enqueue.
+        self.event_discard_warned = false;
         if self.is_complete() && self.pending_validation_ready_to_check() {
             self.check_pending_validation();
         }
         EventDrain::from_drain(self.event_queue.drain(..))
+    }
+
+    /// Returns cumulative replay-session metrics.
+    ///
+    /// Replay sessions populate the bounded event-queue high-water and discard
+    /// counters. Rollback, pacing, network, and checksum-comparison counters stay
+    /// at zero because replay playback has no network rollback loop.
+    pub fn metrics(&self) -> SessionMetrics {
+        self.metrics
+    }
+
+    fn enqueue_event(&mut self, event: FortressEvent<T>) {
+        if let Some(dropped) =
+            enqueue_event_bounded(&mut self.event_queue, self.max_event_queue_size, event)
+        {
+            self.record_event_discard(dropped);
+        }
+        self.metrics.observe_event_queue_len(self.event_queue.len());
+    }
+
+    fn record_event_discard(&mut self, dropped: FortressEvent<T>) {
+        self.metrics.record_event_discard(dropped.kind());
+        if !self.event_discard_warned {
+            self.event_discard_warned = true;
+            report_violation_to!(
+                &self.violation_observer,
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "replay event queue overflow at capacity: evicting the oldest queued routine \
+                 first; otherwise discarding an incoming routine or replacing the oldest durable \
+                 with an incoming durable (queue cap {}); drain events during validation or raise \
+                 the event-queue size to avoid losing notifications. See \
+                 SessionMetrics::events_discarded_total for the running count",
+                self.max_event_queue_size
+            );
+        }
     }
 
     /// Returns the current session state.
@@ -740,7 +810,10 @@ impl<T: Config> fmt::Debug for ReplaySession<T> {
 )]
 mod tests {
     use super::*;
+    use crate::metrics::EventKind;
     use crate::replay::ReplayMetadata;
+    use crate::telemetry::CollectingObserver;
+    use crate::SessionBuilder;
     use std::net::SocketAddr;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -989,6 +1062,89 @@ mod tests {
             },
             other => panic!("Expected ReplayDesync, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn validation_overflow_is_bounded_counted_and_retains_newest_desyncs() {
+        const CAP: usize = 10;
+        const FRAMES: usize = CAP + 2;
+
+        let replay = make_replay_with_checksums(FRAMES, 1, vec![Some(0xCAFE); FRAMES]);
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_event_queue_size(CAP)
+            .expect("minimum queue cap is valid")
+            .with_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>)
+            .start_replay_session_with_validation(replay)
+            .expect("valid replay builds");
+
+        for _ in 0..FRAMES {
+            let requests = session.advance_frame().expect("replay frame advances");
+            match requests.first() {
+                Some(FortressRequest::SaveGameState { cell, frame }) => {
+                    cell.save(*frame, Some(vec![1u8]), Some(0xBAD));
+                },
+                other => panic!("expected SaveGameState first, got {other:?}"),
+            }
+        }
+        assert!(
+            session.advance_frame().is_err(),
+            "the exhausted advance flushes final-frame validation"
+        );
+
+        let metrics = session.metrics();
+        assert_eq!(
+            metrics.event_queue_high_water,
+            u64::try_from(CAP).expect("small test cap fits u64")
+        );
+        assert_eq!(metrics.events_discarded_total, 2);
+        assert_eq!(
+            metrics
+                .events_discarded_by_kind
+                .get(EventKind::ReplayDesync),
+            2,
+            "a durable-only overflow honestly counts its oldest-event fallback"
+        );
+
+        let events: Vec<_> = session.events().collect();
+        assert_eq!(events.len(), CAP, "builder-configured cap must be enforced");
+        let frames: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                FortressEvent::ReplayDesync { frame, .. } => Some(*frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), CAP);
+        assert_eq!(frames.first(), Some(&Frame::new(2)));
+        assert_eq!(
+            frames.last(),
+            Some(&Frame::new(
+                i32::try_from(FRAMES - 1).expect("small test frame fits i32")
+            ))
+        );
+
+        let warnings = observer
+            .violations()
+            .iter()
+            .filter(|violation| {
+                violation.severity == ViolationSeverity::Warning
+                    && violation.kind == ViolationKind::NetworkProtocol
+                    && violation.message.contains("replay event queue overflow")
+            })
+            .count();
+        assert_eq!(warnings, 1, "one drain gap emits one overflow warning");
+    }
+
+    #[test]
+    fn direct_constructors_use_shared_default_event_queue_size() {
+        let replay = make_replay(1, 1);
+        let normal = ReplaySession::<TestConfig>::new(replay.clone()).expect("normal replay");
+        let validating =
+            ReplaySession::<TestConfig>::new_with_validation(replay).expect("validating replay");
+
+        assert_eq!(normal.max_event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
+        assert_eq!(validating.max_event_queue_size, DEFAULT_EVENT_QUEUE_SIZE);
     }
 
     #[test]

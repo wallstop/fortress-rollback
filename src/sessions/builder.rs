@@ -61,8 +61,9 @@ const DEFAULT_MAX_FRAMES_BEHIND: usize = 10;
 // The amount of frames the spectator advances in a single step if too far behind
 const DEFAULT_CATCHUP_SPEED: usize = 1;
 /// Default event queue size.
-/// Events older than this threshold may be dropped if not polled.
-const DEFAULT_EVENT_QUEUE_SIZE: usize = 100;
+/// At capacity, the oldest queued routine is evicted first. Otherwise an incoming
+/// routine is discarded or an incoming durable replaces the oldest durable.
+pub(crate) const DEFAULT_EVENT_QUEUE_SIZE: usize = 100;
 
 /// The [`SessionBuilder`] builds all Fortress Rollback Sessions.
 ///
@@ -101,7 +102,7 @@ where
     time_sync_config: TimeSyncConfig,
     /// Configuration for input queue sizing.
     input_queue_config: InputQueueConfig,
-    /// Maximum number of events to queue before oldest are dropped.
+    /// Hard event-queue bound; queued routine events are evicted first at capacity.
     event_queue_size: usize,
     /// Whether to enable replay recording during P2P sessions.
     recording: bool,
@@ -967,10 +968,15 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Sets the maximum number of events to queue before oldest are dropped.
+    /// Sets the maximum number of events retained by the bounded event queue.
     ///
-    /// When the event queue exceeds this size, the oldest events are discarded.
-    /// This provides backpressure if the application isn't consuming events quickly enough.
+    /// When an event arrives at capacity, the oldest queued routine
+    /// progress/advisory event is discarded first. If the queue contains only
+    /// durable events, an incoming routine event is discarded; an incoming
+    /// durable event replaces the oldest durable event to preserve the hard
+    /// allocation bound. This does not apply backpressure to session processing; inspect
+    /// [`SessionMetrics::events_discarded_total`](crate::SessionMetrics::events_discarded_total)
+    /// to detect an undersized queue.
     ///
     /// # Arguments
     ///
@@ -979,6 +985,9 @@ impl<T: Config> SessionBuilder<T> {
     /// # Errors
     ///
     /// Returns a [`FortressError`] if `size` is less than 10.
+    /// Session construction can subsequently return an allocation error (or
+    /// `None` for spectator constructors) if this many event slots cannot be
+    /// reserved.
     ///
     /// # Example
     ///
@@ -1841,8 +1850,8 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Returns
     /// Returns `None` if the protocol or spectator configuration is invalid,
-    /// or if protocol initialization fails (e.g., due to serialization issues
-    /// with the Input type).
+    /// protocol initialization fails (e.g., due to serialization issues with
+    /// the Input type), or the configured event queue cannot be reserved.
     pub fn start_spectator_session(
         self,
         host_addr: T::Address,
@@ -1899,8 +1908,9 @@ impl<T: Config> SessionBuilder<T> {
     /// # Returns
     ///
     /// Returns `None` if `host_addrs` is empty, if the protocol or spectator
-    /// configuration is invalid, or if protocol initialization fails for any address
-    /// (e.g. due to serialization issues with the Input type).
+    /// configuration is invalid, protocol initialization fails for any address
+    /// (e.g. due to serialization issues with the Input type), or the configured
+    /// event queue cannot be reserved.
     ///
     /// # Example
     ///
@@ -2039,8 +2049,10 @@ impl<T: Config> SessionBuilder<T> {
     /// frame by frame when [`advance_frame`](crate::Session::advance_frame)
     /// is called. No network, save/load, or local input is needed.
     ///
-    /// The builder is consumed but most configuration is ignored since
-    /// replay playback does not require networking or synchronization.
+    /// The builder is consumed but most configuration is ignored since replay
+    /// playback does not require networking or synchronization. The configured
+    /// event-queue size and violation observer are retained for bounded replay
+    /// validation events.
     ///
     /// # Example
     ///
@@ -2078,12 +2090,18 @@ impl<T: Config> SessionBuilder<T> {
     /// # Errors
     ///
     /// Returns an error if the replay fails internal consistency validation
-    /// (see [`Replay::validate`]).
+    /// (see [`Replay::validate`]) or the configured event queue cannot be
+    /// reserved.
     pub fn start_replay_session(
         self,
         replay: Replay<T::Input>,
     ) -> crate::FortressResult<ReplaySession<T>> {
-        ReplaySession::new(replay)
+        ReplaySession::new_with_options(
+            replay,
+            false,
+            self.event_queue_size,
+            self.violation_observer,
+        )
     }
 
     /// Creates a replay playback session with checksum validation enabled.
@@ -2135,12 +2153,18 @@ impl<T: Config> SessionBuilder<T> {
     /// # Errors
     ///
     /// Returns an error if the replay fails internal consistency validation
-    /// (see [`Replay::validate`]).
+    /// (see [`Replay::validate`]) or the configured event queue cannot be
+    /// reserved.
     pub fn start_replay_session_with_validation(
         self,
         replay: Replay<T::Input>,
     ) -> crate::FortressResult<ReplaySession<T>> {
-        ReplaySession::new_with_validation(replay)
+        ReplaySession::new_with_options(
+            replay,
+            true,
+            self.event_queue_size,
+            self.violation_observer,
+        )
     }
 
     fn create_endpoint(
@@ -2356,7 +2380,7 @@ mod tests {
     #[test]
     fn test_with_event_queue_size_accepts_valid_values() {
         // Test various valid values
-        for size in [10, 50, 100, 200, 500, usize::MAX] {
+        for size in [10, 50, 100, 200, 500] {
             let builder = SessionBuilder::<TestConfig>::new()
                 .with_event_queue_size(size)
                 .expect("Valid event queue size should be accepted");
@@ -2529,6 +2553,17 @@ mod tests {
     }
 
     #[test]
+    fn start_p2p_session_reports_event_queue_allocation_failure() {
+        let err = single_local_builder()
+            .with_event_queue_size(usize::MAX)
+            .expect("configuration accepts platform-sized caps")
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+
+        assert_allocation_failed(err, "p2p.event_queue");
+    }
+
+    #[test]
     fn start_p2p_session_reports_time_sync_allocation_failure() {
         let err = SessionBuilder::<TestConfig>::new()
             .with_num_players(2)
@@ -2571,6 +2606,48 @@ mod tests {
             .start_spectator_session(test_addr(7_500), DummySocket);
 
         assert!(session.is_none());
+    }
+
+    #[test]
+    fn start_spectator_session_returns_none_when_event_queue_reservation_fails() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_event_queue_size(usize::MAX)
+            .unwrap()
+            .start_spectator_session(test_addr(7_501), DummySocket);
+
+        assert!(session.is_none());
+    }
+
+    #[test]
+    fn replay_builders_report_event_queue_allocation_failure() {
+        use crate::replay::{Replay, ReplayMetadata};
+
+        for validate_checksums in [false, true] {
+            let replay = Replay::<TestInput> {
+                num_players: 1,
+                frames: vec![vec![TestInput { inp: 0 }]],
+                checksums: vec![Some(1)],
+                metadata: ReplayMetadata {
+                    library_version: "test".to_string(),
+                    num_players: 1,
+                    total_frames: 1,
+                    skipped_frames: 0,
+                },
+            };
+            let builder = SessionBuilder::<TestConfig>::new()
+                .with_event_queue_size(usize::MAX)
+                .unwrap();
+            let err = if validate_checksums {
+                builder.start_replay_session_with_validation(replay)
+            } else {
+                builder.start_replay_session(replay)
+            }
+            .unwrap_err();
+
+            assert_allocation_failed(err, "replay.event_queue");
+        }
     }
 
     #[test]
