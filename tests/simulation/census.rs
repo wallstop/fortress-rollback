@@ -9,8 +9,6 @@ use super::harness::{
     TraceSessionState,
 };
 use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
-#[cfg(feature = "hot-join")]
-use fortress_rollback::telemetry::{ViolationKind, ViolationSeverity};
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
@@ -29,6 +27,10 @@ const GILBERT_ELLIOTT_HEAL: u32 = 420;
 const NPEER_HOT_JOIN_AT: u32 = 140;
 #[cfg(feature = "hot-join")]
 const NPEER_HOT_JOIN_HEAL: u32 = 220;
+#[cfg(feature = "hot-join")]
+const NPEER_OVERLAP_HOT_JOIN_AT: u32 = 140;
+#[cfg(feature = "hot-join")]
+const NPEER_HOT_JOIN_PARTITION_AT: u32 = 156;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     let mut initial_links = Vec::new();
@@ -48,6 +50,14 @@ fn blocked_drop_count(report: &RunReport, from: usize, to: usize) -> u64 {
         .get(&(from, to))
         .copied()
         .unwrap_or(0)
+}
+
+#[cfg(feature = "hot-join")]
+fn probe_wire(report: &RunReport, from: usize, to: usize) -> &super::harness::PeerWireTotals {
+    report
+        .probe_peer_wire_by_link
+        .get(&(from, to))
+        .unwrap_or_else(|| panic!("missing probe wire ledger for {from}->{to}"))
 }
 
 fn peer_event_payload_count(report: &RunReport, peer: usize, key: PeerEventKey) -> u64 {
@@ -164,8 +174,8 @@ fn gilbert_elliott_schedule(include_correlated_loss: bool) -> Schedule {
 }
 
 #[cfg(feature = "hot-join")]
-fn clean_npeer_hot_join_schedule() -> Schedule {
-    let n = 4;
+fn clean_npeer_hot_join_schedule(n: usize) -> Schedule {
+    let hot_join_slot = n.saturating_sub(1);
     let mut config = SimConfig::smoke(n);
     config.steps = 900;
     config.noise = BackgroundNoise::Clean;
@@ -174,7 +184,12 @@ fn clean_npeer_hot_join_schedule() -> Schedule {
     config.disconnect_behavior = DropPolicy::ContinueWithout;
 
     let events = vec![
-        (NPEER_HOT_JOIN_AT, ScheduleEvent::HotJoin { slot: 3 }),
+        (
+            NPEER_HOT_JOIN_AT,
+            ScheduleEvent::HotJoin {
+                slot: hot_join_slot,
+            },
+        ),
         (NPEER_HOT_JOIN_HEAL, ScheduleEvent::HealAll),
     ];
 
@@ -189,114 +204,282 @@ fn clean_npeer_hot_join_schedule() -> Schedule {
     }
 }
 
-/// M3 §28.3(c) prerequisite known-red: the clean N=4 simulation lifecycle
-/// wedges before a partition can be introduced honestly. The coordinator
-/// repeatedly times out at the N-peer commit barrier, the joiner remains
-/// `HotJoining`, and the survivors stop confirming. Once this baseline is
-/// fixed, add the matched partition that lands during a proved-open floor
-/// round and hot-join.
+#[cfg(feature = "hot-join")]
+fn partition_during_floor_round_hot_join_schedule(include_partition: bool) -> Schedule {
+    let mut schedule = clean_npeer_hot_join_schedule(4);
+    for (step, event) in &mut schedule.events {
+        if matches!(event, ScheduleEvent::HotJoin { .. }) {
+            *step = NPEER_OVERLAP_HOT_JOIN_AT;
+        }
+    }
+    schedule.events.insert(
+        1,
+        (
+            NPEER_OVERLAP_HOT_JOIN_AT,
+            ScheduleEvent::PeerStall { peer: 3, steps: 9 },
+        ),
+    );
+    schedule
+        .events
+        .push((154, ScheduleEvent::PeerStall { peer: 1, steps: 1 }));
+    if include_partition {
+        for other in [0, 2, 3] {
+            schedule.events.push((
+                NPEER_HOT_JOIN_PARTITION_AT,
+                ScheduleEvent::Block {
+                    from: 1,
+                    to: other,
+                    blocked: true,
+                },
+            ));
+            schedule.events.push((
+                NPEER_HOT_JOIN_PARTITION_AT,
+                ScheduleEvent::Block {
+                    from: other,
+                    to: 1,
+                    blocked: true,
+                },
+            ));
+        }
+    }
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
+/// M3 §28.3(c) prerequisite: deterministic replacement-generation protocol
+/// identities let clean N-peer hot-joins clear the survivor commit barrier.
+/// N=3 exercises one survivor acknowledgement; N=4 exercises two and is the
+/// matched control for the later partition-during-floor-round row.
 #[cfg(feature = "hot-join")]
 #[test]
-#[ignore = "known N-peer hot-join commit-barrier timeout under simulation lifecycle"]
-fn clean_npeer_hot_join_wedges_at_commit_barrier_known_defect() {
+fn clean_npeer_hot_join_clears_survivor_commit_barrier() {
     use fortress_rollback::MessageKind;
 
-    let schedule = clean_npeer_hot_join_schedule();
-    let first = run(&schedule, &RunOptions::default());
-    let replay = run(&schedule, &RunOptions::default());
+    for n in [3, 4] {
+        let schedule = clean_npeer_hot_join_schedule(n);
+        let first = run(&schedule, &RunOptions::default());
+        let replay = run(&schedule, &RunOptions::default());
+        first.expect_pass(&schedule);
+        assert_eq!(first.trace_hash, replay.trace_hash, "N={n}");
+        assert_eq!(first.verdict, replay.verdict, "N={n}");
+        assert_eq!(first.net_stats, replay.net_stats, "N={n}");
+        assert_eq!(first.metrics, replay.metrics, "N={n}");
+        assert_eq!(first.peer_wire, replay.peer_wire, "N={n}");
+        assert_eq!(first.final_confirmed, replay.final_confirmed, "N={n}");
+        assert_eq!(first.violation_census, replay.violation_census, "N={n}");
+        assert_eq!(first.recovered_within_b, Some(true), "N={n}");
+        assert!(
+            first.final_confirmed.iter().all(|frame| *frame > 800),
+            "N={n}: {:?}",
+            first.final_confirmed
+        );
+        assert!(first.violation_census.is_empty(), "N={n}");
+        assert_eq!(first.net_stats.dropped_by_policy, 0, "N={n}");
+        assert_eq!(first.net_stats.retransmit_delayed, 0, "N={n}");
+        assert_eq!(first.net_stats.dropped_blocked, 0, "N={n}");
+        assert_eq!(first.net_stats.dropped_unattached, 0, "N={n}");
+        assert_eq!(first.net_stats.duplicated, 0, "N={n}");
+        assert_eq!(first.net_stats.held, 0, "N={n}");
+        assert_eq!(first.net_stats.gilbert_elliott_loss_events, 0, "N={n}");
+        assert!(
+            first.trace_tail.last().is_some_and(|snapshot| snapshot
+                .session_states
+                .iter()
+                .all(|state| *state == TraceSessionState::Running)),
+            "N={n}"
+        );
+        for survivor in 1..n.saturating_sub(1) {
+            let survivor_wire = first
+                .peer_wire
+                .get(survivor)
+                .expect("survivor wire ledger exists");
+            assert!(
+                survivor_wire.sent_by_kind(MessageKind::ReactivateSlotAck) > 0,
+                "N={n}: survivor {survivor} must ack the replacement generation"
+            );
+        }
+        for kind in [
+            MessageKind::JoinRequest,
+            MessageKind::StateSnapshot,
+            MessageKind::ReactivateSlot,
+            MessageKind::ReactivateSlotAck,
+            MessageKind::JoinCommitted,
+        ] {
+            assert!(
+                first
+                    .peer_wire
+                    .iter()
+                    .map(|wire| wire.sent_by_kind(kind))
+                    .sum::<u64>()
+                    > 0,
+                "N={n}: {kind:?} traffic must occur"
+            );
+        }
+        assert_eq!(
+            first
+                .peer_wire
+                .iter()
+                .map(|wire| wire.sent_by_kind(MessageKind::JoinAborted))
+                .sum::<u64>(),
+            0,
+            "N={n}"
+        );
+    }
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn partition_lands_during_open_floor_round_and_hot_join_then_recovers() {
+    use fortress_rollback::telemetry::{ViolationKind, ViolationSeverity};
+    use fortress_rollback::MessageKind;
+
+    let control_schedule = partition_during_floor_round_hot_join_schedule(false);
+    let before_options = RunOptions {
+        probe_confirmed_at: Some(NPEER_HOT_JOIN_PARTITION_AT - 3),
+        ..RunOptions::default()
+    };
+    let before = run(&control_schedule, &before_options);
+    before.expect_pass(&control_schedule);
+
+    let overlap_options = RunOptions {
+        probe_confirmed_at: Some(NPEER_HOT_JOIN_PARTITION_AT - 1),
+        ..RunOptions::default()
+    };
+    let control = run(&control_schedule, &overlap_options);
+    let control_replay = run(&control_schedule, &overlap_options);
+    control.expect_pass(&control_schedule);
+    assert_eq!(control.trace_hash, control_replay.trace_hash);
+    assert_eq!(
+        control.probe_peer_wire_by_link,
+        control_replay.probe_peer_wire_by_link
+    );
+    for to in [0, 2] {
+        let before_sent = probe_wire(&before, 1, to).sent_by_kind(MessageKind::FloorRequest);
+        let before_received = probe_wire(&before, 1, to).received_by_kind(MessageKind::FloorReply);
+        let overlap_sent = probe_wire(&control, 1, to).sent_by_kind(MessageKind::FloorRequest);
+        let overlap_received =
+            probe_wire(&control, 1, to).received_by_kind(MessageKind::FloorReply);
+        assert_eq!(
+            before_sent, before_received,
+            "peer1->{to} must have no older floor request outstanding"
+        );
+        assert_eq!(
+            overlap_sent,
+            before_sent + 1,
+            "exactly one new peer1->{to} floor request must open before the partition"
+        );
+        assert_eq!(
+            overlap_received, before_received,
+            "the newly opened peer1->{to} floor request must still await its reply"
+        );
+    }
+    for survivor in [1, 2] {
+        assert!(
+            probe_wire(&control, 0, survivor).sent_by_kind(MessageKind::ReactivateSlot)
+                > probe_wire(&before, 0, survivor).sent_by_kind(MessageKind::ReactivateSlot),
+            "coordinator must open the survivor barrier toward peer {survivor} during the overlap step"
+        );
+    }
+    assert!(probe_wire(&control, 3, 0).sent_by_kind(MessageKind::JoinRequest) > 0);
+    assert_eq!(
+        probe_wire(&control, 1, 0).sent_by_kind(MessageKind::ReactivateSlotAck),
+        0
+    );
+    assert_eq!(
+        probe_wire(&control, 0, 3).sent_by_kind(MessageKind::JoinCommitted),
+        0
+    );
+    assert_eq!(control.probe_confirmed.get(3), Some(&-1));
+
+    let schedule = partition_during_floor_round_hot_join_schedule(true);
+    let first = run(&schedule, &overlap_options);
+    let replay = run(&schedule, &overlap_options);
+    first.expect_pass(&schedule);
+    assert_eq!(first.probe_confirmed, control.probe_confirmed);
+    assert_eq!(
+        first.probe_peer_wire_by_link,
+        control.probe_peer_wire_by_link
+    );
     assert_eq!(first.trace_hash, replay.trace_hash);
     assert_eq!(first.verdict, replay.verdict);
     assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.blocked_drops_by_link, replay.blocked_drops_by_link);
     assert_eq!(first.metrics, replay.metrics);
+    assert_eq!(first.peer_wire, replay.peer_wire);
     assert_eq!(first.final_confirmed, replay.final_confirmed);
+    assert_eq!(first.probe_confirmed, replay.probe_confirmed);
+    assert_eq!(
+        first.probe_peer_wire_by_link,
+        replay.probe_peer_wire_by_link
+    );
     assert_eq!(first.violation_census, replay.violation_census);
-    assert_eq!(first.final_confirmed, vec![144, 144, 144, -1]);
-    assert_eq!(first.recovered_within_b, Some(false));
+
+    let partition_links = [(1, 0), (0, 1), (1, 2), (2, 1), (1, 3), (3, 1)];
+    let blocked_total: u64 = partition_links
+        .iter()
+        .map(|&(from, to)| {
+            let drops = blocked_drop_count(&first, from, to);
+            assert!(drops > 0, "partition link {from}->{to} must drop traffic");
+            drops
+        })
+        .sum();
+    assert_eq!(first.blocked_drops_by_link.len(), partition_links.len());
+    assert_eq!(first.net_stats.dropped_blocked, blocked_total);
     assert_eq!(first.net_stats.dropped_by_policy, 0);
     assert_eq!(first.net_stats.retransmit_delayed, 0);
-    assert_eq!(first.net_stats.dropped_blocked, 0);
     assert_eq!(first.net_stats.dropped_unattached, 0);
     assert_eq!(first.net_stats.duplicated, 0);
     assert_eq!(first.net_stats.held, 0);
-    assert_eq!(first.net_stats.gilbert_elliott_good_to_bad, 0);
-    assert_eq!(first.net_stats.gilbert_elliott_bad_to_good, 0);
-    assert_eq!(first.net_stats.gilbert_elliott_bad_sends, 0);
-    assert_eq!(first.net_stats.gilbert_elliott_good_sends, 0);
     assert_eq!(first.net_stats.gilbert_elliott_loss_events, 0);
-    assert_eq!(first.net_stats.gilbert_elliott_max_loss_run, 0);
-    let violation_count = |location: &str, prefix: &str| {
-        first
-            .violation_census
-            .iter()
-            .filter(|(signature, _)| {
-                signature.severity == ViolationSeverity::Warning
-                    && signature.kind == ViolationKind::NetworkProtocol
-                    && signature.location == location
-                    && signature.message_prefix.starts_with(prefix)
-            })
-            .map(|(_, count)| *count)
-            .sum::<u64>()
-    };
-    assert_eq!(
-        violation_count(
-            "src/sessions/p2p_session.rs:2371",
-            "N-peer hot-join serve for slot"
-        ),
-        2,
-        "the coordinator must time out at the N-peer commit barrier: {:?}",
-        first.violation_census
-    );
-    assert_eq!(
-        violation_count(
-            "src/sessions/p2p_session.rs:5158",
-            "N-peer hot-join attempt for slot"
-        ),
-        2,
-        "the joiner must observe both coordinator aborts: {:?}",
-        first.violation_census
-    );
-    assert!(matches!(
-        first.trace_tail.last().map(|snapshot| &snapshot.session_states),
-        Some(states) if states == &[TraceSessionState::Running, TraceSessionState::Running,
-            TraceSessionState::Running, TraceSessionState::HotJoining]
-    ));
-    assert_eq!(first.verdict.failures.len(), 5);
-    let end_progress_peers: Vec<_> = first
-        .verdict
-        .failures
+    assert_eq!(first.recovered_within_b, Some(true));
+    assert_eq!(first.violation_census.len(), 1);
+    let (signature, count) = first
+        .violation_census
+        .first_key_value()
+        .expect("one synchronization warning is censused");
+    assert_eq!(signature.severity, ViolationSeverity::Warning);
+    assert_eq!(signature.kind, ViolationKind::Synchronization);
+    assert!(signature
+        .location
+        .starts_with("src/network/protocol/mod.rs:"));
+    assert_eq!(signature.message_prefix, "Excessive sync retries");
+    assert_eq!(*count, 1);
+    assert!(first.final_confirmed.iter().all(|frame| *frame > 700));
+    assert!(first.trace_tail.last().is_some_and(|snapshot| snapshot
+        .session_states
         .iter()
-        .filter_map(|failure| match failure {
-            OracleFailure::EndProgress { peer, .. } => Some(*peer),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(end_progress_peers, vec![3]);
-    let post_heal_peers: Vec<_> = first
-        .verdict
-        .failures
-        .iter()
-        .filter_map(|failure| match failure {
-            OracleFailure::PostHealLiveness { peer, .. } => Some(*peer),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(post_heal_peers, vec![0, 1, 2, 3]);
+        .all(|state| *state == TraceSessionState::Running)));
+    assert!(
+        probe_wire(&first, 1, 0).sent_by_kind(MessageKind::ReactivateSlotAck) == 0,
+        "the partition prefix must still be inside the open commit barrier"
+    );
     assert!(
         first
             .peer_wire
-            .iter()
-            .map(|wire| wire.sent_by_kind(MessageKind::JoinRequest))
-            .sum::<u64>()
-            > 0
+            .get(1)
+            .is_some_and(|wire| wire.sent_by_kind(MessageKind::ReactivateSlotAck) > 0),
+        "isolated survivor must ack after heal"
     );
     assert!(
         first
             .peer_wire
             .iter()
-            .map(|wire| wire.sent_by_kind(MessageKind::StateSnapshot))
+            .map(|wire| wire.sent_by_kind(MessageKind::JoinCommitted))
             .sum::<u64>()
             > 0
     );
+    assert_eq!(
+        first
+            .peer_wire
+            .iter()
+            .map(|wire| wire.sent_by_kind(MessageKind::JoinAborted))
+            .sum::<u64>(),
+        0
+    );
+    assert!(first
+        .load_game_state_observations
+        .iter()
+        .any(|observation| observation.peer == 3 && observation.step > NPEER_HOT_JOIN_HEAL));
 }
 
 #[test]

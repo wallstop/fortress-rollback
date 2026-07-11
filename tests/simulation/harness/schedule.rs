@@ -126,7 +126,13 @@ pub enum ScenarioMix {
 ///   change that leaves every other peer's canonical destination unchanged.
 /// - `11`: adds [`GilbertElliottPolicy`], a deterministic two-state
 ///   correlated-loss model on materialized directed links.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 11;
+/// - `12`: makes protocol RNG seeds target-width-stable and gives each
+///   hot-join replacement generation an initial protocol magic distinct from
+///   the generation it replaces. It bounds new schedules to one replacement
+///   generation because fencing older/per-link protocol eras needs a wider
+///   model. Schemas <=11 retain their historical seed and validation semantics
+///   for corpus replay.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 12;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -922,6 +928,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
     // call returns `Ok`, so they do not update this mask.
     let mut retired_by_guaranteed_kill = vec![false; n];
     let mut rebound_peers = BTreeSet::new();
+    let mut hot_join_seen = false;
     for (_, event) in &schedule.events {
         match event {
             ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
@@ -955,6 +962,13 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                 retired_by_guaranteed_kill[*host] = true;
             },
             ScheduleEvent::HotJoin { slot } => {
+                if schedule.schema_version >= 12 && hot_join_seen {
+                    return Err(
+                        "schema v12 HotJoin appears more than once; the simulation capability supports one replacement generation per schedule"
+                            .to_owned(),
+                    );
+                }
+                hot_join_seen = true;
                 if retired_by_guaranteed_kill[*slot] {
                     return Err(format!(
                         "HotJoin slot {slot} is already retired by an earlier kill event"
@@ -2409,6 +2423,16 @@ mod tests {
         let mut sparse = valid.clone();
         sparse.config.save_mode = SavePolicy::Sparse;
         cases.push((sparse, "save_mode EveryFrame"));
+
+        let mut repeated = valid.clone();
+        repeated
+            .events
+            .push((120, ScheduleEvent::HotJoin { slot: 2 }));
+        repeated.events.sort_by_key(|(step, _)| *step);
+        let mut legacy_repeated = repeated.clone();
+        legacy_repeated.schema_version = 11;
+        assert_eq!(validate_schedule(&legacy_repeated), Ok(()));
+        cases.push((repeated, "schema v12 HotJoin appears more than once"));
 
         let mut killed_slot = valid.clone();
         killed_slot

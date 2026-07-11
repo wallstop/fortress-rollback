@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+// Version 2 makes end-of-step per-link probe counters identity-bearing. Older
+// probe-bearing artifacts cannot reproduce that stronger trace identity and
+// are rejected explicitly rather than reported as nondeterministic.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -598,7 +601,7 @@ mod tests {
         );
         let decoded = read_artifact(&path).expect("artifact schema round trips");
         assert_eq!(decoded, artifact);
-        assert_eq!(decoded.artifact_schema_version, 1);
+        assert_eq!(decoded.artifact_schema_version, 2);
         assert_eq!(decoded.trace_tail.len(), TRACE_TAIL_CAPACITY);
 
         std::fs::remove_dir_all(&root).expect("temporary artifact tree removes");

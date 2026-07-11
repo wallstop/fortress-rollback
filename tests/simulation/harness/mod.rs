@@ -23,6 +23,7 @@ use crate::common::sim_net::{SimNet, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
+use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
@@ -160,11 +161,12 @@ pub struct RunOptions {
     /// Corrupt `(peer, from_frame)`'s saved **checksums only** (states stay
     /// identical): exercises the in-band detector cross-check path.
     pub corrupt_checksum_from: Option<(usize, i32)>,
-    /// If set, snapshot every peer's confirmed frame at this step into
-    /// [`RunReport::probe_confirmed`]. Lets a test observe mid-run confirmation
-    /// (frozen during a hitch, converged after heal) — end-of-run state alone
-    /// hides recovery dynamics because a clean drain always converges. Must be
-    /// within `0..steps` (asserted up front, so a requested probe always fires).
+    /// If set, snapshot every peer's confirmed frame and every directed link's
+    /// wire counters at the end of this step into [`RunReport::probe_confirmed`]
+    /// and [`RunReport::probe_peer_wire_by_link`]. Lets a test observe mid-run
+    /// confirmation and protocol traffic; end-of-run state alone hides those
+    /// dynamics because a clean drain always converges. The probe contributes
+    /// to trace/shrinker identity and must be within `0..steps`.
     pub probe_confirmed_at: Option<u32>,
     /// Corrupt the configured spectator's first input fingerprint in each
     /// displayed frame at or after this frame. Negative controls only need one
@@ -332,10 +334,19 @@ pub struct TraceSpectatorState {
 }
 
 #[derive(Serialize)]
+struct TracePeerWireLink {
+    from: usize,
+    to: usize,
+    totals: PeerWireTotals,
+}
+
+#[derive(Serialize)]
 struct TraceFinalSummary {
     failure_classes: Vec<&'static str>,
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    probe_peer_wire_by_link: Vec<TracePeerWireLink>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -362,6 +373,10 @@ pub struct RunReport {
     /// Each peer's confirmed frame sampled at [`RunOptions::probe_confirmed_at`]
     /// (empty when no probe step was requested). Indexed by peer.
     pub probe_confirmed: Vec<i32>,
+    /// Per-directed-link wire counters sampled after every peer has completed
+    /// the step selected by [`RunOptions::probe_confirmed_at`]. Empty when no
+    /// probe was requested. Keys are `(local_peer, remote_peer)`.
+    pub probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
@@ -426,7 +441,7 @@ pub struct RunReport {
 /// headers). The `messages_{sent,received}_by_kind` arrays are positional in
 /// [`MessageKind::ALL`] order; read them by category with
 /// [`sent_by_kind`](Self::sent_by_kind) / [`received_by_kind`](Self::received_by_kind).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PeerWireTotals {
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -507,6 +522,32 @@ impl PeerWireTotals {
             .copied()
             .fold(0u64, u64::saturating_add)
     }
+}
+
+fn collect_peer_wire_by_link<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    n_players: usize,
+) -> BTreeMap<(usize, usize), PeerWireTotals> {
+    let mut by_link = BTreeMap::new();
+    for (local, slot) in peers.iter().enumerate() {
+        for remote in 0..n_players {
+            if remote == local {
+                continue;
+            }
+            let metrics = slot
+                .session
+                .peer_metrics(PlayerHandle::new(remote))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "peer {local}: peer_metrics(handle={remote}) failed unexpectedly: {error:?}"
+                    )
+                });
+            let mut totals = PeerWireTotals::default();
+            totals.add(&metrics);
+            by_link.insert((local, remote), totals);
+        }
+    }
+    by_link
 }
 
 impl RunReport {
@@ -668,6 +709,8 @@ struct PeerSlot<I: SimInput> {
     observer: Arc<CollectingObserver>,
     /// Highest frame whose confirmed inputs were sampled into the oracle.
     sampled_confirmed: i32,
+    /// RNG seed used to construct this peer's current protocol generation.
+    protocol_rng_seed: u64,
     /// A hot-joined replacement starts from a mid-game snapshot and cannot
     /// answer historical `confirmed_inputs_for_frame` queries below that
     /// snapshot. While armed, this stores the earliest frame the coordinator's
@@ -706,9 +749,75 @@ fn peer_protocol_config(schedule: &Schedule, peer: usize, clock: &TestClock) -> 
 
     ProtocolConfig {
         clock: Some(peer_clock),
-        protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, peer))),
+        protocol_rng_seed: Some(peer_protocol_seed(schedule, peer)),
         ..ProtocolConfig::default()
     }
+}
+
+fn peer_protocol_seed(schedule: &Schedule, peer: usize) -> u64 {
+    if schedule.schema_version < 12 {
+        fnv1a_hash(&(schedule.seed, peer))
+    } else {
+        let peer = u64::try_from(peer).expect("validated peer index fits u64");
+        fnv1a_hash(&(schedule.seed, peer))
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn protocol_magic_for_seed(seed: u64) -> u16 {
+    // Keep this in lockstep with UdpProtocol::new: draw the low u16 from
+    // Pcg32 and reject zero. The end-to-end hot-join census guards the
+    // production side of this test-harness coupling.
+    let mut rng = Pcg32::seed_from_u64(seed);
+    loop {
+        let magic = rng.next_u32() as u16;
+        if magic != 0 {
+            return magic;
+        }
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_protocol_seed_candidate(
+    schedule: &Schedule,
+    peer: usize,
+    step: u32,
+    previous_seed: u64,
+    nonce: u32,
+) -> u64 {
+    let peer = u64::try_from(peer).expect("validated peer index fits u64");
+    fnv1a_hash(&(
+        "hot-join-replacement",
+        schedule.seed,
+        peer,
+        step,
+        previous_seed,
+        nonce,
+    ))
+}
+
+/// Derives a deterministic replacement-generation seed whose initial protocol
+/// magic differs from the departing generation. Reusing the old seed makes a
+/// replacement synchronize prematurely with survivor endpoints from the old
+/// era; their later rearm advances its magic and the replacement then filters
+/// the genuine new-era handshake forever.
+#[cfg(feature = "hot-join")]
+fn hot_join_protocol_seed(schedule: &Schedule, peer: usize, step: u32, previous_seed: u64) -> u64 {
+    // Schema <=11 replays the original same-seed replacement semantics so
+    // checked-in corpus traces keep their historical identity. Schema 12
+    // gives each replacement generation a distinct initial protocol magic.
+    if schedule.schema_version < 12 {
+        return previous_seed;
+    }
+    let previous_magic = protocol_magic_for_seed(previous_seed);
+    for nonce in 0_u32..=u32::from(u16::MAX) {
+        let candidate =
+            hot_join_protocol_seed_candidate(schedule, peer, step, previous_seed, nonce);
+        if protocol_magic_for_seed(candidate) != previous_magic {
+            return candidate;
+        }
+    }
+    panic!("failed to derive a distinct protocol magic for hot-join peer {peer} at step {step}");
 }
 
 fn update_spectator_required_min_frame<I: SimInput>(
@@ -807,7 +916,10 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     let socket: SimSocket<Message> = ctx.net.attach(ctx.addrs[slot]);
     let replacement_binding = socket.binding();
     let observer = Arc::clone(&ctx.peers[slot].observer);
-    let protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
+    let replacement_protocol_seed =
+        hot_join_protocol_seed(ctx.schedule, slot, step, ctx.peers[slot].protocol_rng_seed);
+    let mut protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
+    protocol_config.protocol_rng_seed = Some(replacement_protocol_seed);
     let mut builder = SessionBuilder::<I::SessionConfig>::new()
         .with_num_players(ctx.schedule.config.n_players)
         .expect("valid player count")
@@ -875,6 +987,7 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     ctx.peers[slot].session = replacement;
     ctx.peers[slot].binding = replacement_binding;
     ctx.peers[slot].source_addrs = vec![ctx.addrs[slot]];
+    ctx.peers[slot].protocol_rng_seed = replacement_protocol_seed;
     ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
 }
 
@@ -1219,6 +1332,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 game,
                 observer,
                 sampled_confirmed: -1,
+                protocol_rng_seed: peer_protocol_seed(schedule, i),
                 pending_replacement_handoff_floor: None,
             }
         })
@@ -1299,6 +1413,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
+    let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
 
     // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
     // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
@@ -1658,6 +1773,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
+        // Sample link-specific wire counters only after the fixed-order peer
+        // loop completes, so the probe describes one unambiguous end-of-step
+        // cut rather than a mixture of before/after states across peers.
+        if options.probe_confirmed_at == Some(step) {
+            probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
+        }
+
         if let Some(spectator) = spectator.as_mut() {
             drive_spectator(
                 spectator,
@@ -1841,6 +1963,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
         probe_confirmed: probe_confirmed.clone(),
+        probe_peer_wire_by_link: probe_peer_wire_by_link
+            .iter()
+            .map(|(&(from, to), totals)| TracePeerWireLink {
+                from,
+                to,
+                totals: totals.clone(),
+            })
+            .collect(),
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -1858,6 +1988,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         final_confirmed,
         trace_tail: trace_tail.into(),
         probe_confirmed,
+        probe_peer_wire_by_link,
         net_stats: net.stats(),
         blocked_drops_by_link,
         load_game_state_observations,
@@ -2153,8 +2284,62 @@ mod tests {
             game: SimGameStub::<StubInput>::new(),
             observer,
             sampled_confirmed: -1,
+            protocol_rng_seed: peer_protocol_seed(schedule, peer),
             pending_replacement_handoff_floor: None,
         }
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn hot_join_protocol_seed_is_deterministic_and_old_generation_distinct() {
+        let schedule = schedule::generate(0x5EED_CAFE, schedule::SimConfig::smoke(4));
+        let initial = peer_protocol_seed(&schedule, 3);
+        let replacement = hot_join_protocol_seed(&schedule, 3, 140, initial);
+        let repeated = hot_join_protocol_seed(&schedule, 3, 140, initial);
+        let second_replacement = hot_join_protocol_seed(&schedule, 3, 240, replacement);
+        let second_repeated = hot_join_protocol_seed(&schedule, 3, 240, replacement);
+
+        assert_eq!(replacement, repeated);
+        assert_ne!(replacement, initial);
+        assert_ne!(
+            protocol_magic_for_seed(replacement),
+            protocol_magic_for_seed(initial)
+        );
+        assert_eq!(second_replacement, second_repeated);
+        assert_ne!(second_replacement, replacement);
+        assert_ne!(
+            protocol_magic_for_seed(second_replacement),
+            protocol_magic_for_seed(replacement)
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn hot_join_protocol_seed_retries_when_nonce_zero_candidate_reuses_previous_magic() {
+        let schedule = schedule::generate(0xB24D, schedule::SimConfig::smoke(4));
+        let initial = peer_protocol_seed(&schedule, 3);
+        let colliding = hot_join_protocol_seed_candidate(&schedule, 3, 140, initial, 0);
+        let replacement = hot_join_protocol_seed(&schedule, 3, 140, initial);
+
+        assert_eq!(
+            protocol_magic_for_seed(colliding),
+            protocol_magic_for_seed(initial)
+        );
+        assert_ne!(replacement, colliding);
+        assert_ne!(
+            protocol_magic_for_seed(replacement),
+            protocol_magic_for_seed(initial)
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn schema_v11_hot_join_preserves_same_seed_replay_semantics() {
+        let mut schedule = schedule::generate(0x5EED_CAFE, schedule::SimConfig::smoke(4));
+        schedule.schema_version = 11;
+        let initial = peer_protocol_seed(&schedule, 3);
+
+        assert_eq!(hot_join_protocol_seed(&schedule, 3, 140, initial), initial);
     }
 
     #[cfg(feature = "hot-join")]
@@ -2250,6 +2435,10 @@ mod tests {
 
         assert_eq!(implicit.trace_hash, explicit.trace_hash);
         assert_eq!(implicit.final_confirmed, explicit.final_confirmed);
+        assert_eq!(
+            implicit.probe_peer_wire_by_link,
+            explicit.probe_peer_wire_by_link
+        );
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(
             implicit.blocked_drops_by_link,
@@ -2280,5 +2469,64 @@ mod tests {
             explicit.spectator_final_hosts
         );
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
+    }
+
+    #[test]
+    fn end_of_step_wire_probe_is_complete_and_matches_final_cut() {
+        let n = 3;
+        let schedule = schedule::generate(
+            0xA11C_E099,
+            schedule::SimConfig {
+                steps: 180,
+                ..schedule::SimConfig::smoke(n)
+            },
+        );
+        let without_probe = run(&schedule, &RunOptions::default());
+        assert!(without_probe.probe_peer_wire_by_link.is_empty());
+
+        let report = run(
+            &schedule,
+            &RunOptions {
+                probe_confirmed_at: Some(schedule.config.steps - 1),
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(report.probe_peer_wire_by_link.len(), n * (n - 1));
+
+        for local in 0..n {
+            let links: Vec<&PeerWireTotals> = report
+                .probe_peer_wire_by_link
+                .iter()
+                .filter_map(|(&(from, _), totals)| (from == local).then_some(totals))
+                .collect();
+            assert_eq!(links.len(), n - 1);
+            let aggregate = PeerWireTotals {
+                bytes_sent: links.iter().map(|totals| totals.bytes_sent).sum(),
+                bytes_received: links.iter().map(|totals| totals.bytes_received).sum(),
+                packets_sent: links.iter().map(|totals| totals.packets_sent).sum(),
+                packets_received: links.iter().map(|totals| totals.packets_received).sum(),
+                messages_sent_by_kind: std::array::from_fn(|index| {
+                    links
+                        .iter()
+                        .map(|totals| totals.messages_sent_by_kind[index])
+                        .sum()
+                }),
+                messages_received_by_kind: std::array::from_fn(|index| {
+                    links
+                        .iter()
+                        .map(|totals| totals.messages_received_by_kind[index])
+                        .sum()
+                }),
+                input_bytes_pre_compression: links
+                    .iter()
+                    .map(|totals| totals.input_bytes_pre_compression)
+                    .sum(),
+                input_bytes_post_compression: links
+                    .iter()
+                    .map(|totals| totals.input_bytes_post_compression)
+                    .sum(),
+            };
+            assert_eq!(aggregate, report.peer_wire[local]);
+        }
     }
 }

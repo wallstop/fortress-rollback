@@ -50,6 +50,7 @@ pub struct ShrinkResult {
 struct FinalSummary {
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
+    probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
     load_game_state_observations: Vec<super::LoadGameStateObservation>,
@@ -74,6 +75,7 @@ impl From<&RunReport> for FinalSummary {
         Self {
             final_confirmed: report.final_confirmed.clone(),
             probe_confirmed: report.probe_confirmed.clone(),
+            probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
             load_game_state_observations: report.load_game_state_observations.clone(),
@@ -806,6 +808,7 @@ mod tests {
             final_confirmed,
             trace_tail: Vec::new(),
             probe_confirmed: Vec::new(),
+            probe_peer_wire_by_link: BTreeMap::new(),
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
             load_game_state_observations: Vec::new(),
