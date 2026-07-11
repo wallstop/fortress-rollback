@@ -11,7 +11,7 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
-    run, RunOptions,
+    run, RunOptions, RunReport,
 };
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
@@ -2537,6 +2537,40 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
         );
 
         let obey_again = run(&obey, &RunOptions::default());
+        assert!(!obey_report.progress_samples.is_empty(), "n={n}");
+        assert!(obey_report.progress_samples.len() <= 12, "n={n}");
+        assert_eq!(
+            obey_report.progress_samples, obey_again.progress_samples,
+            "bounded control-loop samples must replay exactly (n={n})"
+        );
+        for sample in &obey_report.progress_samples {
+            assert_eq!(sample.endpoints.len(), n * (n - 1), "n={n}");
+            assert_eq!(sample.link_queues.len(), n * (n - 1), "n={n}");
+            assert!(
+                sample
+                    .endpoints
+                    .windows(2)
+                    .all(|pair| (pair[0].from, pair[0].to) < (pair[1].from, pair[1].to)),
+                "endpoint samples must use stable directed-link order (n={n})"
+            );
+            assert!(
+                sample
+                    .link_queues
+                    .iter()
+                    .all(|queue| queue.queued_bytes == 0
+                        && queue.queued_datagrams == 0
+                        && queue.drain_delay_ns == 0),
+                "delay-only links must not report bandwidth debt (n={n})"
+            );
+        }
+        assert!(
+            obey_report
+                .progress_samples
+                .iter()
+                .flat_map(|sample| &sample.endpoints)
+                .any(|endpoint| endpoint.ping_ms > 0),
+            "the control-loop series must observe measured RTT (n={n})"
+        );
         assert_eq!(
             obey_report.trace_hash, obey_again.trace_hash,
             "an Obey run must reproduce its exact trace (n={n})"
@@ -2547,6 +2581,146 @@ fn app_model_obey_wait_recommendation_stays_consistent() {
              actually happen (n={n})"
         );
     }
+}
+
+/// H-OSC symmetric control: identical 100 ms one-way links do not activate
+/// the discrete sleep controller in the deterministic equal-rate workload.
+/// This falsifies the original perfectly-symmetric mutual-sleep premise; a
+/// perturbation/jitter treatment is still required to test oscillation after
+/// the loop is actually activated.
+#[test]
+fn symmetric_delay_does_not_create_mutual_sleep_h_osc() {
+    for n in [2usize, 4] {
+        let mut schedule = wait_rec_schedule(n, AppModel::Obey);
+        schedule.config.steps = 900;
+        for (_, _, policy) in &mut schedule.initial_links {
+            policy.base_delay = Duration::from_millis(100);
+        }
+        schedule.events.clear();
+        schedule.heal_at = schedule.config.steps;
+
+        let first = run(&schedule, &RunOptions::default());
+        let replay = run(&schedule, &RunOptions::default());
+        first.expect_pass(&schedule);
+        assert_eq!(first.trace_hash, replay.trace_hash, "n={n}");
+        assert_eq!(first.progress_samples, replay.progress_samples, "n={n}");
+        assert!(!first.progress_samples.is_empty(), "n={n}");
+        assert_eq!(first.wait_frames_obeyed, vec![0; n], "n={n}");
+        assert!(
+            first
+                .metrics
+                .iter()
+                .all(|metrics| metrics.wait_recommendations == 0),
+            "perfectly symmetric delay must not manufacture a peer lead: {:?}",
+            first.metrics
+        );
+        assert!(
+            first.progress_samples.last().is_some_and(|sample| sample
+                .endpoints
+                .iter()
+                .all(|endpoint| (190..=230).contains(&endpoint.ping_ms))),
+            "every endpoint must observe the intended ≈200 ms RTT (n={n}): {:?}",
+            first.progress_samples
+        );
+    }
+}
+
+/// H-ASYM matched experiment: a 10/200 ms one-way split has the same 210 ms
+/// RTT as its symmetric control. It creates a measurable throughput/stall
+/// asymmetry, but the reported advantages stay below the sleep dead band and
+/// falsify the predicted one-sided `WaitRecommendation` mechanism.
+#[test]
+fn h_asym_biases_throughput_without_wait_recommendations() {
+    let build = |asymmetric: bool| {
+        let mut schedule = wait_rec_schedule(2, AppModel::Obey);
+        for (from, to, policy) in &mut schedule.initial_links {
+            policy.base_delay = if asymmetric {
+                if from < to {
+                    Duration::from_millis(10)
+                } else {
+                    Duration::from_millis(200)
+                }
+            } else {
+                Duration::from_millis(105)
+            };
+        }
+        schedule.events.clear();
+        schedule.heal_at = schedule.config.steps;
+        schedule
+    };
+    let symmetric = build(false);
+    let asymmetric = build(true);
+    let symmetric_report = run(&symmetric, &RunOptions::default());
+    let asymmetric_report = run(&asymmetric, &RunOptions::default());
+    let replay = run(&asymmetric, &RunOptions::default());
+    symmetric_report.expect_pass(&symmetric);
+    asymmetric_report.expect_pass(&asymmetric);
+    assert_eq!(asymmetric_report.trace_hash, replay.trace_hash);
+    assert_eq!(asymmetric_report.progress_samples, replay.progress_samples);
+    assert_eq!(symmetric_report.wait_frames_obeyed, vec![0, 0]);
+    assert_eq!(asymmetric_report.wait_frames_obeyed, vec![0, 0]);
+    assert!(symmetric_report
+        .metrics
+        .iter()
+        .all(|metrics| metrics.wait_recommendations == 0));
+    assert!(asymmetric_report
+        .metrics
+        .iter()
+        .all(|metrics| metrics.wait_recommendations == 0));
+    assert_eq!(
+        symmetric_report.metrics[0].visual_frames,
+        symmetric_report.metrics[1].visual_frames
+    );
+    assert_eq!(
+        symmetric_report.metrics[0].stall_count,
+        symmetric_report.metrics[1].stall_count
+    );
+    assert!(
+        asymmetric_report.metrics[1].visual_frames > asymmetric_report.metrics[0].visual_frames
+    );
+    assert!(asymmetric_report.metrics[0].stall_count > asymmetric_report.metrics[1].stall_count);
+    let final_sample = asymmetric_report
+        .progress_samples
+        .last()
+        .expect("matched asymmetric run records bounded samples");
+    let symmetric_final = symmetric_report
+        .progress_samples
+        .last()
+        .expect("matched symmetric control records bounded samples");
+    assert_eq!(
+        final_sample.current_frames[1] - final_sample.current_frames[0],
+        7,
+        "10/200 ms paths should produce the measured seven-frame throughput split"
+    );
+    assert_eq!(
+        symmetric_final
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .collect::<Vec<_>>(),
+        final_sample
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .collect::<Vec<_>>(),
+        "control and treatment must observe the same RTT"
+    );
+    assert!(
+        final_sample
+            .endpoints
+            .iter()
+            .all(|endpoint| (210..=240).contains(&endpoint.ping_ms)),
+        "both treatment endpoints must observe the matched ≈210 ms RTT"
+    );
+    assert_eq!(
+        final_sample
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.remote_frame_advantage)
+            .collect::<Vec<_>>(),
+        vec![-1, 1],
+        "the latest wire gauges stay below the three-frame recommendation dead band"
+    );
 }
 
 /// Builds a clock-skew schedule: an `n`-mesh over clean links with a small
@@ -2754,6 +2928,27 @@ fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
     assert_ne!(exact_report.trace_hash, skewed_report.trace_hash);
 }
 
+#[test]
+fn schema_v15_skew_progress_preserves_legacy_trace_shape() {
+    let mut schedule = skew_gated_schedule(1_200, 1_000, AppModel::Obey);
+    schedule.schema_version = 15;
+    schedule.config.step_dt_ms = 8;
+
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert!(!first.progress_samples.is_empty());
+    assert!(first
+        .progress_samples
+        .iter()
+        .all(|sample| sample.endpoints.is_empty() && sample.link_queues.is_empty()));
+    let encoded = serde_json::to_string(&first.progress_samples)
+        .expect("legacy progress samples serialize deterministically");
+    assert!(!encoded.contains("endpoints"));
+    assert!(!encoded.contains("link_queues"));
+}
+
 /// H-SKEW hour-equivalent experiment: +0.1% produces exactly 216 additional
 /// 60 Hz opportunities over one virtual hour. Nightly records both the bounded
 /// lag/correction result and the currently-red work-amplification observation.
@@ -2822,6 +3017,18 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
         "H-SKEW resimulation amplification must not exceed 40%: \
          exact={exact_resimulation}, skewed={skewed_resimulation}"
     );
+    assert!(
+        skewed_total_work.saturating_mul(100) >= exact_total_work.saturating_mul(110),
+        "the open H-SKEW-COST finding must remain directly observable until a \
+         reviewed controller fix deliberately flips this assertion: \
+         exact={exact_total_work}, skewed={skewed_total_work}"
+    );
+    assert!(
+        skewed_resimulation.saturating_mul(100) >= exact_resimulation.saturating_mul(120),
+        "the open H-SKEW-COST resimulation finding must remain directly observable until a \
+         reviewed controller fix deliberately flips this assertion: \
+         exact={exact_resimulation}, skewed={skewed_resimulation}"
+    );
 
     assert_eq!(skewed_report.wait_frames_obeyed[1], 0);
     assert!(
@@ -2874,6 +3081,103 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
             max.saturating_sub(min) <= 1,
             "steady-state lag must stay flat rather than creep (peer={peer}, \
              samples={steady_samples:?})"
+        );
+    }
+}
+
+/// H-SKEW cost-amplification diagnostic: repeat a ten-minute-equivalent matched
+/// exact/skew experiment at several scheduler resolutions. A real clock-drift
+/// cost should remain comparable as the deterministic outer-loop cadence gets
+/// finer; a large cadence-dependent swing instead identifies sampling/phase
+/// aliasing in the harness as a confounder.
+#[test]
+#[ignore = "H-SKEW scheduler-resolution cost matrix; run manually"]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn h_skew_cost_amplification_across_scheduler_resolutions() {
+    const DURATION_MS: u32 = 600_000;
+
+    for step_dt_ms in [5_u32, 8, 10, 15] {
+        let steps = DURATION_MS / step_dt_ms + 1;
+        let mut exact = skew_gated_schedule(steps, 0, AppModel::Obey);
+        exact.config.step_dt_ms = u64::from(step_dt_ms);
+        let exact_report = run(&exact, &RunOptions::default());
+        exact_report.expect_pass(&exact);
+
+        let total_work = |report: &RunReport| {
+            report
+                .metrics
+                .iter()
+                .map(|metrics| metrics.frames_advanced)
+                .fold(0_u64, u64::saturating_add)
+        };
+        let resimulation = |report: &RunReport| {
+            report
+                .metrics
+                .iter()
+                .map(|metrics| metrics.resimulated_frames)
+                .fold(0_u64, u64::saturating_add)
+        };
+        assert_eq!(exact_report.frame_opportunities, vec![36_000, 36_000]);
+        let exact_work = total_work(&exact_report);
+        let exact_resimulation = resimulation(&exact_report);
+        let mut work_by_orientation = [0_u64; 2];
+        let mut resimulation_by_orientation = [0_u64; 2];
+
+        for fast_peer in 0..2 {
+            let mut skewed = skew_gated_schedule(steps, 0, AppModel::Obey);
+            skewed.config.step_dt_ms = u64::from(step_dt_ms);
+            skewed.config.clock_skew_ppm = vec![0, 0];
+            skewed.config.clock_skew_ppm[fast_peer] = 1_000;
+            let skewed_report = run(&skewed, &RunOptions::default());
+            skewed_report.expect_pass(&skewed);
+
+            let skewed_work = total_work(&skewed_report);
+            let skewed_resimulation = resimulation(&skewed_report);
+            work_by_orientation[fast_peer] = skewed_work;
+            resimulation_by_orientation[fast_peer] = skewed_resimulation;
+            println!(
+                "H-SKEW-COST step_dt_ms={step_dt_ms} fast_peer={fast_peer} \
+                 exact_opportunities={:?} skewed_opportunities={:?} \
+                 exact_work={exact_work} skewed_work={skewed_work} \
+                 exact_resimulation={exact_resimulation} \
+                 skewed_resimulation={skewed_resimulation} skips={:?}",
+                exact_report.frame_opportunities,
+                skewed_report.frame_opportunities,
+                skewed_report.wait_frames_obeyed
+            );
+
+            let mut expected_opportunities = vec![36_000, 36_000];
+            expected_opportunities[fast_peer] = 36_036;
+            assert_eq!(skewed_report.frame_opportunities, expected_opportunities);
+            assert!(
+                skewed_work.saturating_mul(100) >= exact_work.saturating_mul(108),
+                "the measured total-work excess must persist at {step_dt_ms} ms: \
+                 exact={exact_work}, skewed={skewed_work}"
+            );
+            assert!(
+                skewed_resimulation.saturating_mul(100) >= exact_resimulation.saturating_mul(115),
+                "the measured resimulation excess must persist at {step_dt_ms} ms: \
+                 exact={exact_resimulation}, skewed={skewed_resimulation}"
+            );
+            for peer in 0..2 {
+                if peer == fast_peer {
+                    assert!(
+                        (30..=42).contains(&skewed_report.wait_frames_obeyed[peer]),
+                        "correction duty must track the 36-frame drift at {step_dt_ms} ms: {:?}",
+                        skewed_report.wait_frames_obeyed
+                    );
+                } else {
+                    assert_eq!(skewed_report.wait_frames_obeyed[peer], 0);
+                }
+            }
+        }
+        assert_eq!(
+            work_by_orientation[0], work_by_orientation[1],
+            "fixed peer drive order must not explain H-SKEW total-work cost at {step_dt_ms} ms"
+        );
+        assert_eq!(
+            resimulation_by_orientation[0], resimulation_by_orientation[1],
+            "fixed peer drive order must not explain H-SKEW resimulation cost at {step_dt_ms} ms"
         );
     }
 }

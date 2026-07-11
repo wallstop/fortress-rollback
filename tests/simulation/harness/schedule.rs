@@ -153,7 +153,9 @@ pub enum ScenarioMix {
 ///   materialized directed links.
 /// - `15`: adds [`FrameModel::SkewGated60Hz`], which makes per-peer clock skew
 ///   control frame-production cadence instead of timestamps alone.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 15;
+/// - `16`: adds bounded directed-endpoint and live bandwidth-queue samples to
+///   control-loop experiments. Schema 15 retains its original trace identity.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 16;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:

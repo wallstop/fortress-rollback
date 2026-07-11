@@ -1,7 +1,7 @@
 //! Premise-asserted simulation census rows for specific distributed failure modes.
 
 use super::harness::schedule::{
-    BackgroundNoise, DropPolicy, SavePolicy, Schedule, ScheduleEvent, SimConfig,
+    AppModel, BackgroundNoise, DropPolicy, SavePolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
@@ -674,6 +674,8 @@ fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
     let replay = run(&schedule, &RunOptions::default());
     first.expect_pass(&schedule);
     assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.progress_samples, replay.progress_samples);
+    assert!(!first.progress_samples.is_empty());
     assert_eq!(first.net_stats, replay.net_stats);
     assert_eq!(first.link_stats_by_link, replay.link_stats_by_link);
     assert_eq!(first.recovered_within_b, Some(true));
@@ -693,6 +695,31 @@ fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
     assert_eq!(stats.dropped_by_policy, 0, "{stats:?}");
     assert_eq!(stats.dropped_blocked, 0, "{stats:?}");
     assert!(first.final_confirmed.iter().all(|frame| *frame > 400));
+    assert!(
+        first
+            .progress_samples
+            .iter()
+            .flat_map(|sample| &sample.link_queues)
+            .any(|queue| queue.from == 0
+                && queue.to == 1
+                && queue.queued_bytes > 0
+                && queue.queued_datagrams > 0
+                && queue.drain_delay_ns > 0),
+        "the bounded series must observe live queue growth on 0->1: {:?}",
+        first.progress_samples
+    );
+    assert!(
+        first
+            .progress_samples
+            .last()
+            .is_some_and(|sample| sample
+                .link_queues
+                .iter()
+                .all(|queue| queue.queued_bytes == 0
+                    && queue.queued_datagrams == 0
+                    && queue.drain_delay_ns == 0)),
+        "the final bounded sample must prove every bandwidth queue drained"
+    );
     assert_eq!(
         control
             .metrics
@@ -722,6 +749,105 @@ fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
             assert_eq!(stats.bandwidth_tail_drops, 0, "link={link:?}");
         }
     }
+}
+
+/// H-BLOAT matched treatment: compare an app that ignores one-way
+/// queue-induced wait recommendations with one that obeys them, using the live
+/// queue series plus cumulative maxima as recovery evidence. The harness keeps
+/// polling while it skips simulation advances, so this row covers pacing
+/// feedback, not an application that also suspends network service.
+#[test]
+fn h_bloat_obedience_reduces_work_without_changing_sampled_queue() {
+    let mut ignore = bandwidth_queue_schedule(true);
+    ignore.config.app_model = AppModel::Ignore;
+    let mut obey = ignore.clone();
+    obey.config.app_model = AppModel::Obey;
+
+    let ignore_report = run(&ignore, &RunOptions::default());
+    let obey_report = run(&obey, &RunOptions::default());
+    let replay = run(&obey, &RunOptions::default());
+    ignore_report.expect_pass(&ignore);
+    obey_report.expect_pass(&obey);
+    assert_eq!(obey_report.trace_hash, replay.trace_hash);
+    assert_eq!(obey_report.progress_samples, replay.progress_samples);
+
+    let queue_series = |report: &RunReport| {
+        report
+            .progress_samples
+            .iter()
+            .map(|sample| {
+                let queue = sample
+                    .link_queues
+                    .iter()
+                    .find(|queue| queue.from == 0 && queue.to == 1)
+                    .expect("complete directed-link queue sample");
+                (sample.step, queue.queued_bytes, queue.drain_delay_ns)
+            })
+            .collect::<Vec<_>>()
+    };
+    let ignore_queue = queue_series(&ignore_report);
+    let obey_queue = queue_series(&obey_report);
+    let total_work = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.frames_advanced)
+            .sum::<u64>()
+    };
+    assert!(ignore_queue.iter().any(|(_, bytes, _)| *bytes > 0));
+    assert!(obey_queue.iter().any(|(_, bytes, _)| *bytes > 0));
+    assert!(obey_report
+        .wait_frames_obeyed
+        .iter()
+        .any(|skips| *skips > 0));
+    assert_eq!(
+        ignore_queue, obey_queue,
+        "obeying must not change the bounded queue/drain samples"
+    );
+    assert_eq!(
+        ignore_report.net_stats.bandwidth_admitted_bytes,
+        obey_report.net_stats.bandwidth_admitted_bytes
+    );
+    assert_eq!(
+        ignore_report.net_stats.bandwidth_tail_dropped_bytes,
+        obey_report.net_stats.bandwidth_tail_dropped_bytes
+    );
+    assert_eq!(
+        ignore_report.net_stats.bandwidth_max_queue_bytes,
+        obey_report.net_stats.bandwidth_max_queue_bytes
+    );
+    assert_eq!(
+        ignore_report.net_stats.bandwidth_max_queue_delay_ns,
+        obey_report.net_stats.bandwidth_max_queue_delay_ns
+    );
+    let ignore_work = total_work(&ignore_report);
+    let obey_work = total_work(&obey_report);
+    assert!(
+        obey_work.saturating_mul(100) <= ignore_work.saturating_mul(75),
+        "obeying should reduce stress-work by at least 25%: \
+         ignore={ignore_work}, obey={obey_work}"
+    );
+    let resimulation = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    };
+    let ignore_resimulation = resimulation(&ignore_report);
+    let obey_resimulation = resimulation(&obey_report);
+    assert!(
+        obey_resimulation.saturating_mul(100) <= ignore_resimulation.saturating_mul(50),
+        "obeying should halve resimulation in this matched stress row: \
+         ignore={ignore_resimulation}, obey={obey_resimulation}"
+    );
+    assert!(obey_report
+        .progress_samples
+        .last()
+        .is_some_and(|sample| sample
+            .link_queues
+            .iter()
+            .all(|queue| queue.queued_bytes == 0)));
 }
 
 #[test]
