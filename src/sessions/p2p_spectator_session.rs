@@ -3,6 +3,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::error::{allocation_failed, try_reserve_hint};
+#[cfg(test)]
+use crate::sessions::event_drain::remove_event_for_overflow;
 use crate::{
     frame_info::PlayerInput,
     network::{
@@ -10,6 +12,7 @@ use crate::{
         protocol::{Event, UdpProtocol},
     },
     report_violation, report_violation_to,
+    sessions::event_drain::enqueue_event_bounded,
     sessions::session_trait::Session,
     telemetry::{ViolationKind, ViolationObserver, ViolationSeverity},
     Config, EventDrain, FortressError, FortressEvent, FortressRequest, FortressResult, Frame,
@@ -173,7 +176,7 @@ where
     state_buffer: Vec<GameStateCell<T::State>>,
     /// Optional observer for specification violations.
     violation_observer: Option<Arc<dyn ViolationObserver>>,
-    /// Maximum number of events to queue before oldest are dropped.
+    /// Hard event-queue bound; routine events are discarded first on overflow.
     max_event_queue_size: usize,
     /// Cumulative, always-on session metrics (see [`SpectatorSession::metrics`]).
     metrics: SessionMetrics,
@@ -307,6 +310,11 @@ impl<T: Config> SpectatorSession<T> {
             canonical_hosts.push(None);
         }
 
+        let mut event_queue = VecDeque::new();
+        event_queue
+            .try_reserve_exact(event_queue_size)
+            .map_err(|_err| allocation_failed("spectator.event_queue", event_queue_size))?;
+
         Ok(Self {
             state: SessionState::Synchronizing,
             num_players,
@@ -319,7 +327,7 @@ impl<T: Config> SpectatorSession<T> {
             host_drop_witness,
             host_status_epoch,
             canonical_hosts,
-            event_queue: VecDeque::new(),
+            event_queue,
             current_frame: Frame::NULL,
             last_recv_frame: Frame::NULL,
             max_frames_behind,
@@ -579,21 +587,23 @@ impl<T: Config> SpectatorSession<T> {
         .into())
     }
 
-    /// Returns all events that happened since last queried for events. If the
-    /// number of stored events exceeds the configured event queue size, the
-    /// oldest events will be discarded.
+    /// Returns all events that happened since last queried for events. When an
+    /// event arrives at capacity, the oldest queued routine progress/advisory
+    /// event is discarded first. If only durable events are queued, an incoming
+    /// routine is discarded; an incoming durable replaces the oldest durable.
     #[must_use = "events should be handled to react to session state changes"]
     pub fn events(&mut self) -> EventDrain<'_, T> {
-        // Draining starts a new overflow episode: re-arm the rate-limited
-        // event-queue-overflow warning (see `trim_event_queue`).
+        // Draining starts a new overflow episode: re-arm the warning emitted by
+        // `record_event_discard` when a bounded enqueue discards an event.
         self.event_discard_warned = false;
         EventDrain::from_drain(self.event_queue.drain(..))
     }
 
     /// Returns a snapshot of this spectator's cumulative [`SessionMetrics`].
     ///
-    /// Counters are always-on, monotonic for the life of the session, and cheap
-    /// to read (the returned value is `Copy`). A non-zero
+    /// Cumulative counters and high-water marks are always-on and monotonic for
+    /// the life of the session; current-value gauges may move in either
+    /// direction. The returned snapshot is cheap to read (`Copy`). A non-zero
     /// [`events_discarded_total`](SessionMetrics::events_discarded_total) means
     /// the application is draining [`events`](Self::events) slower than they
     /// arrive and has lost notifications.
@@ -1341,23 +1351,24 @@ impl<T: Config> SpectatorSession<T> {
             player,
             frame
         );
-        self.event_queue
-            .push_back(FortressEvent::SpectatorDivergence {
-                frame,
-                player,
-                primary_addr,
-                conflicting_addr,
-            });
+        self.enqueue_event(FortressEvent::SpectatorDivergence {
+            frame,
+            player,
+            primary_addr,
+            conflicting_addr,
+        });
         self.spectator_divergence = Some(SpectatorDivergenceState {
             frame,
             player,
             _marker: std::marker::PhantomData,
         });
-        self.trim_event_queue();
     }
 
-    /// Bounds the event queue to `max_event_queue_size`, dropping the oldest
-    /// events first.
+    /// Corrects a test queue that is already over `max_event_queue_size`, dropping
+    /// the oldest queued routine first, or the oldest durable if none is routine.
+    /// Production enqueue retains the incoming event's identity: at capacity it
+    /// evicts the oldest queued routine first; otherwise it discards an incoming
+    /// routine or replaces the oldest durable with an incoming durable.
     ///
     /// Overflow means the application is draining events slower than they
     /// arrive; the dropped events are lost. This used to happen silently
@@ -1367,23 +1378,41 @@ impl<T: Config> SpectatorSession<T> {
     /// on each [`events`](Self::events) drain) so the loss is observable via
     /// [`metrics`](Self::metrics) and any registered violation observer without
     /// flooding on a churn burst.
+    #[cfg(test)]
     fn trim_event_queue(&mut self) {
-        let mut discarded = 0u64;
         while self.event_queue.len() > self.max_event_queue_size {
-            if let Some(dropped) = self.event_queue.pop_front() {
-                self.metrics.record_event_discard(dropped.kind());
-                discarded += 1;
+            if let Some(dropped) = remove_event_for_overflow(&mut self.event_queue) {
+                self.record_event_discard(dropped);
             } else {
                 break;
             }
         }
-        if discarded > 0 && !self.event_discard_warned {
+        self.metrics.observe_event_queue_len(self.event_queue.len());
+    }
+
+    /// Enqueues within the fallibly reserved hard cap: evict the oldest queued
+    /// routine first; otherwise discard an incoming routine or replace the oldest
+    /// durable with an incoming durable.
+    fn enqueue_event(&mut self, event: FortressEvent<T>) {
+        if let Some(dropped) =
+            enqueue_event_bounded(&mut self.event_queue, self.max_event_queue_size, event)
+        {
+            self.record_event_discard(dropped);
+        }
+        self.metrics.observe_event_queue_len(self.event_queue.len());
+    }
+
+    fn record_event_discard(&mut self, dropped: FortressEvent<T>) {
+        self.metrics.record_event_discard(dropped.kind());
+        if !self.event_discard_warned {
             self.event_discard_warned = true;
             report_violation_to!(
                 &self.violation_observer,
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
-                "spectator event queue overflow: discarding undrained event(s) (queue cap {}); \
+                "spectator event queue overflow at capacity: evicting the oldest queued routine \
+                 first; otherwise discarding an incoming routine or replacing the oldest durable \
+                 with an incoming durable (queue cap {}); \
                  drain events every poll or raise the event-queue size to avoid losing \
                  notifications. See SessionMetrics::events_discarded_total for the running count",
                 self.max_event_queue_size
@@ -2098,7 +2127,7 @@ impl<T: Config> SpectatorSession<T> {
                 total_requests_sent,
                 elapsed_ms,
             } => {
-                self.event_queue.push_back(FortressEvent::Synchronizing {
+                self.enqueue_event(FortressEvent::Synchronizing {
                     addr,
                     total,
                     count,
@@ -2108,35 +2137,30 @@ impl<T: Config> SpectatorSession<T> {
             },
             // forward to user
             Event::NetworkInterrupted { disconnect_timeout } => {
-                self.event_queue
-                    .push_back(FortressEvent::NetworkInterrupted {
-                        addr,
-                        disconnect_timeout,
-                    });
+                self.enqueue_event(FortressEvent::NetworkInterrupted {
+                    addr,
+                    disconnect_timeout,
+                });
             },
             // forward to user
             Event::NetworkResumed => {
-                self.event_queue
-                    .push_back(FortressEvent::NetworkResumed { addr });
+                self.enqueue_event(FortressEvent::NetworkResumed { addr });
             },
             // synced with a host, then forward to user. The first host to sync flips
             // the session to Running; subsequent hosts are idempotent.
             Event::Synchronized => {
                 self.state = SessionState::Running;
-                self.event_queue
-                    .push_back(FortressEvent::Synchronized { addr });
+                self.enqueue_event(FortressEvent::Synchronized { addr });
             },
             // disconnect the host, then forward to user. The host is removed by the
             // caller after all events have been handled.
             Event::Disconnected => {
                 disconnected_host = Some(host_index);
-                self.event_queue
-                    .push_back(FortressEvent::Disconnected { addr });
+                self.enqueue_event(FortressEvent::Disconnected { addr });
             },
             // forward sync timeout to user
             Event::SyncTimeout { elapsed_ms } => {
-                self.event_queue
-                    .push_back(FortressEvent::SyncTimeout { addr, elapsed_ms });
+                self.enqueue_event(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
             // add the input and all associated information
             Event::Input {
@@ -2147,9 +2171,6 @@ impl<T: Config> SpectatorSession<T> {
                 self.handle_host_input(host_index, input, player, peer_connect_status, addr);
             },
         }
-
-        // check event queue size and discard oldest events if too big
-        self.trim_event_queue();
 
         disconnected_host
     }
@@ -2644,15 +2665,19 @@ mod tests {
         assert_eq!(session.metrics().events_discarded_total, 0);
 
         let addr = test_addr(9000);
-        // Canary at the front: a safety-critical Disconnected.
+        // Canary at the front: a durable Disconnected.
         session
             .event_queue
             .push_back(FortressEvent::Disconnected { addr });
-        // Push past the cap with benign events so the canary overflows out.
+        // Push past the cap with routine events; they must be selected first.
         for _ in 0..session.max_event_queue_size {
             session
                 .event_queue
-                .push_back(FortressEvent::NetworkResumed { addr });
+                .push_back(FortressEvent::InputDelayRecommendation {
+                    player_handle: PlayerHandle::new(0),
+                    current_delay: 0,
+                    suggested_delay: 1,
+                });
         }
         session.trim_event_queue();
 
@@ -2660,6 +2685,18 @@ mod tests {
             session.event_queue.len(),
             session.max_event_queue_size,
             "queue must be trimmed to its cap"
+        );
+        assert_eq!(
+            session.metrics().event_queue_high_water,
+            u64::try_from(session.max_event_queue_size).unwrap_or(u64::MAX),
+            "bounded enqueue high-water must never exceed the configured cap"
+        );
+        assert!(
+            session
+                .event_queue
+                .iter()
+                .any(|event| matches!(event, FortressEvent::Disconnected { .. })),
+            "routine churn must not evict the durable Disconnected canary"
         );
         let metrics = session.metrics();
         assert!(
@@ -2670,9 +2707,16 @@ mod tests {
         assert_eq!(
             metrics
                 .events_discarded_by_kind
-                .get(EventKind::Disconnected),
+                .get(EventKind::InputDelayRecommendation),
             1,
-            "the safety-critical Disconnected canary must be attributed to its kind"
+            "the oldest routine recommendation must be attributed to its kind"
+        );
+        assert_eq!(
+            metrics
+                .events_discarded_by_kind
+                .get(EventKind::Disconnected),
+            0,
+            "the retained Disconnected canary must not be counted as discarded"
         );
         let violations = observer.violations();
         assert!(
@@ -2703,7 +2747,6 @@ mod tests {
             .start_spectator_session(test_addr(7101), DummySocket)
             .expect("spectator session builds");
 
-        let addr = test_addr(9001);
         let overflow_warnings = |observer: &CollectingObserver| {
             observer
                 .violations()
@@ -2721,7 +2764,11 @@ mod tests {
             for _ in 0..(session.max_event_queue_size + 1) {
                 session
                     .event_queue
-                    .push_back(FortressEvent::NetworkResumed { addr });
+                    .push_back(FortressEvent::InputDelayRecommendation {
+                        player_handle: PlayerHandle::new(0),
+                        current_delay: 0,
+                        suggested_delay: 1,
+                    });
             }
             session.trim_event_queue();
         }
@@ -2741,7 +2788,11 @@ mod tests {
         for _ in 0..(session.max_event_queue_size + 1) {
             session
                 .event_queue
-                .push_back(FortressEvent::NetworkResumed { addr });
+                .push_back(FortressEvent::InputDelayRecommendation {
+                    player_handle: PlayerHandle::new(0),
+                    current_delay: 0,
+                    suggested_delay: 1,
+                });
         }
         session.trim_event_queue();
         assert_eq!(

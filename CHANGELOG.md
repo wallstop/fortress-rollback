@@ -120,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Legacy `disconnect_player` (`Halt`-style) drops, and drops on a host that does not serve hot-joins, are
     not made re-joinable.
 - Always-on session metrics: `SessionMetrics` (a cheap, `Copy`, `serde::Serialize` snapshot of cumulative
-  counters), exposed via `P2PSession::metrics()` and `SpectatorSession::metrics()`. Counters are plain
+  counters), exposed via `P2PSession::metrics()`, `SpectatorSession::metrics()`, and
+  `ReplaySession::metrics()`. Counters are plain
   integers updated inline on the paths they measure — no timers, no allocation, no `Instant` — so reads are
   deterministic and WASM-safe. The first surface is **event-queue-overflow accounting**:
   `SessionMetrics::events_discarded_total` counts events dropped because the application drained the bounded
@@ -318,14 +319,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framing as the existing protocol messages). Byzantine peers are out of scope. The existing
   defense-in-depth — the prediction-window rollback clamp, the sparse earlier-checkpoint search, and the
   disconnect-rollback checksum invalidation/deferral — is unchanged and now mostly dormant.
-- **Pre-existing:** Event-queue overflow no longer discards events **silently**. When the bounded event
-  queue exceeds its configured size the session still drops the oldest events (unchanged retention — that
-  policy is revisited separately), but each drop is now recorded in `SessionMetrics` (see *Added*) and a
+- **Pre-existing:** Event-queue overflow no longer discards events **silently** or evicts routine and
+  safety-relevant notifications indiscriminately. P2P, spectator, and replay sessions all enforce the
+  configured bound. When an event arrives at capacity, sessions first discard the oldest queued routine
+  progress/advisory event, if one exists, and retain the new arrival. If the queue contains only durable
+  events, an incoming routine event is discarded; an incoming durable event replaces the oldest durable
+  event to preserve the hard allocation bound. Each drop is recorded in `SessionMetrics` (see *Added*) and a
   rate-limited `Warning`/`NetworkProtocol` violation is reported once per overflow episode (re-armed each
   time the application drains events), so a churn burst warns once rather than once per message. Previously the
   oldest event — even a safety-critical `Disconnected` or `DesyncDetected` — was dropped with no violation
   and no counter, so an application draining events slower than they arrive could miss a disconnect or a
-  desync with no way to detect the loss. Both `P2PSession` and `SpectatorSession` are covered. The cap is
+  desync with no way to detect the loss. `P2PSession`, `SpectatorSession`, and `ReplaySession` are covered.
+  The cap is
   now enforced at **every** event-emission path — including events raised from `advance_frame` (wait
   recommendations, desync detection), `remove_player`/`disconnect_player`, and the hot-join lifecycle —
   not only when an inbound message is handled, so the queue can no longer sit above its configured size
