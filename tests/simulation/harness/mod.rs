@@ -23,6 +23,7 @@ use crate::common::sim_net::{SimNet, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
+#[cfg(feature = "hot-join")]
 use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
