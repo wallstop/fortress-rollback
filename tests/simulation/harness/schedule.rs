@@ -85,8 +85,10 @@ pub enum AppModel {
 /// How the harness turns virtual wall-clock time into frame opportunities.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameModel {
-    /// Preserve the historical harness behavior: every live peer gets exactly
-    /// one frame opportunity per outer simulation step.
+    /// Preserve the historical harness cadence: every peer accrues exactly one
+    /// opportunity per outer step. Dead, stalled, or synchronizing peers
+    /// consume that opportunity without advancing, so they never catch up in a
+    /// burst after becoming runnable.
     #[default]
     Lockstep,
     /// Gate each peer at 60 Hz using its own rate-skewed clock. This is the
@@ -154,9 +156,10 @@ pub enum ScenarioMix {
 pub const SCHEDULE_SCHEMA_VERSION: u32 = 15;
 /// Hard execution bound for one materialized harness schedule.
 ///
-/// This admits the 240,001-step, one-hour H-SKEW experiment at 15 ms cadence
-/// while preventing an untrusted corpus entry from turning the runner's
-/// `0..steps` loop into an effectively unbounded job.
+/// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:
+/// step 0 starts at the epoch and the last driven step starts exactly one hour
+/// later at 3,600,000 ms. The bound also prevents an untrusted corpus entry
+/// from turning the runner's `0..steps` loop into an effectively unbounded job.
 pub const MAX_SIMULATION_STEPS: u32 = 250_000;
 /// A 60 Hz target sampled at integer milliseconds can advance twice only when
 /// a peer's local clock jumps by at least 17 ms between outer steps.
