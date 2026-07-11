@@ -652,6 +652,10 @@ impl<M: Clone> SimNetState<M> {
             policy.fragmentation.is_none() || self.payload_metadata.is_some(),
             "fragmentation policy requires SimNet::new_size_aware metadata"
         );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
+        );
 
         // Split borrows: read the link decision first, then roll RNG.
         let (blocked, holding) = match self.links.get(&key) {
@@ -941,6 +945,10 @@ impl<M: Clone> SimNet<M> {
             policy.fragmentation.is_none() || state.payload_metadata.is_some(),
             "fragmentation policy requires SimNet::new_size_aware metadata"
         );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
+        );
         state.default_policy = policy;
     }
 
@@ -955,6 +963,10 @@ impl<M: Clone> SimNet<M> {
         assert!(
             policy.fragmentation.is_none() || state.payload_metadata.is_some(),
             "fragmentation policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
         );
         let key = (from, to);
         let stream_from = state
@@ -2066,6 +2078,42 @@ mod tests {
         });
 
         sender.send_payload(addr(2), 1);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "fragmentation policy cannot be combined with reliable retransmission"
+    )]
+    fn default_fragmentation_with_retransmission_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        net.set_default_policy(LinkPolicy {
+            retransmit_delay: Duration::from_millis(10),
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            }),
+            ..LinkPolicy::clean()
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "fragmentation policy cannot be combined with reliable retransmission"
+    )]
+    fn directed_fragmentation_with_retransmission_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                retransmit_delay: Duration::from_millis(10),
+                fragmentation: Some(FragmentationPolicy {
+                    fragment_drop_rate: 0.2,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
     }
 
     #[test]
