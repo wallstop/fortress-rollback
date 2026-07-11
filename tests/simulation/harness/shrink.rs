@@ -6,7 +6,9 @@
 
 use super::schedule::{validate_schedule, Schedule, ScheduleEvent};
 use super::{RunOptions, RunReport};
-use crate::common::sim_net::{FragmentationPolicy, GilbertElliottPolicy, LinkPolicy};
+use crate::common::sim_net::{
+    BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
+};
 use fortress_rollback::metrics::EventKind;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -345,6 +347,7 @@ fn restore_final_heal(schedule: &mut Schedule, preferred_step: Option<u32>) {
 enum LinkSimplification {
     Loss,
     Fragmentation,
+    Bandwidth,
     Duplication,
     Jitter,
     Delay,
@@ -353,6 +356,10 @@ enum LinkSimplification {
 }
 
 fn simplify_link(policy: &mut LinkPolicy, simplification: LinkSimplification) {
+    // Fault-model policies are simplified by removing one independent axis.
+    // We deliberately do not tune GE probabilities, fragmentation probability,
+    // or bandwidth numeric bounds: doing so can replace the reproduced failure
+    // mechanism (for example, queue delay with oversize/tail drop).
     match simplification {
         LinkSimplification::Loss => {
             policy.drop_rate = 0.0;
@@ -361,6 +368,7 @@ fn simplify_link(policy: &mut LinkPolicy, simplification: LinkSimplification) {
             policy.gilbert_elliott = None;
         },
         LinkSimplification::Fragmentation => policy.fragmentation = None,
+        LinkSimplification::Bandwidth => policy.bandwidth = None,
         LinkSimplification::Duplication => policy.dup_rate = 0.0,
         LinkSimplification::Jitter => policy.jitter = Duration::ZERO,
         LinkSimplification::Delay => policy.base_delay = Duration::ZERO,
@@ -710,6 +718,7 @@ where
     for simplification in [
         LinkSimplification::Loss,
         LinkSimplification::Fragmentation,
+        LinkSimplification::Bandwidth,
         LinkSimplification::Duplication,
         LinkSimplification::Jitter,
         LinkSimplification::Delay,
@@ -1359,6 +1368,7 @@ mod tests {
             retransmit_delay: Duration::from_millis(4),
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         };
         schedule
             .initial_links
@@ -1490,6 +1500,24 @@ mod tests {
             panic!("first event must remain SetLink");
         };
         assert_eq!(policy.fragmentation, None);
+        assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn bandwidth_simplification_removes_only_bandwidth() {
+        let mut policy = LinkPolicy {
+            dup_rate: 0.25,
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 10_000,
+                burst_bytes: 1_500,
+                queue_capacity_bytes: 3_000,
+            }),
+            ..LinkPolicy::clean()
+        };
+
+        simplify_link(&mut policy, LinkSimplification::Bandwidth);
+
+        assert_eq!(policy.bandwidth, None);
         assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
     }
 

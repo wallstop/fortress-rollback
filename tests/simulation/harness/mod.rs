@@ -310,6 +310,28 @@ pub struct TraceNetStats {
     pub fragmentation_max_fragments_per_send: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub fragmentation_fragment_cap_hits: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_admitted_datagrams: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_admitted_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_queued_datagrams: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_tail_drops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_oversize_drops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_reservation_cap_drops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_reservation_cap_dropped_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_time_overflow_drops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_tail_dropped_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_max_queue_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_max_queue_delay_ns: u64,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -342,6 +364,17 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             fragmentation_max_packet_bytes: stats.fragmentation_max_packet_bytes,
             fragmentation_max_fragments_per_send: stats.fragmentation_max_fragments_per_send,
             fragmentation_fragment_cap_hits: stats.fragmentation_fragment_cap_hits,
+            bandwidth_admitted_datagrams: stats.bandwidth_admitted_datagrams,
+            bandwidth_admitted_bytes: stats.bandwidth_admitted_bytes,
+            bandwidth_queued_datagrams: stats.bandwidth_queued_datagrams,
+            bandwidth_tail_drops: stats.bandwidth_tail_drops,
+            bandwidth_oversize_drops: stats.bandwidth_oversize_drops,
+            bandwidth_reservation_cap_drops: stats.bandwidth_reservation_cap_drops,
+            bandwidth_reservation_cap_dropped_bytes: stats.bandwidth_reservation_cap_dropped_bytes,
+            bandwidth_time_overflow_drops: stats.bandwidth_time_overflow_drops,
+            bandwidth_tail_dropped_bytes: stats.bandwidth_tail_dropped_bytes,
+            bandwidth_max_queue_bytes: stats.bandwidth_max_queue_bytes,
+            bandwidth_max_queue_delay_ns: stats.bandwidth_max_queue_delay_ns,
         }
     }
 }
@@ -2308,13 +2341,14 @@ mod tests {
     }
 
     #[test]
-    fn trace_net_stats_ge_fields_are_backward_compatible_and_identity_bearing() {
+    fn extended_trace_net_stats_are_backward_compatible_and_identity_bearing() {
         let legacy_json = serde_json::to_value(TraceNetStats::default()).unwrap();
         let object = legacy_json
             .as_object()
             .expect("TraceNetStats serializes as an object");
         assert!(!object.keys().any(|key| key.starts_with("gilbert_elliott")));
         assert!(!object.keys().any(|key| key.starts_with("fragmentation")));
+        assert!(!object.keys().any(|key| key.starts_with("bandwidth")));
         let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
         assert_eq!(legacy_back, TraceNetStats::default());
 
@@ -2369,6 +2403,25 @@ mod tests {
         );
         changed.net = fragmentation_stats;
         assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+
+        let bandwidth_stats = TraceNetStats {
+            bandwidth_admitted_datagrams: 3,
+            bandwidth_admitted_bytes: 300,
+            bandwidth_queued_datagrams: 2,
+            bandwidth_tail_drops: 1,
+            bandwidth_tail_dropped_bytes: 100,
+            bandwidth_time_overflow_drops: 1,
+            bandwidth_max_queue_bytes: 200,
+            bandwidth_max_queue_delay_ns: 200_000_000,
+            ..TraceNetStats::default()
+        };
+        let bandwidth_json = serde_json::to_vec(&bandwidth_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&bandwidth_json).unwrap(),
+            bandwidth_stats
+        );
+        changed.net = bandwidth_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
     }
 
     #[test]
@@ -2399,6 +2452,25 @@ mod tests {
         assert_ne!(
             serde_json::to_vec(&trace_fragmentation_drops(13, &left_drops)).unwrap(),
             serde_json::to_vec(&trace_fragmentation_drops(13, &right_drops)).unwrap()
+        );
+    }
+
+    #[test]
+    fn schema_v14_per_link_bandwidth_evidence_is_identity_bearing() {
+        let stats = crate::common::sim_net::SimLinkStats {
+            bandwidth_admitted_datagrams: 1,
+            bandwidth_admitted_bytes: 100,
+            bandwidth_queued_datagrams: 1,
+            bandwidth_max_queue_bytes: 100,
+            bandwidth_max_queue_delay_ns: 100_000_000,
+            ..crate::common::sim_net::SimLinkStats::default()
+        };
+        let left = BTreeMap::from([((0, 1), stats)]);
+        let right = BTreeMap::from([((1, 0), stats)]);
+
+        assert_ne!(
+            serde_json::to_vec(&trace_link_stats(14, &left)).unwrap(),
+            serde_json::to_vec(&trace_link_stats(14, &right)).unwrap()
         );
     }
 

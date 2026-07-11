@@ -62,6 +62,16 @@ pub const FRAGMENT_PAYLOAD_BYTES: usize = 1472;
 /// Defensive ceiling for generic metadata providers. This exceeds the fragment
 /// count of the protocol's maximum 64 MiB encoded message.
 pub const MAX_MODELED_FRAGMENTS: usize = 65_536;
+/// Per-directed-link ceiling for queued bandwidth reservations.
+pub const MAX_BANDWIDTH_RESERVATIONS_PER_LINK: usize = 4_096;
+/// Whole-fabric ceiling for queued bandwidth reservations.
+pub const MAX_BANDWIDTH_RESERVATIONS_TOTAL: usize = 65_536;
+/// Maximum burst or queued-byte declaration accepted by direct SimNet users.
+pub const MAX_BANDWIDTH_BYTES: u64 = 64 * 1024 * 1024;
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
 
 /// Optional per-fragment loss applied only to oversized datagrams.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -69,6 +79,24 @@ pub const MAX_MODELED_FRAGMENTS: usize = 65_536;
 pub struct FragmentationPolicy {
     /// Independent probability that one modeled fragment is lost.
     pub fragment_drop_rate: f64,
+}
+
+/// Deterministic token-bucket shaper with a bounded per-directed-link queue.
+///
+/// Bytes covered by the burst bucket pass immediately. Excess bytes accrue as
+/// service debt at `rate_bytes_per_second`; a send whose debt would exceed
+/// `queue_capacity_bytes` is tail-dropped. This models the bufferbloat
+/// signature (queueing delay grows before loss) with strictly capped queue
+/// metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BandwidthPolicy {
+    /// Sustained payload throughput for this directed link.
+    pub rate_bytes_per_second: u64,
+    /// Bytes that may pass immediately after an idle period.
+    pub burst_bytes: u64,
+    /// Maximum queued service debt before tail drop.
+    pub queue_capacity_bytes: u64,
 }
 
 /// Metadata supplied by size-aware [`SimNet`] constructors.
@@ -90,6 +118,28 @@ pub struct SimLinkStats {
     pub input_sends_over_1472_bytes: u64,
     pub fragmentation_input_losses: u64,
     pub max_consecutive_input_policy_loss_run: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_admitted_datagrams: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_admitted_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_tail_dropped_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_tail_drops: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_oversize_drops: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_reservation_cap_drops: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_reservation_cap_dropped_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_time_overflow_drops: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_queued_datagrams: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_max_queue_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_max_queue_delay_ns: u64,
 }
 
 impl SimLinkStats {
@@ -120,6 +170,39 @@ impl SimLinkStats {
         self.max_consecutive_input_policy_loss_run = self
             .max_consecutive_input_policy_loss_run
             .max(other.max_consecutive_input_policy_loss_run);
+        self.bandwidth_admitted_bytes = self
+            .bandwidth_admitted_bytes
+            .saturating_add(other.bandwidth_admitted_bytes);
+        self.bandwidth_admitted_datagrams = self
+            .bandwidth_admitted_datagrams
+            .saturating_add(other.bandwidth_admitted_datagrams);
+        self.bandwidth_tail_dropped_bytes = self
+            .bandwidth_tail_dropped_bytes
+            .saturating_add(other.bandwidth_tail_dropped_bytes);
+        self.bandwidth_tail_drops = self
+            .bandwidth_tail_drops
+            .saturating_add(other.bandwidth_tail_drops);
+        self.bandwidth_oversize_drops = self
+            .bandwidth_oversize_drops
+            .saturating_add(other.bandwidth_oversize_drops);
+        self.bandwidth_reservation_cap_drops = self
+            .bandwidth_reservation_cap_drops
+            .saturating_add(other.bandwidth_reservation_cap_drops);
+        self.bandwidth_reservation_cap_dropped_bytes = self
+            .bandwidth_reservation_cap_dropped_bytes
+            .saturating_add(other.bandwidth_reservation_cap_dropped_bytes);
+        self.bandwidth_time_overflow_drops = self
+            .bandwidth_time_overflow_drops
+            .saturating_add(other.bandwidth_time_overflow_drops);
+        self.bandwidth_queued_datagrams = self
+            .bandwidth_queued_datagrams
+            .saturating_add(other.bandwidth_queued_datagrams);
+        self.bandwidth_max_queue_bytes = self
+            .bandwidth_max_queue_bytes
+            .max(other.bandwidth_max_queue_bytes);
+        self.bandwidth_max_queue_delay_ns = self
+            .bandwidth_max_queue_delay_ns
+            .max(other.bandwidth_max_queue_delay_ns);
     }
 }
 
@@ -181,6 +264,10 @@ pub struct LinkPolicy {
     /// fragmentation RNG and preserves legacy traces exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragmentation: Option<FragmentationPolicy>,
+    /// Optional token-bucket bandwidth and bounded-queue model. `None`
+    /// consumes no time or state and preserves legacy traces exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<BandwidthPolicy>,
 }
 
 impl LinkPolicy {
@@ -197,6 +284,7 @@ impl LinkPolicy {
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         }
     }
 }
@@ -271,6 +359,28 @@ pub struct SimNetStats {
     /// Metadata providers that exceeded [`MAX_MODELED_FRAGMENTS`] and were
     /// dropped fail-closed without running a truncated probability model.
     pub fragmentation_fragment_cap_hits: u64,
+    /// Datagrams admitted to an enabled bandwidth model.
+    pub bandwidth_admitted_datagrams: u64,
+    /// Payload bytes admitted to enabled bandwidth models.
+    pub bandwidth_admitted_bytes: u64,
+    /// Datagrams delayed by bandwidth service debt.
+    pub bandwidth_queued_datagrams: u64,
+    /// Datagrams rejected by bounded-queue tail drop.
+    pub bandwidth_tail_drops: u64,
+    /// Datagrams larger than the bucket's maximum atomic burst.
+    pub bandwidth_oversize_drops: u64,
+    /// Datagrams refused by the reservation element-count safety ceiling.
+    pub bandwidth_reservation_cap_drops: u64,
+    /// Payload bytes refused by the reservation element-count ceiling.
+    pub bandwidth_reservation_cap_dropped_bytes: u64,
+    /// Datagrams refused because their shaped deadline was unrepresentable.
+    pub bandwidth_time_overflow_drops: u64,
+    /// Payload bytes rejected by bounded-queue tail drop.
+    pub bandwidth_tail_dropped_bytes: u64,
+    /// Largest queued service debt observed on any link.
+    pub bandwidth_max_queue_bytes: u64,
+    /// Largest bandwidth-induced delay observed on any link.
+    pub bandwidth_max_queue_delay_ns: u64,
 }
 
 /// Runtime state of one directed link.
@@ -296,6 +406,19 @@ struct LinkState {
     fragmentation_rng: Option<Pcg32>,
     /// Stable seed identity retained across source-address rebinds.
     fragmentation_stream_key: Option<(SocketAddr, SocketAddr)>,
+    /// Available whole-byte burst credit at [`bandwidth_updated_at`].
+    bandwidth_tokens: u64,
+    /// Outstanding shaped bytes waiting for service.
+    bandwidth_queued_bytes: u64,
+    /// Last virtual-time instant at which token/queue state was settled.
+    bandwidth_updated_at: Option<Instant>,
+    /// Fractional byte numerator retained across integer refills (`< 1e9`).
+    bandwidth_refill_remainder: u64,
+    /// Last enabled shaper, retained until its admitted horizon drains even if
+    /// the link policy is replaced with a clean one.
+    bandwidth_drain_policy: Option<BandwidthPolicy>,
+    /// Future shaped departures used only to retire queued-byte accounting.
+    bandwidth_reservations: VecDeque<(Instant, u64)>,
     stats: SimLinkStats,
 }
 
@@ -312,6 +435,12 @@ impl LinkState {
             input_policy_loss_run: 0,
             fragmentation_rng: None,
             fragmentation_stream_key: Some(key),
+            bandwidth_tokens: 0,
+            bandwidth_queued_bytes: 0,
+            bandwidth_updated_at: None,
+            bandwidth_refill_remainder: 0,
+            bandwidth_drain_policy: None,
+            bandwidth_reservations: VecDeque::new(),
             stats: SimLinkStats::default(),
         }
     }
@@ -377,6 +506,8 @@ struct SimNetState<M> {
     stats: SimNetStats,
     blocked_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
     fragmentation_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
+    /// Total live entries across every link's bandwidth reservation queue.
+    bandwidth_reservation_count: usize,
 }
 
 impl<M: Clone> SimNetState<M> {
@@ -413,6 +544,264 @@ impl<M: Clone> SimNetState<M> {
             to,
             payload,
         }));
+    }
+
+    fn settle_bandwidth_reservations(&mut self, now: Instant) {
+        if self.bandwidth_reservation_count == 0 {
+            return;
+        }
+        let mut retired = 0_usize;
+        for link in self.links.values_mut() {
+            while link
+                .bandwidth_reservations
+                .front()
+                .is_some_and(|(departure, _)| *departure <= now)
+            {
+                if let Some((_, bytes)) = link.bandwidth_reservations.pop_front() {
+                    link.bandwidth_queued_bytes = link.bandwidth_queued_bytes.saturating_sub(bytes);
+                    retired = retired.saturating_add(1);
+                }
+            }
+        }
+        self.bandwidth_reservation_count = self.bandwidth_reservation_count.saturating_sub(retired);
+    }
+
+    /// Applies one directed link's integer token bucket. Returns the earliest
+    /// shaped departure, or `None` when the bounded queue drops the copy.
+    fn bandwidth_departure(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        encoded_len: usize,
+        policy: BandwidthPolicy,
+    ) -> Option<Instant> {
+        let now = self.now();
+        let encoded_len = u64::try_from(encoded_len).unwrap_or(u64::MAX);
+        let link = self.links.get_mut(&key)?;
+
+        if encoded_len == 0 || encoded_len > policy.burst_bytes {
+            self.stats.bandwidth_oversize_drops =
+                self.stats.bandwidth_oversize_drops.saturating_add(1);
+            link.stats.bandwidth_oversize_drops =
+                link.stats.bandwidth_oversize_drops.saturating_add(1);
+            return None;
+        }
+
+        let mut cursor = link.bandwidth_updated_at.unwrap_or(now);
+        let mut tokens = if link.bandwidth_updated_at.is_some() {
+            link.bandwidth_tokens
+        } else {
+            policy.burst_bytes
+        }
+        .min(policy.burst_bytes);
+        let mut remainder = link.bandwidth_refill_remainder;
+        if cursor < now {
+            let elapsed_ns = now.duration_since(cursor).as_nanos();
+            let numerator = elapsed_ns
+                .saturating_mul(u128::from(policy.rate_bytes_per_second))
+                .saturating_add(u128::from(remainder));
+            let refilled = u64::try_from(numerator / 1_000_000_000).unwrap_or(u64::MAX);
+            let uncapped = tokens.saturating_add(refilled);
+            tokens = uncapped.min(policy.burst_bytes);
+            remainder = if uncapped >= policy.burst_bytes {
+                0
+            } else {
+                u64::try_from(numerator % 1_000_000_000).unwrap_or(0)
+            };
+            cursor = now;
+        }
+
+        if encoded_len <= tokens {
+            tokens -= encoded_len;
+        } else {
+            let missing = encoded_len - tokens;
+            let needed_numerator = u128::from(missing)
+                .saturating_mul(1_000_000_000)
+                .saturating_sub(u128::from(remainder));
+            let rate = u128::from(policy.rate_bytes_per_second);
+            let wait_ns = needed_numerator.div_ceil(rate);
+            let wait_ns_u64 = u64::try_from(wait_ns).unwrap_or(u64::MAX);
+            let refill_numerator = u128::from(wait_ns_u64)
+                .saturating_mul(rate)
+                .saturating_add(u128::from(remainder));
+            let gained = u64::try_from(refill_numerator / 1_000_000_000).unwrap_or(u64::MAX);
+            tokens = tokens.saturating_add(gained).saturating_sub(encoded_len);
+            remainder = u64::try_from(refill_numerator % 1_000_000_000).unwrap_or(0);
+            let Some(next_cursor) = cursor.checked_add(Duration::from_nanos(wait_ns_u64)) else {
+                self.stats.bandwidth_time_overflow_drops =
+                    self.stats.bandwidth_time_overflow_drops.saturating_add(1);
+                link.stats.bandwidth_time_overflow_drops =
+                    link.stats.bandwidth_time_overflow_drops.saturating_add(1);
+                return None;
+            };
+            cursor = next_cursor;
+        }
+        let departure = cursor;
+
+        let queued = departure > now;
+        if queued
+            && (link.bandwidth_reservations.len() >= MAX_BANDWIDTH_RESERVATIONS_PER_LINK
+                || self.bandwidth_reservation_count >= MAX_BANDWIDTH_RESERVATIONS_TOTAL)
+        {
+            self.stats.bandwidth_reservation_cap_drops =
+                self.stats.bandwidth_reservation_cap_drops.saturating_add(1);
+            self.stats.bandwidth_reservation_cap_dropped_bytes = self
+                .stats
+                .bandwidth_reservation_cap_dropped_bytes
+                .saturating_add(encoded_len);
+            link.stats.bandwidth_reservation_cap_drops =
+                link.stats.bandwidth_reservation_cap_drops.saturating_add(1);
+            link.stats.bandwidth_reservation_cap_dropped_bytes = link
+                .stats
+                .bandwidth_reservation_cap_dropped_bytes
+                .saturating_add(encoded_len);
+            return None;
+        }
+        if queued
+            && link.bandwidth_queued_bytes.saturating_add(encoded_len) > policy.queue_capacity_bytes
+        {
+            self.stats.bandwidth_tail_drops = self.stats.bandwidth_tail_drops.saturating_add(1);
+            self.stats.bandwidth_tail_dropped_bytes = self
+                .stats
+                .bandwidth_tail_dropped_bytes
+                .saturating_add(encoded_len);
+            link.stats.bandwidth_tail_drops = link.stats.bandwidth_tail_drops.saturating_add(1);
+            link.stats.bandwidth_tail_dropped_bytes = link
+                .stats
+                .bandwidth_tail_dropped_bytes
+                .saturating_add(encoded_len);
+            return None;
+        }
+
+        link.bandwidth_tokens = tokens.min(policy.burst_bytes);
+        link.bandwidth_refill_remainder = remainder;
+        link.bandwidth_updated_at = Some(cursor);
+        link.bandwidth_drain_policy = Some(policy);
+        self.stats.bandwidth_admitted_datagrams =
+            self.stats.bandwidth_admitted_datagrams.saturating_add(1);
+        self.stats.bandwidth_admitted_bytes = self
+            .stats
+            .bandwidth_admitted_bytes
+            .saturating_add(encoded_len);
+        link.stats.bandwidth_admitted_bytes = link
+            .stats
+            .bandwidth_admitted_bytes
+            .saturating_add(encoded_len);
+        link.stats.bandwidth_admitted_datagrams =
+            link.stats.bandwidth_admitted_datagrams.saturating_add(1);
+        if queued {
+            let delay_ns =
+                u64::try_from(departure.duration_since(now).as_nanos()).unwrap_or(u64::MAX);
+            link.bandwidth_queued_bytes = link.bandwidth_queued_bytes.saturating_add(encoded_len);
+            link.bandwidth_reservations
+                .push_back((departure, encoded_len));
+            self.bandwidth_reservation_count = self.bandwidth_reservation_count.saturating_add(1);
+            self.stats.bandwidth_queued_datagrams =
+                self.stats.bandwidth_queued_datagrams.saturating_add(1);
+            self.stats.bandwidth_max_queue_bytes = self
+                .stats
+                .bandwidth_max_queue_bytes
+                .max(link.bandwidth_queued_bytes);
+            self.stats.bandwidth_max_queue_delay_ns =
+                self.stats.bandwidth_max_queue_delay_ns.max(delay_ns);
+            link.stats.bandwidth_queued_datagrams =
+                link.stats.bandwidth_queued_datagrams.saturating_add(1);
+            link.stats.bandwidth_max_queue_bytes = link
+                .stats
+                .bandwidth_max_queue_bytes
+                .max(link.bandwidth_queued_bytes);
+            link.stats.bandwidth_max_queue_delay_ns =
+                link.stats.bandwidth_max_queue_delay_ns.max(delay_ns);
+        }
+        Some(departure)
+    }
+
+    /// Admits a datagram behind an already-shaped horizon after shaping has
+    /// been disabled. Followers share the existing departure cut without
+    /// extending the old rate limit, while retaining the same byte/element
+    /// allocation bounds until that backlog drains.
+    fn bandwidth_horizon_departure(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        encoded_len: usize,
+        policy: BandwidthPolicy,
+    ) -> Option<Instant> {
+        let now = self.now();
+        let encoded_len = u64::try_from(encoded_len).unwrap_or(u64::MAX);
+        let link = self.links.get_mut(&key)?;
+        let departure = link.bandwidth_updated_at.filter(|cursor| *cursor > now)?;
+
+        if encoded_len == 0 || encoded_len > policy.burst_bytes {
+            self.stats.bandwidth_oversize_drops =
+                self.stats.bandwidth_oversize_drops.saturating_add(1);
+            link.stats.bandwidth_oversize_drops =
+                link.stats.bandwidth_oversize_drops.saturating_add(1);
+            return None;
+        }
+        if link.bandwidth_reservations.len() >= MAX_BANDWIDTH_RESERVATIONS_PER_LINK
+            || self.bandwidth_reservation_count >= MAX_BANDWIDTH_RESERVATIONS_TOTAL
+        {
+            self.stats.bandwidth_reservation_cap_drops =
+                self.stats.bandwidth_reservation_cap_drops.saturating_add(1);
+            self.stats.bandwidth_reservation_cap_dropped_bytes = self
+                .stats
+                .bandwidth_reservation_cap_dropped_bytes
+                .saturating_add(encoded_len);
+            link.stats.bandwidth_reservation_cap_drops =
+                link.stats.bandwidth_reservation_cap_drops.saturating_add(1);
+            link.stats.bandwidth_reservation_cap_dropped_bytes = link
+                .stats
+                .bandwidth_reservation_cap_dropped_bytes
+                .saturating_add(encoded_len);
+            return None;
+        }
+        if link.bandwidth_queued_bytes.saturating_add(encoded_len) > policy.queue_capacity_bytes {
+            self.stats.bandwidth_tail_drops = self.stats.bandwidth_tail_drops.saturating_add(1);
+            self.stats.bandwidth_tail_dropped_bytes = self
+                .stats
+                .bandwidth_tail_dropped_bytes
+                .saturating_add(encoded_len);
+            link.stats.bandwidth_tail_drops = link.stats.bandwidth_tail_drops.saturating_add(1);
+            link.stats.bandwidth_tail_dropped_bytes = link
+                .stats
+                .bandwidth_tail_dropped_bytes
+                .saturating_add(encoded_len);
+            return None;
+        }
+
+        let delay_ns = u64::try_from(departure.duration_since(now).as_nanos()).unwrap_or(u64::MAX);
+        link.bandwidth_queued_bytes = link.bandwidth_queued_bytes.saturating_add(encoded_len);
+        link.bandwidth_reservations
+            .push_back((departure, encoded_len));
+        self.bandwidth_reservation_count = self.bandwidth_reservation_count.saturating_add(1);
+        self.stats.bandwidth_admitted_datagrams =
+            self.stats.bandwidth_admitted_datagrams.saturating_add(1);
+        self.stats.bandwidth_admitted_bytes = self
+            .stats
+            .bandwidth_admitted_bytes
+            .saturating_add(encoded_len);
+        self.stats.bandwidth_queued_datagrams =
+            self.stats.bandwidth_queued_datagrams.saturating_add(1);
+        self.stats.bandwidth_max_queue_bytes = self
+            .stats
+            .bandwidth_max_queue_bytes
+            .max(link.bandwidth_queued_bytes);
+        self.stats.bandwidth_max_queue_delay_ns =
+            self.stats.bandwidth_max_queue_delay_ns.max(delay_ns);
+        link.stats.bandwidth_admitted_datagrams =
+            link.stats.bandwidth_admitted_datagrams.saturating_add(1);
+        link.stats.bandwidth_admitted_bytes = link
+            .stats
+            .bandwidth_admitted_bytes
+            .saturating_add(encoded_len);
+        link.stats.bandwidth_queued_datagrams =
+            link.stats.bandwidth_queued_datagrams.saturating_add(1);
+        link.stats.bandwidth_max_queue_bytes = link
+            .stats
+            .bandwidth_max_queue_bytes
+            .max(link.bandwidth_queued_bytes);
+        link.stats.bandwidth_max_queue_delay_ns =
+            link.stats.bandwidth_max_queue_delay_ns.max(delay_ns);
+        Some(departure)
     }
 
     /// Returns `true` when a policy loss was converted into a reliable
@@ -653,6 +1042,23 @@ impl<M: Clone> SimNetState<M> {
             "fragmentation policy requires SimNet::new_size_aware metadata"
         );
         assert!(
+            policy.bandwidth.is_none() || self.payload_metadata.is_some(),
+            "bandwidth policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.rate_bytes_per_second > 0 && bandwidth.burst_bytes > 0
+            }),
+            "bandwidth policy requires nonzero rate_bytes_per_second and burst_bytes"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.burst_bytes <= MAX_BANDWIDTH_BYTES
+                    && bandwidth.queue_capacity_bytes <= MAX_BANDWIDTH_BYTES
+            }),
+            "bandwidth policy burst_bytes and queue_capacity_bytes exceed the modeled bound"
+        );
+        assert!(
             policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
             "fragmentation policy cannot be combined with reliable retransmission"
         );
@@ -673,6 +1079,45 @@ impl<M: Clone> SimNetState<M> {
             self.held.entry(key).or_default().push_back(payload);
             return;
         }
+
+        let shaping_now = self.now();
+        self.settle_bandwidth_reservations(shaping_now);
+
+        // The shaper models the sender-side uplink. A datagram consumes that
+        // link before downstream loss, fragmentation, or simulated network
+        // duplication decides its fate.
+        let draining_policy = self.links.get(&key).and_then(|link| {
+            (link
+                .bandwidth_updated_at
+                .is_some_and(|cursor| cursor > shaping_now))
+            .then_some(link.bandwidth_drain_policy)
+            .flatten()
+        });
+        let shaped_departure = if let Some(bandwidth) = policy.bandwidth {
+            let Some(metadata) = metadata else {
+                return;
+            };
+            let Some(departure) = self.bandwidth_departure(key, metadata.encoded_len, bandwidth)
+            else {
+                return;
+            };
+            departure
+        } else if let Some(bandwidth) = draining_policy {
+            let Some(metadata) = metadata else {
+                return;
+            };
+            let Some(departure) =
+                self.bandwidth_horizon_departure(key, metadata.encoded_len, bandwidth)
+            else {
+                return;
+            };
+            departure
+        } else {
+            if let Some(link) = self.links.get_mut(&key) {
+                link.bandwidth_drain_policy = None;
+            }
+            shaping_now
+        };
 
         let is_input = metadata.is_some_and(|metadata| metadata.is_input);
         let mut input_policy_lost = false;
@@ -758,13 +1203,12 @@ impl<M: Clone> SimNetState<M> {
             self.stats.duplicated += 1;
         }
 
-        let now = self.now();
         let blocked_until = self
             .links
             .get(&key)
             .and_then(|link| link.retransmit_blocked_until);
         for delay in delays.into_iter().take(copies) {
-            let mut deliver_at = now + delay;
+            let mut deliver_at = shaped_departure + delay;
             if let Some(deadline) = blocked_until {
                 deliver_at = deliver_at.max(deadline);
             }
@@ -897,6 +1341,7 @@ impl<M: Clone> SimNet<M> {
                 stats: SimNetStats::default(),
                 blocked_drop_counts: BTreeMap::new(),
                 fragmentation_drop_counts: BTreeMap::new(),
+                bandwidth_reservation_count: 0,
             })),
         }
     }
@@ -947,6 +1392,23 @@ impl<M: Clone> SimNet<M> {
             "fragmentation policy requires SimNet::new_size_aware metadata"
         );
         assert!(
+            policy.bandwidth.is_none() || state.payload_metadata.is_some(),
+            "bandwidth policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.rate_bytes_per_second > 0 && bandwidth.burst_bytes > 0
+            }),
+            "bandwidth policy requires nonzero rate_bytes_per_second and burst_bytes"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.burst_bytes <= MAX_BANDWIDTH_BYTES
+                    && bandwidth.queue_capacity_bytes <= MAX_BANDWIDTH_BYTES
+            }),
+            "bandwidth policy burst_bytes and queue_capacity_bytes exceed the modeled bound"
+        );
+        assert!(
             policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
             "fragmentation policy cannot be combined with reliable retransmission"
         );
@@ -954,8 +1416,9 @@ impl<M: Clone> SimNet<M> {
     }
 
     /// Sets (or replaces) the fault policy for the directed link `from → to`,
-    /// preserving its blocked/holding toggles and any current retransmission
-    /// head-of-line deadline. Replacing a policy resets fixed-burst progress
+    /// preserving its blocked/holding toggles, retransmission head-of-line
+    /// deadline, and any already-admitted bandwidth departure horizon.
+    /// Replacing a policy resets fixed-burst progress
     /// and starts any Gilbert-Elliott channel in Good with an empty loss run.
     /// The per-link fragmentation RNG continues across policy epochs so a
     /// re-applied policy does not replay the same trial prefix.
@@ -964,6 +1427,23 @@ impl<M: Clone> SimNet<M> {
         assert!(
             policy.fragmentation.is_none() || state.payload_metadata.is_some(),
             "fragmentation policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.bandwidth.is_none() || state.payload_metadata.is_some(),
+            "bandwidth policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.rate_bytes_per_second > 0 && bandwidth.burst_bytes > 0
+            }),
+            "bandwidth policy requires nonzero rate_bytes_per_second and burst_bytes"
+        );
+        assert!(
+            policy.bandwidth.is_none_or(|bandwidth| {
+                bandwidth.burst_bytes <= MAX_BANDWIDTH_BYTES
+                    && bandwidth.queue_capacity_bytes <= MAX_BANDWIDTH_BYTES
+            }),
+            "bandwidth policy burst_bytes and queue_capacity_bytes exceed the modeled bound"
         );
         assert!(
             policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
@@ -1041,7 +1521,8 @@ impl<M: Clone> SimNet<M> {
 
     /// Resets every link to clean/unblocked/released and the default policy
     /// to clean. Buffered held messages are delivered (FIFO), in-flight
-    /// messages keep their scheduled delivery times.
+    /// messages keep their scheduled delivery times, and new sends cannot
+    /// leapfrog an already-admitted bandwidth backlog.
     pub fn heal_all(&self) {
         let mut state = self.lock();
         state.default_policy = LinkPolicy::clean();
@@ -1257,6 +1738,18 @@ impl<M: Clone> SimSocketBinding<M> {
                     max_consecutive_input_policy_loss_run: continued_run,
                     ..SimLinkStats::default()
                 };
+                // The NAT mapping changes, but the socket retains its physical
+                // uplink. Move (rather than duplicate) shaping state so the new
+                // source cannot leapfrog its pre-rebind backlog or gain a new
+                // burst allowance.
+                if let Some(old_link) = state.links.get_mut(&old_key) {
+                    old_link.bandwidth_tokens = 0;
+                    old_link.bandwidth_queued_bytes = 0;
+                    old_link.bandwidth_updated_at = None;
+                    old_link.bandwidth_refill_remainder = 0;
+                    old_link.bandwidth_drain_policy = None;
+                    old_link.bandwidth_reservations.clear();
+                }
                 // Retain `old_key`: `heal_all` discovers and releases held
                 // pre-rebind traffic by iterating the historical link keys.
                 state.links.insert(new_key, link);
@@ -1376,6 +1869,7 @@ mod tests {
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         };
         let first = run_trace(42, policy.clone());
         let second = run_trace(42, policy.clone());
@@ -2065,6 +2559,639 @@ mod tests {
     }
 
     #[test]
+    fn bandwidth_queue_delays_before_exact_capacity_tail_drop() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 100,
+                queue_capacity_bytes: 200,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        for id in 1..=4 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(
+            receiver
+                .recv_payloads()
+                .into_iter()
+                .map(|(_, payload)| payload.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        offset.fetch_add(99, AtomicOrdering::Relaxed);
+        assert!(receiver.recv_payloads().is_empty());
+        offset.fetch_add(1, AtomicOrdering::Relaxed);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 2);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 3);
+
+        let stats = net.stats();
+        assert_eq!(stats.bandwidth_admitted_datagrams, 3);
+        assert_eq!(stats.bandwidth_admitted_bytes, 300);
+        assert_eq!(stats.bandwidth_queued_datagrams, 2);
+        assert_eq!(stats.bandwidth_tail_drops, 1);
+        assert_eq!(stats.bandwidth_tail_dropped_bytes, 100);
+        assert_eq!(stats.bandwidth_oversize_drops, 0);
+        assert_eq!(stats.bandwidth_max_queue_bytes, 200);
+        assert_eq!(stats.bandwidth_max_queue_delay_ns, 200_000_000);
+
+        let link = net.link_stats()[&(addr(1), addr(2))];
+        assert_eq!(link.bandwidth_admitted_bytes, 300);
+        assert_eq!(link.bandwidth_queued_datagrams, 2);
+        assert_eq!(link.bandwidth_tail_drops, 1);
+        assert_eq!(link.bandwidth_tail_dropped_bytes, 100);
+        assert_eq!(link.bandwidth_max_queue_bytes, 200);
+        assert_eq!(link.bandwidth_max_queue_delay_ns, 200_000_000);
+    }
+
+    #[test]
+    fn bandwidth_refill_preserves_fractional_nanosecond_remainder() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 3,
+                burst_bytes: 1,
+                queue_capacity_bytes: 2,
+            }),
+            ..LinkPolicy::clean()
+        });
+        for id in 1..=3 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(net.stats().bandwidth_queued_datagrams, 2);
+        assert_eq!(net.stats().bandwidth_max_queue_delay_ns, 666_666_667);
+    }
+
+    #[test]
+    fn bandwidth_deadline_overflow_fails_closed_without_queue_mutation() {
+        let base = Instant::now();
+        let mut low = 0_u64;
+        let mut high = u64::MAX;
+        while low < high {
+            let mid = low + (high - low) / 2 + 1;
+            if base.checked_add(Duration::from_secs(mid)).is_some() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let near_limit = base
+            .checked_add(Duration::from_secs(low))
+            .expect("binary search retains a representable Instant");
+        assert!(near_limit.checked_add(Duration::from_secs(1)).is_none());
+
+        let clock: SimClockFn = Arc::new(move || near_limit);
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1,
+                burst_bytes: 1,
+                queue_capacity_bytes: 1,
+            }),
+            ..LinkPolicy::clean()
+        });
+        for id in 1..=2 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        assert_eq!(net.stats().bandwidth_admitted_datagrams, 1);
+        assert_eq!(net.stats().bandwidth_time_overflow_drops, 1);
+        assert_eq!(net.stats().bandwidth_queued_datagrams, 0);
+        assert_eq!(net.lock().bandwidth_reservation_count, 0);
+    }
+
+    #[test]
+    fn settling_one_send_retires_expired_reservations_on_idle_links() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let a = net.attach(addr(1));
+        let _b = net.attach(addr(2));
+        let c = net.attach(addr(3));
+        let _d = net.attach(addr(4));
+        let policy = LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1,
+                burst_bytes: 1,
+                queue_capacity_bytes: 1,
+            }),
+            ..LinkPolicy::clean()
+        };
+        net.set_link(addr(1), addr(2), policy.clone());
+        net.set_link(addr(3), addr(4), policy);
+        for id in 1..=2 {
+            a.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+        assert_eq!(net.lock().bandwidth_reservation_count, 1);
+
+        offset.fetch_add(1_000, AtomicOrdering::Relaxed);
+        for id in 3..=4 {
+            c.send_payload(
+                addr(4),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+        let state = net.lock();
+        assert_eq!(state.bandwidth_reservation_count, 1);
+        assert!(state.links[&(addr(1), addr(2))]
+            .bandwidth_reservations
+            .is_empty());
+    }
+
+    #[test]
+    fn bandwidth_rejects_atomic_payload_above_burst_without_wedging() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 99,
+                queue_capacity_bytes: 10_000,
+            }),
+            ..LinkPolicy::clean()
+        });
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+
+        assert!(receiver.recv_payloads().is_empty());
+        assert_eq!(net.stats().bandwidth_oversize_drops, 1);
+        assert_eq!(
+            net.link_stats()[&(addr(1), addr(2))].bandwidth_oversize_drops,
+            1
+        );
+    }
+
+    #[test]
+    fn downstream_duplication_consumes_one_uplink_admission() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            dup_rate: 1.0,
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 100,
+                queue_capacity_bytes: 100,
+            }),
+            ..LinkPolicy::clean()
+        });
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+
+        assert_eq!(receiver.recv_payloads().len(), 2);
+        assert_eq!(net.stats().duplicated, 1);
+        assert_eq!(net.stats().bandwidth_admitted_datagrams, 1);
+        assert_eq!(net.stats().bandwidth_queued_datagrams, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "bandwidth policy requires SimNet::new_size_aware metadata")]
+    fn bandwidth_without_payload_metadata_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 100,
+                queue_capacity_bytes: 100,
+            }),
+            ..LinkPolicy::clean()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "bandwidth policy burst_bytes and queue_capacity_bytes exceed")]
+    fn direct_bandwidth_policy_rejects_unbounded_queue_declaration() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1,
+                burst_bytes: 1,
+                queue_capacity_bytes: MAX_BANDWIDTH_BYTES + 1,
+            }),
+            ..LinkPolicy::clean()
+        });
+    }
+
+    #[test]
+    fn downstream_fragment_loss_still_consumes_uplink_bandwidth() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 1.0,
+            }),
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 10_000,
+                burst_bytes: 2_000,
+                queue_capacity_bytes: 2_000,
+            }),
+            ..LinkPolicy::clean()
+        });
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: 2_000,
+                is_input: true,
+            },
+        );
+
+        assert!(receiver.recv_payloads().is_empty());
+        assert_eq!(net.stats().bandwidth_admitted_datagrams, 1);
+        assert_eq!(net.stats().bandwidth_admitted_bytes, 2_000);
+        assert_eq!(net.stats().fragmentation_loss_events, 1);
+    }
+
+    #[test]
+    fn policy_replacement_preserves_existing_bandwidth_departure_horizon() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        let shaped = LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1_000,
+                burst_bytes: 100,
+                queue_capacity_bytes: 300,
+            }),
+            ..LinkPolicy::clean()
+        };
+        net.set_link(addr(1), addr(2), shaped);
+        for id in 1..=3 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+        net.set_link(addr(1), addr(2), LinkPolicy::clean());
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 4,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 2);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(
+            receiver
+                .recv_payloads()
+                .into_iter()
+                .map(|(_, payload)| payload.id)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn smaller_replacement_burst_clamps_inherited_token_credit() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1,
+                    burst_bytes: 1_000,
+                    queue_capacity_bytes: 1_000,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1,
+                    burst_bytes: 100,
+                    queue_capacity_bytes: 100,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        for id in 2..=3 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(
+            receiver
+                .recv_payloads()
+                .into_iter()
+                .map(|(_, payload)| payload.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(net.stats().bandwidth_queued_datagrams, 1);
+    }
+
+    #[test]
+    fn heal_preserves_existing_bandwidth_departure_horizon() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1_000,
+                    burst_bytes: 100,
+                    queue_capacity_bytes: 200,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        for id in 1..=2 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+        net.heal_all();
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 3,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(
+            receiver
+                .recv_payloads()
+                .into_iter()
+                .map(|(_, payload)| payload.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn clean_horizon_followers_are_bounded_without_extending_horizon() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1,
+                    burst_bytes: 1,
+                    queue_capacity_bytes: 3,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        for id in 1..=2 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+        net.heal_all();
+        for id in 3..=7 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 8,
+                encoded_len: 2,
+                is_input: false,
+            },
+        );
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        assert_eq!(net.stats().bandwidth_tail_drops, 3);
+        assert_eq!(net.stats().bandwidth_oversize_drops, 1);
+        offset.fetch_add(1_000, AtomicOrdering::Relaxed);
+        assert_eq!(
+            receiver
+                .recv_payloads()
+                .into_iter()
+                .map(|(_, payload)| payload.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn rebind_moves_bandwidth_state_without_granting_a_fresh_burst() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let binding = sender.binding();
+        let receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1_000,
+                    burst_bytes: 100,
+                    queue_capacity_bytes: 200,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        for id in 1..=2 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 100,
+                    is_input: false,
+                },
+            );
+        }
+        assert_eq!(net.lock().bandwidth_reservation_count, 1);
+        assert_eq!(binding.rebind(addr(3)), Ok(addr(1)));
+        {
+            let state = net.lock();
+            assert_eq!(state.bandwidth_reservation_count, 1);
+            assert!(state.links[&(addr(1), addr(2))]
+                .bandwidth_reservations
+                .is_empty());
+            assert_eq!(
+                state.links[&(addr(3), addr(2))]
+                    .bandwidth_reservations
+                    .len(),
+                1
+            );
+        }
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 3,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 2);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 3);
+        net.set_link(addr(3), addr(2), LinkPolicy::clean());
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 4,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+        assert_eq!(net.lock().bandwidth_reservation_count, 0);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 4);
+    }
+
+    #[test]
+    fn bandwidth_reservation_element_cap_fails_closed() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1,
+                burst_bytes: 1,
+                queue_capacity_bytes: 10_000,
+            }),
+            ..LinkPolicy::clean()
+        });
+        for id in 0..=u32::try_from(MAX_BANDWIDTH_RESERVATIONS_PER_LINK + 1).unwrap() {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(
+            net.stats().bandwidth_admitted_datagrams,
+            u64::try_from(MAX_BANDWIDTH_RESERVATIONS_PER_LINK + 1).unwrap()
+        );
+        assert_eq!(net.stats().bandwidth_reservation_cap_drops, 1);
+        assert_eq!(net.stats().bandwidth_reservation_cap_dropped_bytes, 1);
+    }
+
+    #[test]
     #[should_panic(expected = "fragmentation policy requires SimNet::new_size_aware metadata")]
     fn fragmentation_without_payload_metadata_fails_loudly() {
         let (clock, _) = manual_clock();
@@ -2130,6 +3257,11 @@ mod tests {
                 fragmentation: Some(FragmentationPolicy {
                     fragment_drop_rate: 1.0,
                 }),
+                bandwidth: Some(BandwidthPolicy {
+                    rate_bytes_per_second: 1,
+                    burst_bytes: 1,
+                    queue_capacity_bytes: 1,
+                }),
                 ..LinkPolicy::clean()
             },
         );
@@ -2148,6 +3280,8 @@ mod tests {
 
         assert_eq!(receiver.recv_payloads().len(), 1);
         assert_eq!(net.stats().fragmentation_eligible_sends, 0);
+        assert_eq!(net.stats().bandwidth_admitted_datagrams, 0);
+        assert_eq!(net.stats().bandwidth_oversize_drops, 0);
         let link = net.link_stats()[&(addr(1), addr(2))];
         assert_eq!(link.input_sends, 2);
         assert_eq!(link.input_delivered_copies, 1);

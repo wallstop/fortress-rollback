@@ -62,6 +62,7 @@ impl CellParams {
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         }
     }
 

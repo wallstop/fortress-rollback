@@ -8,7 +8,9 @@ use super::harness::{
     oracle::OracleFailure, peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload,
     RunOptions, RunReport, TraceSessionState, WideStubInput,
 };
-use crate::common::sim_net::{FragmentationPolicy, GilbertElliottPolicy, LinkPolicy};
+use crate::common::sim_net::{
+    BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
+};
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
@@ -27,6 +29,8 @@ const INPUT_WINDOW_FAULT_START: u32 = 160;
 const FRAGMENTATION_BACKLOG_START: u32 = 140;
 const FRAGMENTATION_BACKLOG_RELEASE: u32 = 204;
 const FRAGMENTATION_HEAL: u32 = 320;
+const BANDWIDTH_START: u32 = 140;
+const BANDWIDTH_HEAL: u32 = 240;
 #[cfg(feature = "hot-join")]
 const NPEER_HOT_JOIN_AT: u32 = 140;
 #[cfg(feature = "hot-join")]
@@ -174,6 +178,44 @@ fn gilbert_elliott_schedule(include_correlated_loss: bool) -> Schedule {
         initial_links: clean_initial_links(n),
         events,
         heal_at: GILBERT_ELLIOTT_HEAL,
+    }
+}
+
+fn bandwidth_queue_schedule(include_constraint: bool) -> Schedule {
+    let n = 2;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 650;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+
+    let mut events = Vec::new();
+    if include_constraint {
+        events.push((
+            BANDWIDTH_START,
+            ScheduleEvent::SetLink {
+                from: 0,
+                to: 1,
+                policy: LinkPolicy {
+                    bandwidth: Some(BandwidthPolicy {
+                        rate_bytes_per_second: 1_000,
+                        burst_bytes: 512,
+                        queue_capacity_bytes: 2_048,
+                    }),
+                    ..LinkPolicy::clean()
+                },
+            },
+        ));
+    }
+    events.push((BANDWIDTH_HEAL, ScheduleEvent::HealAll));
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_B10A,
+        link_seed: 0xCE45_B10B,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: BANDWIDTH_HEAL,
     }
 }
 
@@ -616,6 +658,70 @@ fn correlated_loss_recovers_and_exhibits_two_state_bursts() {
         stats.dropped_by_policy, stats.gilbert_elliott_loss_events,
         "GE is the schedule's only unreliable loss source"
     );
+}
+
+#[test]
+fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
+    let control_schedule = bandwidth_queue_schedule(false);
+    let control = run(&control_schedule, &RunOptions::default());
+    control.expect_pass(&control_schedule);
+    assert_eq!(control.net_stats.bandwidth_admitted_datagrams, 0);
+    assert_eq!(control.net_stats.bandwidth_queued_datagrams, 0);
+    assert_eq!(control.net_stats.bandwidth_tail_drops, 0);
+
+    let schedule = bandwidth_queue_schedule(true);
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.link_stats_by_link, replay.link_stats_by_link);
+    assert_eq!(first.recovered_within_b, Some(true));
+
+    let stats = first.net_stats;
+    assert!(stats.bandwidth_admitted_datagrams > 0, "{stats:?}");
+    assert!(stats.bandwidth_queued_datagrams > 0, "{stats:?}");
+    assert!(stats.bandwidth_max_queue_delay_ns > 0, "{stats:?}");
+    assert!(stats.bandwidth_tail_drops > 0, "{stats:?}");
+    assert_eq!(stats.bandwidth_oversize_drops, 0, "{stats:?}");
+    assert_eq!(stats.bandwidth_reservation_cap_drops, 0, "{stats:?}");
+    assert_eq!(
+        stats.bandwidth_reservation_cap_dropped_bytes, 0,
+        "{stats:?}"
+    );
+    assert_eq!(stats.bandwidth_time_overflow_drops, 0, "{stats:?}");
+    assert_eq!(stats.dropped_by_policy, 0, "{stats:?}");
+    assert_eq!(stats.dropped_blocked, 0, "{stats:?}");
+    assert!(first.final_confirmed.iter().all(|frame| *frame > 400));
+    assert_eq!(
+        control
+            .metrics
+            .iter()
+            .map(|metrics| metrics.wait_recommendations)
+            .sum::<u64>(),
+        0
+    );
+    assert!(
+        first.metrics[0].wait_recommendations > first.metrics[1].wait_recommendations,
+        "the one-way queue must induce the predicted one-sided recommendation bias: {:?}",
+        first.metrics
+    );
+
+    let constrained = first.link_stats_by_link[&(0, 1)];
+    assert!(constrained.bandwidth_queued_datagrams > 0);
+    assert_eq!(
+        constrained.bandwidth_admitted_datagrams,
+        stats.bandwidth_admitted_datagrams
+    );
+    assert!(constrained.bandwidth_max_queue_bytes > 0);
+    assert!(constrained.bandwidth_max_queue_delay_ns > 0);
+    assert!(constrained.bandwidth_tail_drops > 0);
+    for (&link, stats) in &first.link_stats_by_link {
+        if link != (0, 1) {
+            assert_eq!(stats.bandwidth_admitted_bytes, 0, "link={link:?}");
+            assert_eq!(stats.bandwidth_tail_drops, 0, "link={link:?}");
+        }
+    }
 }
 
 #[test]
