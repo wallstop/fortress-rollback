@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SessionMetrics::unknown_source_packets` counts decoded protocol messages received from addresses that are not configured endpoints for a P2P or spectator session. The first such message also emits a `NetworkProtocol` warning with its source address; later warnings are suppressed for the session while the cumulative counter continues rising. This makes stale traffic, source spoofing, and NAT rebinding distinguishable from pure peer silence. Malformed datagrams rejected by a socket before decoding remain outside this session-level counter.
+
 ### Changed
 
 - **Breaking:** `ChaosSocket::with_clock()` callbacks now return `web_time::Instant` instead of `std::time::Instant`, allowing the default clock to run on browser `wasm32-unknown-unknown` without panicking. Browser callers with an injected clock must return `web_time::Instant`; native and Emscripten callers require no change because `web_time` re-exports `std::time::Instant` on those targets.
@@ -140,9 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throttled by a full prediction window — previously unobservable), `wait_recommendations`,
   `confirmation_lag_current` / `_max` / `_sum` (per-advance samples of how far ahead of the confirmed frame
   the simulation runs), `checksums_compared` / `checksums_matched` / `checksums_mismatched` (desync-detection
-  comparisons), `unknown_source_packets` (decoded protocol messages from addresses that are not configured
-  endpoints for the networked session), and the `event_queue_high_water` / `checksum_history_high_water`
-  container high-water marks.
+  comparisons), and the `event_queue_high_water` / `checksum_history_high_water` container high-water marks.
   All counters are always-on, allocation-free, and updated inline on the paths they measure. A companion
   **per-peer** snapshot, `PeerMetrics` (read via `P2PSession::peer_metrics(handle)`), carries wire-exact
   traffic counters for one remote peer or spectator: cumulative `bytes_sent` / `bytes_received` and
