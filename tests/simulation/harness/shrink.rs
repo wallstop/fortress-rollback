@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_removal_remaps_rebind_on_a_valid_schema_v10_schedule() {
+    fn peer_removal_remaps_rebind_on_a_valid_current_schedule() {
         let mut schedule = clean_schedule(4, 20);
         schedule.events = vec![(9, ScheduleEvent::Rebind { peer: 3 })];
 
