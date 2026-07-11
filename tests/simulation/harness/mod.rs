@@ -36,7 +36,9 @@ use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, OracleFailure, Verdict,
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
-use schedule::{hot_join_host_for_slot, validate_schedule, AppModel, Schedule, ScheduleEvent};
+use schedule::{
+    hot_join_host_for_slot, validate_schedule, AppModel, FrameModel, Schedule, ScheduleEvent,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::Hasher as _;
@@ -226,6 +228,21 @@ pub struct LoadGameStateObservation {
     pub step: u32,
     pub peer: usize,
     pub frame: i32,
+}
+
+/// Bounded time-series sample for clock-driven frame-production experiments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSample {
+    pub step: u32,
+    pub current_frames: Vec<i32>,
+    pub confirmed_frames: Vec<i32>,
+    pub confirmation_lag: Vec<u64>,
+    pub wait_recommendations: Vec<u64>,
+    pub rollback_count: Vec<u64>,
+    pub resimulated_frames: Vec<u64>,
+    pub prediction_miss_count: Vec<u64>,
+    pub frame_opportunities: Vec<u64>,
+    pub wait_frames_obeyed: Vec<u64>,
 }
 
 /// Maximum number of final simulation steps retained in a failure artifact.
@@ -483,6 +500,12 @@ struct TraceFinalSummary {
     spectator_applied_frames: usize,
     spectator_max_frame: Option<i32>,
     spectator_final_hosts: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    progress_samples: Vec<ProgressSample>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    frame_opportunities: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_frames_obeyed: Vec<u64>,
     net: TraceNetStats,
 }
 
@@ -521,6 +544,13 @@ pub struct RunReport {
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
+    /// Twelve-or-fewer evenly spaced samples for skew/control-loop analysis.
+    /// Empty for legacy lockstep schedules.
+    pub progress_samples: Vec<ProgressSample>,
+    /// Frame opportunities produced by each peer's selected frame model.
+    pub frame_opportunities: Vec<u64>,
+    /// Opportunities suppressed because the `Obey` app model honored a wait.
+    pub wait_frames_obeyed: Vec<u64>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
@@ -1138,6 +1168,17 @@ fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
     I::from_word(word, step, peer)
 }
 
+/// Returns the cumulative 60 Hz frame opportunities visible at the beginning
+/// of `step` on a clock running at `ppm` relative to base virtual time.
+fn skew_gated_target(step: u32, step_dt_ms: u64, ppm: i32) -> u64 {
+    let rate = u64::try_from(i64::from(1_000_000) + i64::from(ppm)).unwrap_or(0);
+    let base_ms = u128::from(step).saturating_mul(u128::from(step_dt_ms));
+    // Match TestClock's integer-millisecond skew exactly, then gate at 60 Hz.
+    let local_ms = base_ms.saturating_mul(u128::from(rate)) / 1_000_000;
+    let target = local_ms.saturating_mul(60) / 1_000;
+    u64::try_from(target).unwrap_or(u64::MAX)
+}
+
 fn corrupt_fingerprint(fingerprint: InputFingerprint) -> InputFingerprint {
     InputFingerprint {
         logical: fingerprint.logical.wrapping_add(1),
@@ -1585,6 +1626,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // does not advance, letting the others catch up — the closed time-sync loop.
     let app_model = schedule.config.app_model;
     let mut wait_skip: Vec<u32> = vec![0; n];
+    let frame_model = schedule.config.frame_model;
+    let mut frame_opportunities = vec![0_u64; n];
+    let mut skew_targets_seen = vec![0_u64; n];
+    let mut wait_frames_obeyed = vec![0_u64; n];
+    let mut local_input_ordinals = vec![0_u32; n];
+    let mut progress_samples = Vec::new();
+    let progress_interval = schedule.config.steps.div_ceil(12).max(1);
     // Peers whose app model never drains the session event queue (models a
     // wedged event consumer). Their bounded `event_queue` fills and the session
     // trims oldest events, firing the D9 `events_discarded_*` telemetry. Because
@@ -1831,6 +1879,20 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         // a dead peer never does. Either way its state is still folded into the
         // trace below so the digest stays uniform and reproduces bit-for-bit.
         for (i, slot) in peers.iter_mut().enumerate() {
+            // Clock-gated opportunities are consumed even while a peer is
+            // stalled, dead, or synchronizing. A resumed application must not
+            // burst through a wall-clock backlog that it never simulated.
+            let opportunities = match frame_model {
+                FrameModel::Lockstep => 1,
+                FrameModel::SkewGated60Hz => {
+                    let ppm = schedule.config.clock_skew_ppm.get(i).copied().unwrap_or(0);
+                    let target = skew_gated_target(step, schedule.config.step_dt_ms, ppm);
+                    let due = target.saturating_sub(skew_targets_seen[i]);
+                    skew_targets_seen[i] = target;
+                    due
+                },
+            };
+            frame_opportunities[i] = frame_opportunities[i].saturating_add(opportunities);
             // Confirmed frame after this step's drive (or the frozen value for a
             // stalled/dead peer): read exactly once and reused for both the
             // trace fold and any probe snapshot.
@@ -1873,7 +1935,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     }
                 }
 
-                if slot.session.current_state() == SessionState::Running {
+                for _ in 0..opportunities {
+                    if slot.session.current_state() != SessionState::Running {
+                        break;
+                    }
                     if wait_skip[i] > 0 {
                         // Obeying a WaitRecommendation: poll/receive this step
                         // (done above) but skip the advance so the ahead peer
@@ -1883,11 +1948,20 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         // resync) must not silently consume its owed skips, or it
                         // would stop obeying once it resumes.
                         wait_skip[i] -= 1;
+                        wait_frames_obeyed[i] = wait_frames_obeyed[i].saturating_add(1);
                     } else {
+                        let input_ordinal = match frame_model {
+                            FrameModel::Lockstep => step,
+                            FrameModel::SkewGated60Hz => {
+                                let ordinal = local_input_ordinals[i];
+                                local_input_ordinals[i] = ordinal.saturating_add(1);
+                                ordinal
+                            },
+                        };
                         for handle in slot.session.local_player_handles() {
                             if let Err(error) = slot
                                 .session
-                                .add_local_input(handle, input_for::<I>(step, i))
+                                .add_local_input(handle, input_for::<I>(input_ordinal, i))
                             {
                                 oracle.observe_session_error("add_local_input", i, step, &error);
                             }
@@ -1917,7 +1991,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                     slot.game.handle_requests(requests);
                                 }
                             },
-                            Err(error) => oracle.observe_advance_error(i, step, &error),
+                            Err(error) => {
+                                oracle.observe_advance_error(i, step, &error);
+                                break;
+                            },
                         }
                     }
                 }
@@ -1970,6 +2047,42 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             if run_c && step == recovery_anchor_at {
                 confirmed_after_recovery.push(confirmed.as_i32());
             }
+        }
+
+        if frame_model == FrameModel::SkewGated60Hz
+            && ((step + 1) % progress_interval == 0 || step == last_step)
+        {
+            let sample_metrics: Vec<_> = peers.iter().map(|slot| slot.session.metrics()).collect();
+            progress_samples.push(ProgressSample {
+                step,
+                current_frames: peers
+                    .iter()
+                    .map(|slot| slot.session.current_frame().as_i32())
+                    .collect(),
+                confirmed_frames: step_confirmed.clone(),
+                confirmation_lag: sample_metrics
+                    .iter()
+                    .map(|metrics| metrics.confirmation_lag_current)
+                    .collect(),
+                wait_recommendations: sample_metrics
+                    .iter()
+                    .map(|metrics| metrics.wait_recommendations)
+                    .collect(),
+                rollback_count: sample_metrics
+                    .iter()
+                    .map(|metrics| metrics.rollback_count)
+                    .collect(),
+                resimulated_frames: sample_metrics
+                    .iter()
+                    .map(|metrics| metrics.resimulated_frames)
+                    .collect(),
+                prediction_miss_count: sample_metrics
+                    .iter()
+                    .map(|metrics| metrics.prediction_miss_count)
+                    .collect(),
+                frame_opportunities: frame_opportunities.clone(),
+                wait_frames_obeyed: wait_frames_obeyed.clone(),
+            });
         }
 
         // Sample link-specific wire counters only after the fixed-order peer
@@ -2227,6 +2340,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
+        progress_samples: if schedule.schema_version >= 15 {
+            progress_samples.clone()
+        } else {
+            Vec::new()
+        },
+        frame_opportunities: if schedule.schema_version >= 15 {
+            frame_opportunities.clone()
+        } else {
+            Vec::new()
+        },
+        wait_frames_obeyed: if schedule.schema_version >= 15 {
+            wait_frames_obeyed.clone()
+        } else {
+            Vec::new()
+        },
         net: TraceNetStats::from(net.stats()),
     };
     fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
@@ -2246,6 +2374,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         link_stats_by_link,
         load_game_state_observations,
         metrics,
+        progress_samples,
+        frame_opportunities,
+        wait_frames_obeyed,
         peer_wire,
         confirmed_at_heal,
         confirmed_after_recovery,
@@ -2266,6 +2397,21 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn skew_gate_counts_exact_fast_slow_and_frozen_clocks() {
+        let last_step = 225_000;
+        assert_eq!(skew_gated_target(last_step, 16, 0), 216_000);
+        assert_eq!(skew_gated_target(last_step, 16, 1_000), 216_216);
+        assert_eq!(skew_gated_target(last_step, 16, -1_000), 215_784);
+        assert_eq!(skew_gated_target(last_step, 16, -1_000_000), 0);
+        assert_eq!(
+            skew_gated_target(225_000, 16, 1_000)
+                .saturating_sub(skew_gated_target(224_999, 16, 1_000)),
+            2,
+            "the rejected 16ms/+0.1% boundary demonstrates cumulative rounding"
+        );
+    }
 
     #[test]
     fn schema_v10_rebind_addresses_are_deterministic_and_disjoint() {

@@ -650,6 +650,17 @@ where
         }
     }
 
+    // Collapse the frame-production model before simplifying its clock rates;
+    // a failure that does not require rate-gated production should replay on
+    // the historical lockstep model.
+    if current.config.frame_model != super::schedule::FrameModel::Lockstep {
+        let mut candidate = current.clone();
+        candidate.config.frame_model = super::schedule::FrameModel::Lockstep;
+        if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+
     // Simplify individual clock-rate entries before attempting the global
     // collapse. A failure may require one skewed peer while every other entry
     // is irrelevant.
@@ -758,7 +769,7 @@ mod tests {
     use crate::simulation::harness::oracle::{OracleFailure, Verdict};
     use crate::simulation::harness::run;
     use crate::simulation::harness::schedule::{
-        BackgroundNoise, SimConfig, SCHEDULE_SCHEMA_VERSION,
+        BackgroundNoise, FrameModel, SimConfig, SCHEDULE_SCHEMA_VERSION,
     };
 
     fn clean_schedule(n_players: usize, steps: u32) -> Schedule {
@@ -836,6 +847,9 @@ mod tests {
             link_stats_by_link: BTreeMap::new(),
             load_game_state_observations: Vec::new(),
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
+            progress_samples: Vec::new(),
+            frame_opportunities: Vec::new(),
+            wait_frames_obeyed: Vec::new(),
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
             confirmed_at_heal: Vec::new(),
             confirmed_after_recovery: Vec::new(),
@@ -1574,6 +1588,56 @@ mod tests {
         assert_eq!(cadence_result.schedule.config.input_delay, 0);
         assert_eq!(cadence_result.schedule.config.max_prediction, 8);
         assert_eq!(cadence_result.schedule.config.desync_interval, 30);
+    }
+
+    #[test]
+    fn frame_model_shrinking_collapses_or_retains_the_required_gate() {
+        let mut collapsible = clean_schedule(2, 2);
+        collapsible.config.frame_model = FrameModel::SkewGated60Hz;
+        let collapsed = shrink_failure(
+            &collapsible,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| synthetic_report(candidate, vec![state_failure(1)], 0xC011_A95E),
+            |_, _, _| {},
+        )
+        .expect("failure persists without the frame gate");
+        assert_eq!(collapsed.schedule.config.frame_model, FrameModel::Lockstep);
+
+        let mut required = clean_schedule(2, 2);
+        required.config.frame_model = FrameModel::SkewGated60Hz;
+        required.config.step_dt_ms = 15;
+        required.config.clock_skew_ppm = vec![1_000, 2_000];
+        let retained = shrink_failure(
+            &required,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 60,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| {
+                let failures = if candidate.config.frame_model == FrameModel::SkewGated60Hz
+                    && candidate.config.clock_skew_ppm.first() == Some(&1_000)
+                {
+                    vec![state_failure(1)]
+                } else {
+                    Vec::new()
+                };
+                synthetic_report(candidate, failures, 0x6A7E)
+            },
+            |_, _, _| {},
+        )
+        .expect("failure requires the frame gate and first peer skew");
+        assert_eq!(
+            retained.schedule.config.frame_model,
+            FrameModel::SkewGated60Hz
+        );
+        assert_eq!(retained.schedule.config.clock_skew_ppm, vec![1_000, 0]);
     }
 
     #[test]

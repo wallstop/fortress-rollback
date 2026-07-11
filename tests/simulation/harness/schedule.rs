@@ -82,6 +82,21 @@ pub enum AppModel {
     Obey,
 }
 
+/// How the harness turns virtual wall-clock time into frame opportunities.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameModel {
+    /// Preserve the historical harness cadence: every peer accrues exactly one
+    /// opportunity per outer step. Dead, stalled, or synchronizing peers
+    /// consume that opportunity without advancing, so they never catch up in a
+    /// burst after becoming runnable.
+    #[default]
+    Lockstep,
+    /// Gate each peer at 60 Hz using its own rate-skewed clock. This is the
+    /// model required to exercise H-SKEW's frame-production drift. Validation
+    /// admits only cadences that yield at most one opportunity per outer step.
+    SkewGated60Hz,
+}
+
 /// Which storyline vocabulary the deterministic generator may use.
 ///
 /// `NetworkOnly` is the default so every pre-existing generated seed and every
@@ -136,13 +151,19 @@ pub enum ScenarioMix {
 ///   materialized directed links.
 /// - `14`: adds deterministic token-bucket bandwidth and bounded queueing on
 ///   materialized directed links.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 14;
+/// - `15`: adds [`FrameModel::SkewGated60Hz`], which makes per-peer clock skew
+///   control frame-production cadence instead of timestamps alone.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 15;
 /// Hard execution bound for one materialized harness schedule.
 ///
-/// This is 20× the 5,000-step nightly cells and 10× the longest current
-/// deterministic stress run, while preventing an untrusted corpus entry from
-/// turning the runner's `0..steps` loop into an effectively unbounded job.
-pub const MAX_SIMULATION_STEPS: u32 = 100_000;
+/// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:
+/// step 0 starts at the epoch and the last driven step starts exactly one hour
+/// later at 3,600,000 ms. The bound also prevents an untrusted corpus entry
+/// from turning the runner's `0..steps` loop into an effectively unbounded job.
+pub const MAX_SIMULATION_STEPS: u32 = 250_000;
+/// A 60 Hz target sampled at integer milliseconds can advance twice only when
+/// a peer's local clock jumps by at least 17 ms between outer steps.
+const MAX_SKEW_GATED_LOCAL_MS_PER_STEP: u128 = 16;
 /// Maximum virtual time advanced by one harness step.
 pub const MAX_SIMULATION_STEP_DT_MS: u64 = 1_000;
 /// Maximum delay accepted on any materialized simulated link.
@@ -204,6 +225,9 @@ pub struct SimConfig {
     /// used) keeps pre-existing corpus artifacts replayable without a bump.
     #[serde(default)]
     pub app_model: AppModel,
+    /// Frame-production model. `Lockstep` preserves every schema <=14 run.
+    #[serde(default)]
+    pub frame_model: FrameModel,
     /// Per-peer clock-rate skew in parts-per-million (peer `i` reads
     /// `clock_skew_ppm[i]`; a missing/short entry means 0 = no skew). The
     /// peer's local clock runs `ppm` faster (positive) or slower (negative)
@@ -261,6 +285,7 @@ impl SimConfig {
             disconnect_behavior: DropPolicy::default(),
             save_mode: SavePolicy::default(),
             app_model: AppModel::default(),
+            frame_model: FrameModel::default(),
             clock_skew_ppm: Vec::new(),
             starve_events: Vec::new(),
             event_queue_size: None,
@@ -526,7 +551,9 @@ fn event_required_schema(event: &ScheduleEvent) -> u32 {
 }
 
 fn required_schema_version(schedule: &Schedule) -> u32 {
-    let mut required = if schedule.config.noise == BackgroundNoise::ReliableFifo {
+    let mut required = if schedule.config.frame_model == FrameModel::SkewGated60Hz {
+        15
+    } else if schedule.config.noise == BackgroundNoise::ReliableFifo {
         9
     } else {
         1
@@ -938,6 +965,34 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             return Err(format!(
                 "clock_skew_ppm must be >= -1_000_000 (-100% = a frozen clock); a \
                  lower value would run time backwards (got {ppm})"
+            ));
+        }
+        if schedule.config.frame_model == FrameModel::SkewGated60Hz && ppm > 1_000_000 {
+            return Err(format!(
+                "clock_skew_ppm must be <= 1_000_000 (+100%) under SkewGated60Hz; \
+                 larger values would exceed the bounded frame-work model (got {ppm})"
+            ));
+        }
+    }
+    if schedule.config.frame_model == FrameModel::SkewGated60Hz {
+        let fastest_ppm = schedule
+            .config
+            .clock_skew_ppm
+            .iter()
+            .copied()
+            .chain((schedule.config.clock_skew_ppm.len() < n).then_some(0))
+            .max()
+            .unwrap_or(0);
+        let rate = u128::try_from(i64::from(1_000_000) + i64::from(fastest_ppm)).unwrap_or(0);
+        let local_millis_numerator = u128::from(schedule.config.step_dt_ms).saturating_mul(rate);
+        let local_millis_denominator = 1_000_000_u128;
+        if local_millis_numerator
+            > local_millis_denominator.saturating_mul(MAX_SKEW_GATED_LOCAL_MS_PER_STEP)
+        {
+            return Err(format!(
+                "SkewGated60Hz requires at most one frame opportunity per peer per outer step; \
+                 step_dt_ms={} and fastest clock skew {fastest_ppm} ppm exceed that bound",
+                schedule.config.step_dt_ms
             ));
         }
     }
@@ -1798,6 +1853,18 @@ mod tests {
     }
 
     #[test]
+    fn schema_v15_floor_applies_to_skew_gated_frame_model() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.config.frame_model = FrameModel::SkewGated60Hz;
+        schedule.schema_version = 14;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v14 cannot claim skew-gated frame semantics")
+            .contains("requiring schema_version 15"));
+        schedule.schema_version = 15;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
     fn bandwidth_policy_validates_rate_burst_and_memory_bound() {
         let mut schedule = generate(7, SimConfig::smoke(2));
         schedule.initial_links[0].2.bandwidth = Some(crate::common::sim_net::BandwidthPolicy {
@@ -2348,6 +2415,34 @@ mod tests {
         too_many_skews.config.clock_skew_ppm = vec![0; 4];
         cases.push((too_many_skews, "entries for a 3-peer mesh"));
 
+        let mut too_fast_gated_clock = valid.clone();
+        too_fast_gated_clock.config.frame_model = FrameModel::SkewGated60Hz;
+        too_fast_gated_clock.config.clock_skew_ppm = vec![1_000_001];
+        cases.push((too_fast_gated_clock, "must be <= 1_000_000"));
+
+        let mut coarse_gated_cadence = valid.clone();
+        coarse_gated_cadence.config.frame_model = FrameModel::SkewGated60Hz;
+        coarse_gated_cadence.config.step_dt_ms = 17;
+        cases.push((coarse_gated_cadence, "at most one frame opportunity"));
+
+        let mut rounded_two_opportunity_boundary = valid.clone();
+        rounded_two_opportunity_boundary.config.frame_model = FrameModel::SkewGated60Hz;
+        rounded_two_opportunity_boundary.config.step_dt_ms = 16;
+        rounded_two_opportunity_boundary.config.clock_skew_ppm = vec![1_000];
+        cases.push((
+            rounded_two_opportunity_boundary,
+            "at most one frame opportunity",
+        ));
+
+        let mut implicit_exact_peer_is_fastest = valid.clone();
+        implicit_exact_peer_is_fastest.config.frame_model = FrameModel::SkewGated60Hz;
+        implicit_exact_peer_is_fastest.config.step_dt_ms = 33;
+        implicit_exact_peer_is_fastest.config.clock_skew_ppm = vec![-500_000];
+        cases.push((
+            implicit_exact_peer_is_fastest,
+            "at most one frame opportunity",
+        ));
+
         let mut bad_starved_peer = valid.clone();
         bad_starved_peer.config.starve_events = vec![9];
         cases.push((bad_starved_peer, "starve_events peer 9 out of range"));
@@ -2468,7 +2563,7 @@ mod tests {
         let cases: [(Mutation, &str); 7] = [
             (
                 |schedule| schedule.config.steps = MAX_SIMULATION_STEPS + 1,
-                "2..=100000 steps",
+                "materialized simulation schedules need 2..=",
             ),
             (
                 |schedule| schedule.config.max_prediction = MAX_FRAME_DELAY + 1,
@@ -2785,9 +2880,9 @@ mod tests {
 
     /// A corpus artifact predating the `#[serde(default)]` config axes (its
     /// `config` object lacks those fields) must deserialize to their defaults —
-    /// including `save_mode = EveryFrame`, `app_model = Ignore` (open-loop), and
-    /// `clock_skew_ppm = []` (no skew) — so old schedules replay bit-identically.
-    /// This pins the "no schema bump" claim. Each field is asserted
+    /// including `save_mode = EveryFrame`, `app_model = Ignore` (open-loop),
+    /// `frame_model = Lockstep`, and `clock_skew_ppm = []` (no skew) — so old
+    /// schedules replay bit-identically. Each field is asserted
     /// present-and-removed so the test can't pass vacuously (a full config also
     /// deserializes fine).
     #[test]
@@ -2809,6 +2904,10 @@ mod tests {
         assert!(
             config.remove("app_model").is_some(),
             "config must serialize an `app_model` field for this test to remove"
+        );
+        assert!(
+            config.remove("frame_model").is_some(),
+            "config must serialize a `frame_model` field for this test to remove"
         );
         assert!(
             config.remove("clock_skew_ppm").is_some(),
@@ -2841,6 +2940,11 @@ mod tests {
             back.config.app_model,
             AppModel::Ignore,
             "a pre-axis config (no app_model) must default to Ignore"
+        );
+        assert_eq!(
+            back.config.frame_model,
+            FrameModel::Lockstep,
+            "a pre-axis config (no frame_model) must default to Lockstep"
         );
         assert!(
             back.config.clock_skew_ppm.is_empty(),

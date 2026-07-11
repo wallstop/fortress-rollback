@@ -272,6 +272,26 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             artifact.trace_hash, report.trace_hash
         ));
     }
+    for (name, matches) in [
+        (
+            "progress_samples",
+            report.progress_samples == artifact.progress_samples,
+        ),
+        (
+            "frame_opportunities",
+            report.frame_opportunities == artifact.frame_opportunities,
+        ),
+        (
+            "wait_frames_obeyed",
+            report.wait_frames_obeyed == artifact.wait_frames_obeyed,
+        ),
+    ] {
+        if !matches {
+            return Err(format!(
+                "candidate {name} evidence changed independently of the recorded trace hash"
+            ));
+        }
+    }
     let expected = artifact.failures[0].class;
     if report.verdict.failures.first().map(OracleFailure::class) != Some(expected.as_str()) {
         return Err(format!(
@@ -335,6 +355,27 @@ mod tests {
     use super::*;
     use crate::simulation::harness::artifact::{write_artifact, ExistingArtifact, FailureArtifact};
     use crate::simulation::harness::schedule::{generate, SimConfig};
+
+    #[test]
+    fn artifact_reproduction_rejects_mutated_progress_evidence() {
+        let schedule = generate(17, SimConfig::smoke(2));
+        let options = RunOptions {
+            corrupt_state_from: Some((1, 10)),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "negative control must fail");
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        assert_eq!(reproduce_artifact(&artifact), Ok(()));
+
+        let mut mutated = artifact;
+        mutated.frame_opportunities[0] = mutated.frame_opportunities[0].saturating_add(1);
+        let error = reproduce_artifact(&mutated).expect_err("mutated evidence must be rejected");
+        assert!(
+            error.contains("frame_opportunities"),
+            "wrong error: {error}"
+        );
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
