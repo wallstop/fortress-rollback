@@ -6,8 +6,8 @@
 //! proves nothing.
 
 use super::harness::schedule::{
-    generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, ScenarioMix, Schedule,
-    ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+    generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, FrameModel, ScenarioMix,
+    Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
@@ -2681,7 +2681,7 @@ fn clock_skew_long_run_schedule(steps: u32, ppm: i32) -> Schedule {
 ///
 /// **What it does NOT do — H-SKEW (PLAN.md §13) is NOT executed here.** H-SKEW
 /// predicts a *rate* effect: a clock running 0.1% fast drives the frame loop
-/// 0.1% faster in wall-clock time, so the fast peer produces ~43 more frames/hour
+/// 0.1% faster in wall-clock time, so the fast peer produces 216 more frames/hour
 /// than the network confirms and `local_frame_advantage` accumulates. This
 /// harness advances **every peer exactly one frame per step** (`harness/mod.rs`,
 /// lockstep) and reads the clock only for timestamps, so that accumulation is
@@ -2720,6 +2720,160 @@ fn clock_skew_holds_consistency_over_a_long_run() {
         "skew must not drift the peers' confirmed frames apart (spread={spread}, \
          final_confirmed={confirmed:?})"
     );
+}
+
+fn skew_gated_schedule(steps: u32, ppm: i32, app_model: AppModel) -> Schedule {
+    let mut schedule = clock_skew_long_run_schedule(steps, ppm);
+    schedule.config.frame_model = FrameModel::SkewGated60Hz;
+    schedule.config.app_model = app_model;
+    schedule
+}
+
+/// The skew-gated model must turn clock-rate differences into actual frame
+/// opportunities while preserving deterministic, byte-consistent simulation.
+#[test]
+fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
+    let exact = skew_gated_schedule(1_200, 0, AppModel::Obey);
+    let mut exact = exact;
+    exact.config.step_dt_ms = 8;
+    let mut skewed = skew_gated_schedule(1_200, 1_000_000, AppModel::Obey);
+    skewed.config.step_dt_ms = 8;
+
+    let exact_report = run(&exact, &RunOptions::default());
+    exact_report.expect_pass(&exact);
+    let skewed_report = run(&skewed, &RunOptions::default());
+    skewed_report.expect_pass(&skewed);
+    let replay = run(&skewed, &RunOptions::default());
+
+    assert_eq!(exact_report.frame_opportunities, vec![575, 575]);
+    assert_eq!(skewed_report.frame_opportunities, vec![1_151, 575]);
+    assert_eq!(skewed_report.trace_hash, replay.trace_hash);
+    assert_eq!(skewed_report.progress_samples, replay.progress_samples);
+    assert!(!skewed_report.progress_samples.is_empty());
+    assert!(skewed_report.progress_samples.len() <= 12);
+    assert_ne!(exact_report.trace_hash, skewed_report.trace_hash);
+}
+
+/// H-SKEW hour-equivalent experiment: +0.1% produces exactly 216 additional
+/// 60 Hz opportunities over one virtual hour. Nightly records both the bounded
+/// lag/correction result and the currently-red work-amplification observation.
+#[test]
+#[ignore = "hour-equivalent H-SKEW experiment; selected by nightly CI"]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
+    let exact = skew_gated_schedule(225_001, 0, AppModel::Obey);
+    let skewed = skew_gated_schedule(225_001, 1_000, AppModel::Obey);
+
+    let exact_report = run(&exact, &RunOptions::default());
+    exact_report.expect_pass(&exact);
+    let skewed_report = run(&skewed, &RunOptions::default());
+    skewed_report.expect_pass(&skewed);
+    let replay = run(&skewed, &RunOptions::default());
+
+    assert_eq!(exact_report.frame_opportunities, vec![216_000, 216_000]);
+    assert_eq!(skewed_report.frame_opportunities, vec![216_216, 216_000]);
+    assert_eq!(skewed_report.trace_hash, replay.trace_hash);
+    assert_eq!(skewed_report.progress_samples, replay.progress_samples);
+    let exact_total_work = exact_report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.frames_advanced)
+        .fold(0_u64, u64::saturating_add);
+    let skewed_total_work = skewed_report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.frames_advanced)
+        .fold(0_u64, u64::saturating_add);
+    let exact_resimulation = exact_report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.resimulated_frames)
+        .fold(0_u64, u64::saturating_add);
+    let skewed_resimulation = skewed_report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.resimulated_frames)
+        .fold(0_u64, u64::saturating_add);
+    println!(
+        "H-SKEW exact_opportunities={:?} exact_metrics={:?} \
+         skewed_opportunities={:?} wait_frames_obeyed={:?} \
+         skewed_metrics={:?} exact_total_work={} skewed_total_work={} \
+         exact_resimulation={} skewed_resimulation={} samples={:?}",
+        exact_report.frame_opportunities,
+        exact_report.metrics,
+        skewed_report.frame_opportunities,
+        skewed_report.wait_frames_obeyed,
+        skewed_report.metrics,
+        exact_total_work,
+        skewed_total_work,
+        exact_resimulation,
+        skewed_resimulation,
+        skewed_report.progress_samples
+    );
+    assert!(
+        skewed_total_work.saturating_mul(100) <= exact_total_work.saturating_mul(120),
+        "H-SKEW total work amplification must not exceed 20%: \
+         exact={exact_total_work}, skewed={skewed_total_work}"
+    );
+    assert!(
+        skewed_resimulation.saturating_mul(100) <= exact_resimulation.saturating_mul(140),
+        "H-SKEW resimulation amplification must not exceed 40%: \
+         exact={exact_resimulation}, skewed={skewed_resimulation}"
+    );
+
+    assert_eq!(skewed_report.wait_frames_obeyed[1], 0);
+    assert!(
+        (200..=230).contains(&skewed_report.wait_frames_obeyed[0]),
+        "the correction duty should track the injected 216-frame/hour drift \
+         without escalating: {:?}",
+        skewed_report.wait_frames_obeyed
+    );
+    assert_eq!(skewed_report.metrics[1].wait_recommendations, 0);
+    assert!(
+        skewed_report.metrics[0].wait_recommendations <= 120,
+        "the fast peer should correct at most twice per minute, not saturate \
+         the one-second recommendation cooldown: {:?}",
+        skewed_report.metrics
+    );
+    assert!(
+        skewed_report
+            .metrics
+            .iter()
+            .all(|metric| metric.stall_count == 0),
+        "clock correction must not exhaust the prediction window: {:?}",
+        skewed_report.metrics
+    );
+
+    let final_sample = skewed_report
+        .progress_samples
+        .last()
+        .expect("the skew-gated run records bounded progress samples");
+    assert!(
+        final_sample
+            .confirmation_lag
+            .iter()
+            .all(|&lag| lag <= skewed.config.max_prediction as u64),
+        "steady-state confirmation lag must remain inside max_prediction: {:?}",
+        final_sample.confirmation_lag
+    );
+    let steady_samples = &skewed_report.progress_samples[6..];
+    for peer in 0..2 {
+        let min = steady_samples
+            .iter()
+            .map(|sample| sample.confirmation_lag[peer])
+            .min()
+            .expect("steady-state sample set is non-empty");
+        let max = steady_samples
+            .iter()
+            .map(|sample| sample.confirmation_lag[peer])
+            .max()
+            .expect("steady-state sample set is non-empty");
+        assert!(
+            max.saturating_sub(min) <= 1,
+            "steady-state lag must stay flat rather than creep (peer={peer}, \
+             samples={steady_samples:?})"
+        );
+    }
 }
 
 /// Diagnostic probe for a failing schedule: prints per-peer progress every 50

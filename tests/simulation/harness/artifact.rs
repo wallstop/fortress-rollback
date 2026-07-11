@@ -2,17 +2,18 @@
 
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
-use super::{RunReport, TraceSnapshot, TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY};
+use super::{
+    ProgressSample, RunReport, TraceSnapshot, TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY,
+};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 2 makes end-of-step per-link probe counters identity-bearing. Older
-// probe-bearing artifacts cannot reproduce that stronger trace identity and
-// are rejected explicitly rather than reported as nondeterministic.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+// Version 3 preserves schema-v15 clock/control-loop evidence. Older artifacts
+// cannot diagnose that stronger trace identity and are rejected explicitly.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 3;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -126,6 +127,12 @@ pub struct FailureArtifact {
     pub trace_hash: u64,
     /// Per-peer final confirmed frames.
     pub final_confirmed: Vec<i32>,
+    /// Bounded clock/control-loop samples retained for skew failures.
+    pub progress_samples: Vec<ProgressSample>,
+    /// Final per-peer frame-opportunity totals.
+    pub frame_opportunities: Vec<u64>,
+    /// Final per-peer obeyed-wait totals.
+    pub wait_frames_obeyed: Vec<u64>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -150,6 +157,9 @@ impl FailureArtifact {
                 .collect(),
             trace_hash: report.trace_hash,
             final_confirmed: report.final_confirmed.clone(),
+            progress_samples: report.progress_samples.clone(),
+            frame_opportunities: report.frame_opportunities.clone(),
+            wait_frames_obeyed: report.wait_frames_obeyed.clone(),
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -217,6 +227,46 @@ impl FailureArtifact {
                 "artifact has {} final confirmed frames for {n} peers",
                 self.final_confirmed.len()
             ));
+        }
+        for (name, len) in [
+            ("frame_opportunities", self.frame_opportunities.len()),
+            ("wait_frames_obeyed", self.wait_frames_obeyed.len()),
+        ] {
+            if len != n {
+                return Err(format!("artifact has {len} {name} entries for {n} peers"));
+            }
+        }
+        if self.progress_samples.len() > 12 {
+            return Err(format!(
+                "artifact has {} progress samples (maximum 12)",
+                self.progress_samples.len()
+            ));
+        }
+        for sample in &self.progress_samples {
+            for (name, len) in [
+                ("current_frames", sample.current_frames.len()),
+                ("confirmed_frames", sample.confirmed_frames.len()),
+                ("confirmation_lag", sample.confirmation_lag.len()),
+                ("wait_recommendations", sample.wait_recommendations.len()),
+                ("rollback_count", sample.rollback_count.len()),
+                ("resimulated_frames", sample.resimulated_frames.len()),
+                ("prediction_miss_count", sample.prediction_miss_count.len()),
+                ("frame_opportunities", sample.frame_opportunities.len()),
+                ("wait_frames_obeyed", sample.wait_frames_obeyed.len()),
+            ] {
+                if len != n {
+                    return Err(format!(
+                        "artifact progress sample at step {} has {len} {name} entries for {n} peers",
+                        sample.step
+                    ));
+                }
+            }
+            if sample.step >= self.schedule.config.steps {
+                return Err(format!(
+                    "artifact progress sample step {} is outside embedded schedule",
+                    sample.step
+                ));
+            }
         }
         let expected_tail_len = usize::try_from(self.schedule.config.steps)
             .unwrap_or(usize::MAX)
@@ -539,6 +589,9 @@ mod tests {
             }],
             trace_hash: 99,
             final_confirmed: vec![10, 10],
+            progress_samples: Vec::new(),
+            frame_opportunities: vec![600, 600],
+            wait_frames_obeyed: vec![0, 0],
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -593,7 +646,10 @@ mod tests {
         );
         let decoded = read_artifact(&path).expect("artifact schema round trips");
         assert_eq!(decoded, artifact);
-        assert_eq!(decoded.artifact_schema_version, 2);
+        assert_eq!(
+            decoded.artifact_schema_version,
+            FAILURE_ARTIFACT_SCHEMA_VERSION
+        );
         assert_eq!(decoded.trace_tail.len(), TRACE_TAIL_CAPACITY);
 
         std::fs::remove_dir_all(&root).expect("temporary artifact tree removes");
@@ -699,6 +755,12 @@ mod tests {
             Box::new(|artifact| artifact.failures.clear()),
             Box::new(|artifact| {
                 let _ = artifact.final_confirmed.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.frame_opportunities.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_frames_obeyed.pop();
             }),
             Box::new(|artifact| artifact.trace_tail.clear()),
             Box::new(|artifact| artifact.trace_tail[1].step += 1),

@@ -65,13 +65,13 @@ jobs:
             simulation-nightly-${{ runner.os }}-cargo-
             network-nightly-${{ runner.os }}-cargo-
 
-      - name: Run sharded deterministic simulation fleet
+      - name: Run sharded fleet and hour-equivalent clock-skew probe
         run: >-
           cargo nextest run
           --profile ci-simulation-nightly
           --release
           --run-ignored ignored-only
-          -E 'test(simulation::fleet::nightly_seed_shard_)'
+          -E 'test(simulation::fleet::nightly_seed_shard_) or test(simulation::fleet::h_skew_hour_equivalent_measures_lag_correction_and_cost)'
           --test simulation
           --features hot-join
           --no-capture
