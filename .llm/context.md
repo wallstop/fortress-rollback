@@ -280,20 +280,20 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 
 ## Quality Checklist
 
-- [ ] `cargo fmt` run
-- [ ] `cargo clippy --workspace --all-targets --features tokio,json` passes
+- [ ] `cargo fmt` and `cargo clippy --workspace --all-targets --features tokio,json` pass
 - [ ] All tests pass (`cargo nextest run`)
-- [ ] Tests for new functionality included
-- [ ] Rustdoc comments with examples
-- [ ] 100% safe Rust (no unsafe)
-- [ ] All error cases handled
-- [ ] No duplicate methods (e.g., don't add method duplicating `Display` impl)
-- [ ] Feature-dependent APIs documented in rustdoc
+- [ ] New functionality has tests and Rustdoc examples
+- [ ] Code is 100% safe Rust and handles every error path
+- [ ] Public APIs have no duplicate methods and document feature dependencies
 - [ ] Changelog reviewed for pub/user-observable changes
 
 ## For Agents
 
 When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt` and verify `cargo clippy --workspace --all-targets --features tokio,json` passes on any modified files. If the sub-agent cannot run these, the parent agent must run them after receiving changes.
+
+### GitHub Access in Devcontainers
+
+Do not treat `gh auth status` as a universal publish prerequisite. First use `git ls-remote origin HEAD` as a read-connectivity check, then verify write access with a targeted `git push --dry-run origin HEAD:<branch>` before relying on the push path. SSH origins normally use the VS Code-forwarded `SSH_AUTH_SOCK`, while HTTPS origins may use its credential helper. Use local `git` for branches, commits, and pushes, and prefer the connected GitHub app for PR creation, comments, reviews, checks, workflow logs, and review threads. Use authenticated `gh` when an applicable workflow explicitly requires it, or after confirming a required operation is unavailable or fails through the connector. An unauthenticated `gh` is not a blocker when Git transport and the connector cover the requested workflow. Never print or persist credentials.
 
 ---
 
