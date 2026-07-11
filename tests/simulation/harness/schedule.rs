@@ -132,7 +132,9 @@ pub enum ScenarioMix {
 ///   generation because fencing older/per-link protocol eras needs a wider
 ///   model. Schemas <=11 retain their historical seed and validation semantics
 ///   for corpus replay.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 12;
+/// - `13`: adds optional fixed-threshold IPv4-style fragmentation loss on
+///   materialized directed links.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 13;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -491,7 +493,9 @@ pub(super) fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<us
 }
 
 fn link_policy_required_schema(policy: &LinkPolicy) -> u32 {
-    if policy.gilbert_elliott.is_some() {
+    if policy.fragmentation.is_some() {
+        13
+    } else if policy.gilbert_elliott.is_some() {
         11
     } else if !policy.retransmit_delay.is_zero() {
         9
@@ -577,6 +581,18 @@ fn validate_link_policy(policy: &LinkPolicy, context: &str) -> Result<(), String
             return Err(format!(
                 "{context} Gilbert-Elliott loss cannot be layered with drop_rate or \
                  burst_rate/burst_len"
+            ));
+        }
+    }
+    if let Some(fragmentation) = policy.fragmentation {
+        validate_probability(
+            fragmentation.fragment_drop_rate,
+            "fragment_drop_rate",
+            context,
+        )?;
+        if !policy.retransmit_delay.is_zero() {
+            return Err(format!(
+                "{context} fragmentation cannot be combined with retransmit_delay"
             ));
         }
     }
@@ -1068,6 +1084,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
+            fragmentation: None,
         },
         BackgroundNoise::Rough => LinkPolicy {
             drop_rate: draw.range_f64(0.02, 0.10),
@@ -1078,6 +1095,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_len: u32::try_from(draw.range_u64(2, 5)).unwrap_or(3),
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
+            fragmentation: None,
         },
     }
 }
@@ -1625,6 +1643,19 @@ mod tests {
                 },
                 11,
             ),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        fragmentation: Some(crate::common::sim_net::FragmentationPolicy {
+                            fragment_drop_rate: 0.2,
+                        }),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                13,
+            ),
         ];
 
         for (event, required) in cases {
@@ -1684,6 +1715,42 @@ mod tests {
             .contains("requiring schema_version 11"));
         schedule.schema_version = 11;
         assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
+    fn schema_v13_floor_applies_to_fragmentation_links() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
+        schedule.schema_version = 12;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v12 cannot claim fragmentation capability")
+            .contains("requiring schema_version 13"));
+        schedule.schema_version = 13;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
+    fn fragmentation_policy_validates_probability_and_retransmission_exclusion() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: f64::NAN,
+            });
+        assert!(validate_schedule(&schedule)
+            .expect_err("NaN fragmentation probability must fail")
+            .contains("fragment_drop_rate must be finite"));
+
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
+        schedule.initial_links[0].2.retransmit_delay = Duration::from_millis(1);
+        assert!(validate_schedule(&schedule)
+            .expect_err("fragmentation plus retransmission must fail")
+            .contains("fragmentation cannot be combined with retransmit_delay"));
     }
 
     #[test]
@@ -2496,6 +2563,7 @@ mod tests {
             "old corpus artifacts without retransmit_delay must keep UDP-like loss semantics"
         );
         assert_eq!(back.initial_links[0].2.gilbert_elliott, None);
+        assert_eq!(back.initial_links[0].2.fragmentation, None);
     }
 
     #[test]
@@ -2511,11 +2579,36 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("initial link policy must serialize as an object");
         assert!(!clean_policy.contains_key("gilbert_elliott"));
+        assert!(!clean_policy.contains_key("fragmentation"));
 
         schedule.initial_links[0].2 = LinkPolicy {
             gilbert_elliott: Some(valid_gilbert_elliott()),
             ..LinkPolicy::clean()
         };
+        let json = serde_json::to_vec(&schedule).unwrap();
+        let back: Schedule = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, schedule);
+        assert_eq!(validate_schedule(&back), Ok(()));
+    }
+
+    #[test]
+    fn fragmentation_policy_round_trips_and_none_is_omitted() {
+        let mut schedule = generate(42, SimConfig::smoke(2));
+        let clean_json = serde_json::to_value(&schedule).unwrap();
+        let clean_policy = clean_json
+            .get("initial_links")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|links| links.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|link| link.get(2))
+            .and_then(serde_json::Value::as_object)
+            .expect("initial link policy must serialize as an object");
+        assert!(!clean_policy.contains_key("fragmentation"));
+
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
         let json = serde_json::to_vec(&schedule).unwrap();
         let back: Schedule = serde_json::from_slice(&json).unwrap();
         assert_eq!(back, schedule);

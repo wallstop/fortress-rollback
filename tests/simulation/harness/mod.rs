@@ -19,7 +19,7 @@ pub mod oracle;
 pub mod schedule;
 pub mod shrink;
 
-use crate::common::sim_net::{SimNet, SimSocket, SimSocketBinding};
+use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
@@ -269,6 +269,24 @@ pub struct TraceNetStats {
     pub gilbert_elliott_loss_events: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub gilbert_elliott_max_loss_run: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_eligible_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_fragments_modeled: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_lost_fragments: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_input_eligible_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_input_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_max_packet_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_max_fragments_per_send: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_fragment_cap_hits: u64,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -292,6 +310,15 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             gilbert_elliott_bad_sends: stats.gilbert_elliott_bad_sends,
             gilbert_elliott_loss_events: stats.gilbert_elliott_loss_events,
             gilbert_elliott_max_loss_run: stats.gilbert_elliott_max_loss_run,
+            fragmentation_eligible_sends: stats.fragmentation_eligible_sends,
+            fragmentation_fragments_modeled: stats.fragmentation_fragments_modeled,
+            fragmentation_lost_fragments: stats.fragmentation_lost_fragments,
+            fragmentation_loss_events: stats.fragmentation_loss_events,
+            fragmentation_input_eligible_sends: stats.fragmentation_input_eligible_sends,
+            fragmentation_input_loss_events: stats.fragmentation_input_loss_events,
+            fragmentation_max_packet_bytes: stats.fragmentation_max_packet_bytes,
+            fragmentation_max_fragments_per_send: stats.fragmentation_max_fragments_per_send,
+            fragmentation_fragment_cap_hits: stats.fragmentation_fragment_cap_hits,
         }
     }
 }
@@ -342,12 +369,56 @@ struct TracePeerWireLink {
 }
 
 #[derive(Serialize)]
+struct TraceLinkStats {
+    from: usize,
+    to: usize,
+    stats: crate::common::sim_net::SimLinkStats,
+}
+
+#[derive(Serialize)]
+struct TraceLinkCount {
+    from: usize,
+    to: usize,
+    count: u64,
+}
+
+fn trace_fragmentation_drops(
+    schema_version: u32,
+    counts: &BTreeMap<(usize, usize), u64>,
+) -> Vec<TraceLinkCount> {
+    if schema_version < 13 {
+        return Vec::new();
+    }
+    counts
+        .iter()
+        .map(|(&(from, to), &count)| TraceLinkCount { from, to, count })
+        .collect()
+}
+
+fn trace_link_stats(
+    schema_version: u32,
+    stats: &BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
+) -> Vec<TraceLinkStats> {
+    if schema_version < 13 {
+        return Vec::new();
+    }
+    stats
+        .iter()
+        .map(|(&(from, to), &stats)| TraceLinkStats { from, to, stats })
+        .collect()
+}
+
+#[derive(Serialize)]
 struct TraceFinalSummary {
     failure_classes: Vec<&'static str>,
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     probe_peer_wire_by_link: Vec<TracePeerWireLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fragmentation_drops_by_link: Vec<TraceLinkCount>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_stats_by_link: Vec<TraceLinkStats>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -382,6 +453,10 @@ pub struct RunReport {
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
     pub blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
+    /// Fragmentation-loss counts split by directed peer index pair `(from, to)`.
+    pub fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
+    /// Size and policy telemetry split by directed peer index pair `(from, to)`.
+    pub link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     /// `LoadGameState` requests observed while driving peers.
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
@@ -1222,6 +1297,14 @@ pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) ->
     run_inner::<I>(schedule, options, false)
 }
 
+fn message_payload_metadata(message: &Message) -> SimPayloadMetadata {
+    let (encoded_len, kind) = fortress_rollback::__internal::message_metadata(message);
+    SimPayloadMetadata {
+        encoded_len,
+        is_input: kind == MessageKind::Input,
+    }
+}
+
 fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
     validate_schedule(schedule).unwrap_or_else(|error| {
         panic!(
@@ -1240,7 +1323,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     }
 
     let clock = TestClock::new();
-    let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
+    let net: SimNet<Message> = SimNet::new_size_aware(
+        schedule.link_seed,
+        clock.as_protocol_clock(),
+        message_payload_metadata,
+    );
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
 
     let mut spectator_host_enabled = vec![false; n];
@@ -1960,6 +2047,25 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             *total = total.saturating_add(drops);
         }
     }
+    let map_link = |from_addr: &SocketAddr, to_addr: &SocketAddr| {
+        Some((
+            *peer_by_source_addr.get(from_addr)?,
+            *peer_by_canonical_addr.get(to_addr)?,
+        ))
+    };
+    let mut fragmentation_drops_by_link = BTreeMap::new();
+    for ((from_addr, to_addr), drops) in net.fragmentation_drop_counts() {
+        if let Some(key) = map_link(&from_addr, &to_addr) {
+            let total = fragmentation_drops_by_link.entry(key).or_insert(0_u64);
+            *total = total.saturating_add(drops);
+        }
+    }
+    let mut link_stats_by_link: BTreeMap<_, crate::common::sim_net::SimLinkStats> = BTreeMap::new();
+    for ((from_addr, to_addr), stats) in net.link_stats() {
+        if let Some(key) = map_link(&from_addr, &to_addr) {
+            link_stats_by_link.entry(key).or_default().merge(stats);
+        }
+    }
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -1972,6 +2078,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 totals: totals.clone(),
             })
             .collect(),
+        fragmentation_drops_by_link: trace_fragmentation_drops(
+            schedule.schema_version,
+            &fragmentation_drops_by_link,
+        ),
+        link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -1992,6 +2103,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         probe_peer_wire_by_link,
         net_stats: net.stats(),
         blocked_drops_by_link,
+        fragmentation_drops_by_link,
+        link_stats_by_link,
         load_game_state_observations,
         metrics,
         peer_wire,
@@ -2095,6 +2208,7 @@ mod tests {
             .as_object()
             .expect("TraceNetStats serializes as an object");
         assert!(!object.keys().any(|key| key.starts_with("gilbert_elliott")));
+        assert!(!object.keys().any(|key| key.starts_with("fragmentation")));
         let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
         assert_eq!(legacy_back, TraceNetStats::default());
 
@@ -2129,6 +2243,57 @@ mod tests {
         let mut changed = snapshot.clone();
         changed.net = ge_stats;
         assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+
+        let fragmentation_stats = TraceNetStats {
+            fragmentation_eligible_sends: 2,
+            fragmentation_fragments_modeled: 5,
+            fragmentation_lost_fragments: 1,
+            fragmentation_loss_events: 1,
+            fragmentation_input_eligible_sends: 2,
+            fragmentation_input_loss_events: 1,
+            fragmentation_max_packet_bytes: 2945,
+            fragmentation_max_fragments_per_send: 3,
+            fragmentation_fragment_cap_hits: 1,
+            ..TraceNetStats::default()
+        };
+        let fragmentation_json = serde_json::to_vec(&fragmentation_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&fragmentation_json).unwrap(),
+            fragmentation_stats
+        );
+        changed.net = fragmentation_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+    }
+
+    #[test]
+    fn schema_v13_per_link_fragmentation_evidence_is_identity_bearing() {
+        let stats = crate::common::sim_net::SimLinkStats {
+            input_sends: 1,
+            max_encoded_input_bytes: 2_000,
+            fragmentation_input_losses: 1,
+            ..crate::common::sim_net::SimLinkStats::default()
+        };
+        let left_stats = BTreeMap::from([((0, 1), stats)]);
+        let right_stats = BTreeMap::from([((1, 0), stats)]);
+        let left_drops = BTreeMap::from([((0, 1), 1)]);
+        let right_drops = BTreeMap::from([((1, 0), 1)]);
+
+        assert_eq!(
+            serde_json::to_vec(&trace_link_stats(12, &left_stats)).unwrap(),
+            serde_json::to_vec(&trace_link_stats(12, &right_stats)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&trace_fragmentation_drops(12, &left_drops)).unwrap(),
+            serde_json::to_vec(&trace_fragmentation_drops(12, &right_drops)).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_vec(&trace_link_stats(13, &left_stats)).unwrap(),
+            serde_json::to_vec(&trace_link_stats(13, &right_stats)).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_vec(&trace_fragmentation_drops(13, &left_drops)).unwrap(),
+            serde_json::to_vec(&trace_fragmentation_drops(13, &right_drops)).unwrap()
+        );
     }
 
     #[test]
@@ -2445,6 +2610,11 @@ mod tests {
             implicit.blocked_drops_by_link,
             explicit.blocked_drops_by_link
         );
+        assert_eq!(
+            implicit.fragmentation_drops_by_link,
+            explicit.fragmentation_drops_by_link
+        );
+        assert_eq!(implicit.link_stats_by_link, explicit.link_stats_by_link);
         assert_eq!(
             implicit.load_game_state_observations,
             explicit.load_game_state_observations

@@ -387,6 +387,16 @@ pub mod __internal {
 
     // Session internals
     pub use crate::sessions::player_registry::PlayerRegistry;
+
+    /// Returns the exact encoded byte length and stable kind of one protocol
+    /// message.
+    ///
+    /// This unstable hook exists for deterministic integration-test fabrics;
+    /// applications must not treat it as a versioned API contract.
+    #[must_use]
+    pub fn message_metadata(message: &crate::Message) -> (usize, crate::MessageKind) {
+        (message.encoded_len(), message.kind())
+    }
 }
 
 // #############

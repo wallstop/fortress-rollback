@@ -61,6 +61,7 @@ impl CellParams {
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
+            fragmentation: None,
         }
     }
 

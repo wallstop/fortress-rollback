@@ -6,7 +6,7 @@
 
 use super::schedule::{validate_schedule, Schedule, ScheduleEvent};
 use super::{RunOptions, RunReport};
-use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
+use crate::common::sim_net::{FragmentationPolicy, GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::metrics::EventKind;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -53,6 +53,8 @@ struct FinalSummary {
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
+    fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
+    link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     load_game_state_observations: Vec<super::LoadGameStateObservation>,
     metrics: Vec<fortress_rollback::SessionMetrics>,
     peer_wire: Vec<super::PeerWireTotals>,
@@ -78,6 +80,8 @@ impl From<&RunReport> for FinalSummary {
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
+            fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
+            link_stats_by_link: report.link_stats_by_link.clone(),
             load_game_state_observations: report.load_game_state_observations.clone(),
             metrics: report.metrics.clone(),
             peer_wire: report.peer_wire.clone(),
@@ -334,6 +338,7 @@ fn restore_final_heal(schedule: &mut Schedule, preferred_step: Option<u32>) {
 #[derive(Clone, Copy)]
 enum LinkSimplification {
     Loss,
+    Fragmentation,
     Duplication,
     Jitter,
     Delay,
@@ -349,6 +354,7 @@ fn simplify_link(policy: &mut LinkPolicy, simplification: LinkSimplification) {
             policy.burst_len = 0;
             policy.gilbert_elliott = None;
         },
+        LinkSimplification::Fragmentation => policy.fragmentation = None,
         LinkSimplification::Duplication => policy.dup_rate = 0.0,
         LinkSimplification::Jitter => policy.jitter = Duration::ZERO,
         LinkSimplification::Delay => policy.base_delay = Duration::ZERO,
@@ -699,6 +705,7 @@ where
     // or jitter on any of the others.
     for simplification in [
         LinkSimplification::Loss,
+        LinkSimplification::Fragmentation,
         LinkSimplification::Duplication,
         LinkSimplification::Jitter,
         LinkSimplification::Delay,
@@ -811,6 +818,8 @@ mod tests {
             probe_peer_wire_by_link: BTreeMap::new(),
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
+            fragmentation_drops_by_link: BTreeMap::new(),
+            link_stats_by_link: BTreeMap::new(),
             load_game_state_observations: Vec::new(),
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
@@ -1342,6 +1351,7 @@ mod tests {
             burst_len: 2,
             retransmit_delay: Duration::from_millis(4),
             gilbert_elliott: None,
+            fragmentation: None,
         };
         schedule
             .initial_links
@@ -1439,6 +1449,40 @@ mod tests {
         simplify_link(&mut policy, LinkSimplification::Loss);
 
         assert_eq!(policy.gilbert_elliott, None);
+        assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fragmentation_simplification_removes_only_fragmentation() {
+        let policy = LinkPolicy {
+            dup_rate: 0.25,
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            }),
+            ..LinkPolicy::clean()
+        };
+        let mut schedule = clean_schedule(2, 2);
+        schedule.initial_links[0].2 = policy.clone();
+        schedule.events.insert(
+            0,
+            (
+                1,
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy,
+                },
+            ),
+        );
+
+        let simplified = simplify_links(&schedule, LinkSimplification::Fragmentation);
+
+        assert_eq!(simplified.initial_links[0].2.fragmentation, None);
+        assert!((simplified.initial_links[0].2.dup_rate - 0.25).abs() < f64::EPSILON);
+        let ScheduleEvent::SetLink { policy, .. } = &simplified.events[0].1 else {
+            panic!("first event must remain SetLink");
+        };
+        assert_eq!(policy.fragmentation, None);
         assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
     }
 

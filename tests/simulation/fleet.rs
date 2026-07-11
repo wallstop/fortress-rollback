@@ -715,6 +715,7 @@ fn run_tcp_model_mesh(n: usize) {
         burst_len: 0,
         retransmit_delay: Duration::ZERO,
         gilbert_elliott: None,
+        fragmentation: None,
     };
     let hol = LinkPolicy {
         drop_rate: 1.0,
@@ -2466,6 +2467,7 @@ fn wait_rec_schedule(n: usize, app_model: AppModel) -> Schedule {
         burst_len: 0,
         retransmit_delay: Duration::ZERO,
         gilbert_elliott: None,
+        fragmentation: None,
     };
     let mut initial_links = Vec::new();
     for from in 0..n {
@@ -2568,6 +2570,7 @@ fn clock_skew_schedule(n: usize, skew: Vec<i32>) -> Schedule {
         burst_len: 0,
         retransmit_delay: Duration::ZERO,
         gilbert_elliott: None,
+        fragmentation: None,
     };
     let mut initial_links = Vec::new();
     for from in 0..n {
@@ -2647,6 +2650,7 @@ fn clock_skew_long_run_schedule(steps: u32, ppm: i32) -> Schedule {
         burst_len: 0,
         retransmit_delay: Duration::ZERO,
         gilbert_elliott: None,
+        fragmentation: None,
     };
     let initial_links = vec![(0, 1, delayed.clone()), (1, 0, delayed)];
     Schedule {
