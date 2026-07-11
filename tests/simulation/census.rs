@@ -9,6 +9,8 @@ use super::harness::{
     TraceSessionState,
 };
 use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
+#[cfg(feature = "hot-join")]
+use fortress_rollback::telemetry::{ViolationKind, ViolationSeverity};
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
@@ -23,6 +25,10 @@ const REBIND_AT: u32 = 180;
 const REBIND_HEAL_AT: u32 = 300;
 const GILBERT_ELLIOTT_START: u32 = 140;
 const GILBERT_ELLIOTT_HEAL: u32 = 420;
+#[cfg(feature = "hot-join")]
+const NPEER_HOT_JOIN_AT: u32 = 140;
+#[cfg(feature = "hot-join")]
+const NPEER_HOT_JOIN_HEAL: u32 = 220;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     let mut initial_links = Vec::new();
@@ -155,6 +161,142 @@ fn gilbert_elliott_schedule(include_correlated_loss: bool) -> Schedule {
         events,
         heal_at: GILBERT_ELLIOTT_HEAL,
     }
+}
+
+#[cfg(feature = "hot-join")]
+fn clean_npeer_hot_join_schedule() -> Schedule {
+    let n = 4;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 900;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+    config.save_mode = SavePolicy::EveryFrame;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+
+    let events = vec![
+        (NPEER_HOT_JOIN_AT, ScheduleEvent::HotJoin { slot: 3 }),
+        (NPEER_HOT_JOIN_HEAL, ScheduleEvent::HealAll),
+    ];
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_F100,
+        link_seed: 0xCE45_F101,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: NPEER_HOT_JOIN_HEAL,
+    }
+}
+
+/// M3 §28.3(c) prerequisite known-red: the clean N=4 simulation lifecycle
+/// wedges before a partition can be introduced honestly. The coordinator
+/// repeatedly times out at the N-peer commit barrier, the joiner remains
+/// `HotJoining`, and the survivors stop confirming. Once this baseline is
+/// fixed, add the matched partition that lands during a proved-open floor
+/// round and hot-join.
+#[cfg(feature = "hot-join")]
+#[test]
+#[ignore = "known N-peer hot-join commit-barrier timeout under simulation lifecycle"]
+fn clean_npeer_hot_join_wedges_at_commit_barrier_known_defect() {
+    use fortress_rollback::MessageKind;
+
+    let schedule = clean_npeer_hot_join_schedule();
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.metrics, replay.metrics);
+    assert_eq!(first.final_confirmed, replay.final_confirmed);
+    assert_eq!(first.violation_census, replay.violation_census);
+    assert_eq!(first.final_confirmed, vec![144, 144, 144, -1]);
+    assert_eq!(first.recovered_within_b, Some(false));
+    assert_eq!(first.net_stats.dropped_by_policy, 0);
+    assert_eq!(first.net_stats.retransmit_delayed, 0);
+    assert_eq!(first.net_stats.dropped_blocked, 0);
+    assert_eq!(first.net_stats.dropped_unattached, 0);
+    assert_eq!(first.net_stats.duplicated, 0);
+    assert_eq!(first.net_stats.held, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_good_to_bad, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_bad_to_good, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_bad_sends, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_good_sends, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_loss_events, 0);
+    assert_eq!(first.net_stats.gilbert_elliott_max_loss_run, 0);
+    let violation_count = |location: &str, prefix: &str| {
+        first
+            .violation_census
+            .iter()
+            .filter(|(signature, _)| {
+                signature.severity == ViolationSeverity::Warning
+                    && signature.kind == ViolationKind::NetworkProtocol
+                    && signature.location == location
+                    && signature.message_prefix.starts_with(prefix)
+            })
+            .map(|(_, count)| *count)
+            .sum::<u64>()
+    };
+    assert_eq!(
+        violation_count(
+            "src/sessions/p2p_session.rs:2371",
+            "N-peer hot-join serve for slot"
+        ),
+        2,
+        "the coordinator must time out at the N-peer commit barrier: {:?}",
+        first.violation_census
+    );
+    assert_eq!(
+        violation_count(
+            "src/sessions/p2p_session.rs:5158",
+            "N-peer hot-join attempt for slot"
+        ),
+        2,
+        "the joiner must observe both coordinator aborts: {:?}",
+        first.violation_census
+    );
+    assert!(matches!(
+        first.trace_tail.last().map(|snapshot| &snapshot.session_states),
+        Some(states) if states == &[TraceSessionState::Running, TraceSessionState::Running,
+            TraceSessionState::Running, TraceSessionState::HotJoining]
+    ));
+    assert_eq!(first.verdict.failures.len(), 5);
+    let end_progress_peers: Vec<_> = first
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|failure| match failure {
+            OracleFailure::EndProgress { peer, .. } => Some(*peer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(end_progress_peers, vec![3]);
+    let post_heal_peers: Vec<_> = first
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|failure| match failure {
+            OracleFailure::PostHealLiveness { peer, .. } => Some(*peer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(post_heal_peers, vec![0, 1, 2, 3]);
+    assert!(
+        first
+            .peer_wire
+            .iter()
+            .map(|wire| wire.sent_by_kind(MessageKind::JoinRequest))
+            .sum::<u64>()
+            > 0
+    );
+    assert!(
+        first
+            .peer_wire
+            .iter()
+            .map(|wire| wire.sent_by_kind(MessageKind::StateSnapshot))
+            .sum::<u64>()
+            > 0
+    );
 }
 
 #[test]
