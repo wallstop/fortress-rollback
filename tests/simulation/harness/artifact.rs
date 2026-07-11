@@ -570,6 +570,7 @@ mod tests {
                         dropped_unattached: 0,
                         duplicated: 0,
                         held: 0,
+                        ..TraceNetStats::default()
                     },
                     spectator: None,
                 })

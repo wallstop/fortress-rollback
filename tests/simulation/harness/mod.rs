@@ -254,6 +254,22 @@ pub struct TraceNetStats {
     pub dropped_unattached: u64,
     pub duplicated: u64,
     pub held: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_good_to_bad: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_bad_to_good: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_good_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_bad_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_max_loss_run: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
@@ -267,6 +283,12 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             dropped_unattached: stats.dropped_unattached,
             duplicated: stats.duplicated,
             held: stats.held,
+            gilbert_elliott_good_to_bad: stats.gilbert_elliott_good_to_bad,
+            gilbert_elliott_bad_to_good: stats.gilbert_elliott_bad_to_good,
+            gilbert_elliott_good_sends: stats.gilbert_elliott_good_sends,
+            gilbert_elliott_bad_sends: stats.gilbert_elliott_bad_sends,
+            gilbert_elliott_loss_events: stats.gilbert_elliott_loss_events,
+            gilbert_elliott_max_loss_run: stats.gilbert_elliott_max_loss_run,
         }
     }
 }
@@ -1932,6 +1954,49 @@ mod tests {
             snapshot_hash(&changed),
             "dead/lifecycle state is part of the complete step identity"
         );
+    }
+
+    #[test]
+    fn trace_net_stats_ge_fields_are_backward_compatible_and_identity_bearing() {
+        let legacy_json = serde_json::to_value(TraceNetStats::default()).unwrap();
+        let object = legacy_json
+            .as_object()
+            .expect("TraceNetStats serializes as an object");
+        assert!(!object.keys().any(|key| key.starts_with("gilbert_elliott")));
+        let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy_back, TraceNetStats::default());
+
+        let ge_stats = TraceNetStats {
+            gilbert_elliott_good_to_bad: 2,
+            gilbert_elliott_bad_to_good: 1,
+            gilbert_elliott_good_sends: 7,
+            gilbert_elliott_bad_sends: 5,
+            gilbert_elliott_loss_events: 4,
+            gilbert_elliott_max_loss_run: 3,
+            ..TraceNetStats::default()
+        };
+        let ge_json = serde_json::to_vec(&ge_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&ge_json).unwrap(),
+            ge_stats
+        );
+
+        let snapshot = TraceSnapshot {
+            step: 7,
+            confirmed_frames: vec![5, 5],
+            session_states: vec![TraceSessionState::Running; 2],
+            dead: vec![false, false],
+            game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            scheduled_events: Vec::new(),
+            scheduled_events_truncated: 0,
+            observed_events: Vec::new(),
+            observed_events_truncated: 0,
+            net: TraceNetStats::default(),
+            spectator: None,
+        };
+        let mut changed = snapshot.clone();
+        changed.net = ge_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
     }
 
     #[test]

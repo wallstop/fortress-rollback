@@ -6,7 +6,7 @@
 
 use super::schedule::{validate_schedule, Schedule, ScheduleEvent};
 use super::{RunOptions, RunReport};
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::metrics::EventKind;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -345,6 +345,7 @@ fn simplify_link(policy: &mut LinkPolicy, simplification: LinkSimplification) {
             policy.drop_rate = 0.0;
             policy.burst_rate = 0.0;
             policy.burst_len = 0;
+            policy.gilbert_elliott = None;
         },
         LinkSimplification::Duplication => policy.dup_rate = 0.0,
         LinkSimplification::Jitter => policy.jitter = Duration::ZERO,
@@ -1337,6 +1338,7 @@ mod tests {
             burst_rate: 0.1,
             burst_len: 2,
             retransmit_delay: Duration::from_millis(4),
+            gilbert_elliott: None,
         };
         schedule
             .initial_links
@@ -1416,6 +1418,25 @@ mod tests {
         );
         assert_eq!(irrelevant, &LinkPolicy::clean());
         assert_eq!(set_link, &LinkPolicy::clean());
+    }
+
+    #[test]
+    fn loss_simplification_removes_gilbert_elliott_without_touching_other_axes() {
+        let mut policy = LinkPolicy {
+            dup_rate: 0.25,
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 0.05,
+                bad_to_good: 0.20,
+                good_drop_rate: 0.01,
+                bad_drop_rate: 0.80,
+            }),
+            ..LinkPolicy::clean()
+        };
+
+        simplify_link(&mut policy, LinkSimplification::Loss);
+
+        assert_eq!(policy.gilbert_elliott, None);
+        assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

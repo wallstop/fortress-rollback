@@ -8,7 +8,7 @@ use super::harness::{
     oracle::OracleFailure, peer_addr, run, PeerEventKey, PeerEventPayload, RunOptions, RunReport,
     TraceSessionState,
 };
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ const ASYMMETRIC_PARTITION_START: u32 = 140;
 const ASYMMETRIC_PARTITION_HEAL: u32 = 450;
 const REBIND_AT: u32 = 180;
 const REBIND_HEAL_AT: u32 = 300;
+const GILBERT_ELLIOTT_START: u32 = 140;
+const GILBERT_ELLIOTT_HEAL: u32 = 420;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     let mut initial_links = Vec::new();
@@ -114,6 +116,82 @@ fn nat_rebind_schedule(include_rebind: bool) -> Schedule {
         events,
         heal_at: REBIND_HEAL_AT,
     }
+}
+
+fn gilbert_elliott_schedule(include_correlated_loss: bool) -> Schedule {
+    let n = 2;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 720;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+
+    let mut events = Vec::new();
+    if include_correlated_loss {
+        events.push((
+            GILBERT_ELLIOTT_START,
+            ScheduleEvent::SetLink {
+                from: 0,
+                to: 1,
+                policy: LinkPolicy {
+                    gilbert_elliott: Some(GilbertElliottPolicy {
+                        good_to_bad: 0.04,
+                        bad_to_good: 0.15,
+                        good_drop_rate: 0.0,
+                        bad_drop_rate: 0.75,
+                    }),
+                    ..LinkPolicy::clean()
+                },
+            },
+        ));
+    }
+    events.push((GILBERT_ELLIOTT_HEAL, ScheduleEvent::HealAll));
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_0E10,
+        link_seed: 0xCE45_0E11,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: GILBERT_ELLIOTT_HEAL,
+    }
+}
+
+#[test]
+fn correlated_loss_recovers_and_exhibits_two_state_bursts() {
+    let control_schedule = gilbert_elliott_schedule(false);
+    let control = run(&control_schedule, &RunOptions::default());
+    control.expect_pass(&control_schedule);
+    assert_eq!(control.recovered_within_b, Some(true));
+    assert_eq!(control.net_stats.dropped_by_policy, 0);
+    assert_eq!(control.net_stats.gilbert_elliott_good_sends, 0);
+    assert_eq!(control.net_stats.gilbert_elliott_bad_sends, 0);
+    assert_eq!(control.net_stats.gilbert_elliott_loss_events, 0);
+
+    let schedule = gilbert_elliott_schedule(true);
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.metrics, replay.metrics);
+    assert_eq!(first.final_confirmed, replay.final_confirmed);
+    assert_eq!(first.violation_census, replay.violation_census);
+    assert_eq!(first.recovered_within_b, Some(true));
+    assert!(first.final_confirmed.iter().all(|frame| *frame > 100));
+
+    let stats = first.net_stats;
+    assert!(stats.gilbert_elliott_good_sends > 0, "{stats:?}");
+    assert!(stats.gilbert_elliott_bad_sends > 0, "{stats:?}");
+    assert!(stats.gilbert_elliott_good_to_bad >= 2, "{stats:?}");
+    assert!(stats.gilbert_elliott_bad_to_good >= 2, "{stats:?}");
+    assert!(stats.gilbert_elliott_loss_events > 0, "{stats:?}");
+    assert!(stats.gilbert_elliott_max_loss_run >= 4, "{stats:?}");
+    assert_eq!(
+        stats.dropped_by_policy, stats.gilbert_elliott_loss_events,
+        "GE is the schedule's only unreliable loss source"
+    );
 }
 
 #[test]

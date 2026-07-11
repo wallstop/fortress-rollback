@@ -15,7 +15,7 @@
 // Test infrastructure: not every test binary uses every helper.
 #![allow(dead_code)]
 
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::{__internal::MAX_FRAME_DELAY, DisconnectBehavior, SaveMode};
 use serde::{Deserialize, Serialize};
@@ -124,7 +124,9 @@ pub enum ScenarioMix {
 ///   for reliable-ordered transport probes.
 /// - `10`: adds [`ScheduleEvent::Rebind`], a peer source-address/NAT mapping
 ///   change that leaves every other peer's canonical destination unchanged.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 10;
+/// - `11`: adds [`GilbertElliottPolicy`], a deterministic two-state
+///   correlated-loss model on materialized directed links.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 11;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -483,10 +485,12 @@ pub(super) fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<us
 }
 
 fn link_policy_required_schema(policy: &LinkPolicy) -> u32 {
-    if policy.retransmit_delay.is_zero() {
-        1
-    } else {
+    if policy.gilbert_elliott.is_some() {
+        11
+    } else if !policy.retransmit_delay.is_zero() {
         9
+    } else {
+        1
     }
 }
 
@@ -541,6 +545,34 @@ fn validate_link_policy(policy: &LinkPolicy, context: &str) -> Result<(), String
              (got burst_rate={:?}, burst_len={})",
             policy.burst_rate, policy.burst_len
         ));
+    }
+    if let Some(ge) = &policy.gilbert_elliott {
+        for (field, value) in [
+            ("good_to_bad", ge.good_to_bad),
+            ("bad_to_good", ge.bad_to_good),
+            ("good_drop_rate", ge.good_drop_rate),
+            ("bad_drop_rate", ge.bad_drop_rate),
+        ] {
+            validate_probability(value, field, context)?;
+        }
+        if ge.good_to_bad == 0.0 {
+            return Err(format!(
+                "{context} Gilbert-Elliott good_to_bad must be > 0 so the bad state is reachable"
+            ));
+        }
+        if ge.bad_drop_rate <= ge.good_drop_rate {
+            return Err(format!(
+                "{context} Gilbert-Elliott bad_drop_rate must be greater than good_drop_rate \
+                 (got good={:?}, bad={:?})",
+                ge.good_drop_rate, ge.bad_drop_rate
+            ));
+        }
+        if policy.drop_rate > 0.0 || burst_rate_enabled {
+            return Err(format!(
+                "{context} Gilbert-Elliott loss cannot be layered with drop_rate or \
+                 burst_rate/burst_len"
+            ));
+        }
     }
     for (field, value) in [
         ("base_delay", policy.base_delay),
@@ -659,7 +691,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
     }
     if has_rebind && has_hot_join {
         return Err(
-            "Rebind and HotJoin cannot share a schema-v10 schedule; replacement binding semantics \
+            "Rebind and HotJoin cannot share a schedule; replacement binding semantics \
              require a dedicated future capability"
                 .to_owned(),
         );
@@ -671,7 +703,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             .any(|(_, event)| matches!(event, ScheduleEvent::Hold { .. }))
     {
         return Err(
-            "Rebind cannot share a schema-v10 schedule with Hold; releasing held traffic across \
+            "Rebind cannot share a schedule with Hold; releasing held traffic across \
              source-address generations requires a dedicated future capability"
                 .to_owned(),
         );
@@ -904,7 +936,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                 }
                 if !rebound_peers.insert(*peer) {
                     return Err(format!(
-                        "Rebind peer {peer} appears more than once; schema v10 supports one \
+                        "Rebind peer {peer} appears more than once; the Rebind capability supports one \
                          address generation change per peer"
                     ));
                 }
@@ -1021,6 +1053,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_rate: 0.0,
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
         },
         BackgroundNoise::Rough => LinkPolicy {
             drop_rate: draw.range_f64(0.02, 0.10),
@@ -1030,6 +1063,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_rate: draw.range_f64(0.0, 0.005),
             burst_len: u32::try_from(draw.range_u64(2, 5)).unwrap_or(3),
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
         },
     }
 }
@@ -1299,6 +1333,15 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
 mod tests {
     use super::*;
 
+    fn valid_gilbert_elliott() -> GilbertElliottPolicy {
+        GilbertElliottPolicy {
+            good_to_bad: 0.05,
+            bad_to_good: 0.20,
+            good_drop_rate: 0.01,
+            bad_drop_rate: 0.80,
+        }
+    }
+
     #[test]
     fn generate_is_pure_same_seed_same_schedule() {
         let a = generate(42, SimConfig::smoke(4));
@@ -1331,6 +1374,7 @@ mod tests {
             assert!(policy.burst_rate.abs() < f64::EPSILON);
             assert_eq!(policy.burst_len, 0);
             assert_eq!(policy.retransmit_delay, Duration::ZERO);
+            assert_eq!(policy.gilbert_elliott, None);
         }
         assert_eq!(
             schedule
@@ -1556,6 +1600,17 @@ mod tests {
                 9,
             ),
             (ScheduleEvent::Rebind { peer: 1 }, 10),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        gilbert_elliott: Some(valid_gilbert_elliott()),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                11,
+            ),
         ];
 
         for (event, required) in cases {
@@ -1600,6 +1655,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn schema_v11_floor_applies_to_initial_gilbert_elliott_links() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2 = LinkPolicy {
+            gilbert_elliott: Some(valid_gilbert_elliott()),
+            ..LinkPolicy::clean()
+        };
+        schedule.schema_version = 10;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v10 cannot claim a GE initial-link capability")
+            .contains("requiring schema_version 11"));
+        schedule.schema_version = 11;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
     }
 
     #[test]
@@ -1976,6 +2046,56 @@ mod tests {
             "burst_rate/burst_len must both be zero or both be enabled",
         ));
 
+        for (field, value, expected) in [
+            ("good_to_bad", f64::NAN, "good_to_bad must be finite"),
+            ("bad_to_good", -0.1, "bad_to_good must be finite"),
+            ("good_drop_rate", 1.1, "good_drop_rate must be finite"),
+            (
+                "bad_drop_rate",
+                f64::INFINITY,
+                "bad_drop_rate must be finite",
+            ),
+        ] {
+            let mut invalid_ge_probability = valid.clone();
+            let mut ge = valid_gilbert_elliott();
+            match field {
+                "good_to_bad" => ge.good_to_bad = value,
+                "bad_to_good" => ge.bad_to_good = value,
+                "good_drop_rate" => ge.good_drop_rate = value,
+                "bad_drop_rate" => ge.bad_drop_rate = value,
+                _ => unreachable!("table contains only GE probability fields"),
+            }
+            invalid_ge_probability.initial_links[0].2.gilbert_elliott = Some(ge);
+            cases.push((invalid_ge_probability, expected));
+        }
+
+        let mut unreachable_bad_state = valid.clone();
+        let mut ge = valid_gilbert_elliott();
+        ge.good_to_bad = 0.0;
+        unreachable_bad_state.initial_links[0].2.gilbert_elliott = Some(ge);
+        cases.push((unreachable_bad_state, "good_to_bad must be > 0"));
+
+        let mut non_correlated_drop_rates = valid.clone();
+        let mut ge = valid_gilbert_elliott();
+        ge.bad_drop_rate = ge.good_drop_rate;
+        non_correlated_drop_rates.initial_links[0].2.gilbert_elliott = Some(ge);
+        cases.push((
+            non_correlated_drop_rates,
+            "bad_drop_rate must be greater than good_drop_rate",
+        ));
+
+        for legacy_loss in ["drop_rate", "burst"] {
+            let mut layered = valid.clone();
+            layered.initial_links[0].2.gilbert_elliott = Some(valid_gilbert_elliott());
+            if legacy_loss == "drop_rate" {
+                layered.initial_links[0].2.drop_rate = 0.1;
+            } else {
+                layered.initial_links[0].2.burst_rate = 0.1;
+                layered.initial_links[0].2.burst_len = 2;
+            }
+            cases.push((layered, "Gilbert-Elliott loss cannot be layered"));
+        }
+
         let event_cases = [
             (
                 ScheduleEvent::SetLink {
@@ -2119,7 +2239,7 @@ mod tests {
             (100, ScheduleEvent::Rebind { peer: 1 }),
         ]);
         held_rebind.events.sort_by_key(|(step, _)| *step);
-        cases.push((held_rebind, "cannot share a schema-v10 schedule with Hold"));
+        cases.push((held_rebind, "cannot share a schedule with Hold"));
 
         let mut killed_rebind = valid.clone();
         killed_rebind
@@ -2351,6 +2471,31 @@ mod tests {
             Duration::ZERO,
             "old corpus artifacts without retransmit_delay must keep UDP-like loss semantics"
         );
+        assert_eq!(back.initial_links[0].2.gilbert_elliott, None);
+    }
+
+    #[test]
+    fn gilbert_elliott_policy_round_trips_and_none_is_omitted() {
+        let mut schedule = generate(42, SimConfig::smoke(2));
+        let clean_json = serde_json::to_value(&schedule).unwrap();
+        let clean_policy = clean_json
+            .get("initial_links")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|links| links.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|link| link.get(2))
+            .and_then(serde_json::Value::as_object)
+            .expect("initial link policy must serialize as an object");
+        assert!(!clean_policy.contains_key("gilbert_elliott"));
+
+        schedule.initial_links[0].2 = LinkPolicy {
+            gilbert_elliott: Some(valid_gilbert_elliott()),
+            ..LinkPolicy::clean()
+        };
+        let json = serde_json::to_vec(&schedule).unwrap();
+        let back: Schedule = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, schedule);
+        assert_eq!(validate_schedule(&back), Ok(()));
     }
 
     /// The lifecycle-vocabulary events must serialize losslessly — a corpus

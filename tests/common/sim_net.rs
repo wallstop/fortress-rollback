@@ -55,17 +55,34 @@ pub type SimClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// queued in the inbox for the next poll (never dropped).
 pub const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
 
+/// Two-state Markov loss model for one directed link.
+///
+/// Every probability is validated in `0.0..=1.0` by the schedule boundary.
+/// SimNet itself remains a lightweight test utility and assumes its callers
+/// provide a valid policy.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GilbertElliottPolicy {
+    /// Probability that a send in the good state transitions to bad for the
+    /// next admitted send, after the current send's loss decision.
+    pub good_to_bad: f64,
+    /// Probability that a send in the bad state transitions to good for the
+    /// next admitted send, after the current send's loss decision.
+    pub bad_to_good: f64,
+    /// Per-send loss probability while in the current good state.
+    pub good_drop_rate: f64,
+    /// Per-send loss probability while in the current bad state.
+    pub bad_drop_rate: f64,
+}
+
 /// Fault policy for one directed link `(from, to)`.
 ///
-/// All probabilities are in `0.0..=1.0` and are rolled per send, in a fixed
-/// order (burst, drop, duplicate, jitter), from the net-wide seeded RNG.
-/// When [`Self::retransmit_delay`] is nonzero, a burst/drop roll models a
-/// reliable transport retransmission instead of packet loss: the would-be
-/// dropped send is delayed, and subsequent sends on the same link are held
-/// behind that retransmission deadline (TCP/WebRTC-reliable head-of-line
-/// blocking).
-/// Serializable so simulation schedules (which embed link policies) can be
-/// stored as reproducible corpus artifacts.
+/// Legacy loss rolls are ordered burst then independent drop. For valid
+/// materialized schedules, [`Self::gilbert_elliott`] replaces those legacy
+/// loss decisions; duplication and jitter still follow any surviving send.
+/// When [`Self::retransmit_delay`] is nonzero, a would-be loss becomes a
+/// reliable head-of-line delay instead of packet loss.
+/// Serializable so schedules can be stored as reproducible corpus artifacts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkPolicy {
     /// Probability an individual send is dropped.
@@ -86,6 +103,12 @@ pub struct LinkPolicy {
     /// keeps UDP-like unreliable loss semantics.
     #[serde(default)]
     pub retransmit_delay: Duration,
+    /// Optional two-state correlated-loss channel. A materialized link starts
+    /// in the good state; each non-blocked/non-held send rolls its current
+    /// state's loss probability first, then the transition for the next send.
+    /// `None` preserves the pre-schema-v11 RNG stream exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gilbert_elliott: Option<GilbertElliottPolicy>,
 }
 
 impl LinkPolicy {
@@ -100,6 +123,7 @@ impl LinkPolicy {
             burst_rate: 0.0,
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
         }
     }
 }
@@ -130,7 +154,7 @@ pub struct SimNetStats {
     pub sent: u64,
     /// Copies placed into an inbox (including buffered-unattached copies).
     pub delivered: u64,
-    /// Copies dropped by drop-rate or burst rolls.
+    /// Copies dropped by independent, fixed-burst, or Gilbert-Elliott loss.
     pub dropped_by_policy: u64,
     /// Would-be policy drops converted into reliable retransmission delays.
     pub retransmit_delayed: u64,
@@ -143,6 +167,18 @@ pub struct SimNetStats {
     pub duplicated: u64,
     /// Sends captured by a holding link (delivered later on release).
     pub held: u64,
+    /// Good-to-bad state transitions made by Gilbert-Elliott links.
+    pub gilbert_elliott_good_to_bad: u64,
+    /// Bad-to-good state transitions made by Gilbert-Elliott links.
+    pub gilbert_elliott_bad_to_good: u64,
+    /// Sends whose Gilbert-Elliott loss decision used the bad state.
+    pub gilbert_elliott_bad_sends: u64,
+    /// Sends whose Gilbert-Elliott loss decision used the good state.
+    pub gilbert_elliott_good_sends: u64,
+    /// Loss decisions caused specifically by Gilbert-Elliott state.
+    pub gilbert_elliott_loss_events: u64,
+    /// Longest consecutive Gilbert-Elliott loss-decision run on any one link.
+    pub gilbert_elliott_max_loss_run: u64,
 }
 
 /// Runtime state of one directed link.
@@ -157,6 +193,11 @@ struct LinkState {
     blocked: bool,
     /// Capture-and-hold: sends bypass fault rolls and queue until release.
     holding: bool,
+    /// Current Gilbert-Elliott state. Every new/materially replaced link starts
+    /// good, independent of whether the optional policy is enabled.
+    gilbert_elliott_bad: bool,
+    /// Current consecutive GE loss-decision run for this directed link.
+    gilbert_elliott_loss_run: u64,
 }
 
 impl LinkState {
@@ -167,6 +208,8 @@ impl LinkState {
             retransmit_blocked_until: None,
             blocked: false,
             holding: false,
+            gilbert_elliott_bad: false,
+            gilbert_elliott_loss_run: 0,
         }
     }
 }
@@ -285,6 +328,63 @@ impl<M: Clone> SimNetState<M> {
         true
     }
 
+    /// Evaluates one link's optional two-state channel and advances its state.
+    /// Every admitted send consumes exactly two RNG rolls: loss in the current
+    /// state, then transition for the next send. The fixed draw count makes GE
+    /// traces easy to reproduce while the `None` path consumes no new draws.
+    fn gilbert_elliott_loses(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        policy: &GilbertElliottPolicy,
+    ) -> bool {
+        let was_bad = self
+            .links
+            .get(&key)
+            .is_some_and(|link| link.gilbert_elliott_bad);
+        if was_bad {
+            self.stats.gilbert_elliott_bad_sends += 1;
+        } else {
+            self.stats.gilbert_elliott_good_sends += 1;
+        }
+        let drop_rate = if was_bad {
+            policy.bad_drop_rate
+        } else {
+            policy.good_drop_rate
+        };
+        let loses = self.roll_unit() < drop_rate;
+        let transition_rate = if was_bad {
+            policy.bad_to_good
+        } else {
+            policy.good_to_bad
+        };
+        let transitioned = self.roll_unit() < transition_rate;
+        let next_bad = was_bad ^ transitioned;
+        if transitioned {
+            if was_bad {
+                self.stats.gilbert_elliott_bad_to_good += 1;
+            } else {
+                self.stats.gilbert_elliott_good_to_bad += 1;
+            }
+        }
+        let run = if let Some(link) = self.links.get_mut(&key) {
+            link.gilbert_elliott_bad = next_bad;
+            if loses {
+                link.gilbert_elliott_loss_run += 1;
+            } else {
+                link.gilbert_elliott_loss_run = 0;
+            }
+            link.gilbert_elliott_loss_run
+        } else {
+            0
+        };
+        if loses {
+            self.stats.gilbert_elliott_loss_events += 1;
+            self.stats.gilbert_elliott_max_loss_run =
+                self.stats.gilbert_elliott_max_loss_run.max(run);
+        }
+        loses
+    }
+
     fn send(&mut self, from: SocketAddr, to: SocketAddr, payload: M) {
         self.stats.sent += 1;
         let key = (from, to);
@@ -315,12 +415,21 @@ impl<M: Clone> SimNetState<M> {
             .get(&key)
             .map_or_else(LinkPolicy::clean, |link| link.policy.clone());
 
+        let gilbert_elliott_lost = policy
+            .gilbert_elliott
+            .as_ref()
+            .is_some_and(|ge| self.gilbert_elliott_loses(key, ge));
+        if gilbert_elliott_lost && !self.handle_policy_loss(key, policy.retransmit_delay) {
+            return;
+        }
+
         // Burst state machine (mirrors the ChaosSocket semantics: the
         // triggering send and the following `burst_len - 1` sends drop).
-        let in_burst = self
-            .links
-            .get(&key)
-            .is_some_and(|link| link.burst_remaining > 0);
+        let in_burst = !gilbert_elliott_lost
+            && self
+                .links
+                .get(&key)
+                .is_some_and(|link| link.burst_remaining > 0);
         if in_burst {
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining -= 1;
@@ -330,8 +439,10 @@ impl<M: Clone> SimNetState<M> {
             }
         }
 
-        let burst_roll_hit =
-            !in_burst && policy.burst_rate > 0.0 && self.roll_unit() < policy.burst_rate;
+        let burst_roll_hit = !gilbert_elliott_lost
+            && !in_burst
+            && policy.burst_rate > 0.0
+            && self.roll_unit() < policy.burst_rate;
         if burst_roll_hit {
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining = policy.burst_len.saturating_sub(1);
@@ -340,8 +451,10 @@ impl<M: Clone> SimNetState<M> {
                 return;
             }
         } else {
-            let drop_roll_hit =
-                !in_burst && policy.drop_rate > 0.0 && self.roll_unit() < policy.drop_rate;
+            let drop_roll_hit = !gilbert_elliott_lost
+                && !in_burst
+                && policy.drop_rate > 0.0
+                && self.roll_unit() < policy.drop_rate;
             if drop_roll_hit && !self.handle_policy_loss(key, policy.retransmit_delay) {
                 return;
             }
@@ -498,12 +611,15 @@ impl<M: Clone> SimNet<M> {
 
     /// Sets (or replaces) the fault policy for the directed link `from → to`,
     /// preserving its blocked/holding toggles and any current retransmission
-    /// head-of-line deadline, and resetting any burst in progress.
+    /// head-of-line deadline. Replacing a policy resets fixed-burst progress
+    /// and starts any Gilbert-Elliott channel in Good with an empty loss run.
     pub fn set_link(&self, from: SocketAddr, to: SocketAddr, policy: LinkPolicy) {
         let mut state = self.lock();
         let link = state.links.entry((from, to)).or_default();
         link.policy = policy;
         link.burst_remaining = 0;
+        link.gilbert_elliott_bad = false;
+        link.gilbert_elliott_loss_run = 0;
     }
 
     /// Sets the same policy on both directions between `a` and `b`.
@@ -559,6 +675,8 @@ impl<M: Clone> SimNet<M> {
                 link.retransmit_blocked_until = None;
                 link.blocked = false;
                 link.holding = false;
+                link.gilbert_elliott_bad = false;
+                link.gilbert_elliott_loss_run = 0;
             }
             state.release_held(key);
         }
@@ -825,6 +943,7 @@ mod tests {
             burst_rate: 0.02,
             burst_len: 4,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
         };
         let first = run_trace(42, policy.clone());
         let second = run_trace(42, policy.clone());
@@ -1229,6 +1348,213 @@ mod tests {
             "burst_rate=1 with burst_len=3 drops every send (back-to-back bursts)"
         );
         assert_eq!(net.stats().dropped_by_policy, 9);
+    }
+
+    #[test]
+    fn gilbert_elliott_rolls_loss_then_transition_and_tracks_per_link_runs() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 1.0,
+                bad_to_good: 0.0,
+                good_drop_rate: 0.0,
+                bad_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        for value in 0..5 {
+            a.send_payload(addr(2), value);
+        }
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 0)]);
+        assert_eq!(
+            net.stats(),
+            SimNetStats {
+                sent: 5,
+                delivered: 1,
+                dropped_by_policy: 4,
+                gilbert_elliott_good_to_bad: 1,
+                gilbert_elliott_bad_sends: 4,
+                gilbert_elliott_good_sends: 1,
+                gilbert_elliott_loss_events: 4,
+                gilbert_elliott_max_loss_run: 4,
+                ..SimNetStats::default()
+            }
+        );
+
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 1.0,
+                    good_drop_rate: 0.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        a.send_payload(addr(2), 10);
+        a.send_payload(addr(2), 11);
+        a.send_payload(addr(2), 12);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 10), (addr(1), 12)]);
+        let stats = net.stats();
+        assert_eq!(stats.gilbert_elliott_good_to_bad, 3);
+        assert_eq!(stats.gilbert_elliott_bad_to_good, 1);
+        assert_eq!(stats.gilbert_elliott_loss_events, 5);
+        assert_eq!(stats.gilbert_elliott_max_loss_run, 4);
+    }
+
+    #[test]
+    fn gilbert_elliott_bypasses_blocked_and_held_sends_and_resets_per_link() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        let c = net.attach(addr(3));
+        let ge = LinkPolicy {
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 1.0,
+                bad_to_good: 0.0,
+                good_drop_rate: 0.0,
+                bad_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        };
+        net.set_link(addr(1), addr(2), ge.clone());
+        net.set_link(addr(1), addr(3), ge.clone());
+
+        net.set_blocked(addr(1), addr(2), true);
+        a.send_payload(addr(2), 1);
+        net.set_blocked(addr(1), addr(2), false);
+        net.set_holding(addr(1), addr(3), true);
+        a.send_payload(addr(3), 2);
+        net.set_holding(addr(1), addr(3), false);
+        assert_eq!(c.recv_payloads(), vec![(addr(1), 2)]);
+        assert_eq!(net.stats().gilbert_elliott_good_sends, 0);
+
+        a.send_payload(addr(2), 3);
+        a.send_payload(addr(2), 4);
+        a.send_payload(addr(3), 5);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 3)]);
+        assert_eq!(c.recv_payloads(), vec![(addr(1), 5)]);
+        let before_reset = net.stats();
+        assert_eq!(before_reset.gilbert_elliott_good_sends, 2);
+        assert_eq!(before_reset.gilbert_elliott_bad_sends, 1);
+        assert_eq!(before_reset.gilbert_elliott_loss_events, 1);
+
+        net.set_link(addr(1), addr(2), ge);
+        a.send_payload(addr(2), 6);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 6)]);
+        net.heal_all();
+        a.send_payload(addr(2), 7);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 7)]);
+        assert_eq!(net.stats().gilbert_elliott_good_sends, 3);
+    }
+
+    #[test]
+    fn gilbert_elliott_losses_become_reliable_fifo_retransmissions() {
+        let (clock, offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                retransmit_delay: Duration::from_millis(100),
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 1.0,
+                    good_drop_rate: 1.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        a.send_payload(addr(2), 1);
+        a.send_payload(addr(2), 2);
+        assert!(b.recv_payloads().is_empty());
+        offset.store(100, AtomicOrdering::Relaxed);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 1), (addr(1), 2)]);
+        let stats = net.stats();
+        assert_eq!(stats.gilbert_elliott_good_sends, 1);
+        assert_eq!(stats.gilbert_elliott_bad_sends, 1);
+        assert_eq!(stats.gilbert_elliott_good_to_bad, 1);
+        assert_eq!(stats.gilbert_elliott_bad_to_good, 1);
+        assert_eq!(stats.gilbert_elliott_loss_events, 2);
+        assert_eq!(stats.retransmit_delayed, 2);
+        assert_eq!(stats.dropped_by_policy, 0);
+    }
+
+    #[test]
+    fn gilbert_elliott_state_follows_rebound_source_generation() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let peer = addr(2);
+        let fresh = addr(3);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+        net.set_link(
+            old,
+            peer,
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 0.0,
+                    good_drop_rate: 0.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        socket.send_payload(peer, 1);
+        assert_eq!(remote.recv_payloads(), vec![(old, 1)]);
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        socket.send_payload(peer, 2);
+        assert!(remote.recv_payloads().is_empty());
+        assert_eq!(net.stats().gilbert_elliott_bad_sends, 1);
+        assert_eq!(net.stats().gilbert_elliott_loss_events, 1);
+    }
+
+    #[test]
+    fn gilbert_elliott_long_run_matches_stationary_loss_envelope() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(0xCE45_0E11, clock);
+        let a = net.attach(addr(1));
+        let _b = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 0.02,
+                    bad_to_good: 0.08,
+                    good_drop_rate: 0.01,
+                    bad_drop_rate: 0.60,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        for value in 0..20_000 {
+            a.send_payload(addr(2), value);
+        }
+        let stats = net.stats();
+        let bad_fraction = stats.gilbert_elliott_bad_sends as f64 / 20_000.0;
+        let loss_fraction = stats.gilbert_elliott_loss_events as f64 / 20_000.0;
+        assert!((0.15..=0.25).contains(&bad_fraction), "{stats:?}");
+        assert!((0.09..=0.17).contains(&loss_fraction), "{stats:?}");
+        assert!(stats.gilbert_elliott_good_to_bad > 100, "{stats:?}");
+        assert!(stats.gilbert_elliott_bad_to_good > 100, "{stats:?}");
     }
 
     #[test]
