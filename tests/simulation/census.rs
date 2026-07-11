@@ -4,7 +4,10 @@ use super::harness::schedule::{
     BackgroundNoise, DropPolicy, SavePolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
-use super::harness::{peer_addr, run, PeerEventKey, PeerEventPayload, RunOptions, RunReport};
+use super::harness::{
+    oracle::OracleFailure, peer_addr, run, PeerEventKey, PeerEventPayload, RunOptions, RunReport,
+    TraceSessionState,
+};
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
@@ -14,6 +17,8 @@ const SPARSE_HEAL_AT: u32 = 300;
 const MULTI_STAGGER_START: u32 = 150;
 const MULTI_DROP_AT: u32 = 178;
 const MULTI_HEAL_AT: u32 = 300;
+const ASYMMETRIC_PARTITION_START: u32 = 140;
+const ASYMMETRIC_PARTITION_HEAL: u32 = 450;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     let mut initial_links = Vec::new();
@@ -221,6 +226,36 @@ fn same_step_multi_drop_schedule() -> Schedule {
     }
 }
 
+fn asymmetric_partition_schedule() -> Schedule {
+    let n = 5;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 900;
+    config.noise = BackgroundNoise::Clean;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+
+    let events = vec![
+        (
+            ASYMMETRIC_PARTITION_START,
+            ScheduleEvent::Block {
+                from: 4,
+                to: 0,
+                blocked: true,
+            },
+        ),
+        (ASYMMETRIC_PARTITION_HEAL, ScheduleEvent::HealAll),
+    ];
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_0040,
+        link_seed: 0xCE45_0041,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: ASYMMETRIC_PARTITION_HEAL,
+    }
+}
+
 /// M3 §6.4 census: when RTT is far larger than `max_prediction`, peers should
 /// throttle by returning `Ok(empty)` rather than diverging or surfacing advance
 /// errors. The permanent oracle checks liveness and byte-consistent state; this
@@ -406,6 +441,239 @@ fn same_step_multi_drop_after_asymmetric_block_converges() {
         report.trace_hash, again.trace_hash,
         "same-step multi-drop row must reproduce its exact trace"
     );
+}
+
+/// M3 §28.3 known-red census: a one-way partition lasts beyond the disconnect
+/// timeout, so peer 0 drops peer 4 even though the reverse network direction
+/// is never blocked.
+/// This reproduces D14 at whole-mesh scale: the unilateral graceful freeze
+/// rewrites already-confirmed history. The four-peer majority and one-peer
+/// island both keep advancing, but their confirmed histories fork permanently.
+/// Flip this to a green convergence regression when M5's coordinated
+/// prepare/backfill/commit barrier lands.
+#[test]
+#[ignore = "known D14 confirmed-history rewrite under asymmetric partition"]
+fn one_way_minority_partition_rewrites_confirmed_history_known_defect() {
+    let schedule = asymmetric_partition_schedule();
+
+    let report = run(&schedule, &RunOptions::default());
+
+    assert!(
+        blocked_drop_count(&report, 4, 0) > 0,
+        "asymmetric-partition row must drop traffic on blocked link 4->0: {:?}",
+        report.blocked_drops_by_link
+    );
+    assert_eq!(
+        blocked_drop_count(&report, 0, 4),
+        0,
+        "reverse network direction 0->4 must never be blocked: {:?}",
+        report.blocked_drops_by_link
+    );
+    for to in 1..=3 {
+        assert_eq!(
+            blocked_drop_count(&report, 4, to),
+            0,
+            "other 4->majority network directions must remain unblocked ({to}): {:?}",
+            report.blocked_drops_by_link
+        );
+    }
+    assert_eq!(
+        report.net_stats.dropped_blocked,
+        blocked_drop_count(&report, 4, 0),
+        "4->0 must be the schedule's only blocked link: {:?}",
+        report.blocked_drops_by_link
+    );
+    assert!(
+        peer_event_payload_count(&report, 0, peer_dropped_key(4)) > 0,
+        "peer 0 must time out and gracefully drop peer 4: {:?}",
+        report.peer_event_payload_counts_by_peer
+    );
+    assert!(
+        peer_event_payload_count(&report, 0, addr_event_key(EventKind::Disconnected, 4)) > 0,
+        "peer 0 must surface peer 4's terminal disconnect: {:?}",
+        report.peer_event_payload_counts_by_peer
+    );
+    assert!(
+        peer_event_payload_count(&report, 0, addr_event_key(EventKind::NetworkInterrupted, 4)) > 0,
+        "peer 0 must directly observe peer 4's one-way silence: {:?}",
+        report.peer_event_payload_counts_by_peer
+    );
+    for observer in 1..=3 {
+        assert!(
+            peer_event_payload_count(&report, observer, peer_dropped_key(4)) > 0,
+            "majority peer {observer} must learn peer 4's drop through gossip: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+        assert_eq!(
+            peer_event_payload_count(
+                &report,
+                observer,
+                addr_event_key(EventKind::NetworkInterrupted, 4)
+            ),
+            0,
+            "majority peer {observer} must learn the drop before its own timeout: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+        assert!(
+            peer_event_payload_count(
+                &report,
+                observer,
+                addr_event_key(EventKind::Disconnected, 4)
+            ) > 0,
+            "majority peer {observer} must surface peer 4's gossiped disconnect: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+    }
+    for observer in 0..=3 {
+        for retained in 0..=3 {
+            if observer == retained {
+                continue;
+            }
+            assert_eq!(
+                peer_event_payload_count(&report, observer, peer_dropped_key(retained)),
+                0,
+                "majority peer {observer} must retain majority peer {retained}: {:?}",
+                report.peer_event_payload_counts_by_peer
+            );
+        }
+    }
+    for dropped in 0..=3 {
+        assert!(
+            peer_event_payload_count(&report, 4, peer_dropped_key(dropped)) > 0,
+            "minority peer 4 must eventually drop majority peer {dropped}: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+        assert!(
+            peer_event_payload_count(
+                &report,
+                4,
+                addr_event_key(EventKind::NetworkInterrupted, dropped)
+            ) > 0,
+            "minority peer 4 must observe majority peer {dropped}'s silence: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+        assert!(
+            peer_event_payload_count(&report, 4, addr_event_key(EventKind::Disconnected, dropped))
+                > 0,
+            "minority peer 4 must surface majority peer {dropped}'s disconnect: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+    }
+    assert_eq!(
+        report.recovered_within_b,
+        Some(true),
+        "both sides of the intentional ContinueWithout fork must keep advancing"
+    );
+    let confirmed_rewrites: Vec<_> = report
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|failure| match failure {
+            OracleFailure::ConfirmedInputDivergence {
+                peer,
+                first_author,
+                expected,
+                actual,
+                ..
+            } => Some((*peer, *first_author, expected, actual)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !confirmed_rewrites.is_empty()
+            && confirmed_rewrites.iter().all(
+                |(peer, first_author, expected, actual)| {
+                    *peer < 4
+                        && *first_author == 4
+                        && expected.len() == 5
+                        && actual.len() == 5
+                        && expected.get(..4) == actual.get(..4)
+                        && expected.get(4) != actual.get(4)
+                }
+            ),
+        "every confirmed divergence must be D14 rewriting only peer 4's input at the majority: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report
+            .final_confirmed
+            .iter()
+            .all(|confirmed| *confirmed > 200),
+        "the majority and minority island must remain available after the fork: {:?}",
+        report.final_confirmed
+    );
+    let final_snapshot = report
+        .trace_tail
+        .last()
+        .expect("a non-empty run must retain a final trace snapshot");
+    assert!(
+        final_snapshot
+            .session_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Running),
+        "both sides must finish Running rather than wedged: {:?}",
+        final_snapshot.session_states
+    );
+    let majority_state = final_snapshot
+        .game_states
+        .get(1)
+        .expect("five-player trace must contain peer 1 state");
+    assert!(
+        final_snapshot
+            .game_states
+            .iter()
+            .skip(1)
+            .take(3)
+            .all(|state| state == majority_state),
+        "gossip-driven majority peers 1..=3 must converge on one final state: {:?}",
+        final_snapshot.game_states
+    );
+    assert!(
+        report.verdict.failures.iter().all(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+        )),
+        "known D14 divergence must be the complete failure surface: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::StateDivergence {
+                peer: 4,
+                first_author: 0,
+                ..
+            }
+        )),
+        "minority peer 4 must diverge in state from canonical majority peer 0: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .filter_map(|failure| match failure {
+                OracleFailure::StateDivergence {
+                    peer, first_author, ..
+                } => Some((*peer, *first_author)),
+                _ => None,
+            })
+            .all(|pair| pair == (4, 0)),
+        "all state divergence must be minority peer 4 versus canonical majority peer 0: {:?}",
+        report.verdict.failures
+    );
+
+    let again = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "asymmetric-partition row must reproduce its exact trace"
+    );
+    assert_eq!(report.final_confirmed, again.final_confirmed);
+    assert_eq!(report.blocked_drops_by_link, again.blocked_drops_by_link);
 }
 
 /// M3 §6.4 census: after a graceful drop freezes a departed slot, a survivor
