@@ -1364,7 +1364,7 @@ impl<T: Config> P2PSession<T> {
                 self.hot_join_timing.polls_while_joining.saturating_add(1);
         }
         // Get all packets and distribute them to associated endpoints.
-        // The endpoints will handle their packets, which will trigger both events and UPD replies.
+        // The endpoints will handle their packets, which will trigger both events and UDP replies.
         for (from_addr, msg) in &self.socket.receive_all_messages() {
             let mut known_source = false;
             if let Some(endpoint) = self.player_reg.remotes.get_mut(from_addr) {
