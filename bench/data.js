@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783808466849,
+  "lastUpdate": 1783813589913,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "dae74c392344b41a1ce6efbf5050de7d20c5e9d1",
-          "message": "ci: harden workflow permissions to job scope + add fork guard to dependabot auto-merge (#142)\n\nWrite permissions were declared at the workflow level across multiple\nworkflows, granting every job wider access than needed.\n`dependabot-auto-merge.yml` additionally lacked a fork-origin guard on\nits `pull_request_target` trigger, allowing the write-permissioned job\nto run for PRs from forks.\n\n### `dependabot-auto-merge.yml`\n- Downgrade workflow-level to `contents: read` / `pull-requests: read`\n- Move `contents: write` / `pull-requests: write` to the `dependabot`\njob\n- Add fork guard: `github.event.pull_request.head.repo.full_name ==\ngithub.repository`\n\n```yaml\npermissions:\n  contents: read\n  pull-requests: read\n\njobs:\n  dependabot:\n    if: >-\n      github.event.pull_request.user.login == 'dependabot[bot]' &&\n      !github.event.pull_request.draft &&\n      github.event.pull_request.head.repo.full_name == github.repository\n    permissions:\n      contents: write\n      pull-requests: write\n```\n\n### Sweep of all other workflows\nSame over-permissioned pattern found and fixed in 8 additional workflows\n— write permissions moved from workflow scope to the specific jobs that\nrequire them:\n\n- `ci-benchmarks` — `contents/deployments/pull-requests: write` →\n`benchmark` job only; explicit `contents: read` added to\n`benchmark-quick`\n- `ci-changelog` — `pull-requests: write` → `changelog-check` job only\n- `devcontainer-build` — `packages: write` → `build-and-push` job only\n- `docs-deploy` — `pages: write` / `id-token: write` → `deploy` job only\n- `labeler` — `pull-requests: write` → both label jobs\n- `publish` — `contents: write` → `publish` job only\n- `sync-issue-template` — `contents: write` → `sync-versions` job only\n- `wiki-sync` — `contents: write` → `sync-wiki` job only\n\n`actionlint` is already enforced in `ci-lint.yml` and will catch\npermission misconfigurations in future workflow changes.\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>\nCo-authored-by: wallstop <1045249+wallstop@users.noreply.github.com>\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-04-07T17:11:56-07:00",
-          "tree_id": "baddf058969c5872d6c6ff24d2c83bc0b71f6e12",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/dae74c392344b41a1ce6efbf5050de7d20c5e9d1"
-        },
-        "date": 1775607383468,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 102,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 142,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 549,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 900,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1321,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 96114,
-            "range": "± 377",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24476,
-            "range": "± 254",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 675,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 871,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1555,
             "range": "± 94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5ebb23a7b97c142e8fc89281af56f87d58f4ee8e",
+          "message": "Add bounded control-loop simulation evidence (#224)\n\n## What\n\n- quantify H-SKEW rollback cost across mirrored peer orientation and\nfour scheduler cadences\n- add schema-v16 bounded endpoint RTT/advantage/backlog and live\nbandwidth queue/drain samples\n- preserve schema-v15 serialized trace identity and artifact replay\ncompatibility\n- execute matched H-OSC, H-BLOAT, and H-ASYM experiments with direct\nevidence\n\n## Why\n\nSeveral open PLAN hypotheses could only be discussed through aggregate\ncounters. This adds at most 12 deterministic directed-link samples per\nrun, allowing matched causal experiments without unbounded traces.\n\nThe resulting evidence:\n\n- perfectly symmetric 100 ms H-OSC controls are inert (zero\nrecommendations/skips), so perturbation-driven A10 remains\n- the N=2/4-byte H-BLOAT row shows identical bounded queue\nsamples/cumulative maxima while obedience cuts work 42.7%; scale and\nbetween-cut behavior remain open\n- 10/200 ms H-ASYM confirms a seven-frame throughput and 18-vs-11 stall\nsplit, but falsifies the predicted wait-recommendation mechanism at this\nbound\n\n## Impact\n\nTest/simulation infrastructure only. No production API, wire format,\nchangelog-relevant behavior, or runtime behavior changes.\n\n## Validation\n\n- agent preflight: PASS\n- strict workspace clippy with tokio,json: PASS\n- full nextest: 2,743 passed, 73 skipped\n- focused schema compatibility, artifact validation, H-OSC, H-BLOAT,\nH-ASYM, SimNet drain tests: PASS\n- ignored release H-SKEW hour and cadence/orientation probes: PASS\n- adversarial sub-agent review: zero issues\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to test/simulation harness and SimNet telemetry;\nno production runtime or wire-format behavior is modified.\n> \n> **Overview**\n> Adds **schema v16** simulation harness support: up to ~12\ndeterministic `ProgressSample` rows per run now optionally carry\nper-directed **endpoint** gauges (RTT, remote frame advantage, pending\noutput) and **live bandwidth queue** snapshots (queued bytes/datagrams,\ndrain delay). **Schema 15** keeps empty gauge vectors and unchanged\nserialized trace shape; artifact validation enforces directed-link\nordering and counts only for v16+.\n> \n> `SimNet` exposes read-only `SimBandwidthState` via\n`bandwidth_states()` without advancing virtual time or mutating queues.\n> \n> Matched census/fleet tests use the new series for causal evidence:\n**H-BLOAT** (obey vs ignore wait recommendations with identical queue\nsamples), **H-OSC** (symmetric delay does not trigger mutual sleep),\n**H-ASYM** (throughput bias without wait recommendations), tighter\n**bandwidth-queue** census assertions, and additional **H-SKEW** cost\nobservability (lower-bound assertions on hour test; ignored cadence\nmatrix probe).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ndf35e189e982aa28d0981e917519afa6f9ace358. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-11T16:41:52-07:00",
+          "tree_id": "d96e8274539cb56e6e445fbf9719eaf48ce82888",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/5ebb23a7b97c142e8fc89281af56f87d58f4ee8e"
+        },
+        "date": 1783813588865,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 132,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 181,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 448,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 705,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1016,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 132960,
+            "range": "± 3338",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46217,
+            "range": "± 280",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 102",
             "unit": "ns/iter"
           },
           {
