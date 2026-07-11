@@ -170,6 +170,11 @@ where
     /// Used as the basis for predictions to ensure determinism.
     last_confirmed_input: Option<T::Input>,
 
+    /// One confirmed input at the global rollback-window floor displaced by a
+    /// full recovery batch. The bounded side slot keeps that floor queryable
+    /// for cross-player rollback while the ring holds the arriving batch.
+    reclaimed_floor_input: Option<PlayerInput<T::Input>>,
+
     /// Whether this queue is frozen. A frozen queue silently ignores
     /// [`Self::add_input`] calls, leaving the most recently added input as the
     /// final confirmed value forever. Used by the session layer to support
@@ -255,6 +260,7 @@ impl<T: Config> InputQueue<T> {
             player_index,
             queue_length,
             last_confirmed_input: None,
+            reclaimed_floor_input: None,
             frozen: false,
         })
     }
@@ -313,6 +319,22 @@ impl<T: Config> InputQueue<T> {
     ///
     /// [`advance_queue_head`]: Self::advance_queue_head
     pub fn set_frame_delay(&mut self, delay: usize) -> Result<(), FortressError> {
+        self.set_frame_delay_with_reclaim_floor(delay, None)
+    }
+
+    pub(crate) fn set_frame_delay_reclaiming_before(
+        &mut self,
+        delay: usize,
+        reclaim_before: Frame,
+    ) -> Result<(), FortressError> {
+        self.set_frame_delay_with_reclaim_floor(delay, Some(reclaim_before))
+    }
+
+    fn set_frame_delay_with_reclaim_floor(
+        &mut self,
+        delay: usize,
+        reclaim_before: Option<Frame>,
+    ) -> Result<(), FortressError> {
         // Frozen queues represent a dropped peer under ContinueWithout. Once
         // frozen, their simulation input must remain stable regardless of
         // later queue mutation attempts, and `set_frame_delay` is contractually
@@ -382,6 +404,7 @@ impl<T: Config> InputQueue<T> {
         let snapshot_inputs = self.inputs.clone();
         let snapshot_prediction = self.prediction;
         let snapshot_last_confirmed_input = self.last_confirmed_input;
+        let snapshot_reclaimed_floor_input = self.reclaimed_floor_input;
 
         for _ in 0..delta {
             let next_frame = safe_frame_add!(
@@ -394,7 +417,7 @@ impl<T: Config> InputQueue<T> {
                 frame: next_frame,
                 input: last_input.input,
             };
-            if !self.add_input_by_frame(filler, next_frame) {
+            if !self.add_input_by_frame(filler, next_frame, reclaim_before) {
                 self.head = snapshot_head;
                 self.tail = snapshot_tail;
                 self.length = snapshot_length;
@@ -406,6 +429,7 @@ impl<T: Config> InputQueue<T> {
                 self.inputs = snapshot_inputs;
                 self.prediction = snapshot_prediction;
                 self.last_confirmed_input = snapshot_last_confirmed_input;
+                self.reclaimed_floor_input = snapshot_reclaimed_floor_input;
 
                 return Err(FortressError::InternalErrorStructured {
                     kind: InternalErrorKind::InputQueueGapFillFailed { frame: next_frame },
@@ -469,6 +493,11 @@ impl<T: Config> InputQueue<T> {
         &self,
         requested_frame: Frame,
     ) -> Result<PlayerInput<T::Input>, crate::FortressError> {
+        if let Some(input) = self.reclaimed_floor_input {
+            if input.frame == requested_frame {
+                return Ok(input);
+            }
+        }
         let offset = requested_frame.as_i32() as usize % self.queue_length;
 
         let input = self
@@ -523,6 +552,12 @@ impl<T: Config> InputQueue<T> {
         // we only drop frames until the last frame that was requested, otherwise we might delete data still needed
         if !self.last_requested_frame.is_null() {
             frame = cmp::min(frame, self.last_requested_frame);
+        }
+        if self
+            .reclaimed_floor_input
+            .is_some_and(|input| input.frame < frame)
+        {
+            self.reclaimed_floor_input = None;
         }
 
         // move the tail to "delete inputs", wrap around if necessary
@@ -616,6 +651,12 @@ impl<T: Config> InputQueue<T> {
 
         // Remember the last requested frame number for later. We'll need this in add_input() to drop out of prediction mode.
         self.last_requested_frame = requested_frame;
+
+        if let Some(input) = self.reclaimed_floor_input {
+            if input.frame == requested_frame {
+                return Some((input.input, InputStatus::Confirmed));
+            }
+        }
 
         // Verify that we request a frame that still exists
         let tail_input = self.inputs.get(self.tail)?;
@@ -1088,6 +1129,7 @@ impl<T: Config> InputQueue<T> {
         self.first_incorrect_frame = Frame::NULL;
         self.last_requested_frame = Frame::NULL;
         self.prediction = PlayerInput::blank_input(Frame::NULL);
+        self.reclaimed_floor_input = None;
         self.frozen = false;
         // `last_confirmed_input` is intentionally preserved: it is the
         // deterministic prediction base (frozen value on a reactivated host
@@ -1145,6 +1187,27 @@ impl<T: Config> InputQueue<T> {
     /// [`Frame::NULL`] avoids signalling a "drop" to callers that distinguish
     /// drops from accepted inputs while still indicating no progress was made.
     pub fn add_input(&mut self, input: PlayerInput<T::Input>) -> Frame {
+        self.add_input_with_reclaim_floor(input, None)
+    }
+
+    /// Adds input while allowing storage through `reclaim_before` to be moved
+    /// out of a full ring. Frames strictly before the floor are discarded; the
+    /// floor itself is retained in the bounded side slot. The sync layer
+    /// supplies this global floor so one player's recovery cannot lose inputs
+    /// that another player's rollback still needs.
+    pub(crate) fn add_input_reclaiming_before(
+        &mut self,
+        input: PlayerInput<T::Input>,
+        reclaim_before: Frame,
+    ) -> Frame {
+        self.add_input_with_reclaim_floor(input, Some(reclaim_before))
+    }
+
+    fn add_input_with_reclaim_floor(
+        &mut self,
+        input: PlayerInput<T::Input>,
+        reclaim_before: Option<Frame>,
+    ) -> Frame {
         if self.frozen {
             // Silently ignore inputs while frozen. Return the existing
             // last_added_frame so callers do not interpret this as a "drop"
@@ -1166,9 +1229,9 @@ impl<T: Config> InputQueue<T> {
         }
 
         // Move the queue head to the correct point in preparation to input the frame into the queue.
-        let new_frame = self.advance_queue_head(input.frame);
+        let new_frame = self.advance_queue_head(input.frame, reclaim_before);
         // if the frame is valid, then add the input
-        if !new_frame.is_null() && !self.add_input_by_frame(input, new_frame) {
+        if !new_frame.is_null() && !self.add_input_by_frame(input, new_frame, reclaim_before) {
             // Invariant violation occurred during add
             return Frame::NULL;
         }
@@ -1177,7 +1240,12 @@ impl<T: Config> InputQueue<T> {
 
     /// Adds an input frame to the queue at the given frame number. If there are predicted inputs, we will check those and mark them as incorrect, if necessary.
     /// Returns true if the input was added successfully, false if an invariant violation was detected.
-    fn add_input_by_frame(&mut self, input: PlayerInput<T::Input>, frame_number: Frame) -> bool {
+    fn add_input_by_frame(
+        &mut self,
+        input: PlayerInput<T::Input>,
+        frame_number: Frame,
+        reclaim_before: Option<Frame>,
+    ) -> bool {
         let previous_position = match self.head {
             0 => self.queue_length - 1,
             _ => self.head - 1,
@@ -1222,6 +1290,55 @@ impl<T: Config> InputQueue<T> {
                 );
                 return false;
             }
+        }
+
+        // A recovery batch may legitimately contain a full prediction window
+        // while the ring still retains one or more older confirmed inputs.
+        // The sync layer supplies the GLOBAL rollback-window floor. Reclaim
+        // exactly one older slot before writing, but never infer safety from
+        // this queue's local prediction state: another player's earlier
+        // mismatch may require this queue's inputs during the same rollback.
+        // If the displaced frame is exactly the floor, preserve it in the
+        // single side slot rather than losing a still-valid rollback input.
+        if self.length == self.queue_length {
+            let Some(oldest) = self.inputs.get(self.tail) else {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InputQueue,
+                    "Invalid tail index {} while reclaiming a full input queue",
+                    self.tail
+                );
+                return false;
+            };
+            let safe_to_evict = reclaim_before.is_some_and(|floor| oldest.frame <= floor);
+            if !safe_to_evict {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InputQueue,
+                    "Input queue capacity {} exhausted: oldest frame {} is newer than the reclaim floor {:?} (first incorrect {}, last requested {})",
+                    self.queue_length,
+                    oldest.frame,
+                    reclaim_before,
+                    self.first_incorrect_frame,
+                    self.last_requested_frame
+                );
+                return false;
+            }
+            if reclaim_before.is_some_and(|floor| oldest.frame == floor) {
+                self.reclaimed_floor_input = Some(*oldest);
+            }
+            let Some(next_tail) = circular_index_add(self.tail, 1, self.queue_length) else {
+                report_violation!(
+                    ViolationSeverity::Critical,
+                    ViolationKind::InputQueue,
+                    "Failed to advance tail {} while reclaiming a full input queue of length {}",
+                    self.tail,
+                    self.queue_length
+                );
+                return false;
+            };
+            self.tail = next_tail;
+            self.length -= 1;
         }
 
         // Add the frame to the back of the queue
@@ -1361,7 +1478,11 @@ impl<T: Config> InputQueue<T> {
     ///
     /// [`set_frame_delay`]: Self::set_frame_delay
     /// [`add_input`]: Self::add_input
-    fn advance_queue_head(&mut self, mut input_frame: Frame) -> Frame {
+    fn advance_queue_head(
+        &mut self,
+        mut input_frame: Frame,
+        reclaim_before: Option<Frame>,
+    ) -> Frame {
         let previous_position = match self.head {
             0 => self.queue_length - 1,
             _ => self.head - 1,
@@ -1416,7 +1537,7 @@ impl<T: Config> InputQueue<T> {
                     return Frame::NULL;
                 },
             };
-            if !self.add_input_by_frame(input_to_replicate, expected_frame) {
+            if !self.add_input_by_frame(input_to_replicate, expected_frame, reclaim_before) {
                 return Frame::NULL;
             }
             expected_frame =
@@ -1641,6 +1762,7 @@ mod input_queue_tests {
         assert_eq!(queue.inputs, before.inputs);
         assert_eq!(queue.prediction, before.prediction);
         assert_eq!(queue.last_confirmed_input, before.last_confirmed_input);
+        assert_eq!(queue.reclaimed_floor_input, before.reclaimed_floor_input);
         assert_eq!(queue.frozen, before.frozen);
     }
 
@@ -2311,6 +2433,91 @@ mod input_queue_tests {
             queue.confirmed_input(Frame::new(4)).is_err(),
             "failed gap fill must not leave a filler frame behind"
         );
+    }
+
+    /// A full recovery batch may need every ring slot for frames at or after
+    /// the rollback point. Older confirmed history must be reclaimed without
+    /// evicting that rollback point or corrupting the full-ring head/tail
+    /// invariant.
+    #[test]
+    fn full_prediction_recovery_reclaims_only_history_before_rollback() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid queue length");
+
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 })),
+            Frame::new(0)
+        );
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 1 })),
+            Frame::new(1)
+        );
+        let (predicted, status) = queue
+            .input(Frame::new(4))
+            .expect("prediction through frame 4");
+        assert_eq!(predicted.inp, 1);
+        assert_eq!(status, InputStatus::Predicted);
+
+        // Frame 2 differs from this queue's frozen prediction, but another
+        // player may require a global rollback from frame 1. Filling through
+        // frame 5 therefore reclaims frame 0 and moves floor frame 1 into the
+        // bounded side slot.
+        for frame in 2..=5i32 {
+            assert_eq!(
+                queue.add_input_reclaiming_before(
+                    PlayerInput::new(Frame::new(frame), TestInput { inp: frame as u8 }),
+                    Frame::new(1),
+                ),
+                Frame::new(frame)
+            );
+        }
+
+        assert_eq!(queue.first_incorrect_frame, Frame::new(2));
+        assert_eq!(queue.length, 4);
+        queue
+            .check_invariants()
+            .expect("reclaimed full ring is valid");
+        assert_eq!(
+            queue
+                .confirmed_input(Frame::new(1))
+                .expect("global rollback floor remains in the side slot")
+                .input
+                .inp,
+            1
+        );
+        queue.last_requested_frame = Frame::new(1);
+        queue.discard_confirmed_frames(Frame::new(100));
+        assert_eq!(
+            queue
+                .confirmed_input(Frame::new(1))
+                .expect("discard clamp must retain the requested floor")
+                .input
+                .inp,
+            1
+        );
+        for frame in 2..=5i32 {
+            assert_eq!(
+                queue
+                    .confirmed_input(Frame::new(frame))
+                    .expect("rollback-window input remains")
+                    .input
+                    .inp,
+                frame as u8
+            );
+        }
+
+        // The ring now starts at the rollback point. A further append cannot
+        // safely reclaim anything and must leave the queue byte-for-byte
+        // unchanged instead of overwriting the tail before reporting failure.
+        let before = queue.clone();
+        assert_eq!(
+            queue.add_input_reclaiming_before(
+                PlayerInput::new(Frame::new(6), TestInput { inp: 6 }),
+                Frame::new(1),
+            ),
+            Frame::NULL
+        );
+        assert_queue_unchanged(&queue, &before);
     }
 
     /// Setting the frame delay to its current value is a no-op even mid-session.

@@ -6806,6 +6806,19 @@ impl<T: Config> P2PSession<T> {
             .into());
         }
 
+        let queue_length = self.sync_layer.max_frame_delay().saturating_add(1);
+        let storage_span = self.max_prediction.saturating_add(delay);
+        let max_storage_span = queue_length.saturating_sub(1);
+        if storage_span > max_storage_span {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "max_prediction + input_delay",
+                min: 0,
+                max: u64::try_from(max_storage_span).unwrap_or(u64::MAX),
+                actual: u64::try_from(storage_span).unwrap_or(u64::MAX),
+            }
+            .into());
+        }
+
         let current_delay = self.sync_layer.frame_delay(player_handle)?;
         let prev_last_added = self.sync_layer.last_added_frame(player_handle)?;
 
@@ -9917,12 +9930,19 @@ impl<T: Config> P2PSession<T> {
                         );
                         return;
                     }
-                    // update our info
+                    // Retain the input before advancing receipt state. A
+                    // capacity refusal means the protocol has already handed
+                    // us a frame we cannot safely represent; fail closed
+                    // rather than acknowledge/advertise an unretained frame
+                    // and continue toward divergence.
+                    if !self.sync_layer.add_remote_input(player, input) {
+                        let confirmed_before_failure = self.confirmed_frame();
+                        self.enter_fail_closed_disconnect_state_at(confirmed_before_failure);
+                        return;
+                    }
                     if let Some(status) = self.local_connect_status.get_mut(player.as_usize()) {
                         status.last_frame = input.frame;
                     }
-                    // add the remote input
-                    self.sync_layer.add_remote_input(player, input);
                 }
             },
         }
@@ -10427,6 +10447,86 @@ mod tests {
             .expect("Failed to add player 1")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
+    }
+
+    #[test]
+    fn runtime_input_delay_respects_combined_rollback_storage_bound() {
+        let mut session = create_local_only_session();
+        let local = PlayerHandle::new(0);
+
+        session
+            .set_input_delay(local, 119)
+            .expect("8 prediction + 119 delay exactly fits the default ring");
+        let error = session
+            .set_input_delay(local, 120)
+            .expect_err("combined span one beyond the ring must be rejected");
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "max_prediction + input_delay",
+                    min: 0,
+                    max: 127,
+                    actual: 128,
+                }
+            }
+        ));
+        assert_eq!(
+            session.sync_layer.frame_delay(local).expect("local queue"),
+            119,
+            "rejected increase must not mutate the queue"
+        );
+    }
+
+    #[test]
+    fn remote_capacity_refusal_does_not_advance_receipt_state() {
+        let protocol = ProtocolConfig {
+            pending_output_limit: 2,
+            ..ProtocolConfig::default()
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_max_prediction_window(1)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 2 })
+            .with_protocol_config(protocol)
+            .with_num_players(2)
+            .expect("two players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("valid bounded session");
+        session.state = SessionState::Running;
+        let handles: Arc<[PlayerHandle]> = Arc::from(vec![PlayerHandle::new(1)]);
+
+        for frame in 0..=2 {
+            session.handle_event(
+                Event::Input {
+                    input: PlayerInput::new(Frame::new(frame), frame as u8),
+                    player: PlayerHandle::new(1),
+                    peer_connect_status: vec![ConnectionStatus::default(); 2],
+                },
+                Arc::clone(&handles),
+                test_addr(8080),
+            );
+        }
+        assert_eq!(session.local_connect_status[1].last_frame, Frame::new(2));
+
+        session.handle_event(
+            Event::Input {
+                input: PlayerInput::new(Frame::new(3), 3),
+                player: PlayerHandle::new(1),
+                peer_connect_status: vec![ConnectionStatus::default(); 2],
+            },
+            handles,
+            test_addr(8080),
+        );
+        assert_eq!(
+            session.local_connect_status[1].last_frame,
+            Frame::new(2),
+            "an unretained input must not advance the advertised receipt frame"
+        );
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
     }
 
     // ==========================================

@@ -363,6 +363,19 @@ impl<T: Config> SyncLayer<T> {
         self.current_frame = safe_frame_add!(self.current_frame, 1, "SyncLayer::advance_frame");
     }
 
+    /// Earliest input frame that any in-window rollback may still request.
+    /// Frames strictly before this floor are outside the saved-state window and
+    /// may be reclaimed from a full input ring.
+    fn rollback_window_floor(&self) -> Frame {
+        let prediction = i32::try_from(self.max_prediction).unwrap_or(i32::MAX);
+        Frame::new(
+            self.current_frame
+                .as_i32()
+                .saturating_sub(prediction)
+                .max(0),
+        )
+    }
+
     /// Saves the current game state.
     ///
     /// This method relies on the invariant that `current_frame` is always valid
@@ -447,11 +460,12 @@ impl<T: Config> SyncLayer<T> {
                 max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
             });
         }
+        let reclaim_before = self.rollback_window_floor();
         let len = self.input_queues.len();
         self.input_queues
             .get_mut(player_handle.as_usize())
             .ok_or_else(|| input_queue_oob(player_handle.as_usize(), len))?
-            .set_frame_delay(delay)?;
+            .set_frame_delay_reclaiming_before(delay, reclaim_before)?;
         Ok(())
     }
 
@@ -1244,9 +1258,10 @@ impl<T: Config> SyncLayer<T> {
             );
             return Frame::NULL;
         }
+        let reclaim_before = self.rollback_window_floor();
         let queue_count = self.input_queues.len();
         match self.input_queues.get_mut(player_handle.as_usize()) {
-            Some(queue) => queue.add_input(input),
+            Some(queue) => queue.add_input_reclaiming_before(input, reclaim_before),
             None => {
                 report_violation!(
                     ViolationSeverity::Error,
@@ -1266,12 +1281,11 @@ impl<T: Config> SyncLayer<T> {
         &mut self,
         player_handle: PlayerHandle,
         input: PlayerInput<T::Input>,
-    ) {
+    ) -> bool {
+        let reclaim_before = self.rollback_window_floor();
         let queue_count = self.input_queues.len();
         match self.input_queues.get_mut(player_handle.as_usize()) {
-            Some(queue) => {
-                queue.add_input(input);
-            },
+            Some(queue) => queue.add_input_reclaiming_before(input, reclaim_before) == input.frame,
             None => {
                 report_violation!(
                     ViolationSeverity::Error,
@@ -1280,6 +1294,7 @@ impl<T: Config> SyncLayer<T> {
                     player_handle.as_usize(),
                     queue_count
                 );
+                false
             },
         }
     }
@@ -1724,6 +1739,29 @@ mod sync_layer_tests {
         type Input = TestInput;
         type State = u8;
         type Address = SocketAddr;
+    }
+
+    #[test]
+    fn add_remote_input_reports_frozen_noop_as_not_accepted() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 1);
+        let player = PlayerHandle::new(0);
+        assert!(sync_layer.add_remote_input(
+            player,
+            PlayerInput::new(Frame::new(0), TestInput { inp: 1 })
+        ));
+        sync_layer
+            .freeze_player(player, Frame::new(0))
+            .expect("valid freeze frame");
+
+        assert!(!sync_layer.add_remote_input(
+            player,
+            PlayerInput::new(Frame::new(1), TestInput { inp: 2 })
+        ));
+        assert_eq!(
+            sync_layer.input_queues[0].last_added_frame(),
+            Frame::new(0),
+            "frozen queue must retain its original high-water"
+        );
     }
 
     #[test]
