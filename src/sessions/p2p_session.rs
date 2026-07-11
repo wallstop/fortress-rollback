@@ -6809,6 +6809,13 @@ impl<T: Config> P2PSession<T> {
         let queue_length = self.sync_layer.max_frame_delay().saturating_add(1);
         let storage_span = self.max_prediction.saturating_add(delay);
         let max_storage_span = queue_length.saturating_sub(1);
+        if delay > max_storage_span {
+            return Err(InvalidRequestKind::FrameDelayTooLarge {
+                delay,
+                max_delay: max_storage_span,
+            }
+            .into());
+        }
         if storage_span > max_storage_span {
             return Err(InvalidRequestKind::ConfigValueOutOfRange {
                 field: "max_prediction + input_delay",

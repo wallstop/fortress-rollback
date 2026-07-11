@@ -637,16 +637,15 @@ fn collect_peer_wire_by_link<I: SimInput>(
             if remote == local {
                 continue;
             }
-            let metrics = slot
-                .session
-                .peer_metrics(PlayerHandle::new(remote))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "peer {local}: peer_metrics(handle={remote}) failed unexpectedly: {error:?}"
-                    )
-                });
             let mut totals = PeerWireTotals::default();
-            totals.add(&metrics);
+            // A lifecycle event may retire this handle from the local peer
+            // before the probe cut. Preserve the complete directed-link key
+            // set and report zero for that no-longer-remote edge; wire probing
+            // is observational and must not turn valid retirement into a
+            // harness panic.
+            if let Ok(metrics) = slot.session.peer_metrics(PlayerHandle::new(remote)) {
+                totals.add(&metrics);
+            }
             by_link.insert((local, remote), totals);
         }
     }
@@ -2869,5 +2868,28 @@ mod tests {
             };
             assert_eq!(aggregate, report.peer_wire[local]);
         }
+    }
+
+    #[test]
+    fn wire_probe_remains_complete_after_runtime_retirement() {
+        let n = 3;
+        let mut config = schedule::SimConfig::smoke(n);
+        config.steps = 120;
+        config.disconnect_behavior = schedule::DropPolicy::ContinueWithout;
+        let mut schedule = schedule::generate(0xA11C_E100, config);
+        schedule.events = vec![(
+            30,
+            schedule::ScheduleEvent::GracefulRemove { by: 0, target: 2 },
+        )];
+
+        let report = run(
+            &schedule,
+            &RunOptions {
+                probe_confirmed_at: Some(60),
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(report.probe_peer_wire_by_link.len(), n * (n - 1));
+        assert!(report.probe_peer_wire_by_link.contains_key(&(0, 2)));
     }
 }

@@ -907,9 +907,10 @@ impl<M: Clone> SimNet<M> {
 
     /// Attaches a socket at `addr`, creating an inbox for it.
     ///
-    /// An existing inbox (from a previous attachment, or buffered
-    /// unattached-policy traffic) is preserved, so a hot-join re-attach at a
-    /// vacated address receives anything buffered for it.
+    /// An existing inbox is preserved when a previous `SimSocket` was dropped
+    /// without [`Self::detach`], or when unattached-policy traffic created the
+    /// inbox. [`Self::detach`] explicitly removes the inbox, so a detach/attach
+    /// cycle starts with an empty queue.
     ///
     /// The fabric routes through an address-owned inbox, so multiple live
     /// attachments at one address share that queue. The hot-join harness uses
