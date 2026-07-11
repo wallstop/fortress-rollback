@@ -716,7 +716,7 @@ impl<M: Clone> SimNetState<M> {
         let link = self.links.get_mut(&key)?;
         let departure = link.bandwidth_updated_at.filter(|cursor| *cursor > now)?;
 
-        if encoded_len == 0 {
+        if encoded_len == 0 || encoded_len > policy.burst_bytes {
             self.stats.bandwidth_oversize_drops =
                 self.stats.bandwidth_oversize_drops.saturating_add(1);
             link.stats.bandwidth_oversize_drops =
@@ -3002,9 +3002,18 @@ mod tests {
                 },
             );
         }
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 8,
+                encoded_len: 2,
+                is_input: false,
+            },
+        );
 
         assert_eq!(receiver.recv_payloads()[0].1.id, 1);
         assert_eq!(net.stats().bandwidth_tail_drops, 3);
+        assert_eq!(net.stats().bandwidth_oversize_drops, 1);
         offset.fetch_add(1_000, AtomicOrdering::Relaxed);
         assert_eq!(
             receiver
