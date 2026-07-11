@@ -169,6 +169,10 @@ pub struct RunOptions {
     /// dynamics because a clean drain always converges. The probe contributes
     /// to trace/shrinker identity and must be within `0..steps`.
     pub probe_confirmed_at: Option<u32>,
+    /// If set, sample the sender's exact protocol `pending_output_len` gauge
+    /// for one directed `(from, to)` link after every simulation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_output_probe_link: Option<(usize, usize)>,
     /// Corrupt the configured spectator's first input fingerprint in each
     /// displayed frame at or after this frame. Negative controls only need one
     /// planted spectator-only mismatch to prove the §6.2(d) oracle compares
@@ -178,6 +182,19 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+}
+
+/// End-of-step pending-output evidence for one directed protocol link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingOutputProbe {
+    pub from: usize,
+    pub to: usize,
+    pub at_probe: Option<u64>,
+    pub max: u64,
+    pub at_heal: Option<u64>,
+    pub after_recovery: Option<u64>,
+    pub final_value: u64,
 }
 
 /// Payload identity for the endpoint-bearing peer events the harness records.
@@ -419,6 +436,8 @@ struct TraceFinalSummary {
     fragmentation_drops_by_link: Vec<TraceLinkCount>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     link_stats_by_link: Vec<TraceLinkStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_output_probe: Option<PendingOutputProbe>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -449,6 +468,8 @@ pub struct RunReport {
     /// the step selected by [`RunOptions::probe_confirmed_at`]. Empty when no
     /// probe was requested. Keys are `(local_peer, remote_peer)`.
     pub probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals>,
+    /// End-of-step protocol backlog evidence for the requested directed link.
+    pub pending_output_probe: Option<PendingOutputProbe>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
@@ -1297,6 +1318,48 @@ pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) ->
     run_inner::<I>(schedule, options, false)
 }
 
+pub(super) fn validate_run_options(
+    schedule: &Schedule,
+    options: &RunOptions,
+) -> Result<(), String> {
+    let n = schedule.config.n_players;
+    if options
+        .probe_confirmed_at
+        .is_some_and(|probe| probe >= schedule.config.steps)
+    {
+        return Err(format!(
+            "probe_confirmed_at must be within 0..{}",
+            schedule.config.steps
+        ));
+    }
+    let Some((from, to)) = options.pending_output_probe_link else {
+        return Ok(());
+    };
+    if from >= n || to >= n || from == to {
+        return Err(format!(
+            "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
+        ));
+    }
+    let endpoint_retires = schedule.events.iter().any(|(_, event)| {
+        let retired = match event {
+            ScheduleEvent::GracefulRemove { target, .. }
+            | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+            ScheduleEvent::PeerKill { peer } => Some(*peer),
+            ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+            #[cfg(feature = "hot-join")]
+            ScheduleEvent::HotJoin { slot } => Some(*slot),
+            _ => None,
+        };
+        retired.is_some_and(|peer| peer == from || peer == to)
+    });
+    if endpoint_retires {
+        return Err(format!(
+            "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
+        ));
+    }
+    Ok(())
+}
+
 fn message_payload_metadata(message: &Message) -> SimPayloadMetadata {
     let (encoded_len, kind) = fortress_rollback::__internal::message_metadata(message);
     SimPayloadMetadata {
@@ -1313,14 +1376,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         )
     });
 
+    validate_run_options(schedule, options)
+        .unwrap_or_else(|error| panic!("invalid run options: {error}"));
     let n = schedule.config.n_players;
-    if let Some(probe) = options.probe_confirmed_at {
-        assert!(
-            probe < schedule.config.steps,
-            "probe_confirmed_at ({probe}) is outside the run (0..{})",
-            schedule.config.steps
-        );
-    }
 
     let clock = TestClock::new();
     let net: SimNet<Message> = SimNet::new_size_aware(
@@ -1502,6 +1560,18 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
     let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
+    let mut pending_output_probe =
+        options
+            .pending_output_probe_link
+            .map(|(from, to)| PendingOutputProbe {
+                from,
+                to,
+                at_probe: None,
+                max: 0,
+                at_heal: None,
+                after_recovery: None,
+                final_value: 0,
+            });
 
     // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
     // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
@@ -1867,6 +1937,29 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         if options.probe_confirmed_at == Some(step) {
             probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
         }
+        if let Some(probe) = pending_output_probe.as_mut() {
+            let value = peers[probe.from]
+                .session
+                .peer_metrics(PlayerHandle::new(probe.to))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "peer {}: pending-output peer_metrics(handle={}) failed unexpectedly: {error:?}",
+                        probe.from, probe.to
+                    )
+                })
+                .pending_output_len;
+            probe.max = probe.max.max(value);
+            probe.final_value = value;
+            if options.probe_confirmed_at == Some(step) {
+                probe.at_probe = Some(value);
+            }
+            if heal_step == Some(step) {
+                probe.at_heal = Some(value);
+            }
+            if run_c && step == recovery_anchor_at {
+                probe.after_recovery = Some(value);
+            }
+        }
 
         if let Some(spectator) = spectator.as_mut() {
             drive_spectator(
@@ -2083,6 +2176,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             &fragmentation_drops_by_link,
         ),
         link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
+        pending_output_probe,
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -2101,6 +2195,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         trace_tail: trace_tail.into(),
         probe_confirmed,
         probe_peer_wire_by_link,
+        pending_output_probe,
         net_stats: net.stats(),
         blocked_drops_by_link,
         fragmentation_drops_by_link,
@@ -2615,6 +2710,7 @@ mod tests {
             explicit.fragmentation_drops_by_link
         );
         assert_eq!(implicit.link_stats_by_link, explicit.link_stats_by_link);
+        assert_eq!(implicit.pending_output_probe, explicit.pending_output_probe);
         assert_eq!(
             implicit.load_game_state_observations,
             explicit.load_game_state_observations
@@ -2640,6 +2736,66 @@ mod tests {
             explicit.spectator_final_hosts
         );
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
+    }
+
+    #[test]
+    fn pending_output_probe_tracks_milestones_and_replay_identity() {
+        let mut config = schedule::SimConfig::smoke(2);
+        config.steps = 400;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let mut schedule = schedule::generate(0x5045_4e44, config);
+        schedule.events = vec![
+            (
+                20,
+                schedule::ScheduleEvent::Block {
+                    from: 0,
+                    to: 1,
+                    blocked: true,
+                },
+            ),
+            (
+                80,
+                schedule::ScheduleEvent::Block {
+                    from: 0,
+                    to: 1,
+                    blocked: false,
+                },
+            ),
+            (100, schedule::ScheduleEvent::HealAll),
+        ];
+        schedule.heal_at = 100;
+        let options = RunOptions {
+            probe_confirmed_at: Some(79),
+            pending_output_probe_link: Some((0, 1)),
+            ..RunOptions::default()
+        };
+
+        let first = run(&schedule, &options);
+        let replay = run(&schedule, &options);
+        let probe = first.pending_output_probe.expect("probe requested");
+        assert_eq!((probe.from, probe.to), (0, 1));
+        assert!(probe.at_probe.is_some_and(|value| value > 0));
+        assert!(probe.max >= probe.at_probe.unwrap_or_default());
+        assert!(probe.at_heal.is_some());
+        assert!(probe.after_recovery.is_some());
+        assert_eq!(first.trace_hash, replay.trace_hash);
+        assert_eq!(first.pending_output_probe, replay.pending_output_probe);
+
+        let reverse = run(
+            &schedule,
+            &RunOptions {
+                pending_output_probe_link: Some((1, 0)),
+                ..options
+            },
+        );
+        assert_ne!(first.trace_hash, reverse.trace_hash);
+
+        let mut retiring = schedule;
+        retiring
+            .events
+            .push((120, schedule::ScheduleEvent::PeerKill { peer: 1 }));
+        retiring.events.sort_by_key(|(step, _)| *step);
+        assert!(validate_run_options(&retiring, &options).is_err());
     }
 
     #[test]

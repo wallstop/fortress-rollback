@@ -190,6 +190,8 @@ impl FailureArtifact {
         }
         validate_schedule(&self.schedule)
             .map_err(|error| format!("invalid embedded materialized schedule: {error}"))?;
+        super::validate_run_options(&self.schedule, &self.replay_options)
+            .map_err(|error| format!("invalid replay options: {error}"))?;
         let n = self.schedule.config.n_players;
         for (name, value) in [
             ("corrupt_state_from", self.replay_options.corrupt_state_from),
@@ -201,16 +203,6 @@ impl FailureArtifact {
             if value.is_some_and(|(peer, _)| peer >= n) {
                 return Err(format!("replay option {name} has a peer outside 0..{n}"));
             }
-        }
-        if self
-            .replay_options
-            .probe_confirmed_at
-            .is_some_and(|step| step >= self.schedule.config.steps)
-        {
-            return Err(format!(
-                "replay probe step must be within 0..{}",
-                self.schedule.config.steps
-            ));
         }
         if self.schedule.config.spectator_hosts.is_empty()
             && (self.replay_options.corrupt_spectator_input_from.is_some()
@@ -733,6 +725,17 @@ mod tests {
             }),
             Box::new(|artifact| {
                 artifact.replay_options.probe_confirmed_at = Some(artifact.schedule.config.steps);
+            }),
+            Box::new(|artifact| {
+                artifact.replay_options.pending_output_probe_link = Some((0, 0));
+            }),
+            Box::new(|artifact| {
+                artifact.replay_options.pending_output_probe_link = Some((0, 1));
+                artifact.schedule.events.push((
+                    1,
+                    super::super::schedule::ScheduleEvent::PeerKill { peer: 1 },
+                ));
+                artifact.schedule.events.sort_by_key(|(step, _)| *step);
             }),
             Box::new(|artifact| {
                 artifact.replay_options.corrupt_spectator_input_from = Some(0);

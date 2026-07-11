@@ -51,6 +51,7 @@ struct FinalSummary {
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
+    pending_output_probe: Option<super::PendingOutputProbe>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
     fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
@@ -78,6 +79,7 @@ impl From<&RunReport> for FinalSummary {
             final_confirmed: report.final_confirmed.clone(),
             probe_confirmed: report.probe_confirmed.clone(),
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
+            pending_output_probe: report.pending_output_probe,
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
             fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
@@ -144,10 +146,14 @@ fn remap_peer_frame(value: Option<(usize, i32)>, removed: usize) -> Option<(usiz
 }
 
 fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions {
+    let pending_output_probe_link = options
+        .pending_output_probe_link
+        .and_then(|(from, to)| Some((remap_index(from, removed)?, remap_index(to, removed)?)));
     RunOptions {
         corrupt_state_from: remap_peer_frame(options.corrupt_state_from, removed),
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
+        pending_output_probe_link,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
     }
@@ -451,9 +457,7 @@ where
             return None;
         }
         if validate_schedule(schedule).is_err()
-            || options
-                .probe_confirmed_at
-                .is_some_and(|probe| probe >= schedule.config.steps)
+            || super::validate_run_options(schedule, options).is_err()
         {
             return None;
         }
@@ -816,6 +820,7 @@ mod tests {
             trace_tail: Vec::new(),
             probe_confirmed: Vec::new(),
             probe_peer_wire_by_link: BTreeMap::new(),
+            pending_output_probe: None,
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
             fragmentation_drops_by_link: BTreeMap::new(),
@@ -973,6 +978,7 @@ mod tests {
             corrupt_state_from: Some((3, 8)),
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
+            pending_output_probe_link: Some((3, 0)),
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
         };
@@ -985,6 +991,7 @@ mod tests {
         assert_eq!(mapped.corrupt_state_from, Some((2, 8)));
         assert_eq!(mapped.corrupt_checksum_from, None);
         assert_eq!(mapped.probe_confirmed_at, Some(19));
+        assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
         assert_eq!(candidate.events.len(), schedule.events.len() - 1);

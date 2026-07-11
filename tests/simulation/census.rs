@@ -5,10 +5,10 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    oracle::OracleFailure, peer_addr, run, PeerEventKey, PeerEventPayload, RunOptions, RunReport,
-    TraceSessionState,
+    oracle::OracleFailure, peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload,
+    RunOptions, RunReport, TraceSessionState, WideStubInput,
 };
-use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
+use crate::common::sim_net::{FragmentationPolicy, GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::{EventKind, PlayerHandle};
 use std::time::Duration;
 
@@ -23,6 +23,9 @@ const REBIND_AT: u32 = 180;
 const REBIND_HEAL_AT: u32 = 300;
 const GILBERT_ELLIOTT_START: u32 = 140;
 const GILBERT_ELLIOTT_HEAL: u32 = 420;
+const FRAGMENTATION_BACKLOG_START: u32 = 140;
+const FRAGMENTATION_BACKLOG_RELEASE: u32 = 204;
+const FRAGMENTATION_HEAL: u32 = 320;
 #[cfg(feature = "hot-join")]
 const NPEER_HOT_JOIN_AT: u32 = 140;
 #[cfg(feature = "hot-join")]
@@ -170,6 +173,57 @@ fn gilbert_elliott_schedule(include_correlated_loss: bool) -> Schedule {
         initial_links: clean_initial_links(n),
         events,
         heal_at: GILBERT_ELLIOTT_HEAL,
+    }
+}
+
+fn fragmentation_schedule(fragment_drop_rate: f64) -> Schedule {
+    let n = 16;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 700;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+    config.max_prediction = 120;
+
+    let fragmentation = LinkPolicy {
+        fragmentation: Some(FragmentationPolicy { fragment_drop_rate }),
+        ..LinkPolicy::clean()
+    };
+    let events = vec![
+        (
+            FRAGMENTATION_BACKLOG_START,
+            ScheduleEvent::Block {
+                from: 0,
+                to: 1,
+                blocked: true,
+            },
+        ),
+        (
+            FRAGMENTATION_BACKLOG_RELEASE,
+            ScheduleEvent::SetLink {
+                from: 0,
+                to: 1,
+                policy: fragmentation,
+            },
+        ),
+        (
+            FRAGMENTATION_BACKLOG_RELEASE,
+            ScheduleEvent::Block {
+                from: 0,
+                to: 1,
+                blocked: false,
+            },
+        ),
+        (FRAGMENTATION_HEAL, ScheduleEvent::HealAll),
+    ];
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_F12A,
+        link_seed: 0xCE45_F12B,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: FRAGMENTATION_HEAL,
     }
 }
 
@@ -517,6 +571,92 @@ fn correlated_loss_recovers_and_exhibits_two_state_bursts() {
         stats.dropped_by_policy, stats.gilbert_elliott_loss_events,
         "GE is the schedule's only unreliable loss source"
     );
+}
+
+#[test]
+#[ignore = "nightly N=16 32-byte fragmentation experiment"]
+fn oversized_input_fragment_loss_is_bounded_and_recovers() {
+    let options = RunOptions {
+        probe_confirmed_at: Some(FRAGMENTATION_BACKLOG_RELEASE - 1),
+        pending_output_probe_link: Some((0, 1)),
+        ..RunOptions::default()
+    };
+    let control_schedule = fragmentation_schedule(0.0);
+    let control = run_with_input::<WideStubInput>(&control_schedule, &options);
+    control.expect_pass(&control_schedule);
+
+    let schedule = fragmentation_schedule(0.25);
+    let first = run_with_input::<WideStubInput>(&schedule, &options);
+    let replay = run_with_input::<WideStubInput>(&schedule, &options);
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.pending_output_probe, replay.pending_output_probe);
+    assert_eq!(
+        first.fragmentation_drops_by_link,
+        replay.fragmentation_drops_by_link
+    );
+    assert_eq!(first.blocked_drops_by_link, replay.blocked_drops_by_link);
+    assert_eq!(first.link_stats_by_link, replay.link_stats_by_link);
+
+    let control_probe = control.pending_output_probe.expect("control probe");
+    let probe = first.pending_output_probe.expect("fault probe");
+    assert!(
+        probe
+            .at_probe
+            .is_some_and(|value| (1..128).contains(&value)),
+        "{probe:?}"
+    );
+    assert_eq!(probe.at_probe, control_probe.at_probe);
+    assert_eq!(probe.at_heal, control_probe.at_heal);
+    for evidence in [control_probe, probe] {
+        assert!(evidence.max < 128, "{evidence:?}");
+        assert!(
+            evidence.after_recovery.is_some_and(|value| value <= 1),
+            "{evidence:?}"
+        );
+        assert!(evidence.final_value <= 1, "{evidence:?}");
+    }
+
+    let control_link = control.link_stats_by_link[&(0, 1)];
+    let link = first.link_stats_by_link[&(0, 1)];
+    assert!(
+        control_link.max_encoded_input_bytes > 1_472,
+        "{control_link:?}"
+    );
+    assert!(
+        control_link.input_sends_over_1472_bytes > 0,
+        "{control_link:?}"
+    );
+    assert!(link.max_encoded_input_bytes > 1_472, "{link:?}");
+    assert!(link.input_sends_over_1472_bytes > 0, "{link:?}");
+    assert!(first.net_stats.fragmentation_input_eligible_sends > 0);
+    assert!(first.net_stats.fragmentation_max_fragments_per_send >= 2);
+    assert_eq!(first.net_stats.fragmentation_fragment_cap_hits, 0);
+    assert_eq!(control.net_stats.fragmentation_input_loss_events, 0);
+    assert!(first.net_stats.fragmentation_input_loss_events > 0);
+    assert_eq!(
+        first
+            .fragmentation_drops_by_link
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(0, 1)]
+    );
+    assert_eq!(
+        first
+            .blocked_drops_by_link
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(0, 1)]
+    );
+    assert_eq!(first.recovered_within_b, Some(true));
+    assert!(first.trace_tail.last().is_some_and(|snapshot| snapshot
+        .session_states
+        .iter()
+        .all(|state| *state == TraceSessionState::Running)));
 }
 
 #[test]
