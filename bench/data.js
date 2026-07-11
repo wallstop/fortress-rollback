@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783796318744,
+  "lastUpdate": 1783808466849,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "08a3223beae57695ce3db88fba15e05b5a51a0b6",
-          "message": "chore(deps): bump js-sys from 0.3.92 to 0.3.94 in /loom-tests in the cargo-loom-tests group (#139)\n\nBumps the cargo-loom-tests group in /loom-tests with 1 update:\n[js-sys](https://github.com/wasm-bindgen/wasm-bindgen).\n\nUpdates `js-sys` from 0.3.92 to 0.3.94\n<details>\n<summary>Commits</summary>\n<ul>\n<li>See full diff in <a\nhref=\"https://github.com/wasm-bindgen/wasm-bindgen/commits\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=js-sys&package-manager=cargo&previous-version=0.3.92&new-version=0.3.94)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-04-03T04:48:24-07:00",
-          "tree_id": "3134bcdfbc9895309abebf7061763938bb759dab",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/08a3223beae57695ce3db88fba15e05b5a51a0b6"
-        },
-        "date": 1775217251934,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 122,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 171,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 459,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 730,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1047,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 107056,
-            "range": "± 926",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 37029,
-            "range": "± 709",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1603,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 86",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c371e28b33284f74aedd450e9a3f5e7946283d9d",
+          "message": "Model clock-skewed frame production (#223)\n\n## Summary\n\n- add schema-v15 deterministic 60 Hz frame gating driven by each peer's\nskewed clock\n- execute and nightly-gate a matched one-hour H-SKEW experiment with\nbounded lag, correction duty, and work-amplification evidence\n- preserve schema <=14 lockstep behavior while bounding gated schedules\nto one opportunity per peer per outer step\n- carry progress/cost evidence through trace identity, failure\nartifacts, replay validation, and shrinking\n\n## Findings\n\nAt +0.1% skew, the fast peer receives exactly 216 extra opportunities\nper virtual hour and obeys 213 correction frames with zero stalls.\nConfirmation lag stays flat at 4–5 frames. The experiment also exposes a\nstill-open cost issue: aggregate simulation work rises 13.3% and\nresimulation rises 28.3% versus the exact-clock control. Nightly\nceilings prevent this from worsening while W-TIME follow-up investigates\nit.\n\n## Validation\n\n- `cargo nextest run --features tokio,json --no-capture` — 2,760 passed,\n72 skipped\n- `cargo nextest run --test simulation --no-capture` — 287 passed, 25\nskipped\n- release hour-equivalent H-SKEW control + skew + replay — passed\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` — passed\n- `actionlint .github/workflows/ci-simulation-nightly.yml` — passed\n- agent preflight — passed earlier; final rerun reached a pre-existing\nlong-running doc-claims sort and was stopped after all preceding checks\npassed\n- local adversarial review loop — final verdict: zero issues\n- Cursor round 1 finding fixed in `e74baa2`; exact-head re-review\nrequested\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes the deterministic harness frame loop and trace/artifact\nidentity (schema bumps), but production rollback paths are untouched and\nlegacy lockstep schedules stay default-compatible.\n> \n> **Overview**\n> Adds **schema v15** simulation support so each peer can accrue **60 Hz\nframe opportunities from its own skewed clock**\n(`FrameModel::SkewGated60Hz`), while **lockstep remains the default**\nfor older schedules. The harness now tracks **frame opportunities**,\n**obeyed wait frames**, and up to **12 progress samples**, folds them\ninto trace identity for schema ≥15, and bumps **failure artifacts to\nschema v3** with the same fields plus stricter replay checks.\n> \n> **H-SKEW** is exercised with new fleet tests: a short deterministic\nskew-gated probe and an **ignored hour-equivalent** run (+0.1% → 216\nextra opportunities/hour) that asserts bounded lag, correction duty, and\nwork/resimulation ceilings. **Nightly CI** now runs that experiment\nalongside the sharded fleet. Schedule limits rise (**250k steps**,\nskew-gated cadence validation); shrink can collapse `SkewGated60Hz` when\nunnecessary.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ne2c53ff7fd531a506a708c983e8e47f8a8f97f38. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-11T15:16:33-07:00",
+          "tree_id": "0204b4d3b29b088d3234092e2b82ddab6ae6879e",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/c371e28b33284f74aedd450e9a3f5e7946283d9d"
+        },
+        "date": 1783808466348,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 114,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 164,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 446,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 716,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1035,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 133172,
+            "range": "± 2112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46207,
+            "range": "± 835",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 94",
             "unit": "ns/iter"
           },
           {
