@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783784048564,
+  "lastUpdate": 1783796318744,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "f13ec1b589e25f95f1ea2c2d03a139b7ead4dee1",
-          "message": "chore(deps): bump z3 from 0.19.15 to 0.20.0 in the cargo-workspace group (#140)\n\nBumps the cargo-workspace group with 1 update:\n[z3](https://github.com/prove-rs/z3.rs).\n\nUpdates `z3` from 0.19.15 to 0.20.0\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/c19dc55a1af4fd4b0590892f89f8e8f858292a2a\"><code>c19dc55</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/528\">#528</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ced4149506948aaca0728d1abf71c2b53bf6f8a7\"><code>ced4149</code></a>\nchore: document minimum z3 version and feature gate optimize features\n(<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/556\">#556</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/75b88de3c2e9063a40cb62626f74cb9c0c0953ad\"><code>75b88de</code></a>\nchore: allow z3-src publish from branch</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/1aed1a0dba0b49414ea3db3a16346fea6b9abcd7\"><code>1aed1a0</code></a>\nchore: optimize CI and CI caching (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/554\">#554</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/fb844846391d74b0dfd6ca861ab7bd0b42769046\"><code>fb84484</code></a>\nfeat: add Char Ast and Sort (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/553\">#553</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/a4fdb01d705942718f1c9b322e87ebd117f0c88c\"><code>a4fdb01</code></a>\nfeat: make num dependency optional (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/552\">#552</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/426731446684e03639a52c8a4304e5037328c57f\"><code>4267314</code></a>\nchore: fix workflow directory and metadata</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/af6571acd84fd755c35032b410113b5de29bc196\"><code>af6571a</code></a>\nchore: release z3-src 416.0.1 (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/551\">#551</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/e4cea2ceb4ced2b0f0c65b68f22276c221d2d812\"><code>e4cea2c</code></a>\nchore: add xtask command to create z3-src patch PR (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/550\">#550</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/074099e2a66d9d1b17289faece4732e86e037152\"><code>074099e</code></a>\nfeat: Add Optimize::solutions and tweak Optimize::assert (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/530\">#530</a>)</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.19.15...z3-v0.20.0\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=z3&package-manager=cargo&previous-version=0.19.15&new-version=0.20.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-04-03T04:48:10-07:00",
-          "tree_id": "3d98a421cb795990422b8dc8cbf72b172f1da835",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/f13ec1b589e25f95f1ea2c2d03a139b7ead4dee1"
-        },
-        "date": 1775217187562,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 102,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 141,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 566,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 892,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1320,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 95984,
-            "range": "± 339",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24652,
-            "range": "± 1219",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 676,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 871,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1242,
             "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "69f5c51cf3ab7e5559ac91fbaaed31df809f7a46",
+          "message": "Model bounded bandwidth queueing (#222)\n\n## What changed\n\n- add schema-v14 deterministic per-directed-link token-bucket bandwidth\nand bounded tail-drop queueing to `SimNet`\n- bound queued metadata by bytes, per-link reservations, and\nwhole-fabric reservations\n- preserve backlog ordering across policy replacement, `HealAll`, and\nNAT rebind\n- add global/directional trace telemetry, schema validation, serde\ncoverage, and shrinker support\n- add a matched two-peer census row proving queue growth, bounded tail\ndrop, asymmetric wait recommendations, deterministic replay, and bounded\nrecovery\n\n## Why\n\nThe hardening plan could model delay, loss, fragmentation, and reliable\nHOL stalls, but not constrained uplinks or bufferbloat. That left\nH-BLOAT and the bandwidth/fragmentation interaction structurally\nuntestable.\n\nThis PR establishes the bounded deterministic primitive and first\npremise-asserted data without claiming the still-open H-BLOAT\nfeedback-loop verdict.\n\n## Validation\n\n- `cargo nextest run --features tokio,json,hot-join --no-capture` —\n3,003 passed, 71 intentionally skipped\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- two independent adversarial review loops, both final zero-issue\nverdicts\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Large new shaper state machine in shared test infrastructure affects\ndeterministic replay and trace hashes, but changes stay in\nsimulation/test code rather than production rollback paths.\n> \n> **Overview**\n> Adds optional **token-bucket bandwidth** with **bounded tail-drop\nqueueing** on directed links in the test `SimNet`, bumping simulation\nschedules to **schema v14**.\n> \n> `LinkPolicy` gains `BandwidthPolicy` (rate, burst, queue capacity)\nwith caps on burst/queue bytes and reservation counts. Sends run through\nuplink shaping **before** loss, fragmentation, and duplication; delivery\ntime is `shaped_departure + delay`. Oversize payloads, full queues,\nreservation caps, and unrepresentable deadlines fail closed with\ndedicated stats. **Policy swap**, **`HealAll`**, and **NAT rebind** keep\nor move backlog so new traffic cannot jump ahead of admitted shaping.\n> \n> Telemetry is wired through `SimLinkStats`, `SimNetStats`, harness\n`TraceNetStats`, schedule validation, and the failure shrinker\n(bandwidth stripped as its own axis). Extensive unit tests cover queue\ndelay, fractional refill, horizon drain after disabling shaping, and\nrebind behavior; a **census** row asserts queue growth, tail drops,\nasymmetric wait recommendations, replay identity, and recovery on a\nconstrained 0→1 link.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6015b9568508007f9bf61880b5ca6856bcc9f386. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-11T11:53:53-07:00",
+          "tree_id": "3a554db434118dbaed75f2c118c821c4d6122003",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/69f5c51cf3ab7e5559ac91fbaaed31df809f7a46"
+        },
+        "date": 1783796317146,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 113,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 165,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 471,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 754,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1089,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 139306,
+            "range": "± 5439",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 44766,
+            "range": "± 383",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 86",
             "unit": "ns/iter"
           },
           {
