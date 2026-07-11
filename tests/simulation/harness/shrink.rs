@@ -951,7 +951,6 @@ mod tests {
             (6, ScheduleEvent::GracefulRemove { by: 0, target: 3 }),
             (7, ScheduleEvent::LegacyDisconnect { by: 2, target: 3 }),
             (8, ScheduleEvent::PeerKill { peer: 2 }),
-            (9, ScheduleEvent::Rebind { peer: 3 }),
             (10, ScheduleEvent::HotJoin { slot: 3 }),
             (11, ScheduleEvent::SpectatorHostKill { host: 0 }),
             (20, ScheduleEvent::HealAll),
@@ -1007,10 +1006,6 @@ mod tests {
         assert!(candidate
             .events
             .iter()
-            .any(|(_, event)| matches!(event, ScheduleEvent::Rebind { peer: 2 })));
-        assert!(candidate
-            .events
-            .iter()
             .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { slot: 2 })));
         assert!(candidate
             .events
@@ -1020,6 +1015,20 @@ mod tests {
             candidate.events.last().map(|(_, event)| event),
             Some(ScheduleEvent::HealAll)
         ));
+    }
+
+    #[test]
+    fn peer_removal_remaps_rebind_on_a_valid_schema_v10_schedule() {
+        let mut schedule = clean_schedule(4, 20);
+        schedule.events = vec![(9, ScheduleEvent::Rebind { peer: 3 })];
+
+        let (candidate, _) =
+            remove_peer(&schedule, &RunOptions::default(), 1).expect("can remove peer");
+
+        assert_eq!(
+            candidate.events,
+            vec![(9, ScheduleEvent::Rebind { peer: 2 })]
+        );
     }
 
     #[test]

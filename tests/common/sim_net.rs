@@ -694,9 +694,12 @@ impl<M: Clone> SimSocketBinding<M> {
     ///
     /// Messages already queued to the live socket remain readable. Messages
     /// still in flight keep their original source and destination. Outbound
-    /// link policy/state follows the sender to the new address; destination
-    /// policy remains on the canonical old address so peers that have not
-    /// learned the new mapping continue sending into an unattached endpoint.
+    /// link policy/state is cloned to the new source. The old generation is
+    /// deliberately retained so pre-rebind held traffic remains discoverable
+    /// and releasable by [`SimNet::heal_all`]. Destination policy remains on
+    /// the canonical old address so peers that have not learned the new
+    /// mapping continue sending into an unattached endpoint. Schema v10 bounds
+    /// this history to one rebind per peer and excludes old-address hot join.
     pub fn rebind(&self, new_addr: SocketAddr) -> Result<SocketAddr, SimRebindError> {
         let mut binding = self
             .binding
@@ -726,6 +729,8 @@ impl<M: Clone> SimSocketBinding<M> {
         for old_key in outbound_keys {
             if let Some(link) = state.links.get(&old_key).cloned() {
                 let new_key = (new_addr, old_key.1);
+                // Retain `old_key`: `heal_all` discovers and releases held
+                // pre-rebind traffic by iterating the historical link keys.
                 state.links.insert(new_key, link);
             }
         }
