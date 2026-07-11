@@ -23,6 +23,7 @@ const REBIND_AT: u32 = 180;
 const REBIND_HEAL_AT: u32 = 300;
 const GILBERT_ELLIOTT_START: u32 = 140;
 const GILBERT_ELLIOTT_HEAL: u32 = 420;
+const INPUT_WINDOW_FAULT_START: u32 = 160;
 const FRAGMENTATION_BACKLOG_START: u32 = 140;
 const FRAGMENTATION_BACKLOG_RELEASE: u32 = 204;
 const FRAGMENTATION_HEAL: u32 = 320;
@@ -224,6 +225,50 @@ fn fragmentation_schedule(fragment_drop_rate: f64) -> Schedule {
         initial_links: clean_initial_links(n),
         events,
         heal_at: FRAGMENTATION_HEAL,
+    }
+}
+
+fn input_window_boundary_schedule(heal_at: u32, include_loss: bool) -> Schedule {
+    let n = 2;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 900;
+    config.step_dt_ms = 8;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+    config.max_prediction = 127;
+
+    let policy = if include_loss {
+        LinkPolicy {
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 1.0,
+                bad_to_good: 0.0,
+                good_drop_rate: 0.0,
+                bad_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        }
+    } else {
+        LinkPolicy::clean()
+    };
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_1280,
+        link_seed: 0xCE45_1281,
+        config,
+        initial_links: clean_initial_links(n),
+        events: vec![
+            (
+                INPUT_WINDOW_FAULT_START,
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy,
+                },
+            ),
+            (heal_at, ScheduleEvent::HealAll),
+        ],
+        heal_at,
     }
 }
 
@@ -571,6 +616,100 @@ fn correlated_loss_recovers_and_exhibits_two_state_bursts() {
         stats.dropped_by_policy, stats.gilbert_elliott_loss_events,
         "GE is the schedule's only unreliable loss source"
     );
+}
+
+#[test]
+fn input_redundancy_window_recovers_at_limit_and_fails_closed_beyond() {
+    let options = RunOptions {
+        probe_confirmed_at: Some(INPUT_WINDOW_FAULT_START - 1),
+        pending_output_probe_link: Some((0, 1)),
+        ..RunOptions::default()
+    };
+
+    let control_schedule = input_window_boundary_schedule(287, false);
+    let control = run(&control_schedule, &options);
+    control.expect_pass(&control_schedule);
+    assert_eq!(control.net_stats.dropped_by_policy, 0);
+    assert_eq!(
+        control.link_stats_by_link[&(0, 1)].max_consecutive_input_policy_loss_run,
+        0
+    );
+
+    let run_replayed = |heal_at| {
+        let schedule = input_window_boundary_schedule(heal_at, true);
+        let first = run(&schedule, &options);
+        let replay = run(&schedule, &options);
+        assert_eq!(first.trace_hash, replay.trace_hash, "heal={heal_at}");
+        assert_eq!(first.verdict, replay.verdict, "heal={heal_at}");
+        assert_eq!(first.net_stats, replay.net_stats, "heal={heal_at}");
+        assert_eq!(first.metrics, replay.metrics, "heal={heal_at}");
+        assert_eq!(
+            first.final_confirmed, replay.final_confirmed,
+            "heal={heal_at}"
+        );
+        assert_eq!(
+            first.violation_census, replay.violation_census,
+            "heal={heal_at}"
+        );
+        assert_eq!(
+            first.pending_output_probe, replay.pending_output_probe,
+            "heal={heal_at}"
+        );
+        (schedule, first)
+    };
+
+    let (below_schedule, below) = run_replayed(286);
+    below.expect_pass(&below_schedule);
+    let below_pending = below.pending_output_probe.expect("probe requested");
+    assert_eq!(below_pending.limit, 128);
+    assert_eq!(below_pending.max, 127);
+    assert_eq!(below_pending.at_heal, Some(127));
+    assert_eq!(below_pending.first_reached_limit_at, None);
+    assert_eq!(
+        below.link_stats_by_link[&(0, 1)].max_consecutive_input_policy_loss_run,
+        126
+    );
+    assert_eq!(below.recovered_within_b, Some(true));
+
+    let (at_schedule, at) = run_replayed(287);
+    at.expect_pass(&at_schedule);
+    let at_pending = at.pending_output_probe.expect("probe requested");
+    assert_eq!(at_pending.limit, 128);
+    assert_eq!(at_pending.max, 128);
+    assert_eq!(at_pending.at_heal, Some(128));
+    assert_eq!(at_pending.first_reached_limit_at, Some(287));
+    assert_eq!(
+        at.link_stats_by_link[&(0, 1)].max_consecutive_input_policy_loss_run,
+        127
+    );
+    assert_eq!(at.recovered_within_b, Some(true));
+    assert!(at.violation_census.is_empty());
+
+    // The next lost Input cannot grow the bounded pending-output queue beyond
+    // 128. The sender disconnects before a 129th entry is retained; the oracle
+    // therefore sees only the pinned terminal liveness failures, never queue
+    // corruption, unavailable confirmed input, or state divergence.
+    let (_over_schedule, over) = run_replayed(288);
+    let over_pending = over.pending_output_probe.expect("probe requested");
+    assert_eq!(over_pending.limit, 128);
+    assert_eq!(over_pending.max, 128);
+    assert_eq!(over_pending.at_heal, Some(128));
+    assert_eq!(over_pending.first_reached_limit_at, Some(287));
+    assert_eq!(
+        over.link_stats_by_link[&(0, 1)].max_consecutive_input_policy_loss_run,
+        128
+    );
+    assert_eq!(
+        peer_event_payload_count(&over, 0, addr_event_key(EventKind::Disconnected, 1)),
+        1
+    );
+    assert_eq!(over.recovered_within_b, Some(false));
+    assert!(over.violation_census.is_empty());
+    assert_eq!(over.verdict.failures.len(), 4);
+    assert!(over.verdict.failures.iter().all(|failure| matches!(
+        failure,
+        OracleFailure::EndProgress { .. } | OracleFailure::PostHealLiveness { .. }
+    )));
 }
 
 #[test]

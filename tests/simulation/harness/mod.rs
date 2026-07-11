@@ -190,6 +190,12 @@ pub struct RunOptions {
 pub struct PendingOutputProbe {
     pub from: usize,
     pub to: usize,
+    /// Queue capacity used by every protocol endpoint in the harness.
+    #[serde(default)]
+    pub limit: u64,
+    /// First complete end-of-step cut at which the queue reached `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_reached_limit_at: Option<u32>,
     pub at_probe: Option<u64>,
     pub max: u64,
     pub at_heal: Option<u64>,
@@ -1566,6 +1572,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             .map(|(from, to)| PendingOutputProbe {
                 from,
                 to,
+                limit: u64::try_from(ProtocolConfig::default().pending_output_limit)
+                    .unwrap_or(u64::MAX),
+                first_reached_limit_at: None,
                 at_probe: None,
                 max: 0,
                 at_heal: None,
@@ -1950,6 +1959,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .pending_output_len;
             probe.max = probe.max.max(value);
             probe.final_value = value;
+            if probe.first_reached_limit_at.is_none() && value >= probe.limit {
+                probe.first_reached_limit_at = Some(step);
+            }
             if options.probe_confirmed_at == Some(step) {
                 probe.at_probe = Some(value);
             }
@@ -2774,6 +2786,8 @@ mod tests {
         let replay = run(&schedule, &options);
         let probe = first.pending_output_probe.expect("probe requested");
         assert_eq!((probe.from, probe.to), (0, 1));
+        assert_eq!(probe.limit, 128);
+        assert_eq!(probe.first_reached_limit_at, None);
         assert!(probe.at_probe.is_some_and(|value| value > 0));
         assert!(probe.max >= probe.at_probe.unwrap_or_default());
         assert!(probe.at_heal.is_some());
