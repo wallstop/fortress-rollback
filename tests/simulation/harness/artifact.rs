@@ -128,10 +128,13 @@ pub struct FailureArtifact {
     /// Per-peer final confirmed frames.
     pub final_confirmed: Vec<i32>,
     /// Bounded clock/control-loop samples retained for skew failures.
+    #[serde(default)]
     pub progress_samples: Vec<ProgressSample>,
     /// Final per-peer frame-opportunity totals.
+    #[serde(default)]
     pub frame_opportunities: Vec<u64>,
     /// Final per-peer obeyed-wait totals.
+    #[serde(default)]
     pub wait_frames_obeyed: Vec<u64>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
@@ -747,6 +750,33 @@ mod tests {
         let mut artifact = sample_artifact();
         artifact.schedule.schema_version = SCHEDULE_SCHEMA_VERSION + 1;
         assert!(artifact.validate().is_err());
+    }
+
+    #[test]
+    fn artifact_v2_without_progress_fields_reaches_explicit_schema_rejection() {
+        let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
+        let object = value
+            .as_object_mut()
+            .expect("failure artifact serializes as an object");
+        object.insert(
+            "artifact_schema_version".to_owned(),
+            serde_json::Value::from(2),
+        );
+        for field in [
+            "progress_samples",
+            "frame_opportunities",
+            "wait_frames_obeyed",
+        ] {
+            assert!(object.remove(field).is_some(), "fixture contains {field}");
+        }
+
+        let artifact: FailureArtifact =
+            serde_json::from_value(value).expect("v2 envelope reaches validation");
+        let error = artifact.validate().expect_err("v2 schema is unsupported");
+        assert!(
+            error.contains("unsupported failure artifact schema 2"),
+            "wrong diagnostic: {error}"
+        );
     }
 
     #[test]
