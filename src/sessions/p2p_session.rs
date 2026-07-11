@@ -9921,29 +9921,41 @@ impl<T: Config> P2PSession<T> {
     /// routine first; otherwise discard an incoming routine or replace the oldest
     /// durable with an incoming durable.
     fn enqueue_event(&mut self, event: FortressEvent<T>) {
-        if let Some(dropped) =
-            enqueue_event_bounded(&mut self.event_queue, self.max_event_queue_size, event)
-        {
-            self.record_event_discard(dropped);
-        }
-        self.metrics.observe_event_queue_len(self.event_queue.len());
+        Self::enqueue_event_fields(
+            &mut self.event_queue,
+            self.max_event_queue_size,
+            &mut self.metrics,
+            &mut self.event_discard_warned,
+            event,
+        );
     }
 
-    fn record_event_discard(&mut self, dropped: FortressEvent<T>) {
-        self.metrics.record_event_discard(dropped.kind());
-        if !self.event_discard_warned {
-            self.event_discard_warned = true;
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::NetworkProtocol,
-                "event queue overflow at capacity: evicting the oldest queued routine first; \
-                 otherwise discarding an incoming routine or replacing the oldest durable with \
-                 an incoming durable (queue cap {}); \
-                 drain events every poll or raise the event-queue size to avoid losing \
-                 notifications. See SessionMetrics::events_discarded_total for the running count",
-                self.max_event_queue_size
-            );
+    /// Field-level enqueue used when another field of the session is already
+    /// mutably borrowed (notably a remote endpoint during checksum comparison).
+    fn enqueue_event_fields(
+        event_queue: &mut VecDeque<FortressEvent<T>>,
+        max_event_queue_size: usize,
+        metrics: &mut SessionMetrics,
+        event_discard_warned: &mut bool,
+        event: FortressEvent<T>,
+    ) {
+        if let Some(dropped) = enqueue_event_bounded(event_queue, max_event_queue_size, event) {
+            metrics.record_event_discard(dropped.kind());
+            if !*event_discard_warned {
+                *event_discard_warned = true;
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "event queue overflow at capacity: evicting the oldest queued routine first; \
+                     otherwise discarding an incoming routine or replacing the oldest durable with \
+                     an incoming durable (queue cap {}); \
+                     drain events every poll or raise the event-queue size to avoid losing \
+                     notifications. See SessionMetrics::events_discarded_total for the running count",
+                    max_event_queue_size
+                );
+            }
         }
+        metrics.observe_event_queue_len(event_queue.len());
     }
 
     fn compare_local_checksums_against_peers(&mut self) {
@@ -9969,22 +9981,13 @@ impl<T: Config> P2PSession<T> {
                                     remote_checksum,
                                     addr: remote.peer_addr(),
                                 };
-                                if let Some(dropped) = enqueue_event_bounded(
+                                Self::enqueue_event_fields(
                                     &mut self.event_queue,
                                     self.max_event_queue_size,
+                                    &mut self.metrics,
+                                    &mut self.event_discard_warned,
                                     event,
-                                ) {
-                                    self.metrics.record_event_discard(dropped.kind());
-                                    if !self.event_discard_warned {
-                                        self.event_discard_warned = true;
-                                        report_violation!(
-                                            ViolationSeverity::Warning,
-                                            ViolationKind::NetworkProtocol,
-                                            "event queue overflow at capacity: evicting the oldest queued routine first; otherwise discarding an incoming routine or replacing the oldest durable with an incoming durable (queue cap {}); drain events every poll or raise the event-queue size to avoid losing notifications. See SessionMetrics::events_discarded_total for the running count",
-                                            self.max_event_queue_size
-                                        );
-                                    }
-                                }
+                                );
                                 // B3 (Byzantine hardening): track per-peer
                                 // mismatch persistence. On a confirmed frame a
                                 // mismatch is a genuine divergence in the
@@ -10045,7 +10048,6 @@ impl<T: Config> P2PSession<T> {
             },
             DesyncDetection::Off => (),
         }
-        self.metrics.observe_event_queue_len(self.event_queue.len());
     }
 
     fn check_checksum_send_interval(&mut self) {
