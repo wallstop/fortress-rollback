@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783737391154,
+  "lastUpdate": 1783746475323,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "2d3e4264c41aa1906764ef6b9b0a14646f31dbd0",
-          "message": "chore(deps): bump js-sys from 0.3.91 to 0.3.92 in /loom-tests (#126)\n\nBumps [js-sys](https://github.com/wasm-bindgen/wasm-bindgen) from 0.3.91\nto 0.3.92.\n<details>\n<summary>Commits</summary>\n<ul>\n<li>See full diff in <a\nhref=\"https://github.com/wasm-bindgen/wasm-bindgen/commits\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility\nscore](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=js-sys&package-manager=cargo&previous-version=0.3.91&new-version=0.3.92)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop\nDependabot creating any more for this major version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop\nDependabot creating any more for this minor version (unless you reopen\nthe PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop\nDependabot creating any more for this dependency (unless you reopen the\nPR or upgrade to it yourself)\n\n\n</details>\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-03-30T05:52:16-07:00",
-          "tree_id": "a7a845f6eb2816b88e792789a5d9eca7f3ce7327",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/2d3e4264c41aa1906764ef6b9b0a14646f31dbd0"
-        },
-        "date": 1774875405196,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 114,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 428,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 683,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1002,
-            "range": "± 39",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 104676,
-            "range": "± 3722",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27543,
-            "range": "± 811",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 91",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,132 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1605,
             "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2b2ba0161abf4af5011484ff148eece8a611e137",
+          "message": "Add asymmetric minority partition census (#220)\n\n## Summary\n\n- add a premise-asserted N=5 one-way/minority partition census for\nPLAN.md §28.3(a,b)\n- pin the resulting D14 confirmed-history rewrite as an ignored\nknown-red regression until the M5 coordinated drop barrier lands\n- document the devcontainer's connector-first GitHub workflow: local Git\nover the VS Code-forwarded SSH agent, connected GitHub app for PR/review\noperations, and `gh` only when an applicable workflow requires it\n\n## Why\n\nThe asymmetric/minority partition row had remained unexecuted. The\nexperiment showed that a single blocked `4→0` direction forms a\nfour-peer majority and one-peer island through disconnect gossip, but\nalso independently reproduces D14. The regression now proves the exact\ncausal premises and accepts only the D14-shaped peer-4 input rewrite.\n\nPrevious automation also incorrectly treated an unauthenticated `gh` CLI\nas a publish blocker even though the devcontainer's SSH Git transport\nand connected GitHub app were both functional. The canonical LLM\ninstructions now describe the verified hybrid path.\n\n## Validation\n\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture` (2,506 passed)\n- focused census suite under default and `hot-join`\n- ignored D14 census regression executed directly\n- `scripts/docs/check-llm-skills.sh`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `git push --dry-run origin HEAD:refs/heads/dev/wallstop/hardening-30`\n\nNo changelog entry: production behavior and public API are unchanged.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests and agent documentation;\nproduction networking behavior and public APIs are unchanged.\n> \n> **Overview**\n> Adds a **PLAN §28.3** simulation census for a five-peer mesh with a\n**one-way block on `4→0`**: peer 0 times out and drops peer 4 while\n`0→4` stays open, forming a four-peer majority and a one-peer island\nunder `ContinueWithout`.\n> \n> The new\n**`one_way_minority_partition_rewrites_confirmed_history_known_defect`**\ntest is **`#[ignore]`** and pins the **D14** failure\nshape—`ConfirmedInputDivergence` rewriting only peer 4’s input on the\nmajority, plus expected gossip/drop/network-interruption premises and\ndeterministic trace replay—until an M5 coordinated drop barrier is\nexpected to fix it.\n> \n> **`.llm/context.md`** tightens the quality checklist bullets and adds\n**GitHub Access in Devcontainers**: prefer `git ls-remote` / `git push\n--dry-run` and the connected GitHub app over treating unauthenticated\n`gh` as a publish blocker.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n73e139e46d1821d77aff6a1a0992c46f4581629d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-10T22:03:24-07:00",
+          "tree_id": "f5867372dbfa183ec5cee17a89836d71fa8cab36",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/2b2ba0161abf4af5011484ff148eece8a611e137"
+        },
+        "date": 1783746474325,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 114,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 160,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 502,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 692,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1024,
+            "range": "± 104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 139900,
+            "range": "± 351",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 45274,
+            "range": "± 256",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 84",
             "unit": "ns/iter"
           },
           {
