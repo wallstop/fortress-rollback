@@ -1312,16 +1312,28 @@ impl<T: Config> InputQueue<T> {
             };
             let safe_to_evict = reclaim_before.is_some_and(|floor| oldest.frame <= floor);
             if !safe_to_evict {
-                report_violation!(
-                    ViolationSeverity::Critical,
-                    ViolationKind::InputQueue,
-                    "Input queue capacity {} exhausted: oldest frame {} is newer than the reclaim floor {:?} (first incorrect {}, last requested {})",
-                    self.queue_length,
-                    oldest.frame,
-                    reclaim_before,
-                    self.first_incorrect_frame,
-                    self.last_requested_frame
-                );
+                if let Some(floor) = reclaim_before {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Input queue capacity {} exhausted: oldest frame {} is newer than the reclaim floor {} (first incorrect {}, last requested {})",
+                        self.queue_length,
+                        oldest.frame,
+                        floor,
+                        self.first_incorrect_frame,
+                        self.last_requested_frame
+                    );
+                } else {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "Input queue capacity {} exhausted with no reclaim floor (oldest frame {}, first incorrect {}, last requested {})",
+                        self.queue_length,
+                        oldest.frame,
+                        self.first_incorrect_frame,
+                        self.last_requested_frame
+                    );
+                }
                 return false;
             }
             if reclaim_before.is_some_and(|floor| oldest.frame == floor) {
