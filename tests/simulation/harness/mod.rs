@@ -325,6 +325,8 @@ pub struct TraceNetStats {
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub bandwidth_reservation_cap_dropped_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_time_overflow_drops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub bandwidth_tail_dropped_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub bandwidth_max_queue_bytes: u64,
@@ -369,6 +371,7 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             bandwidth_oversize_drops: stats.bandwidth_oversize_drops,
             bandwidth_reservation_cap_drops: stats.bandwidth_reservation_cap_drops,
             bandwidth_reservation_cap_dropped_bytes: stats.bandwidth_reservation_cap_dropped_bytes,
+            bandwidth_time_overflow_drops: stats.bandwidth_time_overflow_drops,
             bandwidth_tail_dropped_bytes: stats.bandwidth_tail_dropped_bytes,
             bandwidth_max_queue_bytes: stats.bandwidth_max_queue_bytes,
             bandwidth_max_queue_delay_ns: stats.bandwidth_max_queue_delay_ns,
@@ -2407,6 +2410,7 @@ mod tests {
             bandwidth_queued_datagrams: 2,
             bandwidth_tail_drops: 1,
             bandwidth_tail_dropped_bytes: 100,
+            bandwidth_time_overflow_drops: 1,
             bandwidth_max_queue_bytes: 200,
             bandwidth_max_queue_delay_ns: 200_000_000,
             ..TraceNetStats::default()

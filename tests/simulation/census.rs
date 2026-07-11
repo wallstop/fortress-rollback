@@ -689,6 +689,7 @@ fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
         stats.bandwidth_reservation_cap_dropped_bytes, 0,
         "{stats:?}"
     );
+    assert_eq!(stats.bandwidth_time_overflow_drops, 0, "{stats:?}");
     assert_eq!(stats.dropped_by_policy, 0, "{stats:?}");
     assert_eq!(stats.dropped_blocked, 0, "{stats:?}");
     assert!(first.final_confirmed.iter().all(|frame| *frame > 400));

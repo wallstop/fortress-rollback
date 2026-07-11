@@ -133,6 +133,8 @@ pub struct SimLinkStats {
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub bandwidth_reservation_cap_dropped_bytes: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bandwidth_time_overflow_drops: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
     pub bandwidth_queued_datagrams: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub bandwidth_max_queue_bytes: u64,
@@ -189,6 +191,9 @@ impl SimLinkStats {
         self.bandwidth_reservation_cap_dropped_bytes = self
             .bandwidth_reservation_cap_dropped_bytes
             .saturating_add(other.bandwidth_reservation_cap_dropped_bytes);
+        self.bandwidth_time_overflow_drops = self
+            .bandwidth_time_overflow_drops
+            .saturating_add(other.bandwidth_time_overflow_drops);
         self.bandwidth_queued_datagrams = self
             .bandwidth_queued_datagrams
             .saturating_add(other.bandwidth_queued_datagrams);
@@ -368,6 +373,8 @@ pub struct SimNetStats {
     pub bandwidth_reservation_cap_drops: u64,
     /// Payload bytes refused by the reservation element-count ceiling.
     pub bandwidth_reservation_cap_dropped_bytes: u64,
+    /// Datagrams refused because their shaped deadline was unrepresentable.
+    pub bandwidth_time_overflow_drops: u64,
     /// Payload bytes rejected by bounded-queue tail drop.
     pub bandwidth_tail_dropped_bytes: u64,
     /// Largest queued service debt observed on any link.
@@ -619,7 +626,14 @@ impl<M: Clone> SimNetState<M> {
             let gained = u64::try_from(refill_numerator / 1_000_000_000).unwrap_or(u64::MAX);
             tokens = tokens.saturating_add(gained).saturating_sub(encoded_len);
             remainder = u64::try_from(refill_numerator % 1_000_000_000).unwrap_or(0);
-            cursor += Duration::from_nanos(wait_ns_u64);
+            let Some(next_cursor) = cursor.checked_add(Duration::from_nanos(wait_ns_u64)) else {
+                self.stats.bandwidth_time_overflow_drops =
+                    self.stats.bandwidth_time_overflow_drops.saturating_add(1);
+                link.stats.bandwidth_time_overflow_drops =
+                    link.stats.bandwidth_time_overflow_drops.saturating_add(1);
+                return None;
+            };
+            cursor = next_cursor;
         }
         let departure = cursor;
 
@@ -2634,6 +2648,54 @@ mod tests {
     }
 
     #[test]
+    fn bandwidth_deadline_overflow_fails_closed_without_queue_mutation() {
+        let base = Instant::now();
+        let mut low = 0_u64;
+        let mut high = u64::MAX;
+        while low < high {
+            let mid = low + (high - low) / 2 + 1;
+            if base.checked_add(Duration::from_secs(mid)).is_some() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let near_limit = base
+            .checked_add(Duration::from_secs(low))
+            .expect("binary search retains a representable Instant");
+        assert!(near_limit.checked_add(Duration::from_secs(1)).is_none());
+
+        let clock: SimClockFn = Arc::new(move || near_limit);
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            bandwidth: Some(BandwidthPolicy {
+                rate_bytes_per_second: 1,
+                burst_bytes: 1,
+                queue_capacity_bytes: 1,
+            }),
+            ..LinkPolicy::clean()
+        });
+        for id in 1..=2 {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 1,
+                    is_input: false,
+                },
+            );
+        }
+
+        assert_eq!(receiver.recv_payloads()[0].1.id, 1);
+        assert_eq!(net.stats().bandwidth_admitted_datagrams, 1);
+        assert_eq!(net.stats().bandwidth_time_overflow_drops, 1);
+        assert_eq!(net.stats().bandwidth_queued_datagrams, 0);
+        assert_eq!(net.lock().bandwidth_reservation_count, 0);
+    }
+
+    #[test]
     fn settling_one_send_retires_expired_reservations_on_idle_links() {
         let (clock, offset) = manual_clock();
         let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
@@ -3054,7 +3116,21 @@ mod tests {
                 },
             );
         }
+        assert_eq!(net.lock().bandwidth_reservation_count, 1);
         assert_eq!(binding.rebind(addr(3)), Ok(addr(1)));
+        {
+            let state = net.lock();
+            assert_eq!(state.bandwidth_reservation_count, 1);
+            assert!(state.links[&(addr(1), addr(2))]
+                .bandwidth_reservations
+                .is_empty());
+            assert_eq!(
+                state.links[&(addr(3), addr(2))]
+                    .bandwidth_reservations
+                    .len(),
+                1
+            );
+        }
         sender.send_payload(
             addr(2),
             SizedPayload {
@@ -3069,6 +3145,17 @@ mod tests {
         assert_eq!(receiver.recv_payloads()[0].1.id, 2);
         offset.fetch_add(100, AtomicOrdering::Relaxed);
         assert_eq!(receiver.recv_payloads()[0].1.id, 3);
+        net.set_link(addr(3), addr(2), LinkPolicy::clean());
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 4,
+                encoded_len: 100,
+                is_input: false,
+            },
+        );
+        assert_eq!(net.lock().bandwidth_reservation_count, 0);
+        assert_eq!(receiver.recv_payloads()[0].1.id, 4);
     }
 
     #[test]
