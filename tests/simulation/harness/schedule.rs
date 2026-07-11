@@ -134,7 +134,9 @@ pub enum ScenarioMix {
 ///   for corpus replay.
 /// - `13`: adds optional fixed-threshold IPv4-style fragmentation loss on
 ///   materialized directed links.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 13;
+/// - `14`: adds deterministic token-bucket bandwidth and bounded queueing on
+///   materialized directed links.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 14;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -147,6 +149,8 @@ pub const MAX_SIMULATION_STEP_DT_MS: u64 = 1_000;
 pub const MAX_SIMULATION_LINK_DELAY: Duration = Duration::from_secs(60);
 /// Maximum number of timed operations in one materialized schedule.
 pub const MAX_SIMULATION_EVENTS: usize = 100_000;
+/// Maximum burst or queued-byte bound accepted from a corpus schedule.
+pub const MAX_SIMULATION_BANDWIDTH_BYTES: u64 = crate::common::sim_net::MAX_BANDWIDTH_BYTES;
 
 /// Background link-noise level applied to every directed link at start.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,7 +497,9 @@ pub(super) fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<us
 }
 
 fn link_policy_required_schema(policy: &LinkPolicy) -> u32 {
-    if policy.fragmentation.is_some() {
+    if policy.bandwidth.is_some() {
+        14
+    } else if policy.fragmentation.is_some() {
         13
     } else if policy.gilbert_elliott.is_some() {
         11
@@ -594,6 +600,27 @@ fn validate_link_policy(policy: &LinkPolicy, context: &str) -> Result<(), String
             return Err(format!(
                 "{context} fragmentation cannot be combined with retransmit_delay"
             ));
+        }
+    }
+    if let Some(bandwidth) = policy.bandwidth {
+        if bandwidth.rate_bytes_per_second == 0 {
+            return Err(format!(
+                "{context} bandwidth rate_bytes_per_second must be > 0"
+            ));
+        }
+        if bandwidth.burst_bytes == 0 {
+            return Err(format!("{context} bandwidth burst_bytes must be > 0"));
+        }
+        for (field, value) in [
+            ("burst_bytes", bandwidth.burst_bytes),
+            ("queue_capacity_bytes", bandwidth.queue_capacity_bytes),
+        ] {
+            if value > MAX_SIMULATION_BANDWIDTH_BYTES {
+                return Err(format!(
+                    "{context} bandwidth {field} must be <= \
+                     {MAX_SIMULATION_BANDWIDTH_BYTES} (got {value})"
+                ));
+            }
         }
     }
     for (field, value) in [
@@ -1085,6 +1112,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         },
         BackgroundNoise::Rough => LinkPolicy {
             drop_rate: draw.range_f64(0.02, 0.10),
@@ -1096,6 +1124,7 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
+            bandwidth: None,
         },
     }
 }
@@ -1656,6 +1685,21 @@ mod tests {
                 },
                 13,
             ),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        bandwidth: Some(crate::common::sim_net::BandwidthPolicy {
+                            rate_bytes_per_second: 10_000,
+                            burst_bytes: 1_500,
+                            queue_capacity_bytes: 3_000,
+                        }),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                14,
+            ),
         ];
 
         for (event, required) in cases {
@@ -1730,6 +1774,58 @@ mod tests {
             .contains("requiring schema_version 13"));
         schedule.schema_version = 13;
         assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
+    fn schema_v14_floor_applies_to_bandwidth_links() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.bandwidth = Some(crate::common::sim_net::BandwidthPolicy {
+            rate_bytes_per_second: 10_000,
+            burst_bytes: 1_500,
+            queue_capacity_bytes: 3_000,
+        });
+        schedule.schema_version = 13;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v13 cannot claim bandwidth capability")
+            .contains("requiring schema_version 14"));
+        schedule.schema_version = 14;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+        let json = serde_json::to_vec(&schedule).expect("bandwidth schedule serializes");
+        let round_trip: Schedule =
+            serde_json::from_slice(&json).expect("bandwidth schedule deserializes");
+        assert_eq!(round_trip, schedule);
+        assert_eq!(validate_schedule(&round_trip), Ok(()));
+    }
+
+    #[test]
+    fn bandwidth_policy_validates_rate_burst_and_memory_bound() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.bandwidth = Some(crate::common::sim_net::BandwidthPolicy {
+            rate_bytes_per_second: 0,
+            burst_bytes: 1,
+            queue_capacity_bytes: 1,
+        });
+        assert!(validate_schedule(&schedule)
+            .expect_err("zero bandwidth rate must fail")
+            .contains("rate_bytes_per_second must be > 0"));
+
+        schedule.initial_links[0].2.bandwidth = Some(crate::common::sim_net::BandwidthPolicy {
+            rate_bytes_per_second: 1,
+            burst_bytes: 0,
+            queue_capacity_bytes: 1,
+        });
+        assert!(validate_schedule(&schedule)
+            .expect_err("zero bandwidth burst must fail")
+            .contains("burst_bytes must be > 0"));
+
+        schedule.initial_links[0].2.bandwidth = Some(crate::common::sim_net::BandwidthPolicy {
+            rate_bytes_per_second: 1,
+            burst_bytes: 1,
+            queue_capacity_bytes: MAX_SIMULATION_BANDWIDTH_BYTES + 1,
+        });
+        assert!(validate_schedule(&schedule)
+            .expect_err("unbounded simulated queue must fail")
+            .contains("queue_capacity_bytes must be <="));
     }
 
     #[test]
