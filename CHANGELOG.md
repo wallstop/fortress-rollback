@@ -140,7 +140,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throttled by a full prediction window — previously unobservable), `wait_recommendations`,
   `confirmation_lag_current` / `_max` / `_sum` (per-advance samples of how far ahead of the confirmed frame
   the simulation runs), `checksums_compared` / `checksums_matched` / `checksums_mismatched` (desync-detection
-  comparisons), and the `event_queue_high_water` / `checksum_history_high_water` container high-water marks.
+  comparisons), `unknown_source_packets` (decoded protocol messages from addresses that are not configured
+  endpoints for the networked session), and the `event_queue_high_water` / `checksum_history_high_water`
+  container high-water marks.
   All counters are always-on, allocation-free, and updated inline on the paths they measure. A companion
   **per-peer** snapshot, `PeerMetrics` (read via `P2PSession::peer_metrics(handle)`), carries wire-exact
   traffic counters for one remote peer or spectator: cumulative `bytes_sent` / `bytes_received` and
