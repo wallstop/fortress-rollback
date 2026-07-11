@@ -6,7 +6,7 @@
 
 use super::schedule::{validate_schedule, Schedule, ScheduleEvent};
 use super::{RunOptions, RunReport};
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{FragmentationPolicy, GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::metrics::EventKind;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -50,8 +50,12 @@ pub struct ShrinkResult {
 struct FinalSummary {
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
+    probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
+    pending_output_probe: Option<super::PendingOutputProbe>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
+    fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
+    link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     load_game_state_observations: Vec<super::LoadGameStateObservation>,
     metrics: Vec<fortress_rollback::SessionMetrics>,
     peer_wire: Vec<super::PeerWireTotals>,
@@ -74,8 +78,12 @@ impl From<&RunReport> for FinalSummary {
         Self {
             final_confirmed: report.final_confirmed.clone(),
             probe_confirmed: report.probe_confirmed.clone(),
+            probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
+            pending_output_probe: report.pending_output_probe,
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
+            fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
+            link_stats_by_link: report.link_stats_by_link.clone(),
             load_game_state_observations: report.load_game_state_observations.clone(),
             metrics: report.metrics.clone(),
             peer_wire: report.peer_wire.clone(),
@@ -138,10 +146,14 @@ fn remap_peer_frame(value: Option<(usize, i32)>, removed: usize) -> Option<(usiz
 }
 
 fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions {
+    let pending_output_probe_link = options
+        .pending_output_probe_link
+        .and_then(|(from, to)| Some((remap_index(from, removed)?, remap_index(to, removed)?)));
     RunOptions {
         corrupt_state_from: remap_peer_frame(options.corrupt_state_from, removed),
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
+        pending_output_probe_link,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
     }
@@ -194,6 +206,9 @@ fn remap_event(event: &ScheduleEvent, removed: usize) -> Option<ScheduleEvent> {
         ScheduleEvent::PeerKill { peer } => Some(ScheduleEvent::PeerKill {
             peer: remap_index(*peer, removed)?,
         }),
+        ScheduleEvent::Rebind { peer } => Some(ScheduleEvent::Rebind {
+            peer: remap_index(*peer, removed)?,
+        }),
         ScheduleEvent::SpectatorHostKill { host } => Some(ScheduleEvent::SpectatorHostKill {
             host: remap_index(*host, removed)?,
         }),
@@ -226,6 +241,7 @@ fn prune_invalid_special_events(schedule: &mut Schedule) {
         ScheduleEvent::HotJoin { slot } => {
             !retired[*slot] && hot_join_host(n, *slot).is_some_and(|host| !retired[host])
         },
+        ScheduleEvent::Rebind { peer } => !retired[*peer],
         ScheduleEvent::SetLink { .. }
         | ScheduleEvent::Block { .. }
         | ScheduleEvent::Hold { .. }
@@ -328,6 +344,7 @@ fn restore_final_heal(schedule: &mut Schedule, preferred_step: Option<u32>) {
 #[derive(Clone, Copy)]
 enum LinkSimplification {
     Loss,
+    Fragmentation,
     Duplication,
     Jitter,
     Delay,
@@ -341,7 +358,9 @@ fn simplify_link(policy: &mut LinkPolicy, simplification: LinkSimplification) {
             policy.drop_rate = 0.0;
             policy.burst_rate = 0.0;
             policy.burst_len = 0;
+            policy.gilbert_elliott = None;
         },
+        LinkSimplification::Fragmentation => policy.fragmentation = None,
         LinkSimplification::Duplication => policy.dup_rate = 0.0,
         LinkSimplification::Jitter => policy.jitter = Duration::ZERO,
         LinkSimplification::Delay => policy.base_delay = Duration::ZERO,
@@ -438,9 +457,7 @@ where
             return None;
         }
         if validate_schedule(schedule).is_err()
-            || options
-                .probe_confirmed_at
-                .is_some_and(|probe| probe >= schedule.config.steps)
+            || super::validate_run_options(schedule, options).is_err()
         {
             return None;
         }
@@ -692,6 +709,7 @@ where
     // or jitter on any of the others.
     for simplification in [
         LinkSimplification::Loss,
+        LinkSimplification::Fragmentation,
         LinkSimplification::Duplication,
         LinkSimplification::Jitter,
         LinkSimplification::Delay,
@@ -801,8 +819,12 @@ mod tests {
             final_confirmed,
             trace_tail: Vec::new(),
             probe_confirmed: Vec::new(),
+            probe_peer_wire_by_link: BTreeMap::new(),
+            pending_output_probe: None,
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
+            fragmentation_drops_by_link: BTreeMap::new(),
+            link_stats_by_link: BTreeMap::new(),
             load_game_state_observations: Vec::new(),
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
@@ -947,8 +969,8 @@ mod tests {
             (6, ScheduleEvent::GracefulRemove { by: 0, target: 3 }),
             (7, ScheduleEvent::LegacyDisconnect { by: 2, target: 3 }),
             (8, ScheduleEvent::PeerKill { peer: 2 }),
-            (9, ScheduleEvent::HotJoin { slot: 3 }),
-            (10, ScheduleEvent::SpectatorHostKill { host: 0 }),
+            (10, ScheduleEvent::HotJoin { slot: 3 }),
+            (11, ScheduleEvent::SpectatorHostKill { host: 0 }),
             (20, ScheduleEvent::HealAll),
         ];
         schedule.heal_at = 20;
@@ -956,6 +978,7 @@ mod tests {
             corrupt_state_from: Some((3, 8)),
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
+            pending_output_probe_link: Some((3, 0)),
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
         };
@@ -968,6 +991,7 @@ mod tests {
         assert_eq!(mapped.corrupt_state_from, Some((2, 8)));
         assert_eq!(mapped.corrupt_checksum_from, None);
         assert_eq!(mapped.probe_confirmed_at, Some(19));
+        assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
         assert_eq!(candidate.events.len(), schedule.events.len() - 1);
@@ -1011,6 +1035,20 @@ mod tests {
             candidate.events.last().map(|(_, event)| event),
             Some(ScheduleEvent::HealAll)
         ));
+    }
+
+    #[test]
+    fn peer_removal_remaps_rebind_on_a_valid_current_schedule() {
+        let mut schedule = clean_schedule(4, 20);
+        schedule.events = vec![(9, ScheduleEvent::Rebind { peer: 3 })];
+
+        let (candidate, _) =
+            remove_peer(&schedule, &RunOptions::default(), 1).expect("can remove peer");
+
+        assert_eq!(
+            candidate.events,
+            vec![(9, ScheduleEvent::Rebind { peer: 2 })]
+        );
     }
 
     #[test]
@@ -1319,6 +1357,8 @@ mod tests {
             burst_rate: 0.1,
             burst_len: 2,
             retransmit_delay: Duration::from_millis(4),
+            gilbert_elliott: None,
+            fragmentation: None,
         };
         schedule
             .initial_links
@@ -1398,6 +1438,59 @@ mod tests {
         );
         assert_eq!(irrelevant, &LinkPolicy::clean());
         assert_eq!(set_link, &LinkPolicy::clean());
+    }
+
+    #[test]
+    fn loss_simplification_removes_gilbert_elliott_without_touching_other_axes() {
+        let mut policy = LinkPolicy {
+            dup_rate: 0.25,
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 0.05,
+                bad_to_good: 0.20,
+                good_drop_rate: 0.01,
+                bad_drop_rate: 0.80,
+            }),
+            ..LinkPolicy::clean()
+        };
+
+        simplify_link(&mut policy, LinkSimplification::Loss);
+
+        assert_eq!(policy.gilbert_elliott, None);
+        assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fragmentation_simplification_removes_only_fragmentation() {
+        let policy = LinkPolicy {
+            dup_rate: 0.25,
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            }),
+            ..LinkPolicy::clean()
+        };
+        let mut schedule = clean_schedule(2, 2);
+        schedule.initial_links[0].2 = policy.clone();
+        schedule.events.insert(
+            0,
+            (
+                1,
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy,
+                },
+            ),
+        );
+
+        let simplified = simplify_links(&schedule, LinkSimplification::Fragmentation);
+
+        assert_eq!(simplified.initial_links[0].2.fragmentation, None);
+        assert!((simplified.initial_links[0].2.dup_rate - 0.25).abs() < f64::EPSILON);
+        let ScheduleEvent::SetLink { policy, .. } = &simplified.events[0].1 else {
+            panic!("first event must remain SetLink");
+        };
+        assert_eq!(policy.fragmentation, None);
+        assert!((policy.dup_rate - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -242,6 +242,9 @@ where
     /// violation to one per overflow episode; the counters in `metrics` keep the
     /// full history regardless.
     event_discard_warned: bool,
+    /// Whether this session has already reported its one unknown-source
+    /// diagnostic. The cumulative metric preserves the full count.
+    unknown_source_warned: bool,
 
     /// Hot-join state (host and joiner orchestration).
     ///
@@ -976,6 +979,7 @@ impl<T: Config> P2PSession<T> {
             halt_confirmed_ceiling: None,
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
+            unknown_source_warned: false,
             #[cfg(feature = "hot-join")]
             hot_join: HotJoinState {
                 reserved_slots: hot_join.reserved_slots,
@@ -1360,13 +1364,28 @@ impl<T: Config> P2PSession<T> {
                 self.hot_join_timing.polls_while_joining.saturating_add(1);
         }
         // Get all packets and distribute them to associated endpoints.
-        // The endpoints will handle their packets, which will trigger both events and UPD replies.
+        // The endpoints will handle their packets, which will trigger both events and UDP replies.
         for (from_addr, msg) in &self.socket.receive_all_messages() {
+            let mut known_source = false;
             if let Some(endpoint) = self.player_reg.remotes.get_mut(from_addr) {
+                known_source = true;
                 endpoint.handle_message(msg);
             }
             if let Some(endpoint) = self.player_reg.spectators.get_mut(from_addr) {
+                known_source = true;
                 endpoint.handle_message(msg);
+            }
+            if !known_source {
+                self.metrics.record_unknown_source_packet();
+                if !self.unknown_source_warned {
+                    self.unknown_source_warned = true;
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "ignoring decoded message from unknown source address {:?}; this may indicate stale traffic, spoofing, or a peer NAT rebind. Further warnings are suppressed for this session; see SessionMetrics::unknown_source_packets for the running count",
+                        from_addr
+                    );
+                }
             }
         }
 
@@ -6065,6 +6084,9 @@ impl<T: Config> P2PSession<T> {
     /// arrive and has lost notifications — see
     /// [`events_discarded_by_kind`](SessionMetrics::events_discarded_by_kind)
     /// for the per-category breakdown.
+    /// [`unknown_source_packets`](SessionMetrics::unknown_source_packets)
+    /// counts decoded messages ignored because their source address is not a
+    /// configured remote or spectator endpoint.
     ///
     /// # Example
     ///
@@ -6780,6 +6802,26 @@ impl<T: Config> P2PSession<T> {
         if !self.player_reg.is_local_player(player_handle) {
             return Err(InvalidRequestKind::NotLocalPlayer {
                 handle: player_handle,
+            }
+            .into());
+        }
+
+        let queue_length = self.sync_layer.max_frame_delay().saturating_add(1);
+        let storage_span = self.max_prediction.saturating_add(delay);
+        let max_storage_span = queue_length.saturating_sub(1);
+        if delay > max_storage_span {
+            return Err(InvalidRequestKind::FrameDelayTooLarge {
+                delay,
+                max_delay: max_storage_span,
+            }
+            .into());
+        }
+        if storage_span > max_storage_span {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "max_prediction + input_delay",
+                min: 0,
+                max: u64::try_from(max_storage_span).unwrap_or(u64::MAX),
+                actual: u64::try_from(storage_span).unwrap_or(u64::MAX),
             }
             .into());
         }
@@ -9895,12 +9937,19 @@ impl<T: Config> P2PSession<T> {
                         );
                         return;
                     }
-                    // update our info
+                    // Retain the input before advancing receipt state. A
+                    // capacity refusal means the protocol has already handed
+                    // us a frame we cannot safely represent; fail closed
+                    // rather than acknowledge/advertise an unretained frame
+                    // and continue toward divergence.
+                    if !self.sync_layer.add_remote_input(player, input) {
+                        let confirmed_before_failure = self.confirmed_frame();
+                        self.enter_fail_closed_disconnect_state_at(confirmed_before_failure);
+                        return;
+                    }
                     if let Some(status) = self.local_connect_status.get_mut(player.as_usize()) {
                         status.last_frame = input.frame;
                     }
-                    // add the remote input
-                    self.sync_layer.add_remote_input(player, input);
                 }
             },
         }
@@ -10233,7 +10282,7 @@ impl<T: Config> Session<T> for P2PSession<T> {
 )]
 mod tests {
     use super::*;
-    use crate::network::messages::Message;
+    use crate::network::messages::{Message, MessageBody, MessageHeader, SyncRequest};
     use crate::sessions::builder::SessionBuilder;
     use crate::{Config, NonBlockingSocket};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -10264,6 +10313,96 @@ mod tests {
         fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
             Vec::new()
         }
+    }
+
+    struct QueuedReceiveSocket {
+        messages: Arc<std::sync::Mutex<Vec<(SocketAddr, Message)>>>,
+    }
+
+    impl NonBlockingSocket<SocketAddr> for QueuedReceiveSocket {
+        fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+            std::mem::take(&mut *self.messages.lock().expect("message queue lock"))
+        }
+    }
+
+    fn sync_request_message() -> Message {
+        Message {
+            header: MessageHeader { magic: 0 },
+            body: MessageBody::SyncRequest(SyncRequest { random_request: 0 }),
+        }
+    }
+
+    #[test]
+    fn unknown_source_packets_are_counted_and_warn_once_per_session() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let unknown = test_addr(9999);
+        let spectator = test_addr(8081);
+        let messages = Arc::new(std::sync::Mutex::new(vec![
+            (unknown, sync_request_message()),
+            (unknown, sync_request_message()),
+            (test_addr(8080), sync_request_message()),
+            (spectator, sync_request_message()),
+        ]));
+        let socket = QueuedReceiveSocket {
+            messages: Arc::clone(&messages),
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .unwrap()
+            .add_player(PlayerType::Spectator(spectator), PlayerHandle::new(2))
+            .unwrap()
+            .start_p2p_session(socket)
+            .unwrap();
+
+        session.poll_remote_clients();
+
+        assert_eq!(session.metrics().unknown_source_packets, 2);
+        let warnings = observer
+            .violations()
+            .into_iter()
+            .filter(|violation| {
+                violation.severity == ViolationSeverity::Warning
+                    && violation.kind == ViolationKind::NetworkProtocol
+                    && violation.message.contains("unknown source")
+            })
+            .count();
+        assert_eq!(warnings, 1, "one burst must emit one diagnostic warning");
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.message.contains(&unknown.to_string())),
+            "the diagnostic must identify the first offending address"
+        );
+
+        // A well-behaved app drains events every poll. That must not re-arm the
+        // diagnostic and turn sustained ghost traffic into one warning per
+        // frame.
+        drop(session.events());
+        messages
+            .lock()
+            .expect("message queue lock")
+            .push((unknown, sync_request_message()));
+        session.poll_remote_clients();
+
+        assert_eq!(session.metrics().unknown_source_packets, 3);
+        let warnings = observer
+            .violations()
+            .into_iter()
+            .filter(|violation| {
+                violation.severity == ViolationSeverity::Warning
+                    && violation.kind == ViolationKind::NetworkProtocol
+                    && violation.message.contains("unknown source")
+            })
+            .count();
+        assert_eq!(warnings, 1, "draining events must not re-arm the warning");
     }
 
     // Helper function to create a local-only P2P session for testing (no network)
@@ -10315,6 +10454,86 @@ mod tests {
             .expect("Failed to add player 1")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
+    }
+
+    #[test]
+    fn runtime_input_delay_respects_combined_rollback_storage_bound() {
+        let mut session = create_local_only_session();
+        let local = PlayerHandle::new(0);
+
+        session
+            .set_input_delay(local, 119)
+            .expect("8 prediction + 119 delay exactly fits the default ring");
+        let error = session
+            .set_input_delay(local, 120)
+            .expect_err("combined span one beyond the ring must be rejected");
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "max_prediction + input_delay",
+                    min: 0,
+                    max: 127,
+                    actual: 128,
+                }
+            }
+        ));
+        assert_eq!(
+            session.sync_layer.frame_delay(local).expect("local queue"),
+            119,
+            "rejected increase must not mutate the queue"
+        );
+    }
+
+    #[test]
+    fn remote_capacity_refusal_does_not_advance_receipt_state() {
+        let protocol = ProtocolConfig {
+            pending_output_limit: 2,
+            ..ProtocolConfig::default()
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_max_prediction_window(1)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 2 })
+            .with_protocol_config(protocol)
+            .with_num_players(2)
+            .expect("two players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("valid bounded session");
+        session.state = SessionState::Running;
+        let handles: Arc<[PlayerHandle]> = Arc::from(vec![PlayerHandle::new(1)]);
+
+        for frame in 0..=2 {
+            session.handle_event(
+                Event::Input {
+                    input: PlayerInput::new(Frame::new(frame), frame as u8),
+                    player: PlayerHandle::new(1),
+                    peer_connect_status: vec![ConnectionStatus::default(); 2],
+                },
+                Arc::clone(&handles),
+                test_addr(8080),
+            );
+        }
+        assert_eq!(session.local_connect_status[1].last_frame, Frame::new(2));
+
+        session.handle_event(
+            Event::Input {
+                input: PlayerInput::new(Frame::new(3), 3),
+                player: PlayerHandle::new(1),
+                peer_connect_status: vec![ConnectionStatus::default(); 2],
+            },
+            handles,
+            test_addr(8080),
+        );
+        assert_eq!(
+            session.local_connect_status[1].last_frame,
+            Frame::new(2),
+            "an unretained input must not advance the advertised receipt frame"
+        );
+        assert_eq!(session.current_state(), SessionState::Synchronizing);
     }
 
     // ==========================================

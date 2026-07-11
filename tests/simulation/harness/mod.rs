@@ -19,10 +19,12 @@ pub mod oracle;
 pub mod schedule;
 pub mod shrink;
 
-use crate::common::sim_net::{SimNet, SimSocket};
+use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
+#[cfg(feature = "hot-join")]
+use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
@@ -39,7 +41,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::Hasher as _;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 /// Input contract used by the deterministic simulation harness.
@@ -160,12 +162,17 @@ pub struct RunOptions {
     /// Corrupt `(peer, from_frame)`'s saved **checksums only** (states stay
     /// identical): exercises the in-band detector cross-check path.
     pub corrupt_checksum_from: Option<(usize, i32)>,
-    /// If set, snapshot every peer's confirmed frame at this step into
-    /// [`RunReport::probe_confirmed`]. Lets a test observe mid-run confirmation
-    /// (frozen during a hitch, converged after heal) — end-of-run state alone
-    /// hides recovery dynamics because a clean drain always converges. Must be
-    /// within `0..steps` (asserted up front, so a requested probe always fires).
+    /// If set, snapshot every peer's confirmed frame and every directed link's
+    /// wire counters at the end of this step into [`RunReport::probe_confirmed`]
+    /// and [`RunReport::probe_peer_wire_by_link`]. Lets a test observe mid-run
+    /// confirmation and protocol traffic; end-of-run state alone hides those
+    /// dynamics because a clean drain always converges. The probe contributes
+    /// to trace/shrinker identity and must be within `0..steps`.
     pub probe_confirmed_at: Option<u32>,
+    /// If set, sample the sender's exact protocol `pending_output_len` gauge
+    /// for one directed `(from, to)` link after every simulation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_output_probe_link: Option<(usize, usize)>,
     /// Corrupt the configured spectator's first input fingerprint in each
     /// displayed frame at or after this frame. Negative controls only need one
     /// planted spectator-only mismatch to prove the §6.2(d) oracle compares
@@ -175,6 +182,25 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+}
+
+/// End-of-step pending-output evidence for one directed protocol link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingOutputProbe {
+    pub from: usize,
+    pub to: usize,
+    /// Queue capacity used by every protocol endpoint in the harness.
+    #[serde(default)]
+    pub limit: u64,
+    /// First complete end-of-step cut at which the queue reached `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_reached_limit_at: Option<u32>,
+    pub at_probe: Option<u64>,
+    pub max: u64,
+    pub at_heal: Option<u64>,
+    pub after_recovery: Option<u64>,
+    pub final_value: u64,
 }
 
 /// Payload identity for the endpoint-bearing peer events the harness records.
@@ -254,6 +280,40 @@ pub struct TraceNetStats {
     pub dropped_unattached: u64,
     pub duplicated: u64,
     pub held: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_good_to_bad: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_bad_to_good: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_good_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_bad_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gilbert_elliott_max_loss_run: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_eligible_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_fragments_modeled: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_lost_fragments: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_input_eligible_sends: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_input_loss_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_max_packet_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_max_fragments_per_send: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fragmentation_fragment_cap_hits: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
@@ -267,6 +327,21 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             dropped_unattached: stats.dropped_unattached,
             duplicated: stats.duplicated,
             held: stats.held,
+            gilbert_elliott_good_to_bad: stats.gilbert_elliott_good_to_bad,
+            gilbert_elliott_bad_to_good: stats.gilbert_elliott_bad_to_good,
+            gilbert_elliott_good_sends: stats.gilbert_elliott_good_sends,
+            gilbert_elliott_bad_sends: stats.gilbert_elliott_bad_sends,
+            gilbert_elliott_loss_events: stats.gilbert_elliott_loss_events,
+            gilbert_elliott_max_loss_run: stats.gilbert_elliott_max_loss_run,
+            fragmentation_eligible_sends: stats.fragmentation_eligible_sends,
+            fragmentation_fragments_modeled: stats.fragmentation_fragments_modeled,
+            fragmentation_lost_fragments: stats.fragmentation_lost_fragments,
+            fragmentation_loss_events: stats.fragmentation_loss_events,
+            fragmentation_input_eligible_sends: stats.fragmentation_input_eligible_sends,
+            fragmentation_input_loss_events: stats.fragmentation_input_loss_events,
+            fragmentation_max_packet_bytes: stats.fragmentation_max_packet_bytes,
+            fragmentation_max_fragments_per_send: stats.fragmentation_max_fragments_per_send,
+            fragmentation_fragment_cap_hits: stats.fragmentation_fragment_cap_hits,
         }
     }
 }
@@ -310,10 +385,65 @@ pub struct TraceSpectatorState {
 }
 
 #[derive(Serialize)]
+struct TracePeerWireLink {
+    from: usize,
+    to: usize,
+    totals: PeerWireTotals,
+}
+
+#[derive(Serialize)]
+struct TraceLinkStats {
+    from: usize,
+    to: usize,
+    stats: crate::common::sim_net::SimLinkStats,
+}
+
+#[derive(Serialize)]
+struct TraceLinkCount {
+    from: usize,
+    to: usize,
+    count: u64,
+}
+
+fn trace_fragmentation_drops(
+    schema_version: u32,
+    counts: &BTreeMap<(usize, usize), u64>,
+) -> Vec<TraceLinkCount> {
+    if schema_version < 13 {
+        return Vec::new();
+    }
+    counts
+        .iter()
+        .map(|(&(from, to), &count)| TraceLinkCount { from, to, count })
+        .collect()
+}
+
+fn trace_link_stats(
+    schema_version: u32,
+    stats: &BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
+) -> Vec<TraceLinkStats> {
+    if schema_version < 13 {
+        return Vec::new();
+    }
+    stats
+        .iter()
+        .map(|(&(from, to), &stats)| TraceLinkStats { from, to, stats })
+        .collect()
+}
+
+#[derive(Serialize)]
 struct TraceFinalSummary {
     failure_classes: Vec<&'static str>,
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    probe_peer_wire_by_link: Vec<TracePeerWireLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fragmentation_drops_by_link: Vec<TraceLinkCount>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_stats_by_link: Vec<TraceLinkStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_output_probe: Option<PendingOutputProbe>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -340,10 +470,20 @@ pub struct RunReport {
     /// Each peer's confirmed frame sampled at [`RunOptions::probe_confirmed_at`]
     /// (empty when no probe step was requested). Indexed by peer.
     pub probe_confirmed: Vec<i32>,
+    /// Per-directed-link wire counters sampled after every peer has completed
+    /// the step selected by [`RunOptions::probe_confirmed_at`]. Empty when no
+    /// probe was requested. Keys are `(local_peer, remote_peer)`.
+    pub probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals>,
+    /// End-of-step protocol backlog evidence for the requested directed link.
+    pub pending_output_probe: Option<PendingOutputProbe>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
     pub blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
+    /// Fragmentation-loss counts split by directed peer index pair `(from, to)`.
+    pub fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
+    /// Size and policy telemetry split by directed peer index pair `(from, to)`.
+    pub link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     /// `LoadGameState` requests observed while driving peers.
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
@@ -404,7 +544,7 @@ pub struct RunReport {
 /// headers). The `messages_{sent,received}_by_kind` arrays are positional in
 /// [`MessageKind::ALL`] order; read them by category with
 /// [`sent_by_kind`](Self::sent_by_kind) / [`received_by_kind`](Self::received_by_kind).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PeerWireTotals {
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -485,6 +625,31 @@ impl PeerWireTotals {
             .copied()
             .fold(0u64, u64::saturating_add)
     }
+}
+
+fn collect_peer_wire_by_link<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    n_players: usize,
+) -> BTreeMap<(usize, usize), PeerWireTotals> {
+    let mut by_link = BTreeMap::new();
+    for (local, slot) in peers.iter().enumerate() {
+        for remote in 0..n_players {
+            if remote == local {
+                continue;
+            }
+            let mut totals = PeerWireTotals::default();
+            // A lifecycle event may retire this handle from the local peer
+            // before the probe cut. Preserve the complete directed-link key
+            // set and report zero for that no-longer-remote edge; wire probing
+            // is observational and must not turn valid retirement into a
+            // harness panic.
+            if let Ok(metrics) = slot.session.peer_metrics(PlayerHandle::new(remote)) {
+                totals.add(&metrics);
+            }
+            by_link.insert((local, remote), totals);
+        }
+    }
+    by_link
 }
 
 impl RunReport {
@@ -639,10 +804,15 @@ impl<I: SimInput> SimGameStub<I> {
 
 struct PeerSlot<I: SimInput> {
     session: P2PSession<I::SessionConfig>,
+    binding: SimSocketBinding<Message>,
+    /// Canonical and rebound source addresses used by this logical peer.
+    source_addrs: Vec<SocketAddr>,
     game: SimGameStub<I>,
     observer: Arc<CollectingObserver>,
     /// Highest frame whose confirmed inputs were sampled into the oracle.
     sampled_confirmed: i32,
+    /// RNG seed used to construct this peer's current protocol generation.
+    protocol_rng_seed: u64,
     /// A hot-joined replacement starts from a mid-game snapshot and cannot
     /// answer historical `confirmed_inputs_for_frame` queries below that
     /// snapshot. While armed, this stores the earliest frame the coordinator's
@@ -681,9 +851,75 @@ fn peer_protocol_config(schedule: &Schedule, peer: usize, clock: &TestClock) -> 
 
     ProtocolConfig {
         clock: Some(peer_clock),
-        protocol_rng_seed: Some(fnv1a_hash(&(schedule.seed, peer))),
+        protocol_rng_seed: Some(peer_protocol_seed(schedule, peer)),
         ..ProtocolConfig::default()
     }
+}
+
+fn peer_protocol_seed(schedule: &Schedule, peer: usize) -> u64 {
+    if schedule.schema_version < 12 {
+        fnv1a_hash(&(schedule.seed, peer))
+    } else {
+        let peer = u64::try_from(peer).expect("validated peer index fits u64");
+        fnv1a_hash(&(schedule.seed, peer))
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn protocol_magic_for_seed(seed: u64) -> u16 {
+    // Keep this in lockstep with UdpProtocol::new: draw the low u16 from
+    // Pcg32 and reject zero. The end-to-end hot-join census guards the
+    // production side of this test-harness coupling.
+    let mut rng = Pcg32::seed_from_u64(seed);
+    loop {
+        let magic = rng.next_u32() as u16;
+        if magic != 0 {
+            return magic;
+        }
+    }
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_protocol_seed_candidate(
+    schedule: &Schedule,
+    peer: usize,
+    step: u32,
+    previous_seed: u64,
+    nonce: u32,
+) -> u64 {
+    let peer = u64::try_from(peer).expect("validated peer index fits u64");
+    fnv1a_hash(&(
+        "hot-join-replacement",
+        schedule.seed,
+        peer,
+        step,
+        previous_seed,
+        nonce,
+    ))
+}
+
+/// Derives a deterministic replacement-generation seed whose initial protocol
+/// magic differs from the departing generation. Reusing the old seed makes a
+/// replacement synchronize prematurely with survivor endpoints from the old
+/// era; their later rearm advances its magic and the replacement then filters
+/// the genuine new-era handshake forever.
+#[cfg(feature = "hot-join")]
+fn hot_join_protocol_seed(schedule: &Schedule, peer: usize, step: u32, previous_seed: u64) -> u64 {
+    // Schema <=11 replays the original same-seed replacement semantics so
+    // checked-in corpus traces keep their historical identity. Schema 12
+    // gives each replacement generation a distinct initial protocol magic.
+    if schedule.schema_version < 12 {
+        return previous_seed;
+    }
+    let previous_magic = protocol_magic_for_seed(previous_seed);
+    for nonce in 0_u32..=u32::from(u16::MAX) {
+        let candidate =
+            hot_join_protocol_seed_candidate(schedule, peer, step, previous_seed, nonce);
+        if protocol_magic_for_seed(candidate) != previous_magic {
+            return candidate;
+        }
+    }
+    panic!("failed to derive a distinct protocol magic for hot-join peer {peer} at step {step}");
 }
 
 fn update_spectator_required_min_frame<I: SimInput>(
@@ -709,8 +945,6 @@ fn retire_peer_for_lifecycle<I: SimInput>(
     peer: usize,
     peers: &[PeerSlot<I>],
     dead: &mut [bool],
-    net: &SimNet<Message>,
-    addrs: &[SocketAddr],
     oracle: &mut Oracle,
     spectator_required_min_frame: Option<&mut Option<i32>>,
 ) {
@@ -719,11 +953,21 @@ fn retire_peer_for_lifecycle<I: SimInput>(
     }
 
     dead[peer] = true;
-    net.detach(addrs[peer]);
+    peers[peer].binding.detach();
     oracle.mark_peer_dead(peer);
     if let Some(required_min_frame) = spectator_required_min_frame {
         update_spectator_required_min_frame(peers, dead, required_min_frame);
     }
+}
+
+/// Deterministic schema-v10 address for peer `peer`'s first NAT rebind.
+///
+/// TEST-NET-2 is disjoint from the harness's loopback canonical/spectator
+/// addresses. Validation permits one rebind per peer, so the peer byte is a
+/// complete collision-free generation identifier for the supported mesh cap.
+fn rebound_peer_addr(peer: usize) -> SocketAddr {
+    let host = u8::try_from(peer.saturating_add(1)).unwrap_or(u8::MAX);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, host)), 35_000)
 }
 
 #[cfg(feature = "hot-join")]
@@ -772,8 +1016,12 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     }
 
     let socket: SimSocket<Message> = ctx.net.attach(ctx.addrs[slot]);
+    let replacement_binding = socket.binding();
     let observer = Arc::clone(&ctx.peers[slot].observer);
-    let protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
+    let replacement_protocol_seed =
+        hot_join_protocol_seed(ctx.schedule, slot, step, ctx.peers[slot].protocol_rng_seed);
+    let mut protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
+    protocol_config.protocol_rng_seed = Some(replacement_protocol_seed);
     let mut builder = SessionBuilder::<I::SessionConfig>::new()
         .with_num_players(ctx.schedule.config.n_players)
         .expect("valid player count")
@@ -839,6 +1087,9 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     ctx.net.detach(ctx.addrs[slot]);
     let _replacement_inbox = ctx.net.attach(ctx.addrs[slot]);
     ctx.peers[slot].session = replacement;
+    ctx.peers[slot].binding = replacement_binding;
+    ctx.peers[slot].source_addrs = vec![ctx.addrs[slot]];
+    ctx.peers[slot].protocol_rng_seed = replacement_protocol_seed;
     ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
 }
 
@@ -1072,6 +1323,56 @@ pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) ->
     run_inner::<I>(schedule, options, false)
 }
 
+pub(super) fn validate_run_options(
+    schedule: &Schedule,
+    options: &RunOptions,
+) -> Result<(), String> {
+    let n = schedule.config.n_players;
+    if options
+        .probe_confirmed_at
+        .is_some_and(|probe| probe >= schedule.config.steps)
+    {
+        return Err(format!(
+            "probe_confirmed_at must be within 0..{}",
+            schedule.config.steps
+        ));
+    }
+    let Some((from, to)) = options.pending_output_probe_link else {
+        return Ok(());
+    };
+    if from >= n || to >= n || from == to {
+        return Err(format!(
+            "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
+        ));
+    }
+    let endpoint_retires = schedule.events.iter().any(|(_, event)| {
+        let retired = match event {
+            ScheduleEvent::GracefulRemove { target, .. }
+            | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+            ScheduleEvent::PeerKill { peer } => Some(*peer),
+            ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+            #[cfg(feature = "hot-join")]
+            ScheduleEvent::HotJoin { slot } => Some(*slot),
+            _ => None,
+        };
+        retired.is_some_and(|peer| peer == from || peer == to)
+    });
+    if endpoint_retires {
+        return Err(format!(
+            "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
+        ));
+    }
+    Ok(())
+}
+
+fn message_payload_metadata(message: &Message) -> SimPayloadMetadata {
+    let (encoded_len, kind) = fortress_rollback::__internal::message_metadata(message);
+    SimPayloadMetadata {
+        encoded_len,
+        is_input: kind == MessageKind::Input,
+    }
+}
+
 fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
     validate_schedule(schedule).unwrap_or_else(|error| {
         panic!(
@@ -1080,17 +1381,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         )
     });
 
+    validate_run_options(schedule, options)
+        .unwrap_or_else(|error| panic!("invalid run options: {error}"));
     let n = schedule.config.n_players;
-    if let Some(probe) = options.probe_confirmed_at {
-        assert!(
-            probe < schedule.config.steps,
-            "probe_confirmed_at ({probe}) is outside the run (0..{})",
-            schedule.config.steps
-        );
-    }
 
     let clock = TestClock::new();
-    let net: SimNet<Message> = SimNet::new(schedule.link_seed, clock.as_protocol_clock());
+    let net: SimNet<Message> = SimNet::new_size_aware(
+        schedule.link_seed,
+        clock.as_protocol_clock(),
+        message_payload_metadata,
+    );
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
 
     let mut spectator_host_enabled = vec![false; n];
@@ -1120,6 +1420,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
+            let binding = socket.binding();
             let observer = Arc::new(CollectingObserver::new());
             let protocol_config = peer_protocol_config(schedule, i, &clock);
             let mut builder = SessionBuilder::<I::SessionConfig>::new()
@@ -1177,9 +1478,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
             PeerSlot {
                 session,
+                binding,
+                source_addrs: vec![addrs[i]],
                 game,
                 observer,
                 sampled_confirmed: -1,
+                protocol_rng_seed: peer_protocol_seed(schedule, i),
                 pending_replacement_handoff_floor: None,
             }
         })
@@ -1260,6 +1564,22 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
+    let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
+    let mut pending_output_probe =
+        options
+            .pending_output_probe_link
+            .map(|(from, to)| PendingOutputProbe {
+                from,
+                to,
+                limit: u64::try_from(ProtocolConfig::default().pending_output_limit)
+                    .unwrap_or(u64::MAX),
+                first_reached_limit_at: None,
+                at_probe: None,
+                max: 0,
+                at_heal: None,
+                after_recovery: None,
+                final_value: 0,
+            });
 
     // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
     // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
@@ -1329,13 +1649,17 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             );
             match event {
                 ScheduleEvent::SetLink { from, to, policy } => {
-                    net.set_link(addrs[*from], addrs[*to], policy.clone());
+                    net.set_link(
+                        peers[*from].binding.local_addr(),
+                        addrs[*to],
+                        policy.clone(),
+                    );
                 },
                 ScheduleEvent::Block { from, to, blocked } => {
-                    net.set_blocked(addrs[*from], addrs[*to], *blocked);
+                    net.set_blocked(peers[*from].binding.local_addr(), addrs[*to], *blocked);
                 },
                 ScheduleEvent::Hold { from, to, holding } => {
-                    net.set_holding(addrs[*from], addrs[*to], *holding);
+                    net.set_holding(peers[*from].binding.local_addr(), addrs[*to], *holding);
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
@@ -1365,8 +1689,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 *target,
                                 &peers,
                                 &mut dead,
-                                &net,
-                                &addrs,
                                 &mut oracle,
                                 spectator_enabled.then_some(&mut spectator_required_min_frame),
                             );
@@ -1390,8 +1712,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 *target,
                                 &peers,
                                 &mut dead,
-                                &net,
-                                &addrs,
                                 &mut oracle,
                                 spectator_enabled.then_some(&mut spectator_required_min_frame),
                             );
@@ -1408,8 +1728,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         *peer,
                         &peers,
                         &mut dead,
-                        &net,
-                        &addrs,
                         &mut oracle,
                         spectator_enabled.then_some(&mut spectator_required_min_frame),
                     );
@@ -1423,11 +1741,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         *host,
                         &peers,
                         &mut dead,
-                        &net,
-                        &addrs,
                         &mut oracle,
                         spectator_enabled.then_some(&mut spectator_required_min_frame),
                     );
+                },
+                ScheduleEvent::Rebind { peer } => {
+                    // Runtime-contingent retirement (for example, an earlier
+                    // GracefulRemove) makes this fire-time precondition miss a
+                    // deterministic no-op. Planted events are never re-sampled.
+                    if !dead[*peer] {
+                        let fresh = rebound_peer_addr(*peer);
+                        match peers[*peer].binding.rebind(fresh) {
+                            Ok(_) => peers[*peer].source_addrs.push(fresh),
+                            Err(error) => oracle.observe_runner_error(
+                                "rebind_failed",
+                                *peer,
+                                step,
+                                format!("failed to move live socket to {fresh}: {error:?}"),
+                            ),
+                        }
+                    }
                 },
                 #[cfg(feature = "hot-join")]
                 ScheduleEvent::HotJoin { slot } => {
@@ -1606,6 +1939,39 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
+        // Sample link-specific wire counters only after the fixed-order peer
+        // loop completes, so the probe describes one unambiguous end-of-step
+        // cut rather than a mixture of before/after states across peers.
+        if options.probe_confirmed_at == Some(step) {
+            probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
+        }
+        if let Some(probe) = pending_output_probe.as_mut() {
+            let value = peers[probe.from]
+                .session
+                .peer_metrics(PlayerHandle::new(probe.to))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "peer {}: pending-output peer_metrics(handle={}) failed unexpectedly: {error:?}",
+                        probe.from, probe.to
+                    )
+                })
+                .pending_output_len;
+            probe.max = probe.max.max(value);
+            probe.final_value = value;
+            if probe.first_reached_limit_at.is_none() && value >= probe.limit {
+                probe.first_reached_limit_at = Some(step);
+            }
+            if options.probe_confirmed_at == Some(step) {
+                probe.at_probe = Some(value);
+            }
+            if heal_step == Some(step) {
+                probe.at_heal = Some(value);
+            }
+            if run_c && step == recovery_anchor_at {
+                probe.after_recovery = Some(value);
+            }
+        }
+
         if let Some(spectator) = spectator.as_mut() {
             drive_spectator(
                 spectator,
@@ -1760,21 +2126,68 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     );
     let recovered_within_b = verdict.recovered_within_b;
     let mut blocked_drops_by_link = BTreeMap::new();
-    let peer_by_addr: BTreeMap<SocketAddr, usize> = addrs
+    let peer_by_source_addr: BTreeMap<SocketAddr, usize> = peers
+        .iter()
+        .enumerate()
+        .flat_map(|(peer, slot)| {
+            slot.source_addrs
+                .iter()
+                .copied()
+                .map(move |addr| (addr, peer))
+        })
+        .collect();
+    let peer_by_canonical_addr: BTreeMap<SocketAddr, usize> = addrs
         .iter()
         .copied()
         .enumerate()
         .map(|(peer, addr)| (addr, peer))
         .collect();
     for ((from_addr, to_addr), drops) in net.blocked_drop_counts() {
-        if let (Some(from), Some(to)) = (peer_by_addr.get(&from_addr), peer_by_addr.get(&to_addr)) {
-            blocked_drops_by_link.insert((*from, *to), drops);
+        if let (Some(from), Some(to)) = (
+            peer_by_source_addr.get(&from_addr),
+            peer_by_canonical_addr.get(&to_addr),
+        ) {
+            let total = blocked_drops_by_link.entry((*from, *to)).or_insert(0u64);
+            *total = total.saturating_add(drops);
+        }
+    }
+    let map_link = |from_addr: &SocketAddr, to_addr: &SocketAddr| {
+        Some((
+            *peer_by_source_addr.get(from_addr)?,
+            *peer_by_canonical_addr.get(to_addr)?,
+        ))
+    };
+    let mut fragmentation_drops_by_link = BTreeMap::new();
+    for ((from_addr, to_addr), drops) in net.fragmentation_drop_counts() {
+        if let Some(key) = map_link(&from_addr, &to_addr) {
+            let total = fragmentation_drops_by_link.entry(key).or_insert(0_u64);
+            *total = total.saturating_add(drops);
+        }
+    }
+    let mut link_stats_by_link: BTreeMap<_, crate::common::sim_net::SimLinkStats> = BTreeMap::new();
+    for ((from_addr, to_addr), stats) in net.link_stats() {
+        if let Some(key) = map_link(&from_addr, &to_addr) {
+            link_stats_by_link.entry(key).or_default().merge(stats);
         }
     }
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
         probe_confirmed: probe_confirmed.clone(),
+        probe_peer_wire_by_link: probe_peer_wire_by_link
+            .iter()
+            .map(|(&(from, to), totals)| TracePeerWireLink {
+                from,
+                to,
+                totals: totals.clone(),
+            })
+            .collect(),
+        fragmentation_drops_by_link: trace_fragmentation_drops(
+            schedule.schema_version,
+            &fragmentation_drops_by_link,
+        ),
+        link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
+        pending_output_probe,
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -1792,8 +2205,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         final_confirmed,
         trace_tail: trace_tail.into(),
         probe_confirmed,
+        probe_peer_wire_by_link,
+        pending_output_probe,
         net_stats: net.stats(),
         blocked_drops_by_link,
+        fragmentation_drops_by_link,
+        link_stats_by_link,
         load_game_state_observations,
         metrics,
         peer_wire,
@@ -1816,6 +2233,17 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn schema_v10_rebind_addresses_are_deterministic_and_disjoint() {
+        let addresses: Vec<_> = (0..16).map(rebound_peer_addr).collect();
+        let unique: std::collections::BTreeSet<_> = addresses.iter().copied().collect();
+        assert_eq!(unique.len(), 16);
+        for (peer, address) in addresses.into_iter().enumerate() {
+            assert_eq!(address, rebound_peer_addr(peer));
+            assert!((0..=16).all(|canonical| address != peer_addr(canonical)));
+        }
+    }
 
     #[test]
     fn trace_event_text_is_utf8_safe_and_bounded() {
@@ -1876,6 +2304,101 @@ mod tests {
             snapshot_hash(&snapshot),
             snapshot_hash(&changed),
             "dead/lifecycle state is part of the complete step identity"
+        );
+    }
+
+    #[test]
+    fn trace_net_stats_ge_fields_are_backward_compatible_and_identity_bearing() {
+        let legacy_json = serde_json::to_value(TraceNetStats::default()).unwrap();
+        let object = legacy_json
+            .as_object()
+            .expect("TraceNetStats serializes as an object");
+        assert!(!object.keys().any(|key| key.starts_with("gilbert_elliott")));
+        assert!(!object.keys().any(|key| key.starts_with("fragmentation")));
+        let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy_back, TraceNetStats::default());
+
+        let ge_stats = TraceNetStats {
+            gilbert_elliott_good_to_bad: 2,
+            gilbert_elliott_bad_to_good: 1,
+            gilbert_elliott_good_sends: 7,
+            gilbert_elliott_bad_sends: 5,
+            gilbert_elliott_loss_events: 4,
+            gilbert_elliott_max_loss_run: 3,
+            ..TraceNetStats::default()
+        };
+        let ge_json = serde_json::to_vec(&ge_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&ge_json).unwrap(),
+            ge_stats
+        );
+
+        let snapshot = TraceSnapshot {
+            step: 7,
+            confirmed_frames: vec![5, 5],
+            session_states: vec![TraceSessionState::Running; 2],
+            dead: vec![false, false],
+            game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            scheduled_events: Vec::new(),
+            scheduled_events_truncated: 0,
+            observed_events: Vec::new(),
+            observed_events_truncated: 0,
+            net: TraceNetStats::default(),
+            spectator: None,
+        };
+        let mut changed = snapshot.clone();
+        changed.net = ge_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+
+        let fragmentation_stats = TraceNetStats {
+            fragmentation_eligible_sends: 2,
+            fragmentation_fragments_modeled: 5,
+            fragmentation_lost_fragments: 1,
+            fragmentation_loss_events: 1,
+            fragmentation_input_eligible_sends: 2,
+            fragmentation_input_loss_events: 1,
+            fragmentation_max_packet_bytes: 2945,
+            fragmentation_max_fragments_per_send: 3,
+            fragmentation_fragment_cap_hits: 1,
+            ..TraceNetStats::default()
+        };
+        let fragmentation_json = serde_json::to_vec(&fragmentation_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&fragmentation_json).unwrap(),
+            fragmentation_stats
+        );
+        changed.net = fragmentation_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+    }
+
+    #[test]
+    fn schema_v13_per_link_fragmentation_evidence_is_identity_bearing() {
+        let stats = crate::common::sim_net::SimLinkStats {
+            input_sends: 1,
+            max_encoded_input_bytes: 2_000,
+            fragmentation_input_losses: 1,
+            ..crate::common::sim_net::SimLinkStats::default()
+        };
+        let left_stats = BTreeMap::from([((0, 1), stats)]);
+        let right_stats = BTreeMap::from([((1, 0), stats)]);
+        let left_drops = BTreeMap::from([((0, 1), 1)]);
+        let right_drops = BTreeMap::from([((1, 0), 1)]);
+
+        assert_eq!(
+            serde_json::to_vec(&trace_link_stats(12, &left_stats)).unwrap(),
+            serde_json::to_vec(&trace_link_stats(12, &right_stats)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&trace_fragmentation_drops(12, &left_drops)).unwrap(),
+            serde_json::to_vec(&trace_fragmentation_drops(12, &right_drops)).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_vec(&trace_link_stats(13, &left_stats)).unwrap(),
+            serde_json::to_vec(&trace_link_stats(13, &right_stats)).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_vec(&trace_fragmentation_drops(13, &left_drops)).unwrap(),
+            serde_json::to_vec(&trace_fragmentation_drops(13, &right_drops)).unwrap()
         );
     }
 
@@ -2000,6 +2523,7 @@ mod tests {
         addrs: &[SocketAddr],
     ) -> PeerSlot<StubInput> {
         let socket: SimSocket<Message> = net.attach(addrs[peer]);
+        let binding = socket.binding();
         let observer = Arc::new(CollectingObserver::new());
         let protocol_config = peer_protocol_config(schedule, peer, clock);
         let mut builder = SessionBuilder::<StubConfig>::new()
@@ -2027,11 +2551,67 @@ mod tests {
         }
         PeerSlot {
             session: builder.start_p2p_session(socket).expect("session starts"),
+            binding,
+            source_addrs: vec![addrs[peer]],
             game: SimGameStub::<StubInput>::new(),
             observer,
             sampled_confirmed: -1,
+            protocol_rng_seed: peer_protocol_seed(schedule, peer),
             pending_replacement_handoff_floor: None,
         }
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn hot_join_protocol_seed_is_deterministic_and_old_generation_distinct() {
+        let schedule = schedule::generate(0x5EED_CAFE, schedule::SimConfig::smoke(4));
+        let initial = peer_protocol_seed(&schedule, 3);
+        let replacement = hot_join_protocol_seed(&schedule, 3, 140, initial);
+        let repeated = hot_join_protocol_seed(&schedule, 3, 140, initial);
+        let second_replacement = hot_join_protocol_seed(&schedule, 3, 240, replacement);
+        let second_repeated = hot_join_protocol_seed(&schedule, 3, 240, replacement);
+
+        assert_eq!(replacement, repeated);
+        assert_ne!(replacement, initial);
+        assert_ne!(
+            protocol_magic_for_seed(replacement),
+            protocol_magic_for_seed(initial)
+        );
+        assert_eq!(second_replacement, second_repeated);
+        assert_ne!(second_replacement, replacement);
+        assert_ne!(
+            protocol_magic_for_seed(second_replacement),
+            protocol_magic_for_seed(replacement)
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn hot_join_protocol_seed_retries_when_nonce_zero_candidate_reuses_previous_magic() {
+        let schedule = schedule::generate(0xB24D, schedule::SimConfig::smoke(4));
+        let initial = peer_protocol_seed(&schedule, 3);
+        let colliding = hot_join_protocol_seed_candidate(&schedule, 3, 140, initial, 0);
+        let replacement = hot_join_protocol_seed(&schedule, 3, 140, initial);
+
+        assert_eq!(
+            protocol_magic_for_seed(colliding),
+            protocol_magic_for_seed(initial)
+        );
+        assert_ne!(replacement, colliding);
+        assert_ne!(
+            protocol_magic_for_seed(replacement),
+            protocol_magic_for_seed(initial)
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn schema_v11_hot_join_preserves_same_seed_replay_semantics() {
+        let mut schedule = schedule::generate(0x5EED_CAFE, schedule::SimConfig::smoke(4));
+        schedule.schema_version = 11;
+        let initial = peer_protocol_seed(&schedule, 3);
+
+        assert_eq!(hot_join_protocol_seed(&schedule, 3, 140, initial), initial);
     }
 
     #[cfg(feature = "hot-join")]
@@ -2127,11 +2707,21 @@ mod tests {
 
         assert_eq!(implicit.trace_hash, explicit.trace_hash);
         assert_eq!(implicit.final_confirmed, explicit.final_confirmed);
+        assert_eq!(
+            implicit.probe_peer_wire_by_link,
+            explicit.probe_peer_wire_by_link
+        );
         assert_eq!(implicit.net_stats, explicit.net_stats);
         assert_eq!(
             implicit.blocked_drops_by_link,
             explicit.blocked_drops_by_link
         );
+        assert_eq!(
+            implicit.fragmentation_drops_by_link,
+            explicit.fragmentation_drops_by_link
+        );
+        assert_eq!(implicit.link_stats_by_link, explicit.link_stats_by_link);
+        assert_eq!(implicit.pending_output_probe, explicit.pending_output_probe);
         assert_eq!(
             implicit.load_game_state_observations,
             explicit.load_game_state_observations
@@ -2157,5 +2747,149 @@ mod tests {
             explicit.spectator_final_hosts
         );
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
+    }
+
+    #[test]
+    fn pending_output_probe_tracks_milestones_and_replay_identity() {
+        let mut config = schedule::SimConfig::smoke(2);
+        config.steps = 400;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let mut schedule = schedule::generate(0x5045_4e44, config);
+        schedule.events = vec![
+            (
+                20,
+                schedule::ScheduleEvent::Block {
+                    from: 0,
+                    to: 1,
+                    blocked: true,
+                },
+            ),
+            (
+                80,
+                schedule::ScheduleEvent::Block {
+                    from: 0,
+                    to: 1,
+                    blocked: false,
+                },
+            ),
+            (100, schedule::ScheduleEvent::HealAll),
+        ];
+        schedule.heal_at = 100;
+        let options = RunOptions {
+            probe_confirmed_at: Some(79),
+            pending_output_probe_link: Some((0, 1)),
+            ..RunOptions::default()
+        };
+
+        let first = run(&schedule, &options);
+        let replay = run(&schedule, &options);
+        let probe = first.pending_output_probe.expect("probe requested");
+        assert_eq!((probe.from, probe.to), (0, 1));
+        assert_eq!(probe.limit, 128);
+        assert_eq!(probe.first_reached_limit_at, None);
+        assert!(probe.at_probe.is_some_and(|value| value > 0));
+        assert!(probe.max >= probe.at_probe.unwrap_or_default());
+        assert!(probe.at_heal.is_some());
+        assert!(probe.after_recovery.is_some());
+        assert_eq!(first.trace_hash, replay.trace_hash);
+        assert_eq!(first.pending_output_probe, replay.pending_output_probe);
+
+        let reverse = run(
+            &schedule,
+            &RunOptions {
+                pending_output_probe_link: Some((1, 0)),
+                ..options
+            },
+        );
+        assert_ne!(first.trace_hash, reverse.trace_hash);
+
+        let mut retiring = schedule;
+        retiring
+            .events
+            .push((120, schedule::ScheduleEvent::PeerKill { peer: 1 }));
+        retiring.events.sort_by_key(|(step, _)| *step);
+        assert!(validate_run_options(&retiring, &options).is_err());
+    }
+
+    #[test]
+    fn end_of_step_wire_probe_is_complete_and_matches_final_cut() {
+        let n = 3;
+        let schedule = schedule::generate(
+            0xA11C_E099,
+            schedule::SimConfig {
+                steps: 180,
+                ..schedule::SimConfig::smoke(n)
+            },
+        );
+        let without_probe = run(&schedule, &RunOptions::default());
+        assert!(without_probe.probe_peer_wire_by_link.is_empty());
+
+        let report = run(
+            &schedule,
+            &RunOptions {
+                probe_confirmed_at: Some(schedule.config.steps - 1),
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(report.probe_peer_wire_by_link.len(), n * (n - 1));
+
+        for local in 0..n {
+            let links: Vec<&PeerWireTotals> = report
+                .probe_peer_wire_by_link
+                .iter()
+                .filter_map(|(&(from, _), totals)| (from == local).then_some(totals))
+                .collect();
+            assert_eq!(links.len(), n - 1);
+            let aggregate = PeerWireTotals {
+                bytes_sent: links.iter().map(|totals| totals.bytes_sent).sum(),
+                bytes_received: links.iter().map(|totals| totals.bytes_received).sum(),
+                packets_sent: links.iter().map(|totals| totals.packets_sent).sum(),
+                packets_received: links.iter().map(|totals| totals.packets_received).sum(),
+                messages_sent_by_kind: std::array::from_fn(|index| {
+                    links
+                        .iter()
+                        .map(|totals| totals.messages_sent_by_kind[index])
+                        .sum()
+                }),
+                messages_received_by_kind: std::array::from_fn(|index| {
+                    links
+                        .iter()
+                        .map(|totals| totals.messages_received_by_kind[index])
+                        .sum()
+                }),
+                input_bytes_pre_compression: links
+                    .iter()
+                    .map(|totals| totals.input_bytes_pre_compression)
+                    .sum(),
+                input_bytes_post_compression: links
+                    .iter()
+                    .map(|totals| totals.input_bytes_post_compression)
+                    .sum(),
+            };
+            assert_eq!(aggregate, report.peer_wire[local]);
+        }
+    }
+
+    #[test]
+    fn wire_probe_remains_complete_after_runtime_retirement() {
+        let n = 3;
+        let mut config = schedule::SimConfig::smoke(n);
+        config.steps = 120;
+        config.disconnect_behavior = schedule::DropPolicy::ContinueWithout;
+        let mut schedule = schedule::generate(0xA11C_E100, config);
+        schedule.events = vec![(
+            30,
+            schedule::ScheduleEvent::GracefulRemove { by: 0, target: 2 },
+        )];
+
+        let report = run(
+            &schedule,
+            &RunOptions {
+                probe_confirmed_at: Some(60),
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(report.probe_peer_wire_by_link.len(), n * (n - 1));
+        assert!(report.probe_peer_wire_by_link.contains_key(&(0, 2)));
     }
 }

@@ -15,7 +15,7 @@
 // Test infrastructure: not every test binary uses every helper.
 #![allow(dead_code)]
 
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::{__internal::MAX_FRAME_DELAY, DisconnectBehavior, SaveMode};
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,19 @@ pub enum ScenarioMix {
 /// - `9`: adds [`BackgroundNoise::ReliableFifo`] and
 ///   [`LinkPolicy::retransmit_delay`](crate::common::sim_net::LinkPolicy::retransmit_delay)
 ///   for reliable-ordered transport probes.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 9;
+/// - `10`: adds [`ScheduleEvent::Rebind`], a peer source-address/NAT mapping
+///   change that leaves every other peer's canonical destination unchanged.
+/// - `11`: adds [`GilbertElliottPolicy`], a deterministic two-state
+///   correlated-loss model on materialized directed links.
+/// - `12`: makes protocol RNG seeds target-width-stable and gives each
+///   hot-join replacement generation an initial protocol magic distinct from
+///   the generation it replaces. It bounds new schedules to one replacement
+///   generation because fencing older/per-link protocol eras needs a wider
+///   model. Schemas <=11 retain their historical seed and validation semantics
+///   for corpus replay.
+/// - `13`: adds optional fixed-threshold IPv4-style fragmentation loss on
+///   materialized directed links.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 13;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -365,6 +377,15 @@ pub enum ScheduleEvent {
     ///
     /// Covered by both planted and generated lifecycle schedules.
     PeerKill { peer: usize },
+    /// Move peer `peer`'s live simulated socket to a fresh source address
+    /// without changing the canonical address stored by any session. This
+    /// models a NAT rebinding or mobile-network path change: the rebound peer's
+    /// messages arrive from an unknown source, while other peers keep sending
+    /// to the abandoned mapping until their disconnect behavior fires.
+    ///
+    /// Planted only; current protocol behavior is intentionally fail-closed and
+    /// therefore is not part of the generated green lifecycle fleet.
+    Rebind { peer: usize },
     /// Permanently kill a peer that is configured as one of the redundant
     /// spectator hosts. The runtime effect is the same crash model as
     /// [`ScheduleEvent::PeerKill`] — the host is no longer driven and is detached
@@ -399,6 +420,7 @@ pub enum LifecycleEventKind {
     GracefulRemove,
     LegacyDisconnect,
     PeerKill,
+    Rebind,
     SpectatorHostKill,
     HotJoin,
 }
@@ -413,6 +435,7 @@ impl ScheduleEvent {
             Self::GracefulRemove { .. } => Some(LifecycleEventKind::GracefulRemove),
             Self::LegacyDisconnect { .. } => Some(LifecycleEventKind::LegacyDisconnect),
             Self::PeerKill { .. } => Some(LifecycleEventKind::PeerKill),
+            Self::Rebind { .. } => Some(LifecycleEventKind::Rebind),
             Self::SpectatorHostKill { .. } => Some(LifecycleEventKind::SpectatorHostKill),
             Self::HotJoin { .. } => Some(LifecycleEventKind::HotJoin),
             Self::SetLink { .. } | Self::Block { .. } | Self::Hold { .. } | Self::HealAll => None,
@@ -470,10 +493,14 @@ pub(super) fn hot_join_host_for_slot(n_players: usize, slot: usize) -> Option<us
 }
 
 fn link_policy_required_schema(policy: &LinkPolicy) -> u32 {
-    if policy.retransmit_delay.is_zero() {
-        1
-    } else {
+    if policy.fragmentation.is_some() {
+        13
+    } else if policy.gilbert_elliott.is_some() {
+        11
+    } else if !policy.retransmit_delay.is_zero() {
         9
+    } else {
+        1
     }
 }
 
@@ -488,6 +515,7 @@ fn event_required_schema(event: &ScheduleEvent) -> u32 {
         ScheduleEvent::LegacyDisconnect { .. } => 6,
         ScheduleEvent::SpectatorHostKill { .. } => 7,
         ScheduleEvent::HotJoin { .. } => 8,
+        ScheduleEvent::Rebind { .. } => 10,
     }
 }
 
@@ -527,6 +555,46 @@ fn validate_link_policy(policy: &LinkPolicy, context: &str) -> Result<(), String
              (got burst_rate={:?}, burst_len={})",
             policy.burst_rate, policy.burst_len
         ));
+    }
+    if let Some(ge) = &policy.gilbert_elliott {
+        for (field, value) in [
+            ("good_to_bad", ge.good_to_bad),
+            ("bad_to_good", ge.bad_to_good),
+            ("good_drop_rate", ge.good_drop_rate),
+            ("bad_drop_rate", ge.bad_drop_rate),
+        ] {
+            validate_probability(value, field, context)?;
+        }
+        if ge.good_to_bad == 0.0 {
+            return Err(format!(
+                "{context} Gilbert-Elliott good_to_bad must be > 0 so the bad state is reachable"
+            ));
+        }
+        if ge.bad_drop_rate <= ge.good_drop_rate {
+            return Err(format!(
+                "{context} Gilbert-Elliott bad_drop_rate must be greater than good_drop_rate \
+                 (got good={:?}, bad={:?})",
+                ge.good_drop_rate, ge.bad_drop_rate
+            ));
+        }
+        if policy.drop_rate > 0.0 || burst_rate_enabled {
+            return Err(format!(
+                "{context} Gilbert-Elliott loss cannot be layered with drop_rate or \
+                 burst_rate/burst_len"
+            ));
+        }
+    }
+    if let Some(fragmentation) = policy.fragmentation {
+        validate_probability(
+            fragmentation.fragment_drop_rate,
+            "fragment_drop_rate",
+            context,
+        )?;
+        if !policy.retransmit_delay.is_zero() {
+            return Err(format!(
+                "{context} fragmentation cannot be combined with retransmit_delay"
+            ));
+        }
     }
     for (field, value) in [
         ("base_delay", policy.base_delay),
@@ -635,9 +703,32 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
         .events
         .iter()
         .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { .. }));
+    let has_rebind = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::Rebind { .. }));
     #[cfg(not(feature = "hot-join"))]
     if has_hot_join {
         return Err("ScheduleEvent::HotJoin requires the crate's `hot-join` feature".to_owned());
+    }
+    if has_rebind && has_hot_join {
+        return Err(
+            "Rebind and HotJoin cannot share a schedule; replacement binding semantics \
+             require a dedicated future capability"
+                .to_owned(),
+        );
+    }
+    if has_rebind
+        && schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::Hold { .. }))
+    {
+        return Err(
+            "Rebind cannot share a schedule with Hold; releasing held traffic across \
+             source-address generations requires a dedicated future capability"
+                .to_owned(),
+        );
     }
     if has_hot_join {
         if schedule.config.input_delay != 0 {
@@ -747,6 +838,13 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                     ));
                 }
             },
+            ScheduleEvent::Rebind { peer } => {
+                if *peer >= n {
+                    return Err(format!(
+                        "Rebind peer {peer} out of range for a {n}-peer mesh"
+                    ));
+                }
+            },
             ScheduleEvent::SpectatorHostKill { host } => {
                 if *host >= n {
                     return Err(format!(
@@ -795,6 +893,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             | ScheduleEvent::GracefulRemove { .. }
             | ScheduleEvent::LegacyDisconnect { .. }
             | ScheduleEvent::PeerKill { .. }
+            | ScheduleEvent::Rebind { .. }
             | ScheduleEvent::SpectatorHostKill { .. }
             | ScheduleEvent::HotJoin { .. }
             | ScheduleEvent::HealAll => {},
@@ -844,11 +943,26 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
     // HotJoin malformed up front. User API drops retire only after the runtime
     // call returns `Ok`, so they do not update this mask.
     let mut retired_by_guaranteed_kill = vec![false; n];
+    let mut rebound_peers = BTreeSet::new();
+    let mut hot_join_seen = false;
     for (_, event) in &schedule.events {
         match event {
             ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
             ScheduleEvent::PeerKill { peer } => {
                 retired_by_guaranteed_kill[*peer] = true;
+            },
+            ScheduleEvent::Rebind { peer } => {
+                if retired_by_guaranteed_kill[*peer] {
+                    return Err(format!(
+                        "Rebind peer {peer} is already retired by an earlier kill event"
+                    ));
+                }
+                if !rebound_peers.insert(*peer) {
+                    return Err(format!(
+                        "Rebind peer {peer} appears more than once; the Rebind capability supports one \
+                         address generation change per peer"
+                    ));
+                }
             },
             ScheduleEvent::SpectatorHostKill { host } => {
                 if !spectator_host_enabled[*host] {
@@ -864,6 +978,13 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                 retired_by_guaranteed_kill[*host] = true;
             },
             ScheduleEvent::HotJoin { slot } => {
+                if schedule.schema_version >= 12 && hot_join_seen {
+                    return Err(
+                        "schema v12 HotJoin appears more than once; the simulation capability supports one replacement generation per schedule"
+                            .to_owned(),
+                    );
+                }
+                hot_join_seen = true;
                 if retired_by_guaranteed_kill[*slot] {
                     return Err(format!(
                         "HotJoin slot {slot} is already retired by an earlier kill event"
@@ -962,6 +1083,8 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_rate: 0.0,
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
+            fragmentation: None,
         },
         BackgroundNoise::Rough => LinkPolicy {
             drop_rate: draw.range_f64(0.02, 0.10),
@@ -971,6 +1094,8 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             burst_rate: draw.range_f64(0.0, 0.005),
             burst_len: u32::try_from(draw.range_u64(2, 5)).unwrap_or(3),
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
+            fragmentation: None,
         },
     }
 }
@@ -1032,8 +1157,8 @@ fn prepare_lifecycle_config(seed: u64, config: &mut SimConfig) -> Option<Lifecyc
             config.disconnect_behavior = DropPolicy::ContinueWithout;
         },
         LifecycleEventKind::PeerStall | LifecycleEventKind::SetInputDelay => {},
-        LifecycleEventKind::LegacyDisconnect => {
-            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        LifecycleEventKind::LegacyDisconnect | LifecycleEventKind::Rebind => {
+            unreachable!("planted-only lifecycle event cannot be randomly generated")
         },
     }
     Some(kind)
@@ -1070,8 +1195,8 @@ fn materialize_lifecycle_event(
         },
         LifecycleEventKind::SpectatorHostKill => ScheduleEvent::SpectatorHostKill { host: subject },
         LifecycleEventKind::HotJoin => ScheduleEvent::HotJoin { slot: subject },
-        LifecycleEventKind::LegacyDisconnect => {
-            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        LifecycleEventKind::LegacyDisconnect | LifecycleEventKind::Rebind => {
+            unreachable!("planted-only lifecycle event cannot be randomly generated")
         },
     }
 }
@@ -1240,6 +1365,15 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
 mod tests {
     use super::*;
 
+    fn valid_gilbert_elliott() -> GilbertElliottPolicy {
+        GilbertElliottPolicy {
+            good_to_bad: 0.05,
+            bad_to_good: 0.20,
+            good_drop_rate: 0.01,
+            bad_drop_rate: 0.80,
+        }
+    }
+
     #[test]
     fn generate_is_pure_same_seed_same_schedule() {
         let a = generate(42, SimConfig::smoke(4));
@@ -1272,6 +1406,7 @@ mod tests {
             assert!(policy.burst_rate.abs() < f64::EPSILON);
             assert_eq!(policy.burst_len, 0);
             assert_eq!(policy.retransmit_delay, Duration::ZERO);
+            assert_eq!(policy.gilbert_elliott, None);
         }
         assert_eq!(
             schedule
@@ -1496,6 +1631,31 @@ mod tests {
                 },
                 9,
             ),
+            (ScheduleEvent::Rebind { peer: 1 }, 10),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        gilbert_elliott: Some(valid_gilbert_elliott()),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                11,
+            ),
+            (
+                ScheduleEvent::SetLink {
+                    from: 0,
+                    to: 1,
+                    policy: LinkPolicy {
+                        fragmentation: Some(crate::common::sim_net::FragmentationPolicy {
+                            fragment_drop_rate: 0.2,
+                        }),
+                        ..LinkPolicy::clean()
+                    },
+                },
+                13,
+            ),
         ];
 
         for (event, required) in cases {
@@ -1540,6 +1700,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn schema_v11_floor_applies_to_initial_gilbert_elliott_links() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2 = LinkPolicy {
+            gilbert_elliott: Some(valid_gilbert_elliott()),
+            ..LinkPolicy::clean()
+        };
+        schedule.schema_version = 10;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v10 cannot claim a GE initial-link capability")
+            .contains("requiring schema_version 11"));
+        schedule.schema_version = 11;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
+    fn schema_v13_floor_applies_to_fragmentation_links() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
+        schedule.schema_version = 12;
+        assert!(validate_schedule(&schedule)
+            .expect_err("schema v12 cannot claim fragmentation capability")
+            .contains("requiring schema_version 13"));
+        schedule.schema_version = 13;
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+    }
+
+    #[test]
+    fn fragmentation_policy_validates_probability_and_retransmission_exclusion() {
+        let mut schedule = generate(7, SimConfig::smoke(2));
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: f64::NAN,
+            });
+        assert!(validate_schedule(&schedule)
+            .expect_err("NaN fragmentation probability must fail")
+            .contains("fragment_drop_rate must be finite"));
+
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
+        schedule.initial_links[0].2.retransmit_delay = Duration::from_millis(1);
+        assert!(validate_schedule(&schedule)
+            .expect_err("fragmentation plus retransmission must fail")
+            .contains("fragmentation cannot be combined with retransmit_delay"));
     }
 
     #[test]
@@ -1674,6 +1885,7 @@ mod tests {
                     | ScheduleEvent::SetInputDelay { .. }
                     | ScheduleEvent::GracefulRemove { .. } => {},
                     ScheduleEvent::LegacyDisconnect { .. }
+                    | ScheduleEvent::Rebind { .. }
                     | ScheduleEvent::SetLink { .. }
                     | ScheduleEvent::Block { .. }
                     | ScheduleEvent::Hold { .. }
@@ -1915,6 +2127,56 @@ mod tests {
             "burst_rate/burst_len must both be zero or both be enabled",
         ));
 
+        for (field, value, expected) in [
+            ("good_to_bad", f64::NAN, "good_to_bad must be finite"),
+            ("bad_to_good", -0.1, "bad_to_good must be finite"),
+            ("good_drop_rate", 1.1, "good_drop_rate must be finite"),
+            (
+                "bad_drop_rate",
+                f64::INFINITY,
+                "bad_drop_rate must be finite",
+            ),
+        ] {
+            let mut invalid_ge_probability = valid.clone();
+            let mut ge = valid_gilbert_elliott();
+            match field {
+                "good_to_bad" => ge.good_to_bad = value,
+                "bad_to_good" => ge.bad_to_good = value,
+                "good_drop_rate" => ge.good_drop_rate = value,
+                "bad_drop_rate" => ge.bad_drop_rate = value,
+                _ => unreachable!("table contains only GE probability fields"),
+            }
+            invalid_ge_probability.initial_links[0].2.gilbert_elliott = Some(ge);
+            cases.push((invalid_ge_probability, expected));
+        }
+
+        let mut unreachable_bad_state = valid.clone();
+        let mut ge = valid_gilbert_elliott();
+        ge.good_to_bad = 0.0;
+        unreachable_bad_state.initial_links[0].2.gilbert_elliott = Some(ge);
+        cases.push((unreachable_bad_state, "good_to_bad must be > 0"));
+
+        let mut non_correlated_drop_rates = valid.clone();
+        let mut ge = valid_gilbert_elliott();
+        ge.bad_drop_rate = ge.good_drop_rate;
+        non_correlated_drop_rates.initial_links[0].2.gilbert_elliott = Some(ge);
+        cases.push((
+            non_correlated_drop_rates,
+            "bad_drop_rate must be greater than good_drop_rate",
+        ));
+
+        for legacy_loss in ["drop_rate", "burst"] {
+            let mut layered = valid.clone();
+            layered.initial_links[0].2.gilbert_elliott = Some(valid_gilbert_elliott());
+            if legacy_loss == "drop_rate" {
+                layered.initial_links[0].2.drop_rate = 0.1;
+            } else {
+                layered.initial_links[0].2.burst_rate = 0.1;
+                layered.initial_links[0].2.burst_len = 2;
+            }
+            cases.push((layered, "Gilbert-Elliott loss cannot be layered"));
+        }
+
         let event_cases = [
             (
                 ScheduleEvent::SetLink {
@@ -1965,6 +2227,10 @@ mod tests {
             (
                 ScheduleEvent::PeerKill { peer: 9 },
                 "PeerKill peer 9 out of range",
+            ),
+            (
+                ScheduleEvent::Rebind { peer: 9 },
+                "Rebind peer 9 out of range",
             ),
             (
                 ScheduleEvent::SpectatorHostKill { host: 9 },
@@ -2026,6 +2292,61 @@ mod tests {
             .events
             .sort_by_key(|(step, _)| *step);
         cases.push((already_killed_spectator, "already retired"));
+
+        let mut duplicate_rebind = valid.clone();
+        duplicate_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        duplicate_rebind.events.extend([
+            (90, ScheduleEvent::Rebind { peer: 1 }),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        duplicate_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((duplicate_rebind, "appears more than once"));
+
+        let mut held_rebind = valid.clone();
+        held_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        held_rebind.events.extend([
+            (
+                90,
+                ScheduleEvent::Hold {
+                    from: 1,
+                    to: 2,
+                    holding: true,
+                },
+            ),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        held_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((held_rebind, "cannot share a schedule with Hold"));
+
+        let mut killed_rebind = valid.clone();
+        killed_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        killed_rebind.events.extend([
+            (90, ScheduleEvent::PeerKill { peer: 1 }),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        killed_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((killed_rebind, "already retired by an earlier kill event"));
+
+        #[cfg(feature = "hot-join")]
+        {
+            let mut hot_join_rebind = valid.clone();
+            hot_join_rebind.config.input_delay = 0;
+            hot_join_rebind
+                .events
+                .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+            hot_join_rebind.events.extend([
+                (90, ScheduleEvent::HotJoin { slot: 1 }),
+                (100, ScheduleEvent::Rebind { peer: 1 }),
+            ]);
+            hot_join_rebind.events.sort_by_key(|(step, _)| *step);
+            cases.push((hot_join_rebind, "Rebind and HotJoin cannot share"));
+        }
 
         let mut small_event_queue = valid.clone();
         small_event_queue.config.event_queue_size = Some(9);
@@ -2170,6 +2491,16 @@ mod tests {
         sparse.config.save_mode = SavePolicy::Sparse;
         cases.push((sparse, "save_mode EveryFrame"));
 
+        let mut repeated = valid.clone();
+        repeated
+            .events
+            .push((120, ScheduleEvent::HotJoin { slot: 2 }));
+        repeated.events.sort_by_key(|(step, _)| *step);
+        let mut legacy_repeated = repeated.clone();
+        legacy_repeated.schema_version = 11;
+        assert_eq!(validate_schedule(&legacy_repeated), Ok(()));
+        cases.push((repeated, "schema v12 HotJoin appears more than once"));
+
         let mut killed_slot = valid.clone();
         killed_slot
             .events
@@ -2231,6 +2562,57 @@ mod tests {
             Duration::ZERO,
             "old corpus artifacts without retransmit_delay must keep UDP-like loss semantics"
         );
+        assert_eq!(back.initial_links[0].2.gilbert_elliott, None);
+        assert_eq!(back.initial_links[0].2.fragmentation, None);
+    }
+
+    #[test]
+    fn gilbert_elliott_policy_round_trips_and_none_is_omitted() {
+        let mut schedule = generate(42, SimConfig::smoke(2));
+        let clean_json = serde_json::to_value(&schedule).unwrap();
+        let clean_policy = clean_json
+            .get("initial_links")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|links| links.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|link| link.get(2))
+            .and_then(serde_json::Value::as_object)
+            .expect("initial link policy must serialize as an object");
+        assert!(!clean_policy.contains_key("gilbert_elliott"));
+        assert!(!clean_policy.contains_key("fragmentation"));
+
+        schedule.initial_links[0].2 = LinkPolicy {
+            gilbert_elliott: Some(valid_gilbert_elliott()),
+            ..LinkPolicy::clean()
+        };
+        let json = serde_json::to_vec(&schedule).unwrap();
+        let back: Schedule = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, schedule);
+        assert_eq!(validate_schedule(&back), Ok(()));
+    }
+
+    #[test]
+    fn fragmentation_policy_round_trips_and_none_is_omitted() {
+        let mut schedule = generate(42, SimConfig::smoke(2));
+        let clean_json = serde_json::to_value(&schedule).unwrap();
+        let clean_policy = clean_json
+            .get("initial_links")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|links| links.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|link| link.get(2))
+            .and_then(serde_json::Value::as_object)
+            .expect("initial link policy must serialize as an object");
+        assert!(!clean_policy.contains_key("fragmentation"));
+
+        schedule.initial_links[0].2.fragmentation =
+            Some(crate::common::sim_net::FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            });
+        let json = serde_json::to_vec(&schedule).unwrap();
+        let back: Schedule = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, schedule);
+        assert_eq!(validate_schedule(&back), Ok(()));
     }
 
     /// The lifecycle-vocabulary events must serialize losslessly — a corpus
@@ -2260,6 +2642,9 @@ mod tests {
             .push((325, ScheduleEvent::SpectatorHostKill { host: 0 }));
         schedule
             .events
+            .push((340, ScheduleEvent::Rebind { peer: 1 }));
+        schedule
+            .events
             .push((350, ScheduleEvent::HotJoin { slot: 1 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
@@ -2272,6 +2657,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerStall { peer: 1, steps: 40 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::Rebind { peer: 1 })));
         assert!(back
             .events
             .iter()

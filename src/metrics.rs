@@ -449,6 +449,18 @@ pub struct SessionMetrics {
     /// [`events_discarded_total`](Self::events_discarded_total): how many
     /// discarded events fell into each category.
     pub events_discarded_by_kind: EventKindCounts,
+
+    /// Number of decoded protocol messages received from an address that is
+    /// not a configured endpoint for this networked session.
+    ///
+    /// A rising value can indicate stale traffic, source-address spoofing, or
+    /// a peer whose NAT mapping changed during the session. Such packets are
+    /// ignored because an address is the peer identity at this protocol layer.
+    /// Malformed datagrams rejected by a socket before it yields a decoded
+    /// [`Message`](crate::Message) are outside this counter's boundary. Replay
+    /// and sync-test sessions have no receive socket, so this remains zero for
+    /// them.
+    pub unknown_source_packets: u64,
 }
 
 impl SessionMetrics {
@@ -461,6 +473,12 @@ impl SessionMetrics {
     pub(crate) fn record_event_discard(&mut self, kind: EventKind) {
         self.events_discarded_total = self.events_discarded_total.saturating_add(1);
         self.events_discarded_by_kind.record(kind);
+    }
+
+    /// Records one decoded packet whose source address is not registered with
+    /// the session.
+    pub(crate) fn record_unknown_source_packet(&mut self) {
+        self.unknown_source_packets = self.unknown_source_packets.saturating_add(1);
     }
 
     /// Records one forward frame advance (a rendered/visual frame) and samples
@@ -1058,6 +1076,17 @@ mod tests {
     }
 
     #[test]
+    fn session_metrics_unknown_source_counter_saturates() {
+        let mut metrics = SessionMetrics::new();
+        metrics.record_unknown_source_packet();
+        assert_eq!(metrics.unknown_source_packets, 1);
+
+        metrics.unknown_source_packets = u64::MAX;
+        metrics.record_unknown_source_packet();
+        assert_eq!(metrics.unknown_source_packets, u64::MAX);
+    }
+
+    #[test]
     fn fortress_event_kind_maps_every_variant() {
         let a = addr();
         let cases: [(FortressEvent<TestConfig>, EventKind); 12] = [
@@ -1280,8 +1309,10 @@ mod tests {
     fn session_metrics_serializes_kind_breakdown_as_labeled_map() {
         let mut metrics = SessionMetrics::new();
         metrics.record_event_discard(EventKind::Disconnected);
+        metrics.record_unknown_source_packet();
         let json = metrics.to_json().expect("json serialization succeeds");
         assert!(json.contains(r#""events_discarded_total":1"#), "{json}");
+        assert!(json.contains(r#""unknown_source_packets":1"#), "{json}");
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""disconnected":1"#), "{json}");
         assert!(json.contains(r#""synchronized":0"#), "{json}");

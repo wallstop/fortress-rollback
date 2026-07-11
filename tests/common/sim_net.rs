@@ -36,6 +36,7 @@
 // Test infrastructure: not every test binary uses every helper.
 #![allow(dead_code)]
 
+use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::{Message, NonBlockingSocket};
 use serde::{Deserialize, Serialize};
@@ -55,17 +56,101 @@ pub type SimClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// queued in the inbox for the next poll (never dropped).
 pub const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
 
+/// Modeled UDP payload bytes per IPv4 fragment under a conventional 1500-byte
+/// path MTU (20-byte IPv4 header + 8-byte UDP header).
+pub const FRAGMENT_PAYLOAD_BYTES: usize = 1472;
+/// Defensive ceiling for generic metadata providers. This exceeds the fragment
+/// count of the protocol's maximum 64 MiB encoded message.
+pub const MAX_MODELED_FRAGMENTS: usize = 65_536;
+
+/// Optional per-fragment loss applied only to oversized datagrams.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentationPolicy {
+    /// Independent probability that one modeled fragment is lost.
+    pub fragment_drop_rate: f64,
+}
+
+/// Metadata supplied by size-aware [`SimNet`] constructors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimPayloadMetadata {
+    pub encoded_len: usize,
+    pub is_input: bool,
+}
+
+/// Cumulative telemetry for one directed link.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SimLinkStats {
+    pub input_sends: u64,
+    pub input_delivered_copies: u64,
+    pub input_policy_loss_decisions: u64,
+    pub input_policy_drops: u64,
+    pub max_encoded_input_bytes: u64,
+    pub input_sends_over_1200_bytes: u64,
+    pub input_sends_over_1472_bytes: u64,
+    pub fragmentation_input_losses: u64,
+    pub max_consecutive_input_policy_loss_run: u64,
+}
+
+impl SimLinkStats {
+    /// Merges another source-address generation of the same logical link.
+    pub fn merge(&mut self, other: Self) {
+        self.input_sends = self.input_sends.saturating_add(other.input_sends);
+        self.input_delivered_copies = self
+            .input_delivered_copies
+            .saturating_add(other.input_delivered_copies);
+        self.input_policy_loss_decisions = self
+            .input_policy_loss_decisions
+            .saturating_add(other.input_policy_loss_decisions);
+        self.input_policy_drops = self
+            .input_policy_drops
+            .saturating_add(other.input_policy_drops);
+        self.max_encoded_input_bytes = self
+            .max_encoded_input_bytes
+            .max(other.max_encoded_input_bytes);
+        self.input_sends_over_1200_bytes = self
+            .input_sends_over_1200_bytes
+            .saturating_add(other.input_sends_over_1200_bytes);
+        self.input_sends_over_1472_bytes = self
+            .input_sends_over_1472_bytes
+            .saturating_add(other.input_sends_over_1472_bytes);
+        self.fragmentation_input_losses = self
+            .fragmentation_input_losses
+            .saturating_add(other.fragmentation_input_losses);
+        self.max_consecutive_input_policy_loss_run = self
+            .max_consecutive_input_policy_loss_run
+            .max(other.max_consecutive_input_policy_loss_run);
+    }
+}
+
+/// Two-state Markov loss model for one directed link.
+///
+/// Every probability is validated in `0.0..=1.0` by the schedule boundary.
+/// SimNet itself remains a lightweight test utility and assumes its callers
+/// provide a valid policy.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GilbertElliottPolicy {
+    /// Probability that a send in the good state transitions to bad for the
+    /// next admitted send, after the current send's loss decision.
+    pub good_to_bad: f64,
+    /// Probability that a send in the bad state transitions to good for the
+    /// next admitted send, after the current send's loss decision.
+    pub bad_to_good: f64,
+    /// Per-send loss probability while in the current good state.
+    pub good_drop_rate: f64,
+    /// Per-send loss probability while in the current bad state.
+    pub bad_drop_rate: f64,
+}
+
 /// Fault policy for one directed link `(from, to)`.
 ///
-/// All probabilities are in `0.0..=1.0` and are rolled per send, in a fixed
-/// order (burst, drop, duplicate, jitter), from the net-wide seeded RNG.
-/// When [`Self::retransmit_delay`] is nonzero, a burst/drop roll models a
-/// reliable transport retransmission instead of packet loss: the would-be
-/// dropped send is delayed, and subsequent sends on the same link are held
-/// behind that retransmission deadline (TCP/WebRTC-reliable head-of-line
-/// blocking).
-/// Serializable so simulation schedules (which embed link policies) can be
-/// stored as reproducible corpus artifacts.
+/// Legacy loss rolls are ordered burst then independent drop. For valid
+/// materialized schedules, [`Self::gilbert_elliott`] replaces those legacy
+/// loss decisions; duplication and jitter still follow any surviving send.
+/// When [`Self::retransmit_delay`] is nonzero, a would-be loss becomes a
+/// reliable head-of-line delay instead of packet loss.
+/// Serializable so schedules can be stored as reproducible corpus artifacts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkPolicy {
     /// Probability an individual send is dropped.
@@ -86,6 +171,16 @@ pub struct LinkPolicy {
     /// keeps UDP-like unreliable loss semantics.
     #[serde(default)]
     pub retransmit_delay: Duration,
+    /// Optional two-state correlated-loss channel. A materialized link starts
+    /// in the good state; each non-blocked/non-held send rolls its current
+    /// state's loss probability first, then the transition for the next send.
+    /// `None` preserves the pre-schema-v11 RNG stream exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gilbert_elliott: Option<GilbertElliottPolicy>,
+    /// Optional IPv4-style fragmentation-amplified loss. `None` consumes no
+    /// fragmentation RNG and preserves legacy traces exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragmentation: Option<FragmentationPolicy>,
 }
 
 impl LinkPolicy {
@@ -100,6 +195,8 @@ impl LinkPolicy {
             burst_rate: 0.0,
             burst_len: 0,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
+            fragmentation: None,
         }
     }
 }
@@ -130,7 +227,7 @@ pub struct SimNetStats {
     pub sent: u64,
     /// Copies placed into an inbox (including buffered-unattached copies).
     pub delivered: u64,
-    /// Copies dropped by drop-rate or burst rolls.
+    /// Copies dropped by independent, fixed-burst, or Gilbert-Elliott loss.
     pub dropped_by_policy: u64,
     /// Would-be policy drops converted into reliable retransmission delays.
     pub retransmit_delayed: u64,
@@ -143,6 +240,37 @@ pub struct SimNetStats {
     pub duplicated: u64,
     /// Sends captured by a holding link (delivered later on release).
     pub held: u64,
+    /// Good-to-bad state transitions made by Gilbert-Elliott links.
+    pub gilbert_elliott_good_to_bad: u64,
+    /// Bad-to-good state transitions made by Gilbert-Elliott links.
+    pub gilbert_elliott_bad_to_good: u64,
+    /// Sends whose Gilbert-Elliott loss decision used the bad state.
+    pub gilbert_elliott_bad_sends: u64,
+    /// Sends whose Gilbert-Elliott loss decision used the good state.
+    pub gilbert_elliott_good_sends: u64,
+    /// Loss decisions caused specifically by Gilbert-Elliott state.
+    pub gilbert_elliott_loss_events: u64,
+    /// Longest consecutive Gilbert-Elliott loss-decision run on any one link.
+    pub gilbert_elliott_max_loss_run: u64,
+    /// Oversized datagrams admitted to fragmentation modeling.
+    pub fragmentation_eligible_sends: u64,
+    /// Total fragments modeled across eligible datagrams.
+    pub fragmentation_fragments_modeled: u64,
+    /// Fragment rolls that selected loss (several may belong to one datagram).
+    pub fragmentation_lost_fragments: u64,
+    /// Datagrams whose fragmentation rolls selected at least one loss.
+    pub fragmentation_loss_events: u64,
+    /// Oversized Input datagrams admitted to fragmentation modeling.
+    pub fragmentation_input_eligible_sends: u64,
+    /// Input datagrams lost because at least one modeled fragment was lost.
+    pub fragmentation_input_loss_events: u64,
+    /// Largest eligible encoded datagram observed.
+    pub fragmentation_max_packet_bytes: u64,
+    /// Largest fragment count modeled for one datagram.
+    pub fragmentation_max_fragments_per_send: u64,
+    /// Metadata providers that exceeded [`MAX_MODELED_FRAGMENTS`] and were
+    /// dropped fail-closed without running a truncated probability model.
+    pub fragmentation_fragment_cap_hits: u64,
 }
 
 /// Runtime state of one directed link.
@@ -157,16 +285,34 @@ struct LinkState {
     blocked: bool,
     /// Capture-and-hold: sends bypass fault rolls and queue until release.
     holding: bool,
+    /// Current Gilbert-Elliott state. Every new/materially replaced link starts
+    /// good, independent of whether the optional policy is enabled.
+    gilbert_elliott_bad: bool,
+    /// Current consecutive GE loss-decision run for this directed link.
+    gilbert_elliott_loss_run: u64,
+    /// Non-Input traffic deliberately does not reset this run.
+    input_policy_loss_run: u64,
+    /// Per-materialized-link fragmentation stream, initialized lazily.
+    fragmentation_rng: Option<Pcg32>,
+    /// Stable seed identity retained across source-address rebinds.
+    fragmentation_stream_key: Option<(SocketAddr, SocketAddr)>,
+    stats: SimLinkStats,
 }
 
 impl LinkState {
-    fn with_policy(policy: LinkPolicy) -> Self {
+    fn with_policy(policy: LinkPolicy, key: (SocketAddr, SocketAddr)) -> Self {
         Self {
             policy,
             burst_remaining: 0,
             retransmit_blocked_until: None,
             blocked: false,
             holding: false,
+            gilbert_elliott_bad: false,
+            gilbert_elliott_loss_run: 0,
+            input_policy_loss_run: 0,
+            fragmentation_rng: None,
+            fragmentation_stream_key: Some(key),
+            stats: SimLinkStats::default(),
         }
     }
 }
@@ -208,6 +354,12 @@ impl<M> Ord for InFlight<M> {
 struct SimNetState<M> {
     clock: SimClockFn,
     rng: Pcg32,
+    /// Domain seed for per-materialized-link fragmentation streams.
+    fragmentation_seed: u64,
+    /// Original source-address identity for fragmentation streams after a
+    /// live socket rebind. Historical addresses remain valid for hot join.
+    fragmentation_source_identities: BTreeMap<SocketAddr, SocketAddr>,
+    payload_metadata: Option<fn(&M) -> SimPayloadMetadata>,
     /// Next unique in-flight sequence number.
     seq: u64,
     /// Policy applied to links that have no explicit state yet. Materialized
@@ -224,6 +376,7 @@ struct SimNetState<M> {
     unattached: UnattachedPolicy,
     stats: SimNetStats,
     blocked_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
+    fragmentation_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
 }
 
 impl<M: Clone> SimNetState<M> {
@@ -285,13 +438,224 @@ impl<M: Clone> SimNetState<M> {
         true
     }
 
+    fn record_input_send(&mut self, key: (SocketAddr, SocketAddr), metadata: SimPayloadMetadata) {
+        if !metadata.is_input {
+            return;
+        }
+        if let Some(link) = self.links.get_mut(&key) {
+            link.stats.input_sends = link.stats.input_sends.saturating_add(1);
+            link.stats.max_encoded_input_bytes = link
+                .stats
+                .max_encoded_input_bytes
+                .max(u64::try_from(metadata.encoded_len).unwrap_or(u64::MAX));
+            if metadata.encoded_len > 1200 {
+                link.stats.input_sends_over_1200_bytes =
+                    link.stats.input_sends_over_1200_bytes.saturating_add(1);
+            }
+            if metadata.encoded_len > FRAGMENT_PAYLOAD_BYTES {
+                link.stats.input_sends_over_1472_bytes =
+                    link.stats.input_sends_over_1472_bytes.saturating_add(1);
+            }
+        }
+    }
+
+    fn record_input_policy_outcome(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        is_input: bool,
+        lost: bool,
+        dropped: bool,
+    ) {
+        if !is_input {
+            return;
+        }
+        if let Some(link) = self.links.get_mut(&key) {
+            if lost {
+                link.stats.input_policy_loss_decisions =
+                    link.stats.input_policy_loss_decisions.saturating_add(1);
+                link.input_policy_loss_run = link.input_policy_loss_run.saturating_add(1);
+                link.stats.max_consecutive_input_policy_loss_run = link
+                    .stats
+                    .max_consecutive_input_policy_loss_run
+                    .max(link.input_policy_loss_run);
+                if dropped {
+                    link.stats.input_policy_drops = link.stats.input_policy_drops.saturating_add(1);
+                }
+            } else {
+                link.input_policy_loss_run = 0;
+            }
+        }
+    }
+
+    /// Evaluates one link's optional two-state channel and advances its state.
+    /// Every admitted send consumes exactly two RNG rolls: loss in the current
+    /// state, then transition for the next send. The fixed draw count makes GE
+    /// traces easy to reproduce while the `None` path consumes no new draws.
+    fn gilbert_elliott_loses(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        policy: &GilbertElliottPolicy,
+    ) -> bool {
+        let was_bad = self
+            .links
+            .get(&key)
+            .is_some_and(|link| link.gilbert_elliott_bad);
+        if was_bad {
+            self.stats.gilbert_elliott_bad_sends += 1;
+        } else {
+            self.stats.gilbert_elliott_good_sends += 1;
+        }
+        let drop_rate = if was_bad {
+            policy.bad_drop_rate
+        } else {
+            policy.good_drop_rate
+        };
+        let loses = self.roll_unit() < drop_rate;
+        let transition_rate = if was_bad {
+            policy.bad_to_good
+        } else {
+            policy.good_to_bad
+        };
+        let transitioned = self.roll_unit() < transition_rate;
+        let next_bad = was_bad ^ transitioned;
+        if transitioned {
+            if was_bad {
+                self.stats.gilbert_elliott_bad_to_good += 1;
+            } else {
+                self.stats.gilbert_elliott_good_to_bad += 1;
+            }
+        }
+        let run = if let Some(link) = self.links.get_mut(&key) {
+            link.gilbert_elliott_bad = next_bad;
+            if loses {
+                link.gilbert_elliott_loss_run += 1;
+            } else {
+                link.gilbert_elliott_loss_run = 0;
+            }
+            link.gilbert_elliott_loss_run
+        } else {
+            0
+        };
+        if loses {
+            self.stats.gilbert_elliott_loss_events += 1;
+            self.stats.gilbert_elliott_max_loss_run =
+                self.stats.gilbert_elliott_max_loss_run.max(run);
+        }
+        loses
+    }
+
+    /// Rolls every modeled fragment, without short-circuiting, and returns
+    /// whether loss of any fragment loses the whole datagram.
+    fn fragmentation_loses(
+        &mut self,
+        key: (SocketAddr, SocketAddr),
+        metadata: SimPayloadMetadata,
+        policy: FragmentationPolicy,
+    ) -> bool {
+        if metadata.encoded_len <= FRAGMENT_PAYLOAD_BYTES {
+            return false;
+        }
+        let requested_fragments = metadata.encoded_len.div_ceil(FRAGMENT_PAYLOAD_BYTES);
+        let cap_exceeded = requested_fragments > MAX_MODELED_FRAGMENTS;
+        let fragments = if cap_exceeded { 0 } else { requested_fragments };
+        if cap_exceeded {
+            self.stats.fragmentation_fragment_cap_hits =
+                self.stats.fragmentation_fragment_cap_hits.saturating_add(1);
+        }
+        let fragments_u64 = u64::try_from(fragments).unwrap_or(u64::MAX);
+        self.stats.fragmentation_eligible_sends =
+            self.stats.fragmentation_eligible_sends.saturating_add(1);
+        self.stats.fragmentation_fragments_modeled = self
+            .stats
+            .fragmentation_fragments_modeled
+            .saturating_add(fragments_u64);
+        self.stats.fragmentation_max_packet_bytes = self
+            .stats
+            .fragmentation_max_packet_bytes
+            .max(u64::try_from(metadata.encoded_len).unwrap_or(u64::MAX));
+        self.stats.fragmentation_max_fragments_per_send = self
+            .stats
+            .fragmentation_max_fragments_per_send
+            .max(fragments_u64);
+        if metadata.is_input {
+            self.stats.fragmentation_input_eligible_sends = self
+                .stats
+                .fragmentation_input_eligible_sends
+                .saturating_add(1);
+        }
+
+        let mut lost = cap_exceeded;
+        let mut lost_fragments = 0_u64;
+        if !cap_exceeded {
+            let stream_key = self
+                .links
+                .get(&key)
+                .and_then(|link| link.fragmentation_stream_key)
+                .unwrap_or(key);
+            let seed = fnv1a_hash(&(self.fragmentation_seed, stream_key));
+            for _ in 0..fragments {
+                let roll = self.links.get_mut(&key).map_or(1.0, |link| {
+                    let rng = link
+                        .fragmentation_rng
+                        .get_or_insert_with(|| Pcg32::seed_from_u64(seed));
+                    f64::from(rng.next_u32()) / (f64::from(u32::MAX) + 1.0)
+                });
+                if roll < policy.fragment_drop_rate {
+                    lost = true;
+                    lost_fragments = lost_fragments.saturating_add(1);
+                }
+            }
+        }
+        self.stats.fragmentation_lost_fragments = self
+            .stats
+            .fragmentation_lost_fragments
+            .saturating_add(lost_fragments);
+        if lost {
+            self.stats.fragmentation_loss_events =
+                self.stats.fragmentation_loss_events.saturating_add(1);
+            if metadata.is_input {
+                self.stats.fragmentation_input_loss_events =
+                    self.stats.fragmentation_input_loss_events.saturating_add(1);
+                if let Some(link) = self.links.get_mut(&key) {
+                    link.stats.fragmentation_input_losses =
+                        link.stats.fragmentation_input_losses.saturating_add(1);
+                }
+            }
+            let count = self.fragmentation_drop_counts.entry(key).or_default();
+            *count = count.saturating_add(1);
+        }
+        lost
+    }
+
     fn send(&mut self, from: SocketAddr, to: SocketAddr, payload: M) {
         self.stats.sent += 1;
         let key = (from, to);
         if !self.links.contains_key(&key) {
-            let state = LinkState::with_policy(self.default_policy.clone());
+            let stream_from = self
+                .fragmentation_source_identities
+                .get(&from)
+                .copied()
+                .unwrap_or(from);
+            let state = LinkState::with_policy(self.default_policy.clone(), (stream_from, to));
             self.links.insert(key, state);
         }
+
+        let metadata = self.payload_metadata.map(|metadata| metadata(&payload));
+        if let Some(metadata) = metadata {
+            self.record_input_send(key, metadata);
+        }
+        let policy = self
+            .links
+            .get(&key)
+            .map_or_else(LinkPolicy::clean, |link| link.policy.clone());
+        assert!(
+            policy.fragmentation.is_none() || self.payload_metadata.is_some(),
+            "fragmentation policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
+        );
 
         // Split borrows: read the link decision first, then roll RNG.
         let (blocked, holding) = match self.links.get(&key) {
@@ -310,63 +674,103 @@ impl<M: Clone> SimNetState<M> {
             return;
         }
 
-        let policy = self
-            .links
-            .get(&key)
-            .map_or_else(LinkPolicy::clean, |link| link.policy.clone());
+        let is_input = metadata.is_some_and(|metadata| metadata.is_input);
+        let mut input_policy_lost = false;
+
+        let gilbert_elliott_lost = policy
+            .gilbert_elliott
+            .as_ref()
+            .is_some_and(|ge| self.gilbert_elliott_loses(key, ge));
+        if gilbert_elliott_lost {
+            input_policy_lost = true;
+            if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                self.record_input_policy_outcome(key, is_input, true, true);
+                return;
+            }
+        }
 
         // Burst state machine (mirrors the ChaosSocket semantics: the
         // triggering send and the following `burst_len - 1` sends drop).
-        let in_burst = self
-            .links
-            .get(&key)
-            .is_some_and(|link| link.burst_remaining > 0);
+        let in_burst = !gilbert_elliott_lost
+            && self
+                .links
+                .get(&key)
+                .is_some_and(|link| link.burst_remaining > 0);
         if in_burst {
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining -= 1;
             }
+            input_policy_lost = true;
             if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                self.record_input_policy_outcome(key, is_input, true, true);
                 return;
             }
         }
 
-        let burst_roll_hit =
-            !in_burst && policy.burst_rate > 0.0 && self.roll_unit() < policy.burst_rate;
+        let burst_roll_hit = !gilbert_elliott_lost
+            && !in_burst
+            && policy.burst_rate > 0.0
+            && self.roll_unit() < policy.burst_rate;
         if burst_roll_hit {
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining = policy.burst_len.saturating_sub(1);
             }
+            input_policy_lost = true;
             if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                self.record_input_policy_outcome(key, is_input, true, true);
                 return;
             }
         } else {
-            let drop_roll_hit =
-                !in_burst && policy.drop_rate > 0.0 && self.roll_unit() < policy.drop_rate;
-            if drop_roll_hit && !self.handle_policy_loss(key, policy.retransmit_delay) {
-                return;
+            let drop_roll_hit = !gilbert_elliott_lost
+                && !in_burst
+                && policy.drop_rate > 0.0
+                && self.roll_unit() < policy.drop_rate;
+            if drop_roll_hit {
+                input_policy_lost = true;
+                if !self.handle_policy_loss(key, policy.retransmit_delay) {
+                    self.record_input_policy_outcome(key, is_input, true, true);
+                    return;
+                }
             }
         }
 
-        let copies = if policy.dup_rate > 0.0 && self.roll_unit() < policy.dup_rate {
+        // Consume the same legacy duplication/jitter draws regardless of the
+        // independent fragmentation outcome, preserving the base fault story.
+        let duplicated = policy.dup_rate > 0.0 && self.roll_unit() < policy.dup_rate;
+        let copies = if duplicated { 2 } else { 1 };
+        let mut delays = [Duration::ZERO; 2];
+        for delay in delays.iter_mut().take(copies) {
+            *delay = policy.base_delay + self.roll_jitter(policy.jitter);
+        }
+
+        let fragmentation_lost = metadata.is_some_and(|metadata| {
+            policy
+                .fragmentation
+                .is_some_and(|fragmentation| self.fragmentation_loses(key, metadata, fragmentation))
+        });
+        input_policy_lost |= fragmentation_lost;
+        if fragmentation_lost && !self.handle_policy_loss(key, policy.retransmit_delay) {
+            self.record_input_policy_outcome(key, is_input, true, true);
+            return;
+        }
+
+        if duplicated {
             self.stats.duplicated += 1;
-            2
-        } else {
-            1
-        };
+        }
 
         let now = self.now();
         let blocked_until = self
             .links
             .get(&key)
             .and_then(|link| link.retransmit_blocked_until);
-        for _ in 0..copies {
-            let delay = policy.base_delay + self.roll_jitter(policy.jitter);
+        for delay in delays.into_iter().take(copies) {
             let mut deliver_at = now + delay;
             if let Some(deadline) = blocked_until {
                 deliver_at = deliver_at.max(deadline);
             }
             self.schedule(from, to, payload.clone(), deliver_at);
         }
+        self.record_input_policy_outcome(key, is_input, input_policy_lost, false);
     }
 
     /// Moves every due in-flight copy into its destination inbox.
@@ -379,10 +783,19 @@ impl<M: Clone> SimNetState<M> {
             let Some(std::cmp::Reverse(msg)) = self.in_flight.pop() else {
                 break;
             };
+            let is_input = self
+                .payload_metadata
+                .is_some_and(|metadata| metadata(&msg.payload).is_input);
             match self.inboxes.get_mut(&msg.to) {
                 Some(queue) => {
                     queue.push_back((msg.from, msg.payload));
                     self.stats.delivered += 1;
+                    if is_input {
+                        if let Some(link) = self.links.get_mut(&(msg.from, msg.to)) {
+                            link.stats.input_delivered_copies =
+                                link.stats.input_delivered_copies.saturating_add(1);
+                        }
+                    }
                 },
                 None => match self.unattached {
                     UnattachedPolicy::Drop => self.stats.dropped_unattached += 1,
@@ -392,6 +805,12 @@ impl<M: Clone> SimNetState<M> {
                             .or_default()
                             .push_back((msg.from, msg.payload));
                         self.stats.delivered += 1;
+                        if is_input {
+                            if let Some(link) = self.links.get_mut(&(msg.from, msg.to)) {
+                                link.stats.input_delivered_copies =
+                                    link.stats.input_delivered_copies.saturating_add(1);
+                            }
+                        }
                     },
                 },
             }
@@ -443,10 +862,31 @@ impl<M: Clone> SimNet<M> {
     /// Starts with a clean default policy and [`UnattachedPolicy::Drop`].
     #[must_use]
     pub fn new(seed: u64, clock: SimClockFn) -> Self {
+        Self::new_inner(seed, clock, None)
+    }
+
+    /// Creates a network that can apply encoded-size-aware policies.
+    #[must_use]
+    pub fn new_size_aware(
+        seed: u64,
+        clock: SimClockFn,
+        payload_metadata: fn(&M) -> SimPayloadMetadata,
+    ) -> Self {
+        Self::new_inner(seed, clock, Some(payload_metadata))
+    }
+
+    fn new_inner(
+        seed: u64,
+        clock: SimClockFn,
+        payload_metadata: Option<fn(&M) -> SimPayloadMetadata>,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(SimNetState {
                 clock,
                 rng: Pcg32::seed_from_u64(seed),
+                fragmentation_seed: seed ^ 0x4652_4147_4d45_4e54,
+                fragmentation_source_identities: BTreeMap::new(),
+                payload_metadata,
                 seq: 0,
                 default_policy: LinkPolicy::clean(),
                 links: BTreeMap::new(),
@@ -456,6 +896,7 @@ impl<M: Clone> SimNet<M> {
                 unattached: UnattachedPolicy::Drop,
                 stats: SimNetStats::default(),
                 blocked_drop_counts: BTreeMap::new(),
+                fragmentation_drop_counts: BTreeMap::new(),
             })),
         }
     }
@@ -466,14 +907,26 @@ impl<M: Clone> SimNet<M> {
 
     /// Attaches a socket at `addr`, creating an inbox for it.
     ///
-    /// An existing inbox (from a previous attachment, or buffered
-    /// unattached-policy traffic) is preserved, so a hot-join re-attach at a
-    /// vacated address receives anything buffered for it.
+    /// An existing inbox is preserved when a previous `SimSocket` was dropped
+    /// without [`Self::detach`], or when unattached-policy traffic created the
+    /// inbox. [`Self::detach`] explicitly removes the inbox, so a detach/attach
+    /// cycle starts with an empty queue.
+    ///
+    /// The fabric routes through an address-owned inbox, so multiple live
+    /// attachments at one address share that queue. The hot-join harness uses
+    /// this briefly while constructing a replacement generation.
     #[must_use]
     pub fn attach(&self, addr: SocketAddr) -> SimSocket<M> {
-        self.lock().inboxes.entry(addr).or_default();
+        let mut state = self.lock();
+        state.inboxes.entry(addr).or_default();
+        state
+            .fragmentation_source_identities
+            .entry(addr)
+            .or_insert(addr);
+        drop(state);
+        let binding = Arc::new(Mutex::new(SimSocketBindingState { addr, active: true }));
         SimSocket {
-            addr,
+            binding,
             state: Arc::clone(&self.state),
         }
     }
@@ -488,17 +941,48 @@ impl<M: Clone> SimNet<M> {
     /// already carried traffic keep their materialized state — use
     /// [`Self::set_link`] to change those.
     pub fn set_default_policy(&self, policy: LinkPolicy) {
-        self.lock().default_policy = policy;
+        let mut state = self.lock();
+        assert!(
+            policy.fragmentation.is_none() || state.payload_metadata.is_some(),
+            "fragmentation policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
+        );
+        state.default_policy = policy;
     }
 
     /// Sets (or replaces) the fault policy for the directed link `from → to`,
     /// preserving its blocked/holding toggles and any current retransmission
-    /// head-of-line deadline, and resetting any burst in progress.
+    /// head-of-line deadline. Replacing a policy resets fixed-burst progress
+    /// and starts any Gilbert-Elliott channel in Good with an empty loss run.
+    /// The per-link fragmentation RNG continues across policy epochs so a
+    /// re-applied policy does not replay the same trial prefix.
     pub fn set_link(&self, from: SocketAddr, to: SocketAddr, policy: LinkPolicy) {
         let mut state = self.lock();
-        let link = state.links.entry((from, to)).or_default();
+        assert!(
+            policy.fragmentation.is_none() || state.payload_metadata.is_some(),
+            "fragmentation policy requires SimNet::new_size_aware metadata"
+        );
+        assert!(
+            policy.fragmentation.is_none() || policy.retransmit_delay.is_zero(),
+            "fragmentation policy cannot be combined with reliable retransmission"
+        );
+        let key = (from, to);
+        let stream_from = state
+            .fragmentation_source_identities
+            .get(&from)
+            .copied()
+            .unwrap_or(from);
+        let link = state.links.entry(key).or_default();
+        link.fragmentation_stream_key
+            .get_or_insert((stream_from, to));
         link.policy = policy;
         link.burst_remaining = 0;
+        link.gilbert_elliott_bad = false;
+        link.gilbert_elliott_loss_run = 0;
+        link.input_policy_loss_run = 0;
     }
 
     /// Sets the same policy on both directions between `a` and `b`.
@@ -511,7 +995,15 @@ impl<M: Clone> SimNet<M> {
     /// asymmetric by design: the reverse direction is untouched.
     pub fn set_blocked(&self, from: SocketAddr, to: SocketAddr, blocked: bool) {
         let mut state = self.lock();
-        let link = state.links.entry((from, to)).or_default();
+        let key = (from, to);
+        let stream_from = state
+            .fragmentation_source_identities
+            .get(&from)
+            .copied()
+            .unwrap_or(from);
+        let link = state.links.entry(key).or_default();
+        link.fragmentation_stream_key
+            .get_or_insert((stream_from, to));
         link.blocked = blocked;
     }
 
@@ -533,7 +1025,14 @@ impl<M: Clone> SimNet<M> {
     pub fn set_holding(&self, from: SocketAddr, to: SocketAddr, holding: bool) {
         let mut state = self.lock();
         let key = (from, to);
+        let stream_from = state
+            .fragmentation_source_identities
+            .get(&from)
+            .copied()
+            .unwrap_or(from);
         let link = state.links.entry(key).or_default();
+        link.fragmentation_stream_key
+            .get_or_insert((stream_from, to));
         link.holding = holding;
         if !holding {
             state.release_held(key);
@@ -554,6 +1053,9 @@ impl<M: Clone> SimNet<M> {
                 link.retransmit_blocked_until = None;
                 link.blocked = false;
                 link.holding = false;
+                link.gilbert_elliott_bad = false;
+                link.gilbert_elliott_loss_run = 0;
+                link.input_policy_loss_run = 0;
             }
             state.release_held(key);
         }
@@ -575,11 +1077,59 @@ impl<M: Clone> SimNet<M> {
     pub fn blocked_drop_counts(&self) -> BTreeMap<(SocketAddr, SocketAddr), u64> {
         self.lock().blocked_drop_counts.clone()
     }
+
+    /// Snapshot of fragmentation loss events split by directed link.
+    #[must_use]
+    pub fn fragmentation_drop_counts(&self) -> BTreeMap<(SocketAddr, SocketAddr), u64> {
+        self.lock().fragmentation_drop_counts.clone()
+    }
+
+    /// Snapshot of cumulative per-directed-link telemetry.
+    #[must_use]
+    pub fn link_stats(&self) -> BTreeMap<(SocketAddr, SocketAddr), SimLinkStats> {
+        self.lock()
+            .links
+            .iter()
+            .map(|(&key, link)| (key, link.stats))
+            .collect()
+    }
 }
 
-/// A peer-side socket attached to a [`SimNet`] at a fixed address.
-pub struct SimSocket<M = Message> {
+/// Why a simulated socket cannot move to a requested address.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SimRebindError {
+    /// The requested address is already the socket's current address.
+    SameAddress,
+    /// Another socket or pre-existing outbound link state already uses the
+    /// requested address.
+    AddressInUse,
+    /// The controlled socket has already been detached.
+    Detached,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SimSocketBindingState {
     addr: SocketAddr,
+    active: bool,
+}
+
+/// Out-of-band controller for a live [`SimSocket`]'s local binding.
+///
+/// The simulation harness keeps this handle after moving the socket into a
+/// session so it can model a NAT mapping change without rebuilding that
+/// session or changing its peers' canonical destination addresses.
+/// Rebinding is address-level: the caller must ensure no other live socket is
+/// attached at the old address because its address-owned inbox moves with the
+/// binding. Schema validation keeps that operation disjoint from hot join.
+#[derive(Clone)]
+pub struct SimSocketBinding<M = Message> {
+    binding: Arc<Mutex<SimSocketBindingState>>,
+    state: Arc<Mutex<SimNetState<M>>>,
+}
+
+/// A peer-side socket attached to a [`SimNet`] at a movable local address.
+pub struct SimSocket<M = Message> {
+    binding: Arc<Mutex<SimSocketBindingState>>,
     state: Arc<Mutex<SimNetState<M>>>,
 }
 
@@ -589,25 +1139,152 @@ impl<M: Clone> SimSocket<M> {
     /// The address this socket is attached at.
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
-        self.addr
+        self.binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned")
+            .addr
+    }
+
+    /// Returns an out-of-band controller for this socket's local binding.
+    #[must_use]
+    pub fn binding(&self) -> SimSocketBinding<M> {
+        SimSocketBinding {
+            binding: Arc::clone(&self.binding),
+            state: Arc::clone(&self.state),
+        }
     }
 
     /// Sends a payload to `to` through the simulated network.
     pub fn send_payload(&self, to: SocketAddr, payload: M) {
+        let binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return;
+        }
+        let from = binding.addr;
+        drop(binding);
         self.state
             .lock()
             .expect("SimNet mutex poisoned")
-            .send(self.addr, to, payload);
+            .send(from, to, payload);
     }
 
     /// Receives every payload due for this socket (bounded per call by
     /// [`MAX_RECEIVE_MESSAGES_PER_POLL`]; the remainder stays queued).
     #[must_use]
     pub fn recv_payloads(&self) -> Vec<(SocketAddr, M)> {
+        let binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return Vec::new();
+        }
+        let addr = binding.addr;
+        drop(binding);
         self.state
             .lock()
             .expect("SimNet mutex poisoned")
-            .receive(self.addr)
+            .receive(addr)
+    }
+}
+
+// Test infrastructure — poisoned mutexes are test bugs (see SimNet::lock).
+#[allow(clippy::expect_used)]
+impl<M: Clone> SimSocketBinding<M> {
+    /// The address currently used by the controlled socket.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned")
+            .addr
+    }
+
+    /// Moves the live socket to `new_addr`, returning its previous address.
+    ///
+    /// Messages already queued to the live socket remain readable. Messages
+    /// still in flight keep their original source and destination. Outbound
+    /// link policy/state is cloned to the new source. The old generation is
+    /// deliberately retained so pre-rebind held traffic remains discoverable
+    /// and releasable by [`SimNet::heal_all`]. Destination policy remains on
+    /// the canonical old address so peers that have not learned the new
+    /// mapping continue sending into an unattached endpoint. Schema v10 bounds
+    /// this history to one rebind per peer and excludes old-address hot join.
+    pub fn rebind(&self, new_addr: SocketAddr) -> Result<SocketAddr, SimRebindError> {
+        let mut binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return Err(SimRebindError::Detached);
+        }
+        let old_addr = binding.addr;
+        if old_addr == new_addr {
+            return Err(SimRebindError::SameAddress);
+        }
+
+        let mut state = self.state.lock().expect("SimNet mutex poisoned");
+        let new_source_in_use = state.links.keys().any(|(from, _)| *from == new_addr)
+            || state.held.keys().any(|(from, _)| *from == new_addr);
+        if state.inboxes.contains_key(&new_addr) || new_source_in_use {
+            return Err(SimRebindError::AddressInUse);
+        }
+
+        let stream_source = state
+            .fragmentation_source_identities
+            .get(&old_addr)
+            .copied()
+            .unwrap_or(old_addr);
+        state
+            .fragmentation_source_identities
+            .insert(new_addr, stream_source);
+
+        let outbound_keys: Vec<(SocketAddr, SocketAddr)> = state
+            .links
+            .keys()
+            .copied()
+            .filter(|(from, _)| *from == old_addr)
+            .collect();
+        for old_key in outbound_keys {
+            if let Some(mut link) = state.links.get(&old_key).cloned() {
+                let new_key = (new_addr, old_key.1);
+                link.fragmentation_stream_key.get_or_insert(old_key);
+                let continued_run = link.input_policy_loss_run;
+                link.stats = SimLinkStats {
+                    max_consecutive_input_policy_loss_run: continued_run,
+                    ..SimLinkStats::default()
+                };
+                // Retain `old_key`: `heal_all` discovers and releases held
+                // pre-rebind traffic by iterating the historical link keys.
+                state.links.insert(new_key, link);
+            }
+        }
+
+        let queued = state.inboxes.remove(&old_addr).unwrap_or_default();
+        state.inboxes.insert(new_addr, queued);
+        binding.addr = new_addr;
+        Ok(old_addr)
+    }
+
+    /// Detaches the controlled socket at its current address.
+    pub fn detach(&self) {
+        let mut binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return;
+        }
+        let addr = binding.addr;
+        self.state
+            .lock()
+            .expect("SimNet mutex poisoned")
+            .inboxes
+            .remove(&addr);
+        binding.active = false;
     }
 }
 
@@ -640,6 +1317,27 @@ mod tests {
         let clock: SimClockFn =
             Arc::new(move || base + Duration::from_millis(offset.load(AtomicOrdering::Relaxed)));
         (clock, offset_ms)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SizedPayload {
+        id: u32,
+        encoded_len: usize,
+        is_input: bool,
+    }
+
+    fn sized_payload_metadata(payload: &SizedPayload) -> SimPayloadMetadata {
+        SimPayloadMetadata {
+            encoded_len: payload.encoded_len,
+            is_input: payload.is_input,
+        }
+    }
+
+    fn small_u32_metadata(_: &u32) -> SimPayloadMetadata {
+        SimPayloadMetadata {
+            encoded_len: 4,
+            is_input: false,
+        }
     }
 
     /// Drives `sends` identical send sequences through a fresh net and
@@ -676,6 +1374,8 @@ mod tests {
             burst_rate: 0.02,
             burst_len: 4,
             retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
+            fragmentation: None,
         };
         let first = run_trace(42, policy.clone());
         let second = run_trace(42, policy.clone());
@@ -927,6 +1627,97 @@ mod tests {
     }
 
     #[test]
+    fn rebind_moves_live_socket_and_preserves_outbound_policy() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let fresh = addr(3);
+        let peer = addr(2);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+
+        net.set_link(
+            old,
+            peer,
+            LinkPolicy {
+                drop_rate: 1.0,
+                ..LinkPolicy::clean()
+            },
+        );
+        remote.send_payload(old, 9);
+        assert!(remote.recv_payloads().is_empty()); // pump 9 into the live socket inbox
+        remote.send_payload(old, 10); // remains in flight until after the rebind
+
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        assert_eq!(socket.local_addr(), fresh);
+        assert_eq!(binding.local_addr(), fresh);
+        assert_eq!(
+            socket.recv_payloads(),
+            vec![(peer, 9)],
+            "already-queued traffic belongs to the live socket and must survive the rebind"
+        );
+        assert_eq!(net.stats().dropped_unattached, 1);
+
+        socket.send_payload(peer, 20);
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "the old outbound drop policy must follow the rebound sender"
+        );
+
+        net.heal_all();
+        socket.send_payload(peer, 30);
+        assert_eq!(remote.recv_payloads(), vec![(fresh, 30)]);
+        remote.send_payload(fresh, 40);
+        assert_eq!(socket.recv_payloads(), vec![(peer, 40)]);
+
+        binding.detach();
+        assert_eq!(binding.rebind(old), Err(SimRebindError::Detached));
+        socket.send_payload(peer, 45);
+        assert!(remote.recv_payloads().is_empty());
+        remote.send_payload(fresh, 50);
+        let _ = remote.recv_payloads();
+        assert_eq!(net.stats().dropped_unattached, 2);
+    }
+
+    #[test]
+    fn rebind_collision_rejects_without_partial_mutation() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let binding = a.binding();
+        let occupied = net.attach(addr(2));
+
+        assert_eq!(binding.rebind(addr(1)), Err(SimRebindError::SameAddress));
+        assert_eq!(binding.rebind(addr(2)), Err(SimRebindError::AddressInUse));
+        assert_eq!(a.local_addr(), addr(1));
+
+        a.send_payload(addr(2), 7);
+        assert_eq!(occupied.recv_payloads(), vec![(addr(1), 7)]);
+    }
+
+    #[test]
+    fn rebind_keeps_pre_and_post_generation_held_traffic_releasable() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let fresh = addr(3);
+        let peer = addr(2);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+
+        net.set_holding(old, peer, true);
+        socket.send_payload(peer, 1);
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        socket.send_payload(peer, 2);
+        assert!(remote.recv_payloads().is_empty());
+
+        net.heal_all();
+        assert_eq!(remote.recv_payloads(), vec![(old, 1), (fresh, 2)]);
+    }
+
+    #[test]
     fn buffer_policy_preserves_traffic_across_reattach() {
         let (clock, _offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
@@ -992,6 +1783,213 @@ mod tests {
     }
 
     #[test]
+    fn gilbert_elliott_rolls_loss_then_transition_and_tracks_per_link_runs() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 1.0,
+                bad_to_good: 0.0,
+                good_drop_rate: 0.0,
+                bad_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        for value in 0..5 {
+            a.send_payload(addr(2), value);
+        }
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 0)]);
+        assert_eq!(
+            net.stats(),
+            SimNetStats {
+                sent: 5,
+                delivered: 1,
+                dropped_by_policy: 4,
+                gilbert_elliott_good_to_bad: 1,
+                gilbert_elliott_bad_sends: 4,
+                gilbert_elliott_good_sends: 1,
+                gilbert_elliott_loss_events: 4,
+                gilbert_elliott_max_loss_run: 4,
+                ..SimNetStats::default()
+            }
+        );
+
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 1.0,
+                    good_drop_rate: 0.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        a.send_payload(addr(2), 10);
+        a.send_payload(addr(2), 11);
+        a.send_payload(addr(2), 12);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 10), (addr(1), 12)]);
+        let stats = net.stats();
+        assert_eq!(stats.gilbert_elliott_good_to_bad, 3);
+        assert_eq!(stats.gilbert_elliott_bad_to_good, 1);
+        assert_eq!(stats.gilbert_elliott_loss_events, 5);
+        assert_eq!(stats.gilbert_elliott_max_loss_run, 4);
+    }
+
+    #[test]
+    fn gilbert_elliott_bypasses_blocked_and_held_sends_and_resets_per_link() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        let c = net.attach(addr(3));
+        let ge = LinkPolicy {
+            gilbert_elliott: Some(GilbertElliottPolicy {
+                good_to_bad: 1.0,
+                bad_to_good: 0.0,
+                good_drop_rate: 0.0,
+                bad_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        };
+        net.set_link(addr(1), addr(2), ge.clone());
+        net.set_link(addr(1), addr(3), ge.clone());
+
+        net.set_blocked(addr(1), addr(2), true);
+        a.send_payload(addr(2), 1);
+        net.set_blocked(addr(1), addr(2), false);
+        net.set_holding(addr(1), addr(3), true);
+        a.send_payload(addr(3), 2);
+        net.set_holding(addr(1), addr(3), false);
+        assert_eq!(c.recv_payloads(), vec![(addr(1), 2)]);
+        assert_eq!(net.stats().gilbert_elliott_good_sends, 0);
+
+        a.send_payload(addr(2), 3);
+        a.send_payload(addr(2), 4);
+        a.send_payload(addr(3), 5);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 3)]);
+        assert_eq!(c.recv_payloads(), vec![(addr(1), 5)]);
+        let before_reset = net.stats();
+        assert_eq!(before_reset.gilbert_elliott_good_sends, 2);
+        assert_eq!(before_reset.gilbert_elliott_bad_sends, 1);
+        assert_eq!(before_reset.gilbert_elliott_loss_events, 1);
+
+        net.set_link(addr(1), addr(2), ge);
+        a.send_payload(addr(2), 6);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 6)]);
+        net.heal_all();
+        a.send_payload(addr(2), 7);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 7)]);
+        assert_eq!(net.stats().gilbert_elliott_good_sends, 3);
+    }
+
+    #[test]
+    fn gilbert_elliott_losses_become_reliable_fifo_retransmissions() {
+        let (clock, offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                retransmit_delay: Duration::from_millis(100),
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 1.0,
+                    good_drop_rate: 1.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        a.send_payload(addr(2), 1);
+        a.send_payload(addr(2), 2);
+        assert!(b.recv_payloads().is_empty());
+        offset.store(100, AtomicOrdering::Relaxed);
+        assert_eq!(b.recv_payloads(), vec![(addr(1), 1), (addr(1), 2)]);
+        let stats = net.stats();
+        assert_eq!(stats.gilbert_elliott_good_sends, 1);
+        assert_eq!(stats.gilbert_elliott_bad_sends, 1);
+        assert_eq!(stats.gilbert_elliott_good_to_bad, 1);
+        assert_eq!(stats.gilbert_elliott_bad_to_good, 1);
+        assert_eq!(stats.gilbert_elliott_loss_events, 2);
+        assert_eq!(stats.retransmit_delayed, 2);
+        assert_eq!(stats.dropped_by_policy, 0);
+    }
+
+    #[test]
+    fn gilbert_elliott_state_follows_rebound_source_generation() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let peer = addr(2);
+        let fresh = addr(3);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+        net.set_link(
+            old,
+            peer,
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 1.0,
+                    bad_to_good: 0.0,
+                    good_drop_rate: 0.0,
+                    bad_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        socket.send_payload(peer, 1);
+        assert_eq!(remote.recv_payloads(), vec![(old, 1)]);
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        socket.send_payload(peer, 2);
+        assert!(remote.recv_payloads().is_empty());
+        assert_eq!(net.stats().gilbert_elliott_bad_sends, 1);
+        assert_eq!(net.stats().gilbert_elliott_loss_events, 1);
+    }
+
+    #[test]
+    fn gilbert_elliott_long_run_matches_stationary_loss_envelope() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(0xCE45_0E11, clock);
+        let a = net.attach(addr(1));
+        let _b = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                gilbert_elliott: Some(GilbertElliottPolicy {
+                    good_to_bad: 0.02,
+                    bad_to_good: 0.08,
+                    good_drop_rate: 0.01,
+                    bad_drop_rate: 0.60,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+
+        for value in 0..20_000 {
+            a.send_payload(addr(2), value);
+        }
+        let stats = net.stats();
+        let bad_fraction = stats.gilbert_elliott_bad_sends as f64 / 20_000.0;
+        let loss_fraction = stats.gilbert_elliott_loss_events as f64 / 20_000.0;
+        assert!((0.15..=0.25).contains(&bad_fraction), "{stats:?}");
+        assert!((0.09..=0.17).contains(&loss_fraction), "{stats:?}");
+        assert!(stats.gilbert_elliott_good_to_bad > 100, "{stats:?}");
+        assert!(stats.gilbert_elliott_bad_to_good > 100, "{stats:?}");
+    }
+
+    #[test]
     fn heal_all_restores_clean_links_and_flushes_held() {
         let (clock, _offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
@@ -1016,6 +2014,508 @@ mod tests {
         b.send_payload(addr(1), 3);
         assert_eq!(b.recv_payloads().len(), 1, "healed link delivers");
         assert_eq!(a.recv_payloads().len(), 1, "healed block delivers");
+    }
+
+    #[test]
+    fn fragmentation_uses_fixed_1472_boundary_and_rolls_every_fragment() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        for (id, encoded_len) in [(1, 1472), (2, 1473), (3, 2944), (4, 2945)] {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len,
+                    is_input: true,
+                },
+            );
+        }
+
+        assert_eq!(receiver.recv_payloads().len(), 1);
+        let stats = net.stats();
+        assert_eq!(stats.fragmentation_eligible_sends, 3);
+        assert_eq!(stats.fragmentation_fragments_modeled, 7);
+        assert_eq!(stats.fragmentation_lost_fragments, 7);
+        assert_eq!(stats.fragmentation_loss_events, 3);
+        assert_eq!(stats.fragmentation_input_eligible_sends, 3);
+        assert_eq!(stats.fragmentation_input_loss_events, 3);
+        assert_eq!(stats.fragmentation_max_packet_bytes, 2945);
+        assert_eq!(stats.fragmentation_max_fragments_per_send, 3);
+        assert_eq!(net.fragmentation_drop_counts()[&(addr(1), addr(2))], 3);
+
+        let link = net.link_stats()[&(addr(1), addr(2))];
+        assert_eq!(link.input_sends, 4);
+        assert_eq!(link.input_delivered_copies, 1);
+        assert_eq!(link.input_policy_loss_decisions, 3);
+        assert_eq!(link.max_consecutive_input_policy_loss_run, 3);
+        assert_eq!(link.max_encoded_input_bytes, 2945);
+        assert_eq!(link.input_sends_over_1200_bytes, 4);
+        assert_eq!(link.input_sends_over_1472_bytes, 3);
+        assert_eq!(link.fragmentation_input_losses, 3);
+        assert_eq!(link.input_policy_drops, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "fragmentation policy requires SimNet::new_size_aware metadata")]
+    fn fragmentation_without_payload_metadata_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            }),
+            ..LinkPolicy::clean()
+        });
+
+        sender.send_payload(addr(2), 1);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "fragmentation policy cannot be combined with reliable retransmission"
+    )]
+    fn default_fragmentation_with_retransmission_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        net.set_default_policy(LinkPolicy {
+            retransmit_delay: Duration::from_millis(10),
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.2,
+            }),
+            ..LinkPolicy::clean()
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "fragmentation policy cannot be combined with reliable retransmission"
+    )]
+    fn directed_fragmentation_with_retransmission_fails_loudly() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                retransmit_delay: Duration::from_millis(10),
+                fragmentation: Some(FragmentationPolicy {
+                    fragment_drop_rate: 0.2,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+    }
+
+    #[test]
+    fn blocked_and_held_sends_bypass_fragmentation_modeling() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                fragmentation: Some(FragmentationPolicy {
+                    fragment_drop_rate: 1.0,
+                }),
+                ..LinkPolicy::clean()
+            },
+        );
+        let payload = SizedPayload {
+            id: 1,
+            encoded_len: 2000,
+            is_input: true,
+        };
+
+        net.set_blocked(addr(1), addr(2), true);
+        sender.send_payload(addr(2), payload.clone());
+        net.set_blocked(addr(1), addr(2), false);
+        net.set_holding(addr(1), addr(2), true);
+        sender.send_payload(addr(2), payload);
+        net.set_holding(addr(1), addr(2), false);
+
+        assert_eq!(receiver.recv_payloads().len(), 1);
+        assert_eq!(net.stats().fragmentation_eligible_sends, 0);
+        let link = net.link_stats()[&(addr(1), addr(2))];
+        assert_eq!(link.input_sends, 2);
+        assert_eq!(link.input_delivered_copies, 1);
+        assert_eq!(link.max_encoded_input_bytes, 2000);
+        assert_eq!(link.input_policy_loss_decisions, 0);
+    }
+
+    #[test]
+    fn base_loss_precedes_fragmentation_and_non_input_does_not_reset_input_run() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            drop_rate: 1.0,
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 1.0,
+            }),
+            ..LinkPolicy::clean()
+        });
+        for (id, is_input) in [(1, true), (2, false), (3, true)] {
+            sender.send_payload(
+                addr(2),
+                SizedPayload {
+                    id,
+                    encoded_len: 2000,
+                    is_input,
+                },
+            );
+        }
+        assert_eq!(net.stats().fragmentation_eligible_sends, 0);
+        let link = net.link_stats()[&(addr(1), addr(2))];
+        assert_eq!(link.input_policy_loss_decisions, 2);
+        assert_eq!(link.input_policy_drops, 2);
+        assert_eq!(link.max_consecutive_input_policy_loss_run, 2);
+    }
+
+    #[test]
+    fn reliable_loss_decision_is_not_counted_as_an_input_drop() {
+        let (clock, offset) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            drop_rate: 1.0,
+            retransmit_delay: Duration::from_millis(10),
+            ..LinkPolicy::clean()
+        });
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: 100,
+                is_input: true,
+            },
+        );
+        offset.fetch_add(10, AtomicOrdering::Relaxed);
+
+        assert_eq!(receiver.recv_payloads().len(), 1);
+        let link = net.link_stats()[&(addr(1), addr(2))];
+        assert_eq!(link.input_policy_loss_decisions, 1);
+        assert_eq!(link.input_policy_drops, 0);
+    }
+
+    #[test]
+    fn generic_fragment_count_above_bound_fails_closed() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let receiver = net.attach(addr(2));
+        net.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.0,
+            }),
+            ..LinkPolicy::clean()
+        });
+        sender.send_payload(
+            addr(2),
+            SizedPayload {
+                id: 1,
+                encoded_len: usize::MAX,
+                is_input: false,
+            },
+        );
+        assert!(receiver.recv_payloads().is_empty());
+        let stats = net.stats();
+        assert_eq!(stats.fragmentation_fragments_modeled, 0);
+        assert_eq!(stats.fragmentation_fragment_cap_hits, 1);
+        assert_eq!(stats.fragmentation_loss_events, 1);
+        assert_eq!(stats.dropped_by_policy, 1);
+    }
+
+    #[test]
+    fn size_awareness_without_fragmentation_preserves_legacy_fault_trace() {
+        let (clock, offset) = manual_clock();
+        let legacy: SimNet<u32> = SimNet::new(42, Arc::clone(&clock));
+        let aware: SimNet<u32> = SimNet::new_size_aware(42, clock, small_u32_metadata);
+        let policy = LinkPolicy {
+            drop_rate: 0.2,
+            dup_rate: 0.1,
+            jitter: Duration::from_millis(9),
+            ..LinkPolicy::clean()
+        };
+        legacy.set_default_policy(policy.clone());
+        aware.set_default_policy(policy);
+        let legacy_sender = legacy.attach(addr(1));
+        let legacy_receiver = legacy.attach(addr(2));
+        let aware_sender = aware.attach(addr(1));
+        let aware_receiver = aware.attach(addr(2));
+        let mut legacy_trace = Vec::new();
+        let mut aware_trace = Vec::new();
+        for value in 0..200 {
+            legacy_sender.send_payload(addr(2), value);
+            aware_sender.send_payload(addr(2), value);
+            offset.fetch_add(1, AtomicOrdering::Relaxed);
+            legacy_trace.extend(legacy_receiver.recv_payloads());
+            aware_trace.extend(aware_receiver.recv_payloads());
+        }
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        legacy_trace.extend(legacy_receiver.recv_payloads());
+        aware_trace.extend(aware_receiver.recv_payloads());
+        assert_eq!(legacy_trace, aware_trace);
+        assert_eq!(legacy.stats(), aware.stats());
+    }
+
+    #[test]
+    fn fragmentation_drop_preserves_later_legacy_rng_outcomes() {
+        let (clock, offset) = manual_clock();
+        let control = SimNet::new_size_aware(42, Arc::clone(&clock), sized_payload_metadata);
+        let treatment = SimNet::new_size_aware(42, clock, sized_payload_metadata);
+        let dup_jitter = || LinkPolicy {
+            dup_rate: 0.4,
+            jitter: Duration::from_millis(9),
+            ..LinkPolicy::clean()
+        };
+        control.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.0,
+            }),
+            ..dup_jitter()
+        });
+        treatment.set_default_policy(LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 1.0,
+            }),
+            ..dup_jitter()
+        });
+        let control_sender = control.attach(addr(1));
+        let control_receiver = control.attach(addr(2));
+        let treatment_sender = treatment.attach(addr(1));
+        let treatment_receiver = treatment.attach(addr(2));
+
+        let oversized = SizedPayload {
+            id: 0,
+            encoded_len: 2000,
+            is_input: true,
+        };
+        control_sender.send_payload(addr(2), oversized.clone());
+        treatment_sender.send_payload(addr(2), oversized);
+        let later_base = LinkPolicy {
+            drop_rate: 0.2,
+            ..dup_jitter()
+        };
+        control.set_link(addr(1), addr(2), later_base.clone());
+        treatment.set_link(addr(1), addr(2), later_base);
+
+        for id in 1..100 {
+            let payload = SizedPayload {
+                id,
+                encoded_len: 100,
+                is_input: true,
+            };
+            control_sender.send_payload(addr(2), payload.clone());
+            treatment_sender.send_payload(addr(2), payload);
+            offset.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
+        let control_trace: Vec<_> = control_receiver
+            .recv_payloads()
+            .into_iter()
+            .filter(|(_, payload)| payload.id != 0)
+            .collect();
+        let treatment_trace: Vec<_> = treatment_receiver.recv_payloads();
+
+        assert_eq!(control_trace, treatment_trace);
+        assert_eq!(treatment.stats().fragmentation_loss_events, 1);
+    }
+
+    #[test]
+    fn fragmentation_rng_is_isolated_per_directed_link() {
+        let (clock, _) = manual_clock();
+        let isolated = SimNet::new_size_aware(91, Arc::clone(&clock), sized_payload_metadata);
+        let noisy = SimNet::new_size_aware(91, clock, sized_payload_metadata);
+        let policy = LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.25,
+            }),
+            ..LinkPolicy::clean()
+        };
+        isolated.set_default_policy(policy.clone());
+        noisy.set_default_policy(policy);
+        let isolated_target = isolated.attach(addr(1));
+        let noisy_target = noisy.attach(addr(1));
+        let noisy_other = noisy.attach(addr(3));
+        let _isolated_receiver = isolated.attach(addr(2));
+        let _noisy_receiver = noisy.attach(addr(2));
+        let _noisy_other_receiver = noisy.attach(addr(4));
+
+        for id in 0..200 {
+            let target = SizedPayload {
+                id,
+                encoded_len: 2000,
+                is_input: true,
+            };
+            noisy_other.send_payload(
+                addr(4),
+                SizedPayload {
+                    is_input: false,
+                    ..target.clone()
+                },
+            );
+            isolated_target.send_payload(addr(2), target.clone());
+            noisy_target.send_payload(addr(2), target);
+        }
+
+        assert_eq!(
+            isolated.fragmentation_drop_counts()[&(addr(1), addr(2))],
+            noisy.fragmentation_drop_counts()[&(addr(1), addr(2))]
+        );
+        assert_eq!(
+            isolated.link_stats()[&(addr(1), addr(2))],
+            noisy.link_stats()[&(addr(1), addr(2))]
+        );
+    }
+
+    #[test]
+    fn fragmentation_rng_continues_across_policy_epochs() {
+        let (clock, _) = manual_clock();
+        let uninterrupted = SimNet::new_size_aware(91, Arc::clone(&clock), sized_payload_metadata);
+        let replaced = SimNet::new_size_aware(91, clock, sized_payload_metadata);
+        let policy = LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.25,
+            }),
+            ..LinkPolicy::clean()
+        };
+        uninterrupted.set_default_policy(policy.clone());
+        replaced.set_default_policy(policy.clone());
+        let uninterrupted_sender = uninterrupted.attach(addr(1));
+        let replaced_sender = replaced.attach(addr(1));
+        let _uninterrupted_receiver = uninterrupted.attach(addr(2));
+        let _replaced_receiver = replaced.attach(addr(2));
+
+        for id in 0..200 {
+            if id == 100 {
+                replaced.set_link(addr(1), addr(2), policy.clone());
+            }
+            let payload = SizedPayload {
+                id,
+                encoded_len: 2000,
+                is_input: true,
+            };
+            uninterrupted_sender.send_payload(addr(2), payload.clone());
+            replaced_sender.send_payload(addr(2), payload);
+        }
+
+        assert_eq!(
+            uninterrupted.fragmentation_drop_counts(),
+            replaced.fragmentation_drop_counts()
+        );
+    }
+
+    #[test]
+    fn rebind_before_first_fragmentation_trial_preserves_stream_identity() {
+        let (clock, _) = manual_clock();
+        let control = SimNet::new_size_aware(91, Arc::clone(&clock), sized_payload_metadata);
+        let rebound = SimNet::new_size_aware(91, clock, sized_payload_metadata);
+        let policy = LinkPolicy {
+            fragmentation: Some(FragmentationPolicy {
+                fragment_drop_rate: 0.25,
+            }),
+            ..LinkPolicy::clean()
+        };
+        control.set_default_policy(policy.clone());
+        rebound.set_default_policy(policy);
+        let control_sender = control.attach(addr(1));
+        let control_receiver = control.attach(addr(2));
+        let rebound_sender = rebound.attach(addr(1));
+        let rebound_binding = rebound_sender.binding();
+        let rebound_receiver = rebound.attach(addr(2));
+        assert_eq!(rebound_binding.rebind(addr(3)), Ok(addr(1)));
+
+        for id in 0..200 {
+            let payload = SizedPayload {
+                id,
+                encoded_len: 2000,
+                is_input: true,
+            };
+            control_sender.send_payload(addr(2), payload.clone());
+            rebound_sender.send_payload(addr(2), payload);
+        }
+
+        let control_payloads: Vec<_> = control_receiver
+            .recv_payloads()
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect();
+        let rebound_payloads: Vec<_> = rebound_receiver
+            .recv_payloads()
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(control_payloads, rebound_payloads);
+    }
+
+    #[test]
+    fn rebind_preserves_logical_input_loss_run() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let binding = sender.binding();
+        let _receiver = net.attach(addr(2));
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                drop_rate: 1.0,
+                ..LinkPolicy::clean()
+            },
+        );
+        let payload = SizedPayload {
+            id: 1,
+            encoded_len: 100,
+            is_input: true,
+        };
+        sender.send_payload(addr(2), payload.clone());
+        assert_eq!(binding.rebind(addr(3)), Ok(addr(1)));
+        sender.send_payload(addr(2), payload);
+
+        assert_eq!(
+            net.link_stats()[&(addr(3), addr(2))].max_consecutive_input_policy_loss_run,
+            2
+        );
+    }
+
+    #[test]
+    fn set_link_resets_current_input_policy_loss_run() {
+        let (clock, _) = manual_clock();
+        let net = SimNet::new_size_aware(7, clock, sized_payload_metadata);
+        let sender = net.attach(addr(1));
+        let _receiver = net.attach(addr(2));
+        let lossy = LinkPolicy {
+            drop_rate: 1.0,
+            ..LinkPolicy::clean()
+        };
+        net.set_link(addr(1), addr(2), lossy.clone());
+        let payload = SizedPayload {
+            id: 1,
+            encoded_len: 100,
+            is_input: true,
+        };
+        sender.send_payload(addr(2), payload.clone());
+        net.set_link(addr(1), addr(2), lossy);
+        sender.send_payload(addr(2), payload);
+        assert_eq!(
+            net.link_stats()[&(addr(1), addr(2))].max_consecutive_input_policy_loss_run,
+            1
+        );
     }
 
     /// End-to-end sanity: real P2P sessions synchronize and advance over

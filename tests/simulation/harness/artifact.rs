@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+// Version 2 makes end-of-step per-link probe counters identity-bearing. Older
+// probe-bearing artifacts cannot reproduce that stronger trace identity and
+// are rejected explicitly rather than reported as nondeterministic.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -187,6 +190,8 @@ impl FailureArtifact {
         }
         validate_schedule(&self.schedule)
             .map_err(|error| format!("invalid embedded materialized schedule: {error}"))?;
+        super::validate_run_options(&self.schedule, &self.replay_options)
+            .map_err(|error| format!("invalid replay options: {error}"))?;
         let n = self.schedule.config.n_players;
         for (name, value) in [
             ("corrupt_state_from", self.replay_options.corrupt_state_from),
@@ -198,16 +203,6 @@ impl FailureArtifact {
             if value.is_some_and(|(peer, _)| peer >= n) {
                 return Err(format!("replay option {name} has a peer outside 0..{n}"));
             }
-        }
-        if self
-            .replay_options
-            .probe_confirmed_at
-            .is_some_and(|step| step >= self.schedule.config.steps)
-        {
-            return Err(format!(
-                "replay probe step must be within 0..{}",
-                self.schedule.config.steps
-            ));
         }
         if self.schedule.config.spectator_hosts.is_empty()
             && (self.replay_options.corrupt_spectator_input_from.is_some()
@@ -570,6 +565,7 @@ mod tests {
                         dropped_unattached: 0,
                         duplicated: 0,
                         held: 0,
+                        ..TraceNetStats::default()
                     },
                     spectator: None,
                 })
@@ -597,7 +593,7 @@ mod tests {
         );
         let decoded = read_artifact(&path).expect("artifact schema round trips");
         assert_eq!(decoded, artifact);
-        assert_eq!(decoded.artifact_schema_version, 1);
+        assert_eq!(decoded.artifact_schema_version, 2);
         assert_eq!(decoded.trace_tail.len(), TRACE_TAIL_CAPACITY);
 
         std::fs::remove_dir_all(&root).expect("temporary artifact tree removes");
@@ -729,6 +725,17 @@ mod tests {
             }),
             Box::new(|artifact| {
                 artifact.replay_options.probe_confirmed_at = Some(artifact.schedule.config.steps);
+            }),
+            Box::new(|artifact| {
+                artifact.replay_options.pending_output_probe_link = Some((0, 0));
+            }),
+            Box::new(|artifact| {
+                artifact.replay_options.pending_output_probe_link = Some((0, 1));
+                artifact.schedule.events.push((
+                    1,
+                    super::super::schedule::ScheduleEvent::PeerKill { peer: 1 },
+                ));
+                artifact.schedule.events.sort_by_key(|(step, _)| *step);
             }),
             Box::new(|artifact| {
                 artifact.replay_options.corrupt_spectator_input_from = Some(0);

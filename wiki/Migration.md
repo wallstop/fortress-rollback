@@ -469,13 +469,13 @@ native, browser, and Godot Web builds.
 
 ## Unreleased: Runtime Input Delay, Disconnect Behavior, Graceful Peer Removal, and Spectator Divergence
 
-The forthcoming release introduces fail-closed redundant spectator divergence plus three `P2PSession` capabilities: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The `P2PSession` behavior is **additive or compatibility-preserving**: existing applications that set input delay at construction time via [`SessionBuilder::with_input_delay`](User-Guide#complete-configuration-reference) keep working, sessions default to `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continues to work unchanged. The spectator divergence behavior affects only failover spectators connected to redundant hosts that disagree. The breaking-change implications are limited to **exhaustive matches** on the public enums listed below.
+The forthcoming release introduces fail-closed redundant spectator divergence plus three `P2PSession` capabilities: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The `P2PSession` behavior is **additive or compatibility-preserving** for configurations whose prediction window plus input delay fits the input queue; previously unsafe larger combinations now fail construction as described below. Sessions default to `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continues to work unchanged. The spectator divergence behavior affects only failover spectators connected to redundant hosts that disagree. The breaking-change implications are limited to **exhaustive matches** on the public enums listed below.
 
 ### Backwards compatibility at a glance
 
 - `SessionBuilder::with_disconnect_behavior` defaults to `DisconnectBehavior::Halt`, which preserves the legacy GGRS-style halt-on-drop semantics. Code that does not call `with_disconnect_behavior` keeps its current behavior.
 - `P2PSession::disconnect_player` is unchanged. The new `remove_player` is added alongside it; you only need to migrate to `remove_player` if you want graceful drop.
-- `P2PSession::set_input_delay` is a new method. Existing code that fixes the delay at construction time via `with_input_delay` continues to work; mid-session adjustment is opt-in.
+- `P2PSession::set_input_delay` is a new method. Existing safe construction-time delays continue to work; session construction and runtime increases now require `max_prediction + input_delay < input_queue_config.queue_length`. Configurations outside that bound previously risked overwriting rollback history during a full recovery batch and now return `InvalidRequestKind::ConfigValueOutOfRange` with field `"max_prediction + input_delay"`. Increase the input queue or reduce prediction/delay to migrate an unsafe combination.
 
 ### Breaking-change implications for exhaustive matches
 

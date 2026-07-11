@@ -613,6 +613,12 @@ impl<T: Config> SessionBuilder<T> {
 
     /// Change the maximum prediction window. Default is 8.
     ///
+    /// Session construction requires `max_prediction + input_delay <
+    /// queue_length`, so the rollback history and delayed-input lead fit in
+    /// the configured input ring. The setters remain order-independent; the
+    /// combined relationship is validated when a rollback or synctest session
+    /// is started.
+    ///
     /// ## Lockstep mode
     ///
     /// As a special case, if you set this to 0, Fortress Rollback will run in lockstep mode:
@@ -635,8 +641,10 @@ impl<T: Config> SessionBuilder<T> {
     /// # Errors
     ///
     /// Returns a [`FortressError`] if `delay` exceeds the maximum allowed value.
-    /// The maximum delay is `queue_length - 1` (default 127, configurable via
-    /// [`with_input_queue_config`](Self::with_input_queue_config)).
+    /// The standalone maximum delay is `queue_length - 1` (default 127,
+    /// configurable via [`with_input_queue_config`](Self::with_input_queue_config)).
+    /// Session construction also requires `max_prediction + input_delay <
+    /// queue_length`; reduce the prediction window when using a large delay.
     ///
     /// This limit ensures the circular input buffer doesn't overflow.
     /// At 60fps with default settings, max delay is 127 frames (~2.1 seconds),
@@ -663,6 +671,7 @@ impl<T: Config> SessionBuilder<T> {
     /// // With custom queue size, max delay changes
     /// let builder = SessionBuilder::<TestConfig>::new()
     ///     .with_input_queue_config(InputQueueConfig::minimal()) // queue_length = 32
+    ///     .with_max_prediction_window(1)
     ///     .with_input_delay(30)?; // max is now 31
     ///
     /// // Exceeding the limit returns an error
@@ -1289,6 +1298,7 @@ impl<T: Config> SessionBuilder<T> {
         self.input_queue_config.validate()?;
         self.input_queue_config
             .validate_frame_delay(self.input_delay)?;
+        self.validate_rollback_window_storage()?;
         self.protocol_config.validate()?;
         Ok(())
     }
@@ -1301,7 +1311,27 @@ impl<T: Config> SessionBuilder<T> {
     fn validate_synctest_config(&self) -> Result<(), FortressError> {
         self.input_queue_config.validate()?;
         self.input_queue_config
-            .validate_frame_delay(self.input_delay)
+            .validate_frame_delay(self.input_delay)?;
+        self.validate_rollback_window_storage()
+    }
+
+    /// The ring must simultaneously retain the complete rollback window and
+    /// the configured delayed-input lead. One additional floor entry is held
+    /// by the queue's bounded recovery side slot when a full protocol batch
+    /// arrives, but the steady-state span must fit in the ring itself.
+    fn validate_rollback_window_storage(&self) -> Result<(), FortressError> {
+        let actual = self.max_prediction.saturating_add(self.input_delay);
+        let max = self.input_queue_config.queue_length.saturating_sub(1);
+        if actual > max {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "max_prediction + input_delay",
+                min: 0,
+                max: u64::try_from(max).unwrap_or(u64::MAX),
+                actual: u64::try_from(actual).unwrap_or(u64::MAX),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Counts the number of distinct *remote machines* (network addresses) the
@@ -2328,6 +2358,51 @@ mod tests {
     }
 
     #[test]
+    fn rollback_window_and_input_delay_must_fit_queue_storage() {
+        let bounded_protocol = ProtocolConfig {
+            pending_output_limit: 32,
+            ..ProtocolConfig::default()
+        };
+        let exact = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig { queue_length: 32 })
+            .with_protocol_config(bounded_protocol.clone())
+            .with_max_prediction_window(30)
+            .with_input_delay(1)
+            .expect("individual delay bound");
+        exact
+            .validate_rollback_config()
+            .expect("30 prediction + 1 delay fits a 32-slot ring");
+        exact
+            .validate_synctest_config()
+            .expect("synctest uses the same exact storage bound");
+
+        let over = SessionBuilder::<TestConfig>::new()
+            .with_input_queue_config(InputQueueConfig { queue_length: 32 })
+            .with_protocol_config(bounded_protocol)
+            .with_max_prediction_window(30)
+            .with_input_delay(2)
+            .expect("individual delay bound");
+        for error in [
+            over.validate_rollback_config()
+                .expect_err("combined span is too large"),
+            over.validate_synctest_config()
+                .expect_err("synctest combined span is too large"),
+        ] {
+            assert!(matches!(
+                error,
+                FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::ConfigValueOutOfRange {
+                        field: "max_prediction + input_delay",
+                        min: 0,
+                        max: 31,
+                        actual: 32,
+                    }
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn test_input_queue_config_custom_queue_rejects_excessive_delay() {
         // With minimal config (queue_length=32), max delay is 31
         // Trying to set delay=32 should return an error
@@ -2543,13 +2618,28 @@ mod tests {
     }
 
     #[test]
-    fn start_p2p_session_reports_max_prediction_allocation_failure() {
+    fn start_p2p_session_rejects_max_prediction_beyond_queue_storage() {
         let err = single_local_builder()
             .with_max_prediction_window(usize::MAX)
             .start_p2p_session(DummySocket)
             .unwrap_err();
 
-        assert_allocation_failed(err, "saved_states.states");
+        match err {
+            FortressError::InvalidRequestStructured {
+                kind:
+                    InvalidRequestKind::ConfigValueOutOfRange {
+                        field,
+                        min,
+                        max,
+                        actual,
+                    },
+            } => {
+                assert_eq!(field, "max_prediction + input_delay");
+                assert_eq!((min, max), (0, 127));
+                assert_eq!(actual, u64::try_from(usize::MAX).unwrap_or(u64::MAX));
+            },
+            other => panic!("expected combined storage range error, got {other:?}"),
+        }
     }
 
     #[test]

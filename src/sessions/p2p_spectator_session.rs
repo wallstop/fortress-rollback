@@ -185,6 +185,9 @@ where
     /// overflow violation to one per overflow episode; `metrics` keeps the full
     /// history regardless.
     event_discard_warned: bool,
+    /// Whether this session has already reported its one unknown-source
+    /// diagnostic. The cumulative metric preserves the full count.
+    unknown_source_warned: bool,
     spectator_divergence: Option<SpectatorDivergenceState<T::Address>>,
     /// Host indices that will emit `Disconnected` during the current poll.
     /// Cross-host comparisons must ignore these hosts so same-poll failover
@@ -339,6 +342,7 @@ impl<T: Config> SpectatorSession<T> {
             max_event_queue_size: event_queue_size,
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
+            unknown_source_warned: false,
             spectator_divergence: None,
             disconnecting_hosts: Vec::new(),
         })
@@ -607,6 +611,9 @@ impl<T: Config> SpectatorSession<T> {
     /// [`events_discarded_total`](SessionMetrics::events_discarded_total) means
     /// the application is draining [`events`](Self::events) slower than they
     /// arrive and has lost notifications.
+    /// [`unknown_source_packets`](SessionMetrics::unknown_source_packets)
+    /// counts decoded messages ignored because their source address is not a
+    /// configured host endpoint.
     ///
     /// [`SessionMetrics`] is shared with [`P2PSession`](crate::P2PSession), so
     /// per-kind categories a spectator never emits (for example
@@ -960,10 +967,24 @@ impl<T: Config> SpectatorSession<T> {
         // The endpoints will handle their packets, which will trigger both events and UDP replies.
         // Route each message to the FIRST host that claims to handle it, then stop.
         for (from, msg) in &self.socket.receive_all_messages() {
+            let mut known_source = false;
             for host in &mut self.hosts {
                 if host.is_handling_message(from) {
+                    known_source = true;
                     host.handle_message(msg);
                     break;
+                }
+            }
+            if !known_source {
+                self.metrics.record_unknown_source_packet();
+                if !self.unknown_source_warned {
+                    self.unknown_source_warned = true;
+                    report_violation!(
+                        ViolationSeverity::Warning,
+                        ViolationKind::NetworkProtocol,
+                        "ignoring decoded message from unknown source address {:?}; this may indicate stale traffic, spoofing, or a host NAT rebind. Further warnings are suppressed for this session; see SessionMetrics::unknown_source_packets for the running count",
+                        from
+                    );
                 }
             }
         }
@@ -2452,6 +2473,83 @@ mod tests {
         fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
             Vec::new()
         }
+    }
+
+    struct QueuedReceiveSocket {
+        messages: Arc<std::sync::Mutex<Vec<(SocketAddr, Message)>>>,
+    }
+
+    impl NonBlockingSocket<SocketAddr> for QueuedReceiveSocket {
+        fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+            std::mem::take(&mut *self.messages.lock().expect("message queue lock"))
+        }
+    }
+
+    #[test]
+    fn spectator_unknown_source_packets_are_counted_and_warn_once_per_session() {
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let host = test_addr(7000);
+        let unknown = test_addr(7999);
+        let message =
+            spectator_input_message(Frame::new(0), [1, 2], vec![ConnectionStatus::default(); 2]);
+        let messages = Arc::new(std::sync::Mutex::new(vec![
+            (unknown, message.clone()),
+            (unknown, message.clone()),
+            (host, message),
+        ]));
+        let socket = QueuedReceiveSocket {
+            messages: Arc::clone(&messages),
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session(host, socket)
+            .unwrap();
+
+        session.poll_remote_clients();
+
+        assert_eq!(session.metrics().unknown_source_packets, 2);
+        let warnings = observer
+            .violations()
+            .into_iter()
+            .filter(|violation| {
+                violation.severity == ViolationSeverity::Warning
+                    && violation.kind == ViolationKind::NetworkProtocol
+                    && violation.message.contains("unknown source")
+            })
+            .count();
+        assert_eq!(warnings, 1, "one burst must emit one diagnostic warning");
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.message.contains(&unknown.to_string())),
+            "the diagnostic must identify the first offending address"
+        );
+
+        drop(session.events());
+        messages.lock().expect("message queue lock").push((
+            unknown,
+            spectator_input_message(Frame::new(1), [3, 4], vec![ConnectionStatus::default(); 2]),
+        ));
+        session.poll_remote_clients();
+
+        assert_eq!(session.metrics().unknown_source_packets, 3);
+        let warnings = observer
+            .violations()
+            .into_iter()
+            .filter(|violation| {
+                violation.severity == ViolationSeverity::Warning
+                    && violation.kind == ViolationKind::NetworkProtocol
+                    && violation.message.contains("unknown source")
+            })
+            .count();
+        assert_eq!(warnings, 1, "event drains must not re-arm the diagnostic");
     }
 
     fn spectator_input_message(
