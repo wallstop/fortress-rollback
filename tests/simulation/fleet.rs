@@ -2761,8 +2761,10 @@ fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
 #[ignore = "hour-equivalent H-SKEW experiment; selected by nightly CI"]
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
 fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
-    let exact = skew_gated_schedule(225_001, 0, AppModel::Obey);
-    let skewed = skew_gated_schedule(225_001, 1_000, AppModel::Obey);
+    let mut exact = skew_gated_schedule(240_001, 0, AppModel::Obey);
+    exact.config.step_dt_ms = 15;
+    let mut skewed = skew_gated_schedule(240_001, 1_000, AppModel::Obey);
+    skewed.config.step_dt_ms = 15;
 
     let exact_report = run(&exact, &RunOptions::default());
     exact_report.expect_pass(&exact);

@@ -154,13 +154,13 @@ pub enum ScenarioMix {
 pub const SCHEDULE_SCHEMA_VERSION: u32 = 15;
 /// Hard execution bound for one materialized harness schedule.
 ///
-/// This admits the 225,001-step, one-hour H-SKEW experiment at 16 ms cadence
+/// This admits the 240,001-step, one-hour H-SKEW experiment at 15 ms cadence
 /// while preventing an untrusted corpus entry from turning the runner's
 /// `0..steps` loop into an effectively unbounded job.
 pub const MAX_SIMULATION_STEPS: u32 = 250_000;
-/// Skew-gated schedules must expose at most one 60 Hz opportunity per peer per
-/// outer step, preserving peer/network interleaving and bounding total work.
-const MAX_SKEW_GATED_OPPORTUNITIES_PER_STEP: u128 = 1;
+/// A 60 Hz target sampled at integer milliseconds can advance twice only when
+/// a peer's local clock jumps by at least 17 ms between outer steps.
+const MAX_SKEW_GATED_LOCAL_MS_PER_STEP: u128 = 16;
 /// Maximum virtual time advanced by one harness step.
 pub const MAX_SIMULATION_STEP_DT_MS: u64 = 1_000;
 /// Maximum delay accepted on any materialized simulated link.
@@ -981,12 +981,10 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             .max()
             .unwrap_or(0);
         let rate = u128::try_from(i64::from(1_000_000) + i64::from(fastest_ppm)).unwrap_or(0);
-        let opportunity_numerator = u128::from(schedule.config.step_dt_ms)
-            .saturating_mul(60)
-            .saturating_mul(rate);
-        let opportunity_denominator = 1_000_u128.saturating_mul(1_000_000);
-        if opportunity_numerator
-            > opportunity_denominator.saturating_mul(MAX_SKEW_GATED_OPPORTUNITIES_PER_STEP)
+        let local_millis_numerator = u128::from(schedule.config.step_dt_ms).saturating_mul(rate);
+        let local_millis_denominator = 1_000_000_u128;
+        if local_millis_numerator
+            > local_millis_denominator.saturating_mul(MAX_SKEW_GATED_LOCAL_MS_PER_STEP)
         {
             return Err(format!(
                 "SkewGated60Hz requires at most one frame opportunity per peer per outer step; \
@@ -2423,6 +2421,15 @@ mod tests {
         coarse_gated_cadence.config.frame_model = FrameModel::SkewGated60Hz;
         coarse_gated_cadence.config.step_dt_ms = 17;
         cases.push((coarse_gated_cadence, "at most one frame opportunity"));
+
+        let mut rounded_two_opportunity_boundary = valid.clone();
+        rounded_two_opportunity_boundary.config.frame_model = FrameModel::SkewGated60Hz;
+        rounded_two_opportunity_boundary.config.step_dt_ms = 16;
+        rounded_two_opportunity_boundary.config.clock_skew_ppm = vec![1_000];
+        cases.push((
+            rounded_two_opportunity_boundary,
+            "at most one frame opportunity",
+        ));
 
         let mut implicit_exact_peer_is_fastest = valid.clone();
         implicit_exact_peer_is_fastest.config.frame_model = FrameModel::SkewGated60Hz;

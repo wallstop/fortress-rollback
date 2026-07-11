@@ -2405,6 +2405,12 @@ mod tests {
         assert_eq!(skew_gated_target(last_step, 16, 1_000), 216_216);
         assert_eq!(skew_gated_target(last_step, 16, -1_000), 215_784);
         assert_eq!(skew_gated_target(last_step, 16, -1_000_000), 0);
+        assert_eq!(
+            skew_gated_target(225_000, 16, 1_000)
+                .saturating_sub(skew_gated_target(224_999, 16, 1_000)),
+            2,
+            "the rejected 16ms/+0.1% boundary demonstrates cumulative rounding"
+        );
     }
 
     #[test]

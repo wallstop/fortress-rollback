@@ -1610,6 +1610,7 @@ mod tests {
 
         let mut required = clean_schedule(2, 2);
         required.config.frame_model = FrameModel::SkewGated60Hz;
+        required.config.step_dt_ms = 15;
         required.config.clock_skew_ppm = vec![1_000, 2_000];
         let retained = shrink_failure(
             &required,
