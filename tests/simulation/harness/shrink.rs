@@ -194,6 +194,9 @@ fn remap_event(event: &ScheduleEvent, removed: usize) -> Option<ScheduleEvent> {
         ScheduleEvent::PeerKill { peer } => Some(ScheduleEvent::PeerKill {
             peer: remap_index(*peer, removed)?,
         }),
+        ScheduleEvent::Rebind { peer } => Some(ScheduleEvent::Rebind {
+            peer: remap_index(*peer, removed)?,
+        }),
         ScheduleEvent::SpectatorHostKill { host } => Some(ScheduleEvent::SpectatorHostKill {
             host: remap_index(*host, removed)?,
         }),
@@ -226,6 +229,7 @@ fn prune_invalid_special_events(schedule: &mut Schedule) {
         ScheduleEvent::HotJoin { slot } => {
             !retired[*slot] && hot_join_host(n, *slot).is_some_and(|host| !retired[host])
         },
+        ScheduleEvent::Rebind { peer } => !retired[*peer],
         ScheduleEvent::SetLink { .. }
         | ScheduleEvent::Block { .. }
         | ScheduleEvent::Hold { .. }
@@ -947,8 +951,9 @@ mod tests {
             (6, ScheduleEvent::GracefulRemove { by: 0, target: 3 }),
             (7, ScheduleEvent::LegacyDisconnect { by: 2, target: 3 }),
             (8, ScheduleEvent::PeerKill { peer: 2 }),
-            (9, ScheduleEvent::HotJoin { slot: 3 }),
-            (10, ScheduleEvent::SpectatorHostKill { host: 0 }),
+            (9, ScheduleEvent::Rebind { peer: 3 }),
+            (10, ScheduleEvent::HotJoin { slot: 3 }),
+            (11, ScheduleEvent::SpectatorHostKill { host: 0 }),
             (20, ScheduleEvent::HealAll),
         ];
         schedule.heal_at = 20;
@@ -999,6 +1004,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, event)| matches!(event, ScheduleEvent::PeerKill { peer: 1 })));
+        assert!(candidate
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::Rebind { peer: 2 })));
         assert!(candidate
             .events
             .iter()

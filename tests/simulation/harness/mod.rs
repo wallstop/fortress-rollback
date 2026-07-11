@@ -19,7 +19,7 @@ pub mod oracle;
 pub mod schedule;
 pub mod shrink;
 
-use crate::common::sim_net::{SimNet, SimSocket};
+use crate::common::sim_net::{SimNet, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
@@ -39,7 +39,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::Hasher as _;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 /// Input contract used by the deterministic simulation harness.
@@ -639,6 +639,9 @@ impl<I: SimInput> SimGameStub<I> {
 
 struct PeerSlot<I: SimInput> {
     session: P2PSession<I::SessionConfig>,
+    binding: SimSocketBinding<Message>,
+    /// Canonical and rebound source addresses used by this logical peer.
+    source_addrs: Vec<SocketAddr>,
     game: SimGameStub<I>,
     observer: Arc<CollectingObserver>,
     /// Highest frame whose confirmed inputs were sampled into the oracle.
@@ -709,8 +712,6 @@ fn retire_peer_for_lifecycle<I: SimInput>(
     peer: usize,
     peers: &[PeerSlot<I>],
     dead: &mut [bool],
-    net: &SimNet<Message>,
-    addrs: &[SocketAddr],
     oracle: &mut Oracle,
     spectator_required_min_frame: Option<&mut Option<i32>>,
 ) {
@@ -719,11 +720,21 @@ fn retire_peer_for_lifecycle<I: SimInput>(
     }
 
     dead[peer] = true;
-    net.detach(addrs[peer]);
+    peers[peer].binding.detach();
     oracle.mark_peer_dead(peer);
     if let Some(required_min_frame) = spectator_required_min_frame {
         update_spectator_required_min_frame(peers, dead, required_min_frame);
     }
+}
+
+/// Deterministic schema-v10 address for peer `peer`'s first NAT rebind.
+///
+/// TEST-NET-2 is disjoint from the harness's loopback canonical/spectator
+/// addresses. Validation permits one rebind per peer, so the peer byte is a
+/// complete collision-free generation identifier for the supported mesh cap.
+fn rebound_peer_addr(peer: usize) -> SocketAddr {
+    let host = u8::try_from(peer.saturating_add(1)).unwrap_or(u8::MAX);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, host)), 35_000)
 }
 
 #[cfg(feature = "hot-join")]
@@ -772,6 +783,7 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     }
 
     let socket: SimSocket<Message> = ctx.net.attach(ctx.addrs[slot]);
+    let replacement_binding = socket.binding();
     let observer = Arc::clone(&ctx.peers[slot].observer);
     let protocol_config = peer_protocol_config(ctx.schedule, slot, ctx.clock);
     let mut builder = SessionBuilder::<I::SessionConfig>::new()
@@ -839,6 +851,8 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
     ctx.net.detach(ctx.addrs[slot]);
     let _replacement_inbox = ctx.net.attach(ctx.addrs[slot]);
     ctx.peers[slot].session = replacement;
+    ctx.peers[slot].binding = replacement_binding;
+    ctx.peers[slot].source_addrs = vec![ctx.addrs[slot]];
     ctx.peers[slot].pending_replacement_handoff_floor = Some(handoff_floor);
 }
 
@@ -1120,6 +1134,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
+            let binding = socket.binding();
             let observer = Arc::new(CollectingObserver::new());
             let protocol_config = peer_protocol_config(schedule, i, &clock);
             let mut builder = SessionBuilder::<I::SessionConfig>::new()
@@ -1177,6 +1192,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
             PeerSlot {
                 session,
+                binding,
+                source_addrs: vec![addrs[i]],
                 game,
                 observer,
                 sampled_confirmed: -1,
@@ -1329,13 +1346,17 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             );
             match event {
                 ScheduleEvent::SetLink { from, to, policy } => {
-                    net.set_link(addrs[*from], addrs[*to], policy.clone());
+                    net.set_link(
+                        peers[*from].binding.local_addr(),
+                        addrs[*to],
+                        policy.clone(),
+                    );
                 },
                 ScheduleEvent::Block { from, to, blocked } => {
-                    net.set_blocked(addrs[*from], addrs[*to], *blocked);
+                    net.set_blocked(peers[*from].binding.local_addr(), addrs[*to], *blocked);
                 },
                 ScheduleEvent::Hold { from, to, holding } => {
-                    net.set_holding(addrs[*from], addrs[*to], *holding);
+                    net.set_holding(peers[*from].binding.local_addr(), addrs[*to], *holding);
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
@@ -1365,8 +1386,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 *target,
                                 &peers,
                                 &mut dead,
-                                &net,
-                                &addrs,
                                 &mut oracle,
                                 spectator_enabled.then_some(&mut spectator_required_min_frame),
                             );
@@ -1390,8 +1409,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 *target,
                                 &peers,
                                 &mut dead,
-                                &net,
-                                &addrs,
                                 &mut oracle,
                                 spectator_enabled.then_some(&mut spectator_required_min_frame),
                             );
@@ -1408,8 +1425,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         *peer,
                         &peers,
                         &mut dead,
-                        &net,
-                        &addrs,
                         &mut oracle,
                         spectator_enabled.then_some(&mut spectator_required_min_frame),
                     );
@@ -1423,11 +1438,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         *host,
                         &peers,
                         &mut dead,
-                        &net,
-                        &addrs,
                         &mut oracle,
                         spectator_enabled.then_some(&mut spectator_required_min_frame),
                     );
+                },
+                ScheduleEvent::Rebind { peer } => {
+                    // Runtime-contingent retirement (for example, an earlier
+                    // GracefulRemove) makes this fire-time precondition miss a
+                    // deterministic no-op. Planted events are never re-sampled.
+                    if !dead[*peer] {
+                        let fresh = rebound_peer_addr(*peer);
+                        match peers[*peer].binding.rebind(fresh) {
+                            Ok(_) => peers[*peer].source_addrs.push(fresh),
+                            Err(error) => oracle.observe_runner_error(
+                                "rebind_failed",
+                                *peer,
+                                step,
+                                format!("failed to move live socket to {fresh}: {error:?}"),
+                            ),
+                        }
+                    }
                 },
                 #[cfg(feature = "hot-join")]
                 ScheduleEvent::HotJoin { slot } => {
@@ -1760,15 +1790,29 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     );
     let recovered_within_b = verdict.recovered_within_b;
     let mut blocked_drops_by_link = BTreeMap::new();
-    let peer_by_addr: BTreeMap<SocketAddr, usize> = addrs
+    let peer_by_source_addr: BTreeMap<SocketAddr, usize> = peers
+        .iter()
+        .enumerate()
+        .flat_map(|(peer, slot)| {
+            slot.source_addrs
+                .iter()
+                .copied()
+                .map(move |addr| (addr, peer))
+        })
+        .collect();
+    let peer_by_canonical_addr: BTreeMap<SocketAddr, usize> = addrs
         .iter()
         .copied()
         .enumerate()
         .map(|(peer, addr)| (addr, peer))
         .collect();
     for ((from_addr, to_addr), drops) in net.blocked_drop_counts() {
-        if let (Some(from), Some(to)) = (peer_by_addr.get(&from_addr), peer_by_addr.get(&to_addr)) {
-            blocked_drops_by_link.insert((*from, *to), drops);
+        if let (Some(from), Some(to)) = (
+            peer_by_source_addr.get(&from_addr),
+            peer_by_canonical_addr.get(&to_addr),
+        ) {
+            let total = blocked_drops_by_link.entry((*from, *to)).or_insert(0u64);
+            *total = total.saturating_add(drops);
         }
     }
     let final_trace_summary = TraceFinalSummary {
@@ -1816,6 +1860,17 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn schema_v10_rebind_addresses_are_deterministic_and_disjoint() {
+        let addresses: Vec<_> = (0..16).map(rebound_peer_addr).collect();
+        let unique: std::collections::BTreeSet<_> = addresses.iter().copied().collect();
+        assert_eq!(unique.len(), 16);
+        for (peer, address) in addresses.into_iter().enumerate() {
+            assert_eq!(address, rebound_peer_addr(peer));
+            assert!((0..=16).all(|canonical| address != peer_addr(canonical)));
+        }
+    }
 
     #[test]
     fn trace_event_text_is_utf8_safe_and_bounded() {
@@ -2000,6 +2055,7 @@ mod tests {
         addrs: &[SocketAddr],
     ) -> PeerSlot<StubInput> {
         let socket: SimSocket<Message> = net.attach(addrs[peer]);
+        let binding = socket.binding();
         let observer = Arc::new(CollectingObserver::new());
         let protocol_config = peer_protocol_config(schedule, peer, clock);
         let mut builder = SessionBuilder::<StubConfig>::new()
@@ -2027,6 +2083,8 @@ mod tests {
         }
         PeerSlot {
             session: builder.start_p2p_session(socket).expect("session starts"),
+            binding,
+            source_addrs: vec![addrs[peer]],
             game: SimGameStub::<StubInput>::new(),
             observer,
             sampled_confirmed: -1,

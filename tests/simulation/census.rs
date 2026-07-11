@@ -19,6 +19,8 @@ const MULTI_DROP_AT: u32 = 178;
 const MULTI_HEAL_AT: u32 = 300;
 const ASYMMETRIC_PARTITION_START: u32 = 140;
 const ASYMMETRIC_PARTITION_HEAL: u32 = 450;
+const REBIND_AT: u32 = 180;
+const REBIND_HEAL_AT: u32 = 300;
 
 fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
     let mut initial_links = Vec::new();
@@ -89,6 +91,135 @@ fn delayed_two_peer_schedule() -> Schedule {
         events: vec![(heal_at, ScheduleEvent::HealAll)],
         heal_at,
     }
+}
+
+fn nat_rebind_schedule(include_rebind: bool) -> Schedule {
+    let n = 3;
+    let mut config = SimConfig::smoke(n);
+    config.steps = 700;
+    config.noise = BackgroundNoise::Clean;
+
+    let mut events = Vec::new();
+    if include_rebind {
+        events.push((REBIND_AT, ScheduleEvent::Rebind { peer: 2 }));
+    }
+    events.push((REBIND_HEAL_AT, ScheduleEvent::HealAll));
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_00A7,
+        link_seed: 0xCE45_00A8,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: REBIND_HEAL_AT,
+    }
+}
+
+#[test]
+fn nat_rebind_is_observable_and_fails_closed_deterministically() {
+    let control = nat_rebind_schedule(false);
+    run(&control, &RunOptions::default()).expect_pass(&control);
+
+    let schedule = nat_rebind_schedule(true);
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.metrics, replay.metrics);
+    assert_eq!(first.violation_census, replay.violation_census);
+    assert_eq!(first.recovered_within_b, Some(false));
+    assert_eq!(
+        first.verdict.failures.len(),
+        6,
+        "the exact failure multiset is two liveness failures per live peer: {:?}",
+        first.verdict.failures,
+    );
+    let end_progress_failures = first
+        .verdict
+        .failures
+        .iter()
+        .filter(|failure| matches!(failure, OracleFailure::EndProgress { .. }))
+        .count();
+    let post_heal_failures = first
+        .verdict
+        .failures
+        .iter()
+        .filter(|failure| matches!(failure, OracleFailure::PostHealLiveness { .. }))
+        .count();
+    assert_eq!(
+        (end_progress_failures, post_heal_failures),
+        (3, 3),
+        "NAT rebinding must produce only the pinned end-state and heal-anchored liveness failures: {:?}",
+        first.verdict.failures,
+    );
+    assert!(
+        first.verdict.failures.iter().all(|failure| matches!(
+            failure,
+            OracleFailure::EndProgress { .. } | OracleFailure::PostHealLiveness { .. }
+        )),
+        "NAT rebinding must not introduce runner/session or consistency failures: {:?}",
+        first.verdict.failures,
+    );
+    assert!(
+        first.net_stats.dropped_unattached > 0,
+        "survivors must keep sending to the abandoned canonical address"
+    );
+    for peer in 0..2 {
+        assert!(
+            first.metrics[peer].unknown_source_packets > 0,
+            "survivor {peer} must observe decoded traffic from the rebound source"
+        );
+    }
+    assert_eq!(
+        first.metrics[2].unknown_source_packets, 0,
+        "the rebound peer receives no traffic from an unknown source"
+    );
+    let warning_count: u64 = first
+        .violation_census
+        .iter()
+        .filter(|(signature, _)| signature.message_prefix.contains("unknown source address"))
+        .map(|(_, count)| *count)
+        .sum();
+    assert_eq!(
+        warning_count, 2,
+        "the two receiving sessions must emit two lifetime-bounded warnings in aggregate"
+    );
+}
+
+#[test]
+fn rebind_after_runtime_retirement_is_a_deterministic_noop() {
+    let mut schedule = nat_rebind_schedule(false);
+    schedule.events = vec![
+        (160, ScheduleEvent::GracefulRemove { by: 0, target: 2 }),
+        (180, ScheduleEvent::Rebind { peer: 2 }),
+        (REBIND_HEAL_AT, ScheduleEvent::HealAll),
+    ];
+    let mut control = schedule.clone();
+    control
+        .events
+        .retain(|(_, event)| !matches!(event, ScheduleEvent::Rebind { .. }));
+
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    let without_rebind = run(&control, &RunOptions::default());
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.net_stats, replay.net_stats);
+    assert_eq!(first.verdict, without_rebind.verdict);
+    assert_eq!(first.net_stats, without_rebind.net_stats);
+    assert_eq!(first.metrics, without_rebind.metrics);
+    assert!(
+        first.verdict.failures.iter().all(|failure| !matches!(
+            failure,
+            OracleFailure::SessionError { operation, .. }
+                if operation.starts_with("rebind_")
+        )),
+        "a missed Rebind fire-time precondition must not become a runner failure: {:?}",
+        first.verdict.failures,
+    );
 }
 
 fn frozen_queue_network_blip_schedule() -> Schedule {

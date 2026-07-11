@@ -122,7 +122,9 @@ pub enum ScenarioMix {
 /// - `9`: adds [`BackgroundNoise::ReliableFifo`] and
 ///   [`LinkPolicy::retransmit_delay`](crate::common::sim_net::LinkPolicy::retransmit_delay)
 ///   for reliable-ordered transport probes.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 9;
+/// - `10`: adds [`ScheduleEvent::Rebind`], a peer source-address/NAT mapping
+///   change that leaves every other peer's canonical destination unchanged.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 10;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This is 20× the 5,000-step nightly cells and 10× the longest current
@@ -365,6 +367,15 @@ pub enum ScheduleEvent {
     ///
     /// Covered by both planted and generated lifecycle schedules.
     PeerKill { peer: usize },
+    /// Move peer `peer`'s live simulated socket to a fresh source address
+    /// without changing the canonical address stored by any session. This
+    /// models a NAT rebinding or mobile-network path change: the rebound peer's
+    /// messages arrive from an unknown source, while other peers keep sending
+    /// to the abandoned mapping until their disconnect behavior fires.
+    ///
+    /// Planted only; current protocol behavior is intentionally fail-closed and
+    /// therefore is not part of the generated green lifecycle fleet.
+    Rebind { peer: usize },
     /// Permanently kill a peer that is configured as one of the redundant
     /// spectator hosts. The runtime effect is the same crash model as
     /// [`ScheduleEvent::PeerKill`] — the host is no longer driven and is detached
@@ -399,6 +410,7 @@ pub enum LifecycleEventKind {
     GracefulRemove,
     LegacyDisconnect,
     PeerKill,
+    Rebind,
     SpectatorHostKill,
     HotJoin,
 }
@@ -413,6 +425,7 @@ impl ScheduleEvent {
             Self::GracefulRemove { .. } => Some(LifecycleEventKind::GracefulRemove),
             Self::LegacyDisconnect { .. } => Some(LifecycleEventKind::LegacyDisconnect),
             Self::PeerKill { .. } => Some(LifecycleEventKind::PeerKill),
+            Self::Rebind { .. } => Some(LifecycleEventKind::Rebind),
             Self::SpectatorHostKill { .. } => Some(LifecycleEventKind::SpectatorHostKill),
             Self::HotJoin { .. } => Some(LifecycleEventKind::HotJoin),
             Self::SetLink { .. } | Self::Block { .. } | Self::Hold { .. } | Self::HealAll => None,
@@ -488,6 +501,7 @@ fn event_required_schema(event: &ScheduleEvent) -> u32 {
         ScheduleEvent::LegacyDisconnect { .. } => 6,
         ScheduleEvent::SpectatorHostKill { .. } => 7,
         ScheduleEvent::HotJoin { .. } => 8,
+        ScheduleEvent::Rebind { .. } => 10,
     }
 }
 
@@ -635,9 +649,32 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
         .events
         .iter()
         .any(|(_, event)| matches!(event, ScheduleEvent::HotJoin { .. }));
+    let has_rebind = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::Rebind { .. }));
     #[cfg(not(feature = "hot-join"))]
     if has_hot_join {
         return Err("ScheduleEvent::HotJoin requires the crate's `hot-join` feature".to_owned());
+    }
+    if has_rebind && has_hot_join {
+        return Err(
+            "Rebind and HotJoin cannot share a schema-v10 schedule; replacement binding semantics \
+             require a dedicated future capability"
+                .to_owned(),
+        );
+    }
+    if has_rebind
+        && schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::Hold { .. }))
+    {
+        return Err(
+            "Rebind cannot share a schema-v10 schedule with Hold; releasing held traffic across \
+             source-address generations requires a dedicated future capability"
+                .to_owned(),
+        );
     }
     if has_hot_join {
         if schedule.config.input_delay != 0 {
@@ -747,6 +784,13 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                     ));
                 }
             },
+            ScheduleEvent::Rebind { peer } => {
+                if *peer >= n {
+                    return Err(format!(
+                        "Rebind peer {peer} out of range for a {n}-peer mesh"
+                    ));
+                }
+            },
             ScheduleEvent::SpectatorHostKill { host } => {
                 if *host >= n {
                     return Err(format!(
@@ -795,6 +839,7 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             | ScheduleEvent::GracefulRemove { .. }
             | ScheduleEvent::LegacyDisconnect { .. }
             | ScheduleEvent::PeerKill { .. }
+            | ScheduleEvent::Rebind { .. }
             | ScheduleEvent::SpectatorHostKill { .. }
             | ScheduleEvent::HotJoin { .. }
             | ScheduleEvent::HealAll => {},
@@ -844,11 +889,25 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
     // HotJoin malformed up front. User API drops retire only after the runtime
     // call returns `Ok`, so they do not update this mask.
     let mut retired_by_guaranteed_kill = vec![false; n];
+    let mut rebound_peers = BTreeSet::new();
     for (_, event) in &schedule.events {
         match event {
             ScheduleEvent::GracefulRemove { .. } | ScheduleEvent::LegacyDisconnect { .. } => {},
             ScheduleEvent::PeerKill { peer } => {
                 retired_by_guaranteed_kill[*peer] = true;
+            },
+            ScheduleEvent::Rebind { peer } => {
+                if retired_by_guaranteed_kill[*peer] {
+                    return Err(format!(
+                        "Rebind peer {peer} is already retired by an earlier kill event"
+                    ));
+                }
+                if !rebound_peers.insert(*peer) {
+                    return Err(format!(
+                        "Rebind peer {peer} appears more than once; schema v10 supports one \
+                         address generation change per peer"
+                    ));
+                }
             },
             ScheduleEvent::SpectatorHostKill { host } => {
                 if !spectator_host_enabled[*host] {
@@ -1032,8 +1091,8 @@ fn prepare_lifecycle_config(seed: u64, config: &mut SimConfig) -> Option<Lifecyc
             config.disconnect_behavior = DropPolicy::ContinueWithout;
         },
         LifecycleEventKind::PeerStall | LifecycleEventKind::SetInputDelay => {},
-        LifecycleEventKind::LegacyDisconnect => {
-            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        LifecycleEventKind::LegacyDisconnect | LifecycleEventKind::Rebind => {
+            unreachable!("planted-only lifecycle event cannot be randomly generated")
         },
     }
     Some(kind)
@@ -1070,8 +1129,8 @@ fn materialize_lifecycle_event(
         },
         LifecycleEventKind::SpectatorHostKill => ScheduleEvent::SpectatorHostKill { host: subject },
         LifecycleEventKind::HotJoin => ScheduleEvent::HotJoin { slot: subject },
-        LifecycleEventKind::LegacyDisconnect => {
-            unreachable!("LegacyDisconnect is classified but not randomly generated")
+        LifecycleEventKind::LegacyDisconnect | LifecycleEventKind::Rebind => {
+            unreachable!("planted-only lifecycle event cannot be randomly generated")
         },
     }
 }
@@ -1496,6 +1555,7 @@ mod tests {
                 },
                 9,
             ),
+            (ScheduleEvent::Rebind { peer: 1 }, 10),
         ];
 
         for (event, required) in cases {
@@ -1674,6 +1734,7 @@ mod tests {
                     | ScheduleEvent::SetInputDelay { .. }
                     | ScheduleEvent::GracefulRemove { .. } => {},
                     ScheduleEvent::LegacyDisconnect { .. }
+                    | ScheduleEvent::Rebind { .. }
                     | ScheduleEvent::SetLink { .. }
                     | ScheduleEvent::Block { .. }
                     | ScheduleEvent::Hold { .. }
@@ -1967,6 +2028,10 @@ mod tests {
                 "PeerKill peer 9 out of range",
             ),
             (
+                ScheduleEvent::Rebind { peer: 9 },
+                "Rebind peer 9 out of range",
+            ),
+            (
                 ScheduleEvent::SpectatorHostKill { host: 9 },
                 "SpectatorHostKill host 9 out of range",
             ),
@@ -2026,6 +2091,61 @@ mod tests {
             .events
             .sort_by_key(|(step, _)| *step);
         cases.push((already_killed_spectator, "already retired"));
+
+        let mut duplicate_rebind = valid.clone();
+        duplicate_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        duplicate_rebind.events.extend([
+            (90, ScheduleEvent::Rebind { peer: 1 }),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        duplicate_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((duplicate_rebind, "appears more than once"));
+
+        let mut held_rebind = valid.clone();
+        held_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        held_rebind.events.extend([
+            (
+                90,
+                ScheduleEvent::Hold {
+                    from: 1,
+                    to: 2,
+                    holding: true,
+                },
+            ),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        held_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((held_rebind, "cannot share a schema-v10 schedule with Hold"));
+
+        let mut killed_rebind = valid.clone();
+        killed_rebind
+            .events
+            .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+        killed_rebind.events.extend([
+            (90, ScheduleEvent::PeerKill { peer: 1 }),
+            (100, ScheduleEvent::Rebind { peer: 1 }),
+        ]);
+        killed_rebind.events.sort_by_key(|(step, _)| *step);
+        cases.push((killed_rebind, "already retired by an earlier kill event"));
+
+        #[cfg(feature = "hot-join")]
+        {
+            let mut hot_join_rebind = valid.clone();
+            hot_join_rebind.config.input_delay = 0;
+            hot_join_rebind
+                .events
+                .retain(|(_, event)| matches!(event, ScheduleEvent::HealAll));
+            hot_join_rebind.events.extend([
+                (90, ScheduleEvent::HotJoin { slot: 1 }),
+                (100, ScheduleEvent::Rebind { peer: 1 }),
+            ]);
+            hot_join_rebind.events.sort_by_key(|(step, _)| *step);
+            cases.push((hot_join_rebind, "Rebind and HotJoin cannot share"));
+        }
 
         let mut small_event_queue = valid.clone();
         small_event_queue.config.event_queue_size = Some(9);
@@ -2260,6 +2380,9 @@ mod tests {
             .push((325, ScheduleEvent::SpectatorHostKill { host: 0 }));
         schedule
             .events
+            .push((340, ScheduleEvent::Rebind { peer: 1 }));
+        schedule
+            .events
             .push((350, ScheduleEvent::HotJoin { slot: 1 }));
         schedule.events.sort_by_key(|(step, _)| *step);
         let json = serde_json::to_string(&schedule).unwrap();
@@ -2272,6 +2395,10 @@ mod tests {
             .events
             .iter()
             .any(|(_, ev)| matches!(ev, ScheduleEvent::PeerStall { peer: 1, steps: 40 })));
+        assert!(back
+            .events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ScheduleEvent::Rebind { peer: 1 })));
         assert!(back
             .events
             .iter()

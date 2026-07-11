@@ -469,11 +469,16 @@ impl<M: Clone> SimNet<M> {
     /// An existing inbox (from a previous attachment, or buffered
     /// unattached-policy traffic) is preserved, so a hot-join re-attach at a
     /// vacated address receives anything buffered for it.
+    ///
+    /// The fabric routes through an address-owned inbox, so multiple live
+    /// attachments at one address share that queue. The hot-join harness uses
+    /// this briefly while constructing a replacement generation.
     #[must_use]
     pub fn attach(&self, addr: SocketAddr) -> SimSocket<M> {
         self.lock().inboxes.entry(addr).or_default();
+        let binding = Arc::new(Mutex::new(SimSocketBindingState { addr, active: true }));
         SimSocket {
-            addr,
+            binding,
             state: Arc::clone(&self.state),
         }
     }
@@ -577,9 +582,41 @@ impl<M: Clone> SimNet<M> {
     }
 }
 
-/// A peer-side socket attached to a [`SimNet`] at a fixed address.
-pub struct SimSocket<M = Message> {
+/// Why a simulated socket cannot move to a requested address.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SimRebindError {
+    /// The requested address is already the socket's current address.
+    SameAddress,
+    /// Another socket or pre-existing outbound link state already uses the
+    /// requested address.
+    AddressInUse,
+    /// The controlled socket has already been detached.
+    Detached,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SimSocketBindingState {
     addr: SocketAddr,
+    active: bool,
+}
+
+/// Out-of-band controller for a live [`SimSocket`]'s local binding.
+///
+/// The simulation harness keeps this handle after moving the socket into a
+/// session so it can model a NAT mapping change without rebuilding that
+/// session or changing its peers' canonical destination addresses.
+/// Rebinding is address-level: the caller must ensure no other live socket is
+/// attached at the old address because its address-owned inbox moves with the
+/// binding. Schema validation keeps that operation disjoint from hot join.
+#[derive(Clone)]
+pub struct SimSocketBinding<M = Message> {
+    binding: Arc<Mutex<SimSocketBindingState>>,
+    state: Arc<Mutex<SimNetState<M>>>,
+}
+
+/// A peer-side socket attached to a [`SimNet`] at a movable local address.
+pub struct SimSocket<M = Message> {
+    binding: Arc<Mutex<SimSocketBindingState>>,
     state: Arc<Mutex<SimNetState<M>>>,
 }
 
@@ -589,25 +626,132 @@ impl<M: Clone> SimSocket<M> {
     /// The address this socket is attached at.
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
-        self.addr
+        self.binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned")
+            .addr
+    }
+
+    /// Returns an out-of-band controller for this socket's local binding.
+    #[must_use]
+    pub fn binding(&self) -> SimSocketBinding<M> {
+        SimSocketBinding {
+            binding: Arc::clone(&self.binding),
+            state: Arc::clone(&self.state),
+        }
     }
 
     /// Sends a payload to `to` through the simulated network.
     pub fn send_payload(&self, to: SocketAddr, payload: M) {
+        let binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return;
+        }
+        let from = binding.addr;
+        drop(binding);
         self.state
             .lock()
             .expect("SimNet mutex poisoned")
-            .send(self.addr, to, payload);
+            .send(from, to, payload);
     }
 
     /// Receives every payload due for this socket (bounded per call by
     /// [`MAX_RECEIVE_MESSAGES_PER_POLL`]; the remainder stays queued).
     #[must_use]
     pub fn recv_payloads(&self) -> Vec<(SocketAddr, M)> {
+        let binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return Vec::new();
+        }
+        let addr = binding.addr;
+        drop(binding);
         self.state
             .lock()
             .expect("SimNet mutex poisoned")
-            .receive(self.addr)
+            .receive(addr)
+    }
+}
+
+// Test infrastructure — poisoned mutexes are test bugs (see SimNet::lock).
+#[allow(clippy::expect_used)]
+impl<M: Clone> SimSocketBinding<M> {
+    /// The address currently used by the controlled socket.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned")
+            .addr
+    }
+
+    /// Moves the live socket to `new_addr`, returning its previous address.
+    ///
+    /// Messages already queued to the live socket remain readable. Messages
+    /// still in flight keep their original source and destination. Outbound
+    /// link policy/state follows the sender to the new address; destination
+    /// policy remains on the canonical old address so peers that have not
+    /// learned the new mapping continue sending into an unattached endpoint.
+    pub fn rebind(&self, new_addr: SocketAddr) -> Result<SocketAddr, SimRebindError> {
+        let mut binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return Err(SimRebindError::Detached);
+        }
+        let old_addr = binding.addr;
+        if old_addr == new_addr {
+            return Err(SimRebindError::SameAddress);
+        }
+
+        let mut state = self.state.lock().expect("SimNet mutex poisoned");
+        let new_source_in_use = state.links.keys().any(|(from, _)| *from == new_addr)
+            || state.held.keys().any(|(from, _)| *from == new_addr);
+        if state.inboxes.contains_key(&new_addr) || new_source_in_use {
+            return Err(SimRebindError::AddressInUse);
+        }
+
+        let outbound_keys: Vec<(SocketAddr, SocketAddr)> = state
+            .links
+            .keys()
+            .copied()
+            .filter(|(from, _)| *from == old_addr)
+            .collect();
+        for old_key in outbound_keys {
+            if let Some(link) = state.links.get(&old_key).cloned() {
+                let new_key = (new_addr, old_key.1);
+                state.links.insert(new_key, link);
+            }
+        }
+
+        let queued = state.inboxes.remove(&old_addr).unwrap_or_default();
+        state.inboxes.insert(new_addr, queued);
+        binding.addr = new_addr;
+        Ok(old_addr)
+    }
+
+    /// Detaches the controlled socket at its current address.
+    pub fn detach(&self) {
+        let mut binding = self
+            .binding
+            .lock()
+            .expect("SimSocket binding mutex poisoned");
+        if !binding.active {
+            return;
+        }
+        let addr = binding.addr;
+        self.state
+            .lock()
+            .expect("SimNet mutex poisoned")
+            .inboxes
+            .remove(&addr);
+        binding.active = false;
     }
 }
 
@@ -924,6 +1068,97 @@ mod tests {
             vec![2],
             "re-attached socket receives post-attach traffic only"
         );
+    }
+
+    #[test]
+    fn rebind_moves_live_socket_and_preserves_outbound_policy() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let fresh = addr(3);
+        let peer = addr(2);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+
+        net.set_link(
+            old,
+            peer,
+            LinkPolicy {
+                drop_rate: 1.0,
+                ..LinkPolicy::clean()
+            },
+        );
+        remote.send_payload(old, 9);
+        assert!(remote.recv_payloads().is_empty()); // pump 9 into the live socket inbox
+        remote.send_payload(old, 10); // remains in flight until after the rebind
+
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        assert_eq!(socket.local_addr(), fresh);
+        assert_eq!(binding.local_addr(), fresh);
+        assert_eq!(
+            socket.recv_payloads(),
+            vec![(peer, 9)],
+            "already-queued traffic belongs to the live socket and must survive the rebind"
+        );
+        assert_eq!(net.stats().dropped_unattached, 1);
+
+        socket.send_payload(peer, 20);
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "the old outbound drop policy must follow the rebound sender"
+        );
+
+        net.heal_all();
+        socket.send_payload(peer, 30);
+        assert_eq!(remote.recv_payloads(), vec![(fresh, 30)]);
+        remote.send_payload(fresh, 40);
+        assert_eq!(socket.recv_payloads(), vec![(peer, 40)]);
+
+        binding.detach();
+        assert_eq!(binding.rebind(old), Err(SimRebindError::Detached));
+        socket.send_payload(peer, 45);
+        assert!(remote.recv_payloads().is_empty());
+        remote.send_payload(fresh, 50);
+        let _ = remote.recv_payloads();
+        assert_eq!(net.stats().dropped_unattached, 2);
+    }
+
+    #[test]
+    fn rebind_collision_rejects_without_partial_mutation() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let a = net.attach(addr(1));
+        let binding = a.binding();
+        let occupied = net.attach(addr(2));
+
+        assert_eq!(binding.rebind(addr(1)), Err(SimRebindError::SameAddress));
+        assert_eq!(binding.rebind(addr(2)), Err(SimRebindError::AddressInUse));
+        assert_eq!(a.local_addr(), addr(1));
+
+        a.send_payload(addr(2), 7);
+        assert_eq!(occupied.recv_payloads(), vec![(addr(1), 7)]);
+    }
+
+    #[test]
+    fn rebind_keeps_pre_and_post_generation_held_traffic_releasable() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        let old = addr(1);
+        let fresh = addr(3);
+        let peer = addr(2);
+        let socket = net.attach(old);
+        let binding = socket.binding();
+        let remote = net.attach(peer);
+
+        net.set_holding(old, peer, true);
+        socket.send_payload(peer, 1);
+        assert_eq!(binding.rebind(fresh), Ok(old));
+        socket.send_payload(peer, 2);
+        assert!(remote.recv_payloads().is_empty());
+
+        net.heal_all();
+        assert_eq!(remote.recv_payloads(), vec![(old, 1), (fresh, 2)]);
     }
 
     #[test]
