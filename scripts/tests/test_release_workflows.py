@@ -19,6 +19,9 @@ def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
     assert "scripts/release/prepare_release.py" in text
     assert 'refs/heads/${DEFAULT_BRANCH}' in text
     assert 'branch="release/v${VERSION}"' in text
+    assert "credential.helper" in text
+    assert "credential.https://github.com.username" in text
+    assert "http.https://github.com/.extraheader" not in text
     assert "gh pr create" in text
 
 
