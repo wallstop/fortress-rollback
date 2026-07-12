@@ -115,10 +115,12 @@ jobs:
           fi
           local_checksum=$(sha256sum "$package_path" | awk '{ print $1 }')
           printf '%s  %s\n' "$local_checksum" "$(basename "$package_path")" > "${package_path}.sha256"
-          echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
-          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "path=$package_path" >> "$GITHUB_OUTPUT"
-          echo "checksum=$local_checksum" >> "$GITHUB_OUTPUT"
+          {
+            echo "crate_name=$CRATE_NAME"
+            echo "version=$CARGO_VERSION"
+            echo "path=$package_path"
+            echo "checksum=$local_checksum"
+          } >> "$GITHUB_OUTPUT"
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
