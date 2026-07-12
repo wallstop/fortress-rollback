@@ -105,6 +105,14 @@ def is_changelog_file(path: str) -> bool:
     return path == "CHANGELOG.md"
 
 
+def is_wire_golden_surface_file(path: str) -> bool:
+    """Return True for immutable wire fixtures and their enforcing hook."""
+    return path == "scripts/hooks/check-wire-golden-immutable.py" or (
+        path.startswith(("src/network/wire_golden_", "tests/network/wire_golden_"))
+        and path.endswith(".rs")
+    )
+
+
 def is_tla_consistency_surface_file(path: str) -> bool:
     """Return True for files that can affect the TLA FIX_MODE consistency check.
 
@@ -314,6 +322,19 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 ),
                 # Semantic merge -- no safe auto-fix.
                 fix_command=None,
+            )
+        )
+
+    if run_all or any(is_wire_golden_surface_file(path) for path in changed_files):
+        checks.append(
+            PlannedCheck(
+                check_id="wire-golden-immutable",
+                description="prevent released wire fixture changes without a protocol bump",
+                command=[PYTHON_EXECUTABLE, "scripts/hooks/check-wire-golden-immutable.py"],
+                fix_hint=(
+                    "Restore released wire fixtures, or bump PROTOCOL_VERSION and add the next "
+                    "versioned golden suite."
+                ),
             )
         )
 

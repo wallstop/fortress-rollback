@@ -226,6 +226,13 @@ repos:
         pass_filenames: false
         files: '^CHANGELOG\.md$'
 
+      - id: wire-golden-immutable
+        name: released wire golden immutability
+        entry: python scripts/hooks/check-wire-golden-immutable.py --cached
+        language: python
+        pass_filenames: false
+        always_run: true
+
       - id: llm-line-limit
         name: check .llm file line limit (300)
         entry: python scripts/hooks/check-llm-line-limit.py

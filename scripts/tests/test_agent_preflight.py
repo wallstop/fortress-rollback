@@ -36,6 +36,8 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("skills-index-check", ".llm/skills/workflows/dev-pipeline.md"),
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
+    ("wire-golden-immutable", "src/network/wire_golden_v1.rs"),
+    ("wire-golden-immutable", "tests/network/wire_golden_legacy_0_9.rs"),
     ("vale-advisory", "docs/index.md"),
     ("link-check", "README.md"),
     ("doc-claims", "tests/common/channel_socket.rs"),

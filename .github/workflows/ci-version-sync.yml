@@ -40,6 +40,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Check Cargo/changelog/version references
         run: bash scripts/sync-version.sh --check
+
+      - name: Check released wire golden immutability
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/hooks/check-wire-golden-immutable.py --base-ref "$BASE_SHA"

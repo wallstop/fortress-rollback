@@ -1652,6 +1652,14 @@ fn bounded_decode_config() -> impl bincode::config::Config {
 }
 
 #[cfg(test)]
+#[path = "wire_golden_v1.rs"]
+mod wire_golden_v1;
+
+#[cfg(test)]
+#[path = "wire_golden_legacy_0_9.rs"]
+mod wire_golden_legacy_0_9;
+
+#[cfg(test)]
 #[allow(
     clippy::panic,
     clippy::unwrap_used,
