@@ -13,7 +13,7 @@ use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
     run, RunOptions, RunReport,
 };
-use crate::common::sim_net::LinkPolicy;
+use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
 use std::{collections::BTreeSet, time::Duration};
 
@@ -2721,6 +2721,212 @@ fn h_asym_biases_throughput_without_wait_recommendations() {
         vec![-1, 1],
         "the latest wire gauges stay below the three-frame recommendation dead band"
     );
+}
+
+fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
+    const N: usize = 4;
+    const SPIKE_START: u32 = 500;
+    const HEAL_AT: u32 = 625;
+
+    let config = SimConfig {
+        n_players: N,
+        steps: 1_500,
+        step_dt_ms: 16,
+        input_delay: 0,
+        noise: BackgroundNoise::Clean,
+        ..SimConfig::smoke(N)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from == to {
+                continue;
+            }
+            let mut policy = LinkPolicy::clean();
+            if (from, to) == (0, 1) {
+                // Instrumentation-only shaper: the 64 MiB burst/rate is far
+                // above this test's traffic, while its presence opts schema 16
+                // into bounded ProgressSamples without changing delivery.
+                policy.bandwidth = Some(BandwidthPolicy {
+                    rate_bytes_per_second: 64 * 1024 * 1024,
+                    burst_bytes: 64 * 1024 * 1024,
+                    queue_capacity_bytes: 0,
+                });
+            }
+            initial_links.push((from, to, policy));
+        }
+    }
+
+    let mut events = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                events.push((
+                    SPIKE_START,
+                    ScheduleEvent::SetLink {
+                        from,
+                        to,
+                        policy: LinkPolicy {
+                            base_delay: Duration::from_millis(delay_ms),
+                            ..LinkPolicy::clean()
+                        },
+                    },
+                ));
+            }
+        }
+    }
+    events.push((HEAL_AT, ScheduleEvent::HealAll));
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0x4D45_5441,
+        link_seed: 0x4D45_5442,
+        config,
+        initial_links,
+        events,
+        heal_at: HEAL_AT,
+    }
+}
+
+/// H-META-RB-OPENLOOP: under the harness's fixed poll cadence, a two-second
+/// symmetric RTT spike creates rollback work, then that work decays after heal
+/// instead of sustaining itself. This does not close full H-META-RB: the
+/// runner does not yet convert resimulation cost into delayed future polls.
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn rollback_storm_decays_after_rtt_spike_under_fixed_cadence() {
+    let control = meta_rb_open_loop_schedule(0);
+    let treatment = meta_rb_open_loop_schedule(150);
+    let control_report = run(&control, &RunOptions::default());
+    let treatment_report = run(&treatment, &RunOptions::default());
+    let replay = run(&treatment, &RunOptions::default());
+    control_report.expect_pass(&control);
+    treatment_report.expect_pass(&treatment);
+    assert_eq!(treatment_report.trace_hash, replay.trace_hash);
+    assert_eq!(treatment_report.progress_samples, replay.progress_samples);
+    assert_eq!(treatment_report.metrics, replay.metrics);
+    assert_eq!(treatment_report.net_stats, replay.net_stats);
+    assert_eq!(treatment_report.recovered_within_b, Some(true));
+    assert_eq!(control_report.recovered_within_b, Some(true));
+    assert_eq!(treatment_report.progress_samples.len(), 12);
+    assert_eq!(
+        treatment_report
+            .progress_samples
+            .iter()
+            .map(|sample| sample.step)
+            .collect::<Vec<_>>(),
+        vec![124, 249, 374, 499, 624, 749, 874, 999, 1124, 1249, 1374, 1499]
+    );
+    for report in [&control_report, &treatment_report] {
+        assert_eq!(report.net_stats.bandwidth_queued_datagrams, 0);
+        assert_eq!(report.net_stats.bandwidth_tail_drops, 0);
+        assert_eq!(report.net_stats.bandwidth_oversize_drops, 0);
+        assert_eq!(report.net_stats.bandwidth_reservation_cap_drops, 0);
+        assert_eq!(report.net_stats.bandwidth_time_overflow_drops, 0);
+        assert_eq!(report.net_stats.bandwidth_max_queue_bytes, 0);
+        assert_eq!(report.net_stats.bandwidth_max_queue_delay_ns, 0);
+    }
+
+    let window_delta = |report: &RunReport, from_step: u32, to_step: u32| {
+        let from = report
+            .progress_samples
+            .iter()
+            .find(|sample| sample.step == from_step)
+            .expect("aligned from sample");
+        let to = report
+            .progress_samples
+            .iter()
+            .find(|sample| sample.step == to_step)
+            .expect("aligned to sample");
+        let rollbacks = to
+            .rollback_count
+            .iter()
+            .zip(&from.rollback_count)
+            .map(|(to, from)| to.saturating_sub(*from))
+            .sum::<u64>();
+        let resimulation = to
+            .resimulated_frames
+            .iter()
+            .zip(&from.resimulated_frames)
+            .map(|(to, from)| to.saturating_sub(*from))
+            .sum::<u64>();
+        (rollbacks, resimulation)
+    };
+    let baseline = window_delta(&treatment_report, 374, 499);
+    let control_spike = window_delta(&control_report, 499, 624);
+    let spike = window_delta(&treatment_report, 499, 624);
+    let post_first = window_delta(&treatment_report, 624, 749);
+    let post_second = window_delta(&treatment_report, 749, 874);
+    let late = window_delta(&treatment_report, 874, 999);
+    let control_post_second = window_delta(&control_report, 749, 874);
+    let control_late = window_delta(&control_report, 874, 999);
+
+    println!(
+        "H-META-RB-OPENLOOP baseline={baseline:?} control_spike={control_spike:?} \
+         spike={spike:?} post_first={post_first:?} post_second={post_second:?} late={late:?}"
+    );
+    assert!(
+        spike.0 > 0
+            && spike.0.saturating_mul(100) <= baseline.0.saturating_mul(50)
+            && spike.1.saturating_mul(100) >= baseline.1.saturating_mul(125)
+            && spike.1 >= spike.0.saturating_mul(2),
+        "spike premise missing: baseline={baseline:?}, spike={spike:?}"
+    );
+    assert!(
+        spike.1.saturating_mul(100) >= control_spike.1.saturating_mul(125),
+        "treatment must exceed matched control: control={control_spike:?}, spike={spike:?}"
+    );
+    for (label, recovered, matched_control) in [
+        ("within B", post_second, control_post_second),
+        ("late", late, control_late),
+    ] {
+        assert!(
+            recovered.0.saturating_mul(100) <= matched_control.0.saturating_mul(105)
+                && recovered.1.saturating_mul(100) <= matched_control.1.saturating_mul(105),
+            "{label} rollback work did not return to the matched fixed-cadence envelope: \
+             control={matched_control:?}, recovered={recovered:?}"
+        );
+    }
+    let spike_sample = treatment_report
+        .progress_samples
+        .iter()
+        .find(|sample| sample.step == 624)
+        .expect("spike sample");
+    let control_sample = control_report
+        .progress_samples
+        .iter()
+        .find(|sample| sample.step == 624)
+        .expect("control spike sample");
+    let expected_endpoints = (0..4)
+        .flat_map(|from| {
+            (0..4)
+                .filter(move |to| *to != from)
+                .map(move |to| (from, to))
+        })
+        .collect::<BTreeSet<_>>();
+    for sample in [spike_sample, control_sample] {
+        assert_eq!(sample.endpoints.len(), 12);
+        assert_eq!(
+            sample
+                .endpoints
+                .iter()
+                .map(|endpoint| (endpoint.from, endpoint.to))
+                .collect::<BTreeSet<_>>(),
+            expected_endpoints
+        );
+    }
+    for endpoint in &spike_sample.endpoints {
+        let control_endpoint = control_sample
+            .endpoints
+            .iter()
+            .find(|control| (control.from, control.to) == (endpoint.from, endpoint.to))
+            .expect("complete matched endpoint sample");
+        assert!(
+            (250..=350).contains(&endpoint.ping_ms) && endpoint.ping_ms > control_endpoint.ping_ms,
+            "every symmetric endpoint must observe the intended ~300ms RTT: \
+             treatment={endpoint:?}, control={control_endpoint:?}"
+        );
+    }
 }
 
 /// Builds a clock-skew schedule: an `n`-mesh over clean links with a small

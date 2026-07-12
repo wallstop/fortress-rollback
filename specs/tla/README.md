@@ -27,6 +27,9 @@ This directory contains TLA+ specifications for formally verifying the correctne
 | File | Config | Status | Description |
 |------|--------|--------|-------------|
 | `NetworkProtocol.tla` | `NetworkProtocol.cfg` | ✓ CI | Sync-handshake + peer-drop state machine (N=3 peers) |
+| `SyncHandshakeV1.tla` | `SyncHandshakeV1.cfg` (+ `_HandlersDisabled.cfg` demo-FAIL) | ✓ CI | Protocol-v1 config-handshake safety under arbitrary loss/reorder: exact agreement or one oriented incompatibility event; timeout is event-only (N=2 peers) |
+| `SyncHandshakeV1Fair.tla` | `SyncHandshakeV1Fair.cfg` | ✓ CI | Matching protocol-v1 peers both synchronize under fair request/reply handling (liveness companion) |
+| `SyncHandshakeV1Mismatch.tla` | `SyncHandshakeV1Mismatch.cfg` | ✓ CI | Mismatching protocol-v1 peers both fail with sticky, oppositely oriented incompatibility reasons under fair request/reply handling |
 | `InputQueue.tla` | `InputQueue.cfg` | ✓ CI | Circular buffer input queue + graceful-drop freeze (`freeze_at`/`set_frozen_value_at`) |
 | `Rollback.tla` | `Rollback.cfg` | ✓ CI | Rollback mechanism |
 | `Concurrency.tla` | `Concurrency.cfg` | ✓ CI | GameStateCell thread safety |
@@ -56,6 +59,45 @@ This directory contains TLA+ specifications for formally verifying the correctne
 
 - Eventually synchronized (under fair scheduling)
 - No deadlock
+
+### SyncHandshakeV1.tla
+
+Protocol-v1's spec-first configuration handshake entrance gate for M5. The
+bounded safety model permits arbitrary message loss, overlapping retry tokens,
+and reordered replies over two fixed-width configuration fields. A sync timeout
+emits once but deliberately leaves the endpoint `Syncing` with retries enabled.
+
+**Safety:**
+
+- A peer reaches `Synced` only after learning an exactly matching remote config
+- A mismatched config can never produce a synchronized endpoint
+- Observed mismatches fail closed with one incompatibility event
+- The event records the first unequal field plus correctly oriented local
+  (`ours`) and remote (`theirs`) values
+- Once failed, an endpoint remains failed while continuing to answer requests
+- Learned config values always belong to the peer identified as their source
+- The transition that emits `SyncTimeout` preserves phase, sync progress,
+  accepted tokens, and the next retry token
+
+**Liveness:**
+
+- `SyncHandshakeV1Fair.cfg` disables loss, fixes matching configurations, and
+  proves both peers eventually reach `Synced` under fair send/handler actions
+- `SyncHandshakeV1Mismatch.cfg` disables loss, requires different configs, and
+  proves both peers eventually reach sticky `Failed` states; the safety
+  invariants check each peer's locally oriented reason
+- `SyncHandshakeV1_HandlersDisabled.cfg` is an expected-fail mutation enforced
+  by `verify-tla.sh`: with the handlers disabled, `EventuallyBothSynced` must
+  produce that specific counterexample. Parse errors, tool crashes, unrelated
+  nonzero exits, and a surprising pass all fail the verifier.
+
+The field-reason model covers `NumPlayers` before `InputWidth`, which is enough
+to verify ordering and `ours`/`theirs` orientation. Rust tests for M5 §8.3 must
+still cover every omitted reason (`ProtocolVersion`, `Fps`, `MaxPrediction`,
+`DesyncInterval`, `Features`, and `ConfigDigest`), translation into both public
+session event types, and exactly-once delivery across repeated mismatched
+requests. Digest calculation, token entropy, and hostile-source authentication
+are outside this model.
 
 ### InputQueue.tla
 
@@ -754,6 +796,10 @@ Each spec has a `.cfg` file with TLC-compatible settings:
 | Config File | Key Constants | State Space |
 |-------------|---------------|-------------|
 | `NetworkProtocol.cfg` | PEERS={p1,p2,p3}, NUM_SYNC_PACKETS=1 | ~170,000 distinct states (~2.6M generated) |
+| `SyncHandshakeV1.cfg` | PEERS={p1,p2}, NUM_SYNC_PACKETS=3, MAX_NETWORK=2, arbitrary loss, all 2×2 configs (safety only) | ~1.59M distinct states (~8.07M generated), ~15s workers-auto |
+| `SyncHandshakeV1Fair.cfg` | same bounds, matching configs, fair delivery (no loss; liveness) | ~46,700 distinct states (~141,300 generated), ~4s workers-auto |
+| `SyncHandshakeV1Mismatch.cfg` | same bounds, mismatching configs, fair delivery (no loss; liveness) | 4,320 distinct states (8,508 generated), ~1s workers-auto |
+| `SyncHandshakeV1_HandlersDisabled.cfg` (CI-enforced expected FAIL) | same fair/matching bounds, request/reply handlers disabled | `EventuallyBothSynced` specifically violated in ~1s (252 distinct states) |
 | `InputQueue.cfg` | QUEUE_LENGTH=3, MAX_FRAME=4, NULL_FRAME=999 | ~56,500 distinct states (~1.07M generated) |
 | `Concurrency.cfg` | MAX_FRAME=4 | Small |
 | `Rollback.cfg` | MAX_PREDICTION=1, MAX_FRAME=3 | ~1.8M distinct states (~29.2M generated) |
@@ -866,6 +912,7 @@ These specifications model the key algorithms from:
 | TLA+ Module | Rust Implementation |
 |-------------|---------------------|
 | `NetworkProtocol` | `src/network/protocol/mod.rs` (UdpProtocol) |
+| `SyncHandshakeV1` / `SyncHandshakeV1Fair` / `SyncHandshakeV1Mismatch` | `src/network/protocol/mod.rs` (v1 sync request/reply config negotiation planned for M5) |
 | `InputQueue` | `src/input_queue/mod.rs` (InputQueue; `freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`, `confirmed_input`) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |

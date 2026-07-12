@@ -17,7 +17,8 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use fortress_rollback::{
-    Config, FortressRequest, Frame, PlayerHandle, SessionBuilder, SyncTestSession,
+    Config, FortressRequest, Frame, Message, NonBlockingSocket, PlayerHandle, PlayerType,
+    SessionBuilder, SyncTestSession,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,6 +50,17 @@ impl Config for BenchConfig {
     type Input = BenchInput;
     type State = BenchState;
     type Address = SocketAddr;
+}
+
+/// Socket used by accessor-only benchmarks that never poll or exchange data.
+struct BenchSocket;
+
+impl NonBlockingSocket<SocketAddr> for BenchSocket {
+    fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        Vec::new()
+    }
 }
 
 /// Benchmark the SyncTestSession advance_frame without rollback
@@ -301,10 +313,61 @@ fn bench_message_serialization(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the pull-based metrics snapshot and packet-hot-path wire-length
+/// arithmetic added by M2. Both accessor calls are allocation-free; this does
+/// not measure the separate always-on counter-update overhead.
+fn bench_metrics_and_wire_length(c: &mut Criterion) {
+    use fortress_rollback::network::codec;
+
+    let remote_addr: SocketAddr = ([127, 0, 0, 1], 7_001).into();
+    let session = SessionBuilder::<BenchConfig>::new()
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .expect("add local player")
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))
+        .expect("add remote player")
+        .start_p2p_session(BenchSocket)
+        .expect("create P2P session");
+
+    let mut metrics_group = c.benchmark_group("P2PSession");
+    metrics_group.bench_function("metrics", |b| {
+        b.iter(|| black_box(black_box(&session).metrics()));
+    });
+    metrics_group.finish();
+
+    // Decode one representative 2-player Input packet outside the timed loop.
+    // This keeps the benchmark on the variable-length arithmetic hot path
+    // without exposing protocol internals solely for Criterion.
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&0_u16.to_le_bytes()); // header.magic
+    wire.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+    wire.extend_from_slice(&2_u64.to_le_bytes()); // peer_connect_status.len()
+    for _ in 0..2 {
+        wire.push(0); // disconnected = false
+        wire.extend_from_slice(&(-1_i32).to_le_bytes()); // last_frame
+        wire.extend_from_slice(&0_u16.to_le_bytes()); // epoch
+    }
+    wire.push(0); // disconnect_requested = false
+    wire.extend_from_slice(&0_i32.to_le_bytes()); // start_frame
+    wire.extend_from_slice(&(-1_i32).to_le_bytes()); // ack_frame
+    wire.extend_from_slice(&96_u64.to_le_bytes()); // compressed input bytes
+    wire.extend(0_u8..96);
+    let (input_message, consumed) = codec::decode_message(&wire).expect("decode benchmark Input");
+    assert_eq!(consumed, wire.len());
+
+    let mut wire_group = c.benchmark_group("Message");
+    wire_group.bench_function("encoded_len", |b| {
+        b.iter(|| {
+            black_box(fortress_rollback::__internal::message_metadata(black_box(&input_message)).0)
+        });
+    });
+    wire_group.finish();
+}
+
 criterion_group!(
     benches,
     bench_advance_frame_no_rollback,
     bench_advance_frame_with_rollback,
     bench_message_serialization,
+    bench_metrics_and_wire_length,
 );
 criterion_main!(benches);

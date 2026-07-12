@@ -62,6 +62,9 @@ NC='\033[0m' # No Color
 # Specs to verify (only specs with .cfg files will be checked)
 SPECS=(
     "NetworkProtocol"
+    "SyncHandshakeV1"
+    "SyncHandshakeV1Fair"
+    "SyncHandshakeV1Mismatch"
     "InputQueue"
     "Concurrency"
     "Rollback"
@@ -76,6 +79,13 @@ SPECS=(
     "FreezeConvergence"
     "FrameAdvantageAggregation"
     "DoubleFailureRelay"
+)
+
+# Mutation checks intentionally expect a specific TLC property counterexample.
+# They are distinct from ordinary specs because a parse error, tool crash, or
+# unrelated non-zero exit must fail CI rather than masquerade as a mutation hit.
+EXPECTED_FAILURE_CHECKS=(
+    "SyncHandshakeV1HandlersDisabled"
 )
 
 # Track results
@@ -238,9 +248,9 @@ verify_spec() {
 
     local exit_code=0
     if [[ "$verbose" == "true" ]]; then
-        "${run_cmd[@]}" 2>&1 | tee "$output_file" || exit_code=$?
+        (cd "$TLA_DIR" && "${run_cmd[@]}") 2>&1 | tee "$output_file" || exit_code=$?
     else
-        "${run_cmd[@]}" > "$output_file" 2>&1 || exit_code=$?
+        (cd "$TLA_DIR" && "${run_cmd[@]}") > "$output_file" 2>&1 || exit_code=$?
     fi
 
     local end_time
@@ -297,13 +307,67 @@ verify_spec() {
     fi
 }
 
+verify_sync_handshake_handlers_disabled() {
+    local verbose="${1:-false}"
+    local label="SyncHandshakeV1HandlersDisabled"
+    local output_file
+    output_file=$(mktemp)
+
+    local -a tlc_cmd=(
+        java
+        "-Xmx$TLA_MEMORY"
+        -XX:+UseParallelGC
+        -jar "$TLA_TOOLS_JAR"
+        -deadlock
+        -workers "$TLA_WORKERS"
+        -lncheck final
+        -config "$TLA_DIR/SyncHandshakeV1_HandlersDisabled.cfg"
+        "$TLA_DIR/SyncHandshakeV1.tla"
+    )
+    local -a run_cmd
+    if [[ -n "$TLA_SPEC_TIMEOUT" ]] && command -v timeout &> /dev/null; then
+        run_cmd=(timeout "$TLA_SPEC_TIMEOUT" "${tlc_cmd[@]}")
+    else
+        run_cmd=("${tlc_cmd[@]}")
+    fi
+
+    echo -e "${BLUE}Verifying $label expected counterexample...${NC}"
+    local exit_code=0
+    if [[ "$verbose" == "true" ]]; then
+        (cd "$TLA_DIR" && "${run_cmd[@]}") 2>&1 | tee "$output_file" || exit_code=$?
+    else
+        (cd "$TLA_DIR" && "${run_cmd[@]}") > "$output_file" 2>&1 || exit_code=$?
+    fi
+
+    local expected_property='Error: Temporal property EventuallyBothSynced was violated.'
+    if [[ $exit_code -eq 13 ]] \
+        && grep -Fq "$expected_property" "$output_file" \
+        && grep -Fq 'behavior constitutes a counter-example' "$output_file" \
+        && grep -qE '^[0-9][0-9,]* states generated,.* 0 states left on queue' "$output_file" \
+        && ! grep -Eq 'Parsing or semantic analysis failed|Unable to access jarfile|Exception in thread|TLC threw' "$output_file"; then
+        echo -e "${GREEN}✓ $label produced the expected EventuallyBothSynced counterexample${NC}"
+        RESULTS[$label]="PASS"
+        ((PASSED++))
+        rm -f "$output_file"
+        return 0
+    fi
+
+    echo -e "${RED}✗ $label did not produce the required property counterexample${NC}"
+    echo "TLC output (last 20 lines):"
+    tail -20 "$output_file"
+    RESULTS[$label]="FAIL"
+    ((FAILED++))
+    rm -f "$output_file"
+    return 1
+}
+
 print_summary() {
     echo ""
     echo "=========================================="
     echo "TLA+ Verification Summary"
     echo "=========================================="
 
-    for spec in "${SPECS[@]}"; do
+    for spec in "${SPECS[@]}" "${EXPECTED_FAILURE_CHECKS[@]}"; do
         local result="${RESULTS[$spec]:-SKIP}"
         local color="$NC"
         local symbol="?"
@@ -412,6 +476,17 @@ main() {
         fi
         echo ""
     done
+
+    # The handler-disabled mutation is part of the base handshake gate. Run it
+    # in full-suite CI and whenever the base spec is selected explicitly.
+    if [[ "$any_failed" == "true" && "$fail_fast" == "true" ]]; then
+        : # A prior failure already requested an immediate stop.
+    elif [[ -z "$target_spec" || "$target_spec" == "SyncHandshakeV1" ]]; then
+        if ! verify_sync_handshake_handlers_disabled "$verbose"; then
+            any_failed=true
+        fi
+        echo ""
+    fi
 
     # Print summary
     print_summary

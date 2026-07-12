@@ -31,6 +31,7 @@ const FRAGMENTATION_BACKLOG_RELEASE: u32 = 204;
 const FRAGMENTATION_HEAL: u32 = 320;
 const BANDWIDTH_START: u32 = 140;
 const BANDWIDTH_HEAL: u32 = 240;
+const POLLCAP_RELEASE: u32 = 220;
 #[cfg(feature = "hot-join")]
 const NPEER_HOT_JOIN_AT: u32 = 140;
 #[cfg(feature = "hot-join")]
@@ -50,6 +51,56 @@ fn clean_initial_links(n: usize) -> Vec<(usize, usize, LinkPolicy)> {
         }
     }
     initial_links
+}
+
+fn pollcap_schedule(plant_target_backlog: bool, steps: u32) -> Schedule {
+    let n = 16;
+    let mut config = SimConfig::smoke(n);
+    config.steps = steps;
+    config.noise = BackgroundNoise::Clean;
+
+    let mut events = Vec::new();
+    if plant_target_backlog {
+        for from in 1..n {
+            events.push((
+                0,
+                ScheduleEvent::Hold {
+                    from,
+                    to: 0,
+                    holding: true,
+                },
+            ));
+        }
+    }
+    events.push((POLLCAP_RELEASE, ScheduleEvent::HealAll));
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_CA90,
+        link_seed: 0xCE45_CA91,
+        config,
+        initial_links: clean_initial_links(n),
+        events,
+        heal_at: POLLCAP_RELEASE,
+    }
+}
+
+fn assert_all_peer_pairs_synchronized(report: &RunReport) {
+    let n = report.first_synchronized_step.len();
+    assert_eq!(n, 16);
+    for local in 0..n {
+        assert_eq!(report.first_synchronized_step[local].len(), n);
+        for remote in 0..n {
+            if local == remote {
+                assert_eq!(report.first_synchronized_step[local][remote], None);
+            } else {
+                assert!(
+                    report.first_synchronized_step[local][remote].is_some(),
+                    "missing Synchronized event for {local}->{remote}"
+                );
+            }
+        }
+    }
 }
 
 fn blocked_drop_count(report: &RunReport, from: usize, to: usize) -> u64 {
@@ -217,6 +268,55 @@ fn bandwidth_queue_schedule(include_constraint: bool) -> Schedule {
         events,
         heal_at: BANDWIDTH_HEAL,
     }
+}
+
+fn scale_bandwidth_fragmentation_schedule(
+    app_model: AppModel,
+    include_bandwidth: bool,
+    fragment_drop_rate: f64,
+) -> Schedule {
+    let mut schedule = fragmentation_schedule(fragment_drop_rate);
+    schedule.config.app_model = app_model;
+
+    let constrained = LinkPolicy {
+        fragmentation: Some(FragmentationPolicy { fragment_drop_rate }),
+        bandwidth: include_bandwidth.then_some(BandwidthPolicy {
+            rate_bytes_per_second: 8_000,
+            burst_bytes: 8_192,
+            queue_capacity_bytes: 32_768,
+        }),
+        ..LinkPolicy::clean()
+    };
+    let release_policy = schedule
+        .events
+        .iter_mut()
+        .find_map(|(step, event)| match event {
+            ScheduleEvent::SetLink { from, to, policy }
+                if *step == FRAGMENTATION_BACKLOG_RELEASE && (*from, *to) == (0, 1) =>
+            {
+                Some(policy)
+            },
+            _ => None,
+        })
+        .expect("fragmentation schedule has the 0->1 release policy");
+    *release_policy = constrained;
+    let block_step = schedule
+        .events
+        .iter_mut()
+        .find_map(|(step, event)| match event {
+            ScheduleEvent::Block { from, to, blocked }
+                if (*from, *to, *blocked) == (0, 1, true) =>
+            {
+                Some(step)
+            },
+            _ => None,
+        })
+        .expect("fragmentation schedule has the 0->1 block event");
+    // 44 pending 32-byte inputs exceed the 1,472-byte fragmentation threshold
+    // while staying far below the 128-entry protocol redundancy bound.
+    *block_step = FRAGMENTATION_BACKLOG_RELEASE - 44;
+
+    schedule
 }
 
 fn fragmentation_schedule(fragment_drop_rate: f64) -> Schedule {
@@ -1028,6 +1128,385 @@ fn oversized_input_fragment_loss_is_bounded_and_recovers() {
         .session_states
         .iter()
         .all(|state| *state == TraceSessionState::Running)));
+}
+
+/// H-POLLCAP clean control: ordinary N=16 cold start never reaches the
+/// per-destination decoded-message cap, and all 240 directed handshakes finish
+/// before the storm schedule's release anchor.
+#[test]
+fn h_pollcap_clean_cold_start_has_no_cap_deferral() {
+    let schedule = pollcap_schedule(false, 280);
+    let options = RunOptions {
+        receive_message_limit: Some(256),
+        ..RunOptions::default()
+    };
+    let first = run(&schedule, &options);
+    let replay = run(&schedule, &options);
+    first.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.verdict, replay.verdict);
+    assert_eq!(first.receive_stats_by_peer, replay.receive_stats_by_peer);
+    assert_eq!(first.first_running_step, replay.first_running_step);
+    assert_eq!(
+        first.first_synchronized_step,
+        replay.first_synchronized_step
+    );
+    assert_all_peer_pairs_synchronized(&first);
+    assert!(
+        first
+            .first_running_step
+            .iter()
+            .all(|step| step.is_some_and(|step| step < POLLCAP_RELEASE)),
+        "{:?}",
+        first.first_running_step
+    );
+    assert!(first
+        .first_synchronized_step
+        .iter()
+        .flatten()
+        .flatten()
+        .all(|step| *step < POLLCAP_RELEASE));
+    assert!(first
+        .receive_stats_by_peer
+        .iter()
+        .all(|stats| { stats.cap_limited_polls == 0 && stats.max_remainder_after_drain == 0 }));
+    assert_eq!(first.net_stats.dropped_by_policy, 0);
+    assert_eq!(first.net_stats.dropped_blocked, 0);
+    assert_eq!(first.net_stats.dropped_unattached, 0);
+    assert_eq!(first.net_stats.duplicated, 0);
+}
+
+/// H-POLLCAP planted release storm: the same target backlog is drained with
+/// caps 256 and 512, isolating bounded FIFO deferral from loss or starvation.
+#[test]
+#[ignore = "nightly N=16 planted per-destination receive storm"]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn h_pollcap_targeted_release_defers_without_starvation() {
+    let schedule = pollcap_schedule(true, 800);
+    let low_options = RunOptions {
+        receive_message_limit: Some(256),
+        ..RunOptions::default()
+    };
+    let high_options = RunOptions {
+        receive_message_limit: Some(512),
+        ..RunOptions::default()
+    };
+    let low = run(&schedule, &low_options);
+    let high = run(&schedule, &high_options);
+    let replay = run(&schedule, &low_options);
+    low.expect_pass(&schedule);
+    high.expect_pass(&schedule);
+    assert_eq!(low.trace_hash, replay.trace_hash);
+    assert_eq!(low.verdict, replay.verdict);
+    assert_eq!(low.net_stats, replay.net_stats);
+    assert_eq!(low.receive_stats_by_peer, replay.receive_stats_by_peer);
+    assert_eq!(low.first_running_step, replay.first_running_step);
+    assert_eq!(low.first_synchronized_step, replay.first_synchronized_step);
+    assert_all_peer_pairs_synchronized(&low);
+    assert_all_peer_pairs_synchronized(&high);
+
+    let low_target = low.receive_stats_by_peer[0];
+    let high_target = high.receive_stats_by_peer[0];
+    println!(
+        "H-POLLCAP low={low_target:?} high={high_target:?} low_running={:?} high_running={:?}",
+        low.first_running_step, high.first_running_step
+    );
+    assert_eq!(
+        low_target.max_due_before_drain,
+        high_target.max_due_before_drain
+    );
+    assert_eq!(low_target.max_due_before_drain, 270, "{low_target:?}");
+    assert_eq!(low_target.cap_limited_polls, 1, "{low_target:?}");
+    assert_eq!(low_target.max_returned_batch, 256);
+    assert_eq!(low_target.max_remainder_after_drain, 14, "{low_target:?}");
+    assert!(low_target.drained_after_cap, "{low_target:?}");
+    assert_eq!(high_target.cap_limited_polls, 0, "{high_target:?}");
+    assert_eq!(high_target.max_returned_batch, 270, "{high_target:?}");
+    assert_eq!(high_target.max_remainder_after_drain, 0, "{high_target:?}");
+    assert!(!high_target.drained_after_cap, "{high_target:?}");
+    assert!(low.receive_stats_by_peer[1..]
+        .iter()
+        .all(|stats| stats.cap_limited_polls == 0));
+    for (low_step, high_step) in low.first_running_step.iter().zip(&high.first_running_step) {
+        let low_step = low_step.expect("low-cap peer reaches Running");
+        let high_step = high_step.expect("high-cap peer reaches Running");
+        assert!((high_step..=high_step + 1).contains(&low_step));
+    }
+    for (low_step, high_step) in low
+        .first_synchronized_step
+        .iter()
+        .flatten()
+        .zip(high.first_synchronized_step.iter().flatten())
+    {
+        match (*low_step, *high_step) {
+            (Some(low_step), Some(high_step)) => {
+                assert!((high_step..=high_step + 1).contains(&low_step));
+            },
+            (None, None) => {},
+            pair => panic!("mismatched synchronization evidence: {pair:?}"),
+        }
+    }
+    assert!(low.net_stats.held > 256, "{:?}", low.net_stats);
+    for net in [low.net_stats, high.net_stats] {
+        assert_eq!(net.dropped_by_policy, 0);
+        assert_eq!(net.dropped_blocked, 0);
+        assert_eq!(net.dropped_unattached, 0);
+        assert_eq!(net.duplicated, 0);
+        assert_eq!(net.fragmentation_loss_events, 0);
+        assert_eq!(net.bandwidth_tail_drops, 0);
+        assert_eq!(net.bandwidth_oversize_drops, 0);
+        assert_eq!(net.bandwidth_reservation_cap_drops, 0);
+        assert_eq!(net.bandwidth_time_overflow_drops, 0);
+    }
+    assert_eq!(low.recovered_within_b, Some(true));
+    assert_eq!(high.recovered_within_b, Some(true));
+}
+
+/// H-BLOAT scale interaction: an N=16 mesh with incompressible 32-byte inputs
+/// releases a bounded pending-input backlog into one constrained directed
+/// link. No-bandwidth and zero-fragment-loss controls separate queue activation
+/// and fragment loss from the matched app treatments. The pinned 8 KB/s rate,
+/// 8 KB burst, and 32 KB tail-drop queue exercise a bounded near-capacity case,
+/// not a general model of every N=16 uplink.
+#[test]
+#[ignore = "nightly N=16 32-byte bandwidth/fragmentation interaction"]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers() {
+    let options = RunOptions {
+        probe_confirmed_at: Some(FRAGMENTATION_BACKLOG_RELEASE - 1),
+        pending_output_probe_link: Some((0, 1)),
+        ..RunOptions::default()
+    };
+    let unconstrained_ignore = scale_bandwidth_fragmentation_schedule(AppModel::Ignore, false, 0.0);
+    let unconstrained = scale_bandwidth_fragmentation_schedule(AppModel::Obey, false, 0.0);
+    let fragment_ignore = scale_bandwidth_fragmentation_schedule(AppModel::Ignore, false, 0.25);
+    let fragment_obey = scale_bandwidth_fragmentation_schedule(AppModel::Obey, false, 0.25);
+    let bandwidth_ignore = scale_bandwidth_fragmentation_schedule(AppModel::Ignore, true, 0.0);
+    let bandwidth_obey = scale_bandwidth_fragmentation_schedule(AppModel::Obey, true, 0.0);
+    let ignore = scale_bandwidth_fragmentation_schedule(AppModel::Ignore, true, 0.25);
+    let obey = scale_bandwidth_fragmentation_schedule(AppModel::Obey, true, 0.25);
+
+    let unconstrained_ignore_report =
+        run_with_input::<WideStubInput>(&unconstrained_ignore, &options);
+    let unconstrained_report = run_with_input::<WideStubInput>(&unconstrained, &options);
+    let fragment_ignore_report = run_with_input::<WideStubInput>(&fragment_ignore, &options);
+    let fragment_obey_report = run_with_input::<WideStubInput>(&fragment_obey, &options);
+    let bandwidth_ignore_report = run_with_input::<WideStubInput>(&bandwidth_ignore, &options);
+    let bandwidth_obey_report = run_with_input::<WideStubInput>(&bandwidth_obey, &options);
+    let ignore_report = run_with_input::<WideStubInput>(&ignore, &options);
+    let obey_report = run_with_input::<WideStubInput>(&obey, &options);
+    let ignore_replay = run_with_input::<WideStubInput>(&ignore, &options);
+    let replay = run_with_input::<WideStubInput>(&obey, &options);
+    unconstrained_ignore_report.expect_pass(&unconstrained_ignore);
+    unconstrained_report.expect_pass(&unconstrained);
+    fragment_ignore_report.expect_pass(&fragment_ignore);
+    fragment_obey_report.expect_pass(&fragment_obey);
+    bandwidth_ignore_report.expect_pass(&bandwidth_ignore);
+    bandwidth_obey_report.expect_pass(&bandwidth_obey);
+    ignore_report.expect_pass(&ignore);
+    obey_report.expect_pass(&obey);
+    assert_eq!(ignore_report.trace_hash, ignore_replay.trace_hash);
+    assert_eq!(
+        ignore_report.progress_samples,
+        ignore_replay.progress_samples
+    );
+    assert_eq!(ignore_report.net_stats, ignore_replay.net_stats);
+    assert_eq!(obey_report.trace_hash, replay.trace_hash);
+    assert_eq!(obey_report.progress_samples, replay.progress_samples);
+    assert_eq!(obey_report.net_stats, replay.net_stats);
+    assert_eq!(obey_report.link_stats_by_link, replay.link_stats_by_link);
+    assert_eq!(ignore_report.recovered_within_b, Some(true));
+    assert_eq!(obey_report.recovered_within_b, Some(true));
+
+    for report in [
+        &unconstrained_ignore_report,
+        &unconstrained_report,
+        &fragment_ignore_report,
+        &fragment_obey_report,
+    ] {
+        assert_eq!(report.net_stats.bandwidth_admitted_datagrams, 0);
+        assert_eq!(report.recovered_within_b, Some(true));
+    }
+    assert_eq!(
+        unconstrained_report
+            .net_stats
+            .fragmentation_input_loss_events,
+        0
+    );
+    assert_eq!(
+        unconstrained_report.wait_frames_obeyed,
+        [vec![3, 3], vec![0; 14]].concat(),
+        "the backlog-only control should pace only the disturbed endpoint pair"
+    );
+    for report in [&fragment_ignore_report, &fragment_obey_report] {
+        assert!(report.net_stats.fragmentation_input_loss_events > 0);
+    }
+    assert!(
+        bandwidth_ignore_report.net_stats.bandwidth_queued_datagrams > 0,
+        "the zero-fragment Ignore control must activate the configured bucket"
+    );
+    assert_eq!(
+        bandwidth_obey_report.net_stats.bandwidth_queued_datagrams, 0,
+        "obedience must drain the zero-fragment control without queueing"
+    );
+    for report in [&bandwidth_ignore_report, &bandwidth_obey_report] {
+        assert_eq!(report.net_stats.fragmentation_input_loss_events, 0);
+        assert_eq!(report.recovered_within_b, Some(true));
+    }
+
+    for report in [&ignore_report, &obey_report] {
+        let stats = report.net_stats;
+        assert!(stats.bandwidth_queued_datagrams > 0, "{stats:?}");
+        assert!(stats.bandwidth_max_queue_bytes > 0, "{stats:?}");
+        assert!(stats.bandwidth_max_queue_delay_ns > 0, "{stats:?}");
+        assert!(stats.fragmentation_input_eligible_sends > 0, "{stats:?}");
+        assert!(stats.fragmentation_input_loss_events > 0, "{stats:?}");
+        assert!(stats.fragmentation_max_fragments_per_send >= 2, "{stats:?}");
+        assert_eq!(stats.fragmentation_fragment_cap_hits, 0, "{stats:?}");
+        assert_eq!(stats.bandwidth_oversize_drops, 0, "{stats:?}");
+        assert_eq!(stats.bandwidth_reservation_cap_drops, 0, "{stats:?}");
+        assert_eq!(stats.bandwidth_time_overflow_drops, 0, "{stats:?}");
+        assert!(report.final_confirmed.iter().all(|frame| *frame > 400));
+        let pending = report.pending_output_probe.expect("pending-output probe");
+        assert!(
+            pending
+                .at_probe
+                .is_some_and(|value| (1..128).contains(&value)),
+            "{pending:?}"
+        );
+        assert!(pending.max < 128, "{pending:?}");
+        assert!(
+            pending.after_recovery.is_some_and(|value| value <= 1),
+            "{pending:?}"
+        );
+        assert!(pending.final_value <= 1, "{pending:?}");
+        let link = report.link_stats_by_link[&(0, 1)];
+        assert!(link.max_encoded_input_bytes > 1_472, "{link:?}");
+        assert!(link.input_sends_over_1472_bytes > 0, "{link:?}");
+        assert!(report.progress_samples.iter().any(|sample| sample
+            .link_queues
+            .iter()
+            .any(|queue| queue.from == 0 && queue.to == 1 && queue.queued_bytes > 0)));
+        assert!(report.progress_samples.last().is_some_and(|sample| sample
+            .link_queues
+            .iter()
+            .all(|queue| queue.queued_bytes == 0
+                && queue.queued_datagrams == 0
+                && queue.drain_delay_ns == 0)));
+    }
+
+    assert!(
+        obey_report
+            .wait_frames_obeyed
+            .iter()
+            .any(|skips| *skips > 0),
+        "the treatment must actually honor at least one wait recommendation"
+    );
+    assert!(
+        obey_report.wait_frames_obeyed.iter().sum::<u64>()
+            > bandwidth_obey_report.wait_frames_obeyed.iter().sum::<u64>()
+            && bandwidth_obey_report.wait_frames_obeyed[2..]
+                .iter()
+                .all(|skips| *skips == 0)
+            && obey_report.wait_frames_obeyed[2..]
+                .iter()
+                .all(|skips| *skips > 0),
+        "fragment loss plus the constrained link must expand pacing beyond both controls"
+    );
+    assert!(
+        obey_report
+            .net_stats
+            .bandwidth_admitted_bytes
+            .saturating_mul(100)
+            <= ignore_report
+                .net_stats
+                .bandwidth_admitted_bytes
+                .saturating_mul(95),
+        "honoring waits should retain the measured >=5% admitted-byte reduction"
+    );
+    assert!(
+        obey_report
+            .net_stats
+            .bandwidth_tail_dropped_bytes
+            .saturating_mul(100)
+            <= ignore_report
+                .net_stats
+                .bandwidth_tail_dropped_bytes
+                .saturating_mul(20),
+        "honoring waits should retain the measured >=80% tail-drop reduction"
+    );
+    assert!(
+        obey_report
+            .net_stats
+            .bandwidth_max_queue_delay_ns
+            .saturating_mul(100)
+            <= ignore_report
+                .net_stats
+                .bandwidth_max_queue_delay_ns
+                .saturating_mul(60),
+        "honoring waits should retain the measured >=40% maximum-delay reduction"
+    );
+    let total_work = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.frames_advanced)
+            .sum::<u64>()
+    };
+    let total_resimulation = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    };
+    let ignore_work = total_work(&ignore_report);
+    let obey_work = total_work(&obey_report);
+    let ignore_resimulation = total_resimulation(&ignore_report);
+    let obey_resimulation = total_resimulation(&obey_report);
+    let sampled_drain_step = |report: &RunReport| {
+        let last_nonempty = report.progress_samples.iter().rposition(|sample| {
+            sample
+                .link_queues
+                .iter()
+                .any(|queue| queue.from == 0 && queue.to == 1 && queue.queued_bytes > 0)
+        });
+        last_nonempty
+            .and_then(|index| report.progress_samples.get(index.saturating_add(1)))
+            .map(|sample| sample.step)
+            .expect("a bounded sample follows the last nonempty 0->1 queue")
+    };
+    let ignore_drain_step = sampled_drain_step(&ignore_report);
+    let obey_drain_step = sampled_drain_step(&obey_report);
+    assert!(
+        obey_drain_step <= ignore_drain_step,
+        "obedience must not delay sampled queue drain: {ignore_drain_step}->{obey_drain_step}"
+    );
+    assert!(
+        obey_work.saturating_mul(100) >= ignore_work.saturating_mul(150)
+            && obey_resimulation.saturating_mul(100) >= ignore_resimulation.saturating_mul(200),
+        "the scale treatment's work-amplification finding must stay visible: \
+         work={ignore_work}->{obey_work}, resimulation={ignore_resimulation}->{obey_resimulation}"
+    );
+    println!(
+        "H-BLOAT-SCALE zero_fragment_skips={:?} admitted_bytes={}->{} \
+         tail_dropped_bytes={}->{} \
+         max_queue_bytes={}->{} max_queue_delay_ns={}->{} drain_step={}->{} \
+         obey_skips={:?} \
+         work={ignore_work}->{obey_work} resimulation={ignore_resimulation}->{obey_resimulation}",
+        bandwidth_obey_report.wait_frames_obeyed,
+        ignore_report.net_stats.bandwidth_admitted_bytes,
+        obey_report.net_stats.bandwidth_admitted_bytes,
+        ignore_report.net_stats.bandwidth_tail_dropped_bytes,
+        obey_report.net_stats.bandwidth_tail_dropped_bytes,
+        ignore_report.net_stats.bandwidth_max_queue_bytes,
+        obey_report.net_stats.bandwidth_max_queue_bytes,
+        ignore_report.net_stats.bandwidth_max_queue_delay_ns,
+        obey_report.net_stats.bandwidth_max_queue_delay_ns,
+        ignore_drain_step,
+        obey_drain_step,
+        obey_report.wait_frames_obeyed,
+    );
 }
 
 #[test]

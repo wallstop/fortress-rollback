@@ -158,6 +158,10 @@ impl SimInput for WideStubInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunOptions {
+    /// Opt-in SimNet decoded-message receive cap and per-socket diagnostics.
+    /// `None` preserves legacy traces and the built-in limit of 256.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_message_limit: Option<usize>,
     /// Corrupt `(peer, from_frame)`'s simulated **state** from that frame on
     /// (a real divergence: state, checksums, and downstream frames all split).
     pub corrupt_state_from: Option<(usize, i32)>,
@@ -532,6 +536,12 @@ struct TraceFinalSummary {
     frame_opportunities: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wait_frames_obeyed: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    receive_stats_by_peer: Vec<crate::common::sim_net::SimReceiveStats>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    first_running_step: Vec<Option<u32>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    first_synchronized_step: Vec<Vec<Option<u32>>>,
     net: TraceNetStats,
 }
 
@@ -566,6 +576,12 @@ pub struct RunReport {
     pub fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
     /// Size and policy telemetry split by directed peer index pair `(from, to)`.
     pub link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
+    /// Per-logical-peer receive-poll diagnostics; empty unless requested.
+    pub receive_stats_by_peer: Vec<crate::common::sim_net::SimReceiveStats>,
+    /// First complete end-of-step boundary at which each session was running.
+    pub first_running_step: Vec<Option<u32>>,
+    /// First observed `Synchronized` event by local and remote peer index.
+    pub first_synchronized_step: Vec<Vec<Option<u32>>>,
     /// `LoadGameState` requests observed while driving peers.
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
@@ -1417,6 +1433,27 @@ fn peer_event_key<I: SimInput>(event: &FortressEvent<I::SessionConfig>) -> Optio
     Some(PeerEventKey { kind, payload })
 }
 
+fn record_first_synchronized_step(
+    first_steps: &mut [Vec<Option<u32>>],
+    peer_by_session_addr: &BTreeMap<SocketAddr, usize>,
+    local: usize,
+    remote_addr: &SocketAddr,
+    step: u32,
+) {
+    let Some(&remote) = peer_by_session_addr.get(remote_addr) else {
+        return;
+    };
+    if remote == local {
+        return;
+    }
+    if let Some(first_step) = first_steps
+        .get_mut(local)
+        .and_then(|row| row.get_mut(remote))
+    {
+        first_step.get_or_insert(step);
+    }
+}
+
 /// Per-step progress dump for the diagnostic path.
 // Deliberate diagnostic stdout: this path only runs under `--run-ignored`
 // manual investigation, where print output IS the deliverable.
@@ -1503,6 +1540,14 @@ pub(super) fn validate_run_options(
     options: &RunOptions,
 ) -> Result<(), String> {
     let n = schedule.config.n_players;
+    if options.receive_message_limit.is_some_and(|limit| {
+        !(1..=crate::common::sim_net::MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL).contains(&limit)
+    }) {
+        return Err(format!(
+            "receive_message_limit must be within 1..={}",
+            crate::common::sim_net::MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL
+        ));
+    }
     if options
         .probe_confirmed_at
         .is_some_and(|probe| probe >= schedule.config.steps)
@@ -1566,7 +1611,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         clock.as_protocol_clock(),
         message_payload_metadata,
     );
+    if let Some(limit) = options.receive_message_limit {
+        net.set_receive_limit(limit);
+    }
+    let collect_receive_timing = options.receive_message_limit.is_some();
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+    let mut peer_by_session_addr: BTreeMap<SocketAddr, usize> = if collect_receive_timing {
+        addrs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(peer, addr)| (addr, peer))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
 
     let mut spectator_host_enabled = vec![false; n];
     for &peer in &schedule.config.spectator_hosts {
@@ -1748,6 +1807,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut wait_frames_obeyed = vec![0_u64; n];
     let mut local_input_ordinals = vec![0_u32; n];
     let mut progress_samples = Vec::new();
+    let mut first_running_step = if collect_receive_timing {
+        vec![None; n]
+    } else {
+        Vec::new()
+    };
+    let mut first_synchronized_step = if collect_receive_timing {
+        vec![vec![None; n]; n]
+    } else {
+        Vec::new()
+    };
     let progress_interval = schedule.config.steps.div_ceil(12).max(1);
     // Peers whose app model never drains the session event queue (models a
     // wedged event consumer). Their bounded `event_queue` fills and the session
@@ -1949,7 +2018,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     if !dead[*peer] {
                         let fresh = rebound_peer_addr(*peer);
                         match peers[*peer].binding.rebind(fresh) {
-                            Ok(_) => peers[*peer].source_addrs.push(fresh),
+                            Ok(_) => {
+                                peers[*peer].source_addrs.push(fresh);
+                                if collect_receive_timing {
+                                    peer_by_session_addr.insert(fresh, *peer);
+                                }
+                            },
                             Err(error) => oracle.observe_runner_error(
                                 "rebind_failed",
                                 *peer,
@@ -2040,6 +2114,17 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
+                        }
+                        if collect_receive_timing {
+                            if let FortressEvent::Synchronized { addr } = event {
+                                record_first_synchronized_step(
+                                    &mut first_synchronized_step,
+                                    &peer_by_session_addr,
+                                    i,
+                                    addr,
+                                    step,
+                                );
+                            }
                         }
                         // Closed-loop app model: obey a `WaitRecommendation` by owing
                         // that many skipped advances (max so a stronger one wins).
@@ -2162,6 +2247,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
             if run_c && step == recovery_anchor_at {
                 confirmed_after_recovery.push(confirmed.as_i32());
+            }
+        }
+
+        if collect_receive_timing {
+            for (peer, slot) in peers.iter().enumerate() {
+                if first_running_step[peer].is_none()
+                    && slot.session.current_state() == SessionState::Running
+                {
+                    first_running_step[peer] = Some(step);
+                }
             }
         }
 
@@ -2440,6 +2535,29 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             link_stats_by_link.entry(key).or_default().merge(stats);
         }
     }
+    let receive_stats_by_peer = if options.receive_message_limit.is_some() {
+        let stats_by_addr = net.receive_stats();
+        peers
+            .iter()
+            .map(|slot| {
+                let mut total = crate::common::sim_net::SimReceiveStats::default();
+                for addr in &slot.source_addrs {
+                    if let Some(stats) = stats_by_addr.get(addr) {
+                        total.merge(*stats);
+                    }
+                }
+                total
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let reported_first_running_step = options
+        .receive_message_limit
+        .map_or_else(Vec::new, |_| first_running_step);
+    let reported_first_synchronized_step = options
+        .receive_message_limit
+        .map_or_else(Vec::new, |_| first_synchronized_step);
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -2479,6 +2597,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         } else {
             Vec::new()
         },
+        receive_stats_by_peer: receive_stats_by_peer.clone(),
+        first_running_step: reported_first_running_step.clone(),
+        first_synchronized_step: reported_first_synchronized_step.clone(),
         net: TraceNetStats::from(net.stats()),
     };
     fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
@@ -2496,6 +2617,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         blocked_drops_by_link,
         fragmentation_drops_by_link,
         link_stats_by_link,
+        receive_stats_by_peer,
+        first_running_step: reported_first_running_step,
+        first_synchronized_step: reported_first_synchronized_step,
         load_game_state_observations,
         metrics,
         progress_samples,
@@ -2546,6 +2670,30 @@ mod tests {
             assert_eq!(address, rebound_peer_addr(peer));
             assert!((0..=16).all(|canonical| address != peer_addr(canonical)));
         }
+    }
+
+    #[test]
+    fn synchronization_timing_maps_rebound_address_to_logical_peer() {
+        let mut peer_by_session_addr = BTreeMap::from([(peer_addr(1), 1)]);
+        peer_by_session_addr.insert(rebound_peer_addr(1), 1);
+        let mut first_steps = vec![vec![None; 2]; 2];
+
+        record_first_synchronized_step(
+            &mut first_steps,
+            &peer_by_session_addr,
+            0,
+            &rebound_peer_addr(1),
+            23,
+        );
+        record_first_synchronized_step(
+            &mut first_steps,
+            &peer_by_session_addr,
+            0,
+            &rebound_peer_addr(1),
+            24,
+        );
+
+        assert_eq!(first_steps[0][1], Some(23));
     }
 
     #[test]
