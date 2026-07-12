@@ -147,6 +147,7 @@ jobs:
           set -euo pipefail
           response="${RUNNER_TEMP}/crates-io-version.json"
           status=$(curl --silent --show-error --location --output "$response" --write-out '%{http_code}' \
+            --header "User-Agent: fortress-rollback-release-workflow/${CARGO_VERSION}" \
             "https://crates.io/api/v1/crates/${CRATE_NAME}/${CARGO_VERSION}")
           if [ "$status" = "404" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -224,19 +225,35 @@ jobs:
           # Write to file to preserve newlines
           echo "$CHANGELOG_CONTENT" > release_notes.md
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.get_version.outputs.tag }}
-          name: ${{ steps.get_version.outputs.tag }}
-          body_path: release_notes.md
-          files: |
-            ${{ steps.package.outputs.path }}
-            ${{ steps.package.outputs.path }}.sha256
-          draft: false
-          prerelease: false
+      - name: Create or update GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: |
+          set -euo pipefail
+          assets=("${PACKAGE_PATH}" "${PACKAGE_PATH}.sha256")
+          release_file="${RUNNER_TEMP}/github-release.json"
+          release_error="${RUNNER_TEMP}/github-release.err"
+          set +e
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > "$release_file" 2> "$release_error"
+          release_lookup_exit=$?
+          set -e
+          if [ "$release_lookup_exit" -eq 0 ]; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --title "$TAG" --notes-file release_notes.md \
+              --draft=false --prerelease=false
+            exit 0
+          fi
+
+          release_lookup_output=$(sed -n '1,40p' "$release_error")
+          if ! printf '%s\n' "$release_lookup_output" | grep -E '(HTTP 404|Not Found|"status":"404")' > "${RUNNER_TEMP}/release-not-found.txt"; then
+            echo "Failed to verify GitHub Release state for ${TAG}." >&2
+            printf '%s\n' "$release_lookup_output" >&2
+            exit "$release_lookup_exit"
+          fi
+          gh release create "$TAG" "${assets[@]}" --title "$TAG" \
+            --notes-file release_notes.md --verify-tag
 
       - name: Finalize release metadata on default branch
         env:

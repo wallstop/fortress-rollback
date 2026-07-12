@@ -38,7 +38,7 @@ def test_publish_workflow_packages_and_verifies_release_artifact() -> None:
     assert "cargo package --locked" in text
     assert "sha256sum" in text
     assert "actions/upload-artifact@" in text
-    assert "softprops/action-gh-release@" in text
+    assert "gh release create" in text
     assert 'package_path="target/package/${CRATE_NAME}-${CARGO_VERSION}.crate"' in text
     assert "${{ steps.package.outputs.path }}.sha256" in text
 
@@ -49,4 +49,14 @@ def test_publish_workflow_is_safe_to_retry_after_crates_io_publish() -> None:
     assert "https://crates.io/api/v1/crates/${CRATE_NAME}/${CARGO_VERSION}" in text
     assert "published_checksum" in text
     assert "local_checksum" in text
+    assert "User-Agent: fortress-rollback-release-workflow/${CARGO_VERSION}" in text
     assert "already exists on crates.io with the packaged checksum" in text
+
+
+def test_publish_workflow_updates_existing_github_release() -> None:
+    text = PUBLISH.read_text(encoding="utf-8")
+
+    assert 'releases/tags/${TAG}' in text
+    assert "gh release upload" in text
+    assert "--clobber" in text
+    assert "gh release edit" in text
