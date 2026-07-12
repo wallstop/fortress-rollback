@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in sess.events() {
             info!("Event: {:?}", event);
             if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                // A fresh event reports the current frame lead, so it replaces any residual skip.
                 recommended_skips = skip_frames;
             }
         }
