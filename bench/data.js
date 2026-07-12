@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783813589913,
+  "lastUpdate": 1783829307617,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "6cf1c0f12be4abf3e789c478137f81bd685d6f52",
-          "message": "chore(deps): bump the cargo-workspace group with 3 updates (#149)\n\nBumps the cargo-workspace group with 3 updates:\n[tokio](https://github.com/tokio-rs/tokio),\n[clap](https://github.com/clap-rs/clap) and\n[pastey](https://github.com/as1100k/pastey).\n\nUpdates `tokio` from 1.51.1 to 1.52.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tokio/releases\">tokio's\nreleases</a>.</em></p>\n<blockquote>\n<h2>Tokio v1.52.1</h2>\n<h1>1.52.1 (April 16th, 2026)</h1>\n<h2>Fixed</h2>\n<ul>\n<li>runtime: revert <a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>\nto fix [a regression]<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8056\">#8056</a>\nthat causes <code>spawn_blocking</code> to hang (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7757\">tokio-rs/tokio#7757</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8056\">#8056</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8056\">tokio-rs/tokio#8056</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8057\">tokio-rs/tokio#8057</a></p>\n<h2>Tokio v1.52.0</h2>\n<h1>1.52.0 (April 14th, 2026)</h1>\n<h2>Added</h2>\n<ul>\n<li>io: <code>AioSource::register_borrowed</code> for I/O safety support\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7992\">#7992</a>)</li>\n<li>net: add <code>try_io</code> function to <code>unix::pipe</code>\nsender and receiver types (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8030\">#8030</a>)</li>\n</ul>\n<h2>Added (unstable)</h2>\n<ul>\n<li>runtime: <code>Builder::enable_eager_driver_handoff</code> setting\nenable eager hand off of the I/O and time drivers before polling tasks\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8010\">#8010</a>)</li>\n<li>taskdump: add <code>trace_with()</code> for customized task dumps\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8025\">#8025</a>)</li>\n<li>taskdump: allow <code>impl FnMut()</code> in <code>trace_with</code>\ninstead of just <code>fn()</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8040\">#8040</a>)</li>\n<li>fs: support <code>io_uring</code> in <code>AsyncRead</code> for\n<code>File</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>)</li>\n</ul>\n<h2>Changed</h2>\n<ul>\n<li>runtime: improve <code>spawn_blocking</code> scalability with\nsharded queue (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>)</li>\n<li>runtime: use <code>compare_exchange_weak()</code> in worker queue\n(<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8028\">#8028</a>)</li>\n</ul>\n<h2>Fixed</h2>\n<ul>\n<li>runtime: overflow second half of tasks when local queue is filled\ninstead of first half (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8029\">#8029</a>)</li>\n</ul>\n<h2>Documented</h2>\n<ul>\n<li>docs: fix typo in <code>oneshot::Sender::send</code> docs (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8026\">#8026</a>)</li>\n<li>docs: hide #[tokio::main] attribute in the docs of\n<code>sync::watch</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8035\">#8035</a>)</li>\n<li>net: add docs on <code>ConnectionRefused</code> errors with UDP\nsockets (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7870\">#7870</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7757\">tokio-rs/tokio#7757</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7870\">#7870</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7870\">tokio-rs/tokio#7870</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7907\">tokio-rs/tokio#7907</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7992\">#7992</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/7992\">tokio-rs/tokio#7992</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8010\">#8010</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8010\">tokio-rs/tokio#8010</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8025\">#8025</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8025\">tokio-rs/tokio#8025</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8026\">#8026</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8026\">tokio-rs/tokio#8026</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8028\">#8028</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8028\">tokio-rs/tokio#8028</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8029\">#8029</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/pull/8029\">tokio-rs/tokio#8029</a></p>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/905c146aeda741ea2202f942a7c3a606dda13da5\"><code>905c146</code></a>\nchore: prepare to release v1.52.1 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8059\">#8059</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/56aaa43e91c4fbed88f0c2a5b65019ed9a0c3c61\"><code>56aaa43</code></a>\nrt: revert <a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7757\">#7757</a>\nto fix regression in <code>spawn_blocking</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8057\">#8057</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/57ff47ab589bfb4dab6766de78655ffef4fb250b\"><code>57ff47a</code></a>\nci: update <code>trybuild</code> to expect output from rustc 1.95.0 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8058\">#8058</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/812de3e134888d1d9e7832e4b789d51f6fd2f749\"><code>812de3e</code></a>\nci: bump taiki-e/cache-cargo-install-action from 1 to 3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8053\">#8053</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/ba82e73c7b804324c82b6fea6966ca12f55c3826\"><code>ba82e73</code></a>\nci: use Dependabot to keep github actions up to date (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8052\">#8052</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/2e85f9ddf8b47197fa6299cc295f4319fec68e53\"><code>2e85f9d</code></a>\nci: replace cirrus-ci with freebsd-vm (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8041\">#8041</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/a7e1cd8ff8a2012cce500fd7e6ae73400531f46d\"><code>a7e1cd8</code></a>\nci: update GitHub Actions workflows to use latest tool versions (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8047\">#8047</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/5f7be0ac42cb3e1b739da1562f98a797cd55a606\"><code>5f7be0a</code></a>\nchore: perpare 1.52.0 (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8045\">#8045</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/36d12d2686a64b9146c674e02e3cf81d8f87163d\"><code>36d12d2</code></a>\ntaskdump: allow impl FnMut() in taskdumps instead of just fn() (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/8040\">#8040</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tokio/commit/f943312865b9d5007f25d2fd5bd8efa3f89d1541\"><code>f943312</code></a>\nfs: support io-uring in <code>AsyncRead</code> for <code>File</code> (<a\nhref=\"https://redirect.github.com/tokio-rs/tokio/issues/7907\">#7907</a>)</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/tokio-rs/tokio/compare/tokio-1.51.1...tokio-1.52.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `clap` from 4.6.0 to 4.6.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/releases\">clap's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v4.6.1</h2>\n<h2>[4.6.1] - 2026-04-15</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(derive)</em> Ensure rebuilds happen when an read env variable\nis changed</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/clap-rs/clap/blob/master/CHANGELOG.md\">clap's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[4.6.1] - 2026-04-15</h2>\n<h3>Fixes</h3>\n<ul>\n<li><em>(derive)</em> Ensure rebuilds happen when an read env variable\nis changed</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/14202755e52802a3d294c4ceeadd703d24b21fe6\"><code>1420275</code></a>\nchore: Release</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/d2c817d151db23e0bff70d3df5f9dd9fc311ad5d\"><code>d2c817d</code></a>\ndocs: Update changelog</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/f88c94e53d40c2427450ed65ec025951906eb1d4\"><code>f88c94e</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6341\">#6341</a>\nfrom epage/sep</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/acbb8225054e0a498f6941f278ad0095a893efe8\"><code>acbb822</code></a>\nfix(complete): Reduce risk of conflict with actual subcommands</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/a49fadbf4acf1853f52ae43a445c8f3c81096b01\"><code>a49fadb</code></a>\nrefactor(complete): Pull out subcommand separator</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/ddc008bbbc1924fbda5d6f2c66bcf4d165984977\"><code>ddc008b</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6332\">#6332</a>\nfrom epage/update</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/497dc50aebe9384dc229e1b4e92850306231f9c9\"><code>497dc50</code></a>\nchore: Update compatible dependencies</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/dca2326243615b2375cccb709b19de912910413d\"><code>dca2326</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/clap-rs/clap/issues/6331\">#6331</a>\nfrom clap-rs/renovate/j178-prek-action-2.x</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/54bdaa340ed434535bbd2d95a05b69d8abd2eb34\"><code>54bdaa3</code></a>\nchore(deps): Update j178/prek-action action to v2</li>\n<li><a\nhref=\"https://github.com/clap-rs/clap/commit/f0d30d961d26f8fb636b33242256fca73a717f77\"><code>f0d30d9</code></a>\nchore: Release</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/clap-rs/clap/compare/clap_complete-v4.6.0...clap_complete-v4.6.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `pastey` from 0.2.1 to 0.2.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/as1100k/pastey/releases\">pastey's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v0.2.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Fix Rust 1.56 compatibility: Handle None-delimited groups in replace\nmodifier in <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/25\">AS1100K/pastey#25</a></li>\n<li>increase the code coverage by <a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nin <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">AS1100K/pastey#28</a></li>\n<li>add coverage on CI by <a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nin <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/30\">AS1100K/pastey#30</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/bharatGoswami8\"><code>@​bharatGoswami8</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">AS1100K/pastey#28</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/AS1100K/pastey/blob/master/CHANGELOG.md#022---2026-04-23\"><code>CHANGELOG.md</code></a></p>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/AS1100K/pastey/blob/master/CHANGELOG.md\">pastey's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>[0.2.2] - 2026-04-23</h2>\n<h3>Improved</h3>\n<ul>\n<li>Improved Code Coverage <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/28\">#28</a>, <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/30\">#30</a></li>\n</ul>\n<h3>Fixed</h3>\n<ul>\n<li>Rust 1.56 compatibility: Handling None-delimited groups in replace\nmodifier <a\nhref=\"https://redirect.github.com/AS1100K/pastey/pull/25\">#25</a></li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/f91b0f4b31ab22e665dedffecfc23410da35b981\"><code>f91b0f4</code></a>\nRELEASE v0.2.2</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/93387eb67735614250e7ed97e28e929af07cfaae\"><code>93387eb</code></a>\nadd coverage on CI (<a\nhref=\"https://redirect.github.com/as1100k/pastey/issues/30\">#30</a>)</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/113fbc18110446e880d57ab6629b670f8ddfc62c\"><code>113fbc1</code></a>\nincrease the code coverage (<a\nhref=\"https://redirect.github.com/as1100k/pastey/issues/28\">#28</a>)</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/436923754b9d9137bef557ccb4c63af67fa9aa2b\"><code>4369237</code></a>\nFix CI Rust 1.56 failure: pin dissimilar to 1.0.10</li>\n<li><a\nhref=\"https://github.com/AS1100K/pastey/commit/6e3ef4a67c14081a1ea6d2be941a725f011976f4\"><code>6e3ef4a</code></a>\nFix Rust 1.56 compatibility: Handle None-delimited groups in replace\nmodifier...</li>\n<li>See full diff in <a\nhref=\"https://github.com/as1100k/pastey/compare/v0.2.1...v0.2.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>\nCo-authored-by: wallstop <1045249+wallstop@users.noreply.github.com>",
-          "timestamp": "2026-04-25T08:31:26-07:00",
-          "tree_id": "90ebaa1a6175b8aad58dc8dafd963ee198128963",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/6cf1c0f12be4abf3e789c478137f81bd685d6f52"
-        },
-        "date": 1777131387642,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 114,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 448,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 725,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1022,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103173,
-            "range": "± 1692",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27333,
-            "range": "± 863",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 91",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6293,6 +6167,144 @@ window.BENCHMARK_DATA = {
             "name": "Message serialization/input_encode_into_buffer",
             "value": 1556,
             "range": "± 102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0b70f028557f9df15a57565345b0aa5773b8489d",
+          "message": "Add protocol v1 verification and scale hardening evidence (#225)\n\n## Summary\n\n- add a TLC-enforced protocol-v1 handshake model covering safety, fair\nmatching, mismatch rejection, and a required non-vacuity counterexample\n- complete the missing `P2PSession::metrics` and `Message::encoded_len`\nCriterion baselines\n- add data-backed H-BLOAT, H-META-RB, and H-POLLCAP simulation rows,\nexact replay evidence, receive-cap diagnostics, and nightly coverage\n- document the preferred VS Code Git/GitHub integration order for agent\nworkflows\n\n## Why\n\nThe hardening plan requires measurement and formal entrance gates before\nthe protocol-v1 wire break. These changes close several open evidence\ngaps without changing production protocol behavior:\n\n- protocol-v1 handshake assumptions are model-checked before\nimplementation\n- N=16 bandwidth/fragmentation behavior is measured rather than inferred\n- rollback-storm persistence is bounded under fixed cadence without\noverstating CPU-feedback coverage\n- the per-socket 256-message cap is shown to defer, not drop or starve,\na planted 270-message typed receive storm\n\n## Results\n\n- H-BLOAT N=16/32-byte treatment reduces tail drops and maximum queue\ndelay, while exposing higher simulation work/resimulation cost\n- H-META-RB returns to the matched fixed-cadence control within the\nrecovery window\n- H-POLLCAP returns 256 messages, retains 14, drains subsequently, and\nadds at most one synchronization step versus cap 512\n- benchmark upper bounds: `P2PSession::metrics` 11.255 ns;\n`Message::encoded_len` 0.845 ns\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `cargo nextest run --no-capture`: 2,760 passed\n- `cargo nextest run --features hot-join --no-capture`: 3,012 passed\n- `bash scripts/verification/verify-tla.sh`: 19/19 gates passed,\nincluding the expected counterexample\n- `python3 scripts/ci/agent-preflight.py --all --auto-fix`\n- focused nightly H-BLOAT and H-POLLCAP release rows and H-META-RB\nregression\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to specs, verification scripts, benchmarks, test\nharness, and agent docs; production `src/` protocol behavior is not\nmodified in this diff.\n> \n> **Overview**\n> Adds **formal and simulation evidence** ahead of protocol-v1 wire\nwork, without changing production session/protocol behavior.\n> \n> **TLA+:** New `SyncHandshakeV1` module with safety (arbitrary loss),\nfair matching liveness, mismatch liveness, and an CI-enforced\n**handlers-disabled** mutation that must violate `EventuallyBothSynced`.\n`verify-tla.sh` registers the new specs, runs TLC from `specs/tla`, and\ntreats the mutation as a distinct expected-failure gate (not a generic\nTLC error).\n> \n> **Benchmarks:** Criterion coverage for allocation-free\n`P2PSession::metrics()` and `Message` wire-length via\n`__internal::message_metadata`.\n> \n> **Simulation harness:** `SimNet` gains configurable per-poll receive\nlimits and `SimReceiveStats`; `RunOptions::receive_message_limit` drives\ncaps and records **first Running / first Synchronized** timing. New\nignored-nightly probes: **H-POLLCAP** (270-message storm defers at 256,\ndrains without starvation), **H-BLOAT** (N=16 bandwidth/fragmentation vs\n`AppModel::Obey`), and **H-META-RB-OPENLOOP** (rollback work after RTT\nspike decays under fixed cadence). Nightly workflow filter includes the\ncensus H-* tests.\n> \n> **Docs:** `AGENTS.md` / `.llm/context.md` prefer callable VS Code Git\nand GitHub PR extensions over `gh` when available.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ndc2993b63564e14e907d444b7373a5027ec903d4. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-11T21:03:28-07:00",
+          "tree_id": "871f2705757b883c52f7554eb0e23ed79a5f4d93",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/0b70f028557f9df15a57565345b0aa5773b8489d"
+        },
+        "date": 1783829306440,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 165,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 444,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 705,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1023,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 124640,
+            "range": "± 404",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46162,
+            "range": "± 857",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 103",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 16,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 1,
+            "range": "± 0",
             "unit": "ns/iter"
           },
           {
