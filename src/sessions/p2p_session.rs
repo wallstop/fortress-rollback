@@ -164,6 +164,12 @@ enum GracefulDropFailurePolicy {
     DisconnectAndHalt,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RemoteDisconnectNotification {
+    Silent,
+    UserRequested,
+}
+
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 ///
 /// This type implements the [`Session`] trait, enabling it to be used in generic
@@ -5027,10 +5033,10 @@ impl<T: Config> P2PSession<T> {
         joiner.torn_down = true;
         let host_addr = joiner.host_addr.clone();
         for endpoint in self.player_reg.remotes.values_mut() {
-            endpoint.disconnect();
+            endpoint.disconnect_remote();
         }
         for endpoint in self.player_reg.spectators.values_mut() {
-            endpoint.disconnect();
+            endpoint.disconnect_remote();
         }
         // Double-emission note (fix round 2): the latch above means the
         // TEARDOWN emits at most once — both callers (buffered-attempt
@@ -5547,6 +5553,10 @@ impl<T: Config> P2PSession<T> {
             DisconnectBehavior::ContinueWithout,
             DisconnectEventPolicy::Emit,
             GracefulDropFailurePolicy::Abort,
+            // Graceful removal is a verdict about the target, propagated by
+            // connection-status gossip. A sender-leaving Goodbye would instead
+            // tell that target that *we* left and cause reciprocal mesh drops.
+            RemoteDisconnectNotification::Silent,
         )
     }
 
@@ -5640,6 +5650,7 @@ impl<T: Config> P2PSession<T> {
                         DisconnectBehavior::Halt,
                         DisconnectEventPolicy::Suppress,
                         GracefulDropFailurePolicy::DisconnectAndHalt,
+                        RemoteDisconnectNotification::UserRequested,
                     );
                     return result;
                 }
@@ -5649,7 +5660,13 @@ impl<T: Config> P2PSession<T> {
                 .into())
             },
             // disconnecting spectators is simpler
-            Some(PlayerType::Spectator(_)) => {
+            Some(PlayerType::Spectator(addr)) => {
+                let endpoint = self.player_reg.spectators.get_mut(addr).ok_or(
+                    FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::EndpointNotFoundForSpectator { player_handle },
+                    },
+                )?;
+                endpoint.disconnect();
                 self.disconnect_player_at_frame(player_handle, Frame::NULL);
                 Ok(())
             },
@@ -7491,6 +7508,7 @@ impl<T: Config> P2PSession<T> {
         behavior: DisconnectBehavior,
         event_policy: DisconnectEventPolicy,
         graceful_failure_policy: GracefulDropFailurePolicy,
+        notification: RemoteDisconnectNotification,
     ) -> Result<(), FortressError> {
         self.disconnect_player_with_policy_tracked(
             player_handle,
@@ -7498,6 +7516,7 @@ impl<T: Config> P2PSession<T> {
             behavior,
             event_policy,
             graceful_failure_policy,
+            notification,
         )
         .0
     }
@@ -7511,6 +7530,7 @@ impl<T: Config> P2PSession<T> {
         behavior: DisconnectBehavior,
         event_policy: DisconnectEventPolicy,
         graceful_failure_policy: GracefulDropFailurePolicy,
+        notification: RemoteDisconnectNotification,
     ) -> (Result<(), FortressError>, bool) {
         let (addr, handles, earliest_last_frame) =
             match self.remote_disconnect_snapshot(player_handle, last_frame_overrides) {
@@ -7549,6 +7569,22 @@ impl<T: Config> P2PSession<T> {
             if let Some(e) = graceful_drop_error {
                 return (Err(e), false);
             }
+        }
+
+        // Only an explicit public API request tells the live remote that this
+        // endpoint is closing. Timeout, propagated-gossip, and re-adjust paths
+        // are local verdicts about the remote and must stay silent: reflecting a
+        // Goodbye there would cause reciprocal/cascaded drops in an N-peer mesh.
+        // Reason 0 is the v1 "user requested" reason; receivers intentionally
+        // treat unknown future reason values as the same idempotent closure.
+        if notification == RemoteDisconnectNotification::UserRequested {
+            let Some(endpoint) = self.player_reg.remotes.get_mut(&addr) else {
+                let error = FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForRemote { player_handle },
+                };
+                return (Err(error), false);
+            };
+            endpoint.send_goodbye_now(&mut self.socket, 0);
         }
 
         self.disconnect_player_at_frames(player_handle, earliest_last_frame, last_frame_overrides);
@@ -7740,7 +7776,7 @@ impl<T: Config> P2PSession<T> {
                 // `self.sync_layer` borrow needed for the frozen-value re-roll.
                 let affected_handles: Vec<PlayerHandle> =
                     endpoint.handles().iter().copied().collect();
-                endpoint.disconnect();
+                endpoint.disconnect_remote();
 
                 // mark the affected players as disconnected
                 for &handle in &affected_handles {
@@ -7861,7 +7897,7 @@ impl<T: Config> P2PSession<T> {
                     );
                     return;
                 };
-                endpoint.disconnect();
+                endpoint.disconnect_remote();
             },
             PlayerType::Local => (),
         }
@@ -8456,15 +8492,11 @@ impl<T: Config> P2PSession<T> {
     /// frame `k` carries a self-claim `>= k`), so the connected-slot min
     /// collapses to the local receipt. After the `N == 2` remote drops, its
     /// endpoint is disconnected (not running), the fold is empty and the slot
-    /// is excluded exactly as before. Two named transient windows fall
-    /// outside this identity, both in the strictly CONSERVATIVE direction
+    /// is excluded exactly as before. One named transient window falls
+    /// outside this identity, in the strictly CONSERVATIVE direction
     /// (the bound dips below the pure local receipt; nothing is confirmed
     /// early):
     ///
-    /// - **Peer-initiated disconnect:** `disconnect_requested` packets skip
-    ///   the connect-status merge while their inputs still process, so the
-    ///   local receipt can briefly exceed the cached self-claim and the bound
-    ///   holds at the stale cache until the endpoint leaves the fold.
     /// - **Hot-join activation:** the host reopens the joined slot with a
     ///   synthetic `last_frame = F - 1` while the rebuilt endpoint's status
     ///   cache is still the default `{connected, NULL}`, so
@@ -8717,10 +8749,8 @@ impl<T: Config> P2PSession<T> {
         //   the coordinator never left it pre-commit — but a STILL-PENDING
         //   reopened peer that has not heard the abort keeps gossiping a
         //   CONNECTED claim the legal leak may have raised past `F`, which
-        //   folds raw; see the residual below). The lone
-        //   exception — `disconnect_requested` packets skip the merge — still
-        //   caps: the cache then retains the reopen seed `{connected, F-1}`
-        //   (nothing else writes it), which folds at `F - 1` anyway. Frames
+        //   folds raw; see the residual below). Input gossip now always merges;
+        //   graceful disconnect uses a separate Goodbye body. Frames
         //   in `(f0, F)` confirmed under the clamp are frozen-served
         //   byte-identically on every peer (the sync-layer reactivation
         //   floor serves `(v0, Disconnected)` there), so nothing leaks —
@@ -9101,7 +9131,7 @@ impl<T: Config> P2PSession<T> {
     /// path's endpoint teardown (session-33 round-5 review Finding 1).
     ///
     /// The generic re-adjust route (`disconnect_player_with_policy` ->
-    /// `disconnect_player_at_frames`) calls `endpoint.disconnect()` on the
+    /// `disconnect_player_at_frames`) calls `endpoint.disconnect_remote()` on the
     /// slot's registry endpoint — for a reserved/rearmed slot that endpoint
     /// is the (re-)armed JOINER channel, and `Disconnected` is a terminal
     /// protocol state with no reconnect edge, so the teardown silently bricks
@@ -9434,6 +9464,7 @@ impl<T: Config> P2PSession<T> {
                 self.disconnect_behavior,
                 event_policy,
                 GracefulDropFailurePolicy::DisconnectAndHalt,
+                RemoteDisconnectNotification::Silent,
             ) {
                 report_violation!(
                     ViolationSeverity::Error,
@@ -9747,7 +9778,7 @@ impl<T: Config> P2PSession<T> {
                     }
                     // Re-arm the dead endpoint back to the pristine reserved
                     // shape (chunk N5 fix round 1). The endpoint synchronized
-                    // with the now-silent joiner and has its `remote_magic`
+                    // with the now-silent joiner and has its `remote_conn_id`
                     // locked to that era; left `Running`-but-mute it would
                     // silently filter every FRESH session's handshake forever
                     // — the slot would stay reserved yet never again be
@@ -9758,7 +9789,7 @@ impl<T: Config> P2PSession<T> {
                     // uses ([`UdpProtocol::rearm_for_rejoin`]) and the mirror
                     // of the survivor's directive-time terminal re-arm; a
                     // resurrected previous-era peer cannot wedge the rebuilt
-                    // endpoint (fresh magic, and its own gameplay traffic is
+                    // endpoint (fresh connection ID, and its own gameplay traffic is
                     // dropped while the rebuilt endpoint synchronizes). Gated
                     // on `is_running()`: only a synchronized endpoint can
                     // have fired `Event::Disconnected`, and a rebuilt one is
@@ -9768,10 +9799,10 @@ impl<T: Config> P2PSession<T> {
                     // `Event::Disconnected` is a silence-timeout verdict, not
                     // proof of death. A joiner that merely stalled past
                     // `disconnect_timeout` and then recovers could previously
-                    // resume IN-SESSION (the endpoint kept its old magic, so
+                    // resume IN-SESSION (the endpoint kept its old connection ID, so
                     // the recovered joiner's next `JoinRequest` reopened a
                     // serve); post-rearm that still-alive joiner's packets
-                    // are magic-filtered and it must instead complete its own
+                    // are connection ID-filtered and it must instead complete its own
                     // bounded coordinator-loss teardown and rebuild with a
                     // fresh session. The trade is deliberate and bounded in
                     // BOTH directions: a transiently-stalled-but-alive joiner
@@ -9819,6 +9850,7 @@ impl<T: Config> P2PSession<T> {
                                 self.disconnect_behavior,
                                 DisconnectEventPolicy::Emit,
                                 GracefulDropFailurePolicy::DisconnectAndHalt,
+                                RemoteDisconnectNotification::Silent,
                             );
                         if let Err(e) = result {
                             report_violation!(
@@ -10329,7 +10361,7 @@ mod tests {
 
     fn sync_request_message() -> Message {
         Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::SyncRequest(SyncRequest { random_request: 0 }),
         }
     }
@@ -13483,6 +13515,7 @@ mod tests {
             behavior,
             DisconnectEventPolicy::Emit,
             GracefulDropFailurePolicy::DisconnectAndHalt,
+            RemoteDisconnectNotification::Silent,
         )
         .expect("auto-timeout graceful drop should succeed");
 
@@ -13606,7 +13639,7 @@ mod tests {
         // remote address) to `Running` and set the session live. Without this,
         // the post-drop state/endpoint deltas below would be vacuous (true from
         // construction). The forced state only touches the endpoint's protocol
-        // `state`/`remote_magic`, not the sync layer, so the graceful-drop
+        // `state`/`remote_conn_id`, not the sync layer, so the graceful-drop
         // freeze path behaves identically.
         for (name, survivor, addr) in [
             ("A", &mut survivor_a, addr_a),
@@ -13665,6 +13698,7 @@ mod tests {
                 c_behavior,
                 DisconnectEventPolicy::Emit,
                 GracefulDropFailurePolicy::DisconnectAndHalt,
+                RemoteDisconnectNotification::Silent,
             )
             .expect("C: auto-timeout graceful drop should succeed");
         // B — auto-timeout under Halt. We use the SAME faithful funnel as C (the
@@ -13688,6 +13722,7 @@ mod tests {
                 b_behavior,
                 DisconnectEventPolicy::Emit,
                 GracefulDropFailurePolicy::DisconnectAndHalt,
+                RemoteDisconnectNotification::Silent,
             )
             .expect("B: auto-timeout Halt drop should succeed");
 
@@ -13874,7 +13909,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(100),
@@ -13952,7 +13987,7 @@ mod tests {
                 .remotes
                 .get_mut(&addr_c)
                 .expect("C endpoint")
-                .disconnect();
+                .disconnect_remote();
             session.local_connect_status[c.as_usize()] = ConnectionStatus {
                 disconnected: false,
                 last_frame: Frame::new(100),
@@ -14046,7 +14081,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(100),
@@ -14243,7 +14278,7 @@ mod tests {
             .remotes
             .get_mut(&addr_d)
             .expect("D endpoint")
-            .disconnect();
+            .disconnect_remote();
         // Realistic non-cold floors (B/C report a floor with every connect status):
         // the stale-echo is a running endpoint's stale-low term, NOT the cold corner.
         seed_floor_round_fresh(&mut session);
@@ -14376,7 +14411,7 @@ mod tests {
                 .remotes
                 .get_mut(&addr_d)
                 .expect("D endpoint")
-                .disconnect();
+                .disconnect_remote();
             seed_floor_round_fresh(&mut session);
 
             let cf_before = session.confirmed_frame();
@@ -14520,7 +14555,7 @@ mod tests {
             .remotes
             .get_mut(&addr_d)
             .expect("D endpoint")
-            .disconnect();
+            .disconnect_remote();
         seed_floor_round_fresh(&mut session);
 
         // The disconnected stale-low term (3) still pins the bound at 3, NOT the
@@ -14565,7 +14600,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
@@ -14619,7 +14654,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(9),
@@ -14940,7 +14975,7 @@ mod tests {
             .remotes
             .get_mut(&addr)
             .expect("remote endpoint must exist")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[remote.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(7),
@@ -15029,7 +15064,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(3),
@@ -15197,7 +15232,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
 
         assert_eq!(
             session.pessimistic_floors().get(d.as_usize()).copied(),
@@ -15311,7 +15346,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
 
         // A's own view of D is still high (real inputs through 10).
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
@@ -15428,7 +15463,7 @@ mod tests {
                 .remotes
                 .get_mut(&addr)
                 .expect("endpoint")
-                .disconnect();
+                .disconnect_remote();
         }
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
@@ -15476,7 +15511,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[d.as_usize()] = ConnectionStatus {
             disconnected: false,
             last_frame: Frame::new(10),
@@ -15528,7 +15563,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
 
         // A's own view of D is still high (real inputs through 10): A has not yet
         // detected D's drop and is about to confirm D with its real inputs.
@@ -15609,7 +15644,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
         let gate = session.pessimistic_floor_relay_topology();
         assert!(
             gate,
@@ -15763,7 +15798,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[b.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(50),
@@ -15879,7 +15914,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[b.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(50),
@@ -16000,7 +16035,7 @@ mod tests {
             .remotes
             .get_mut(&addr_b)
             .expect("B endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[b.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(50),
@@ -16116,7 +16151,7 @@ mod tests {
             .remotes
             .get_mut(&addr_c)
             .expect("C endpoint")
-            .disconnect();
+            .disconnect_remote();
         session.local_connect_status[c.as_usize()] = ConnectionStatus {
             disconnected: true,
             last_frame: Frame::new(5),
@@ -16428,7 +16463,7 @@ mod tests {
             /// (single-threaded fixtures construct sessions/endpoints in a
             /// fixed order, so seed assignment is reproducible). Seeding
             /// removes the harness's last entropy-fed input: without it,
-            /// protocol magic numbers and sync-request randoms come from the
+            /// protocol connection ID numbers and sync-request randoms come from the
             /// thread-local RNG, which seeds itself from wall-clock timing
             /// entropy — every other input here is already virtualized by the
             /// injected clock and the in-memory bus (session-33 round-6 test
@@ -16470,6 +16505,7 @@ mod tests {
                 MessageBody::ReactivateSlotAck(_) => "ReactivateSlotAck",
                 MessageBody::JoinCommitted(_) => "JoinCommitted",
                 MessageBody::JoinAborted(_) => "JoinAborted",
+                MessageBody::Goodbye(_) => "Goodbye",
             }
         }
 
@@ -17387,8 +17423,8 @@ mod tests {
             let session_side = if peer == addr_a() { &duo.a } else { &duo.b };
             panic!(
                 "manual joiner failed to synchronize with {peer:?} — \
-                 joiner endpoint (state, roundtrips left, outstanding randoms, magic, \
-                 remote magic): {:?}; session-side endpoint for the joiner: {:?}",
+                 joiner endpoint (state, roundtrips left, outstanding randoms, connection ID, \
+                 remote connection ID): {:?}; session-side endpoint for the joiner: {:?}",
                 joiner
                     .protos
                     .get(&peer)
@@ -25965,7 +26001,7 @@ mod tests {
         /// completes at a strictly later frame. The fresh handshake is what
         /// requires the coordinator's reserved-slot endpoint re-arm on
         /// death (the `Event::Disconnected` reserved-slot branch): the old
-        /// endpoint's locked magic would otherwise silently filter every
+        /// endpoint's locked connection ID would otherwise silently filter every
         /// fresh session's sync forever.
         #[test]
         fn npeer_buffered_joiner_timeout_discards_tombstones_and_tears_down_for_fresh_rejoin() {

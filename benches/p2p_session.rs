@@ -338,7 +338,10 @@ fn bench_metrics_and_wire_length(c: &mut Criterion) {
     // This keeps the benchmark on the variable-length arithmetic hot path
     // without exposing protocol internals solely for Criterion.
     let mut wire = Vec::new();
-    wire.extend_from_slice(&0_u16.to_le_bytes()); // header.magic
+    wire.extend_from_slice(&[0xF5, 0x52]); // header sentinel
+    wire.push(fortress_rollback::PROTOCOL_VERSION);
+    wire.push(0); // header flags
+    wire.extend_from_slice(&1_u32.to_le_bytes()); // header connection ID
     wire.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
     wire.extend_from_slice(&2_u64.to_le_bytes()); // peer_connect_status.len()
     for _ in 0..2 {
@@ -346,7 +349,6 @@ fn bench_metrics_and_wire_length(c: &mut Criterion) {
         wire.extend_from_slice(&(-1_i32).to_le_bytes()); // last_frame
         wire.extend_from_slice(&0_u16.to_le_bytes()); // epoch
     }
-    wire.push(0); // disconnect_requested = false
     wire.extend_from_slice(&0_i32.to_le_bytes()); // start_frame
     wire.extend_from_slice(&(-1_i32).to_le_bytes()); // ack_frame
     wire.extend_from_slice(&96_u64.to_le_bytes()); // compressed input bytes

@@ -400,7 +400,7 @@ impl TokioUdpSocket {
     /// let mut socket = TokioUdpSocket::bind_to_port(7000).await?;
     /// let target: SocketAddr = "192.168.1.2:7000".parse()?;
     /// let msg = Message {
-    ///     header: MessageHeader { magic: 0x1234 },
+    ///     header: MessageHeader::new(0x1234),
     ///     body: MessageBody::KeepAlive,
     /// };
     ///
@@ -799,7 +799,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
 
@@ -830,11 +830,11 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg1 = Message {
-            header: MessageHeader { magic: 0x1111 },
+            header: MessageHeader::new(0x1111),
             body: MessageBody::KeepAlive,
         };
         let msg2 = Message {
-            header: MessageHeader { magic: 0x2222 },
+            header: MessageHeader::new(0x2222),
             body: MessageBody::KeepAlive,
         };
 
@@ -866,7 +866,7 @@ mod tests {
         // Sending to an unreachable address should not panic
         let invalid_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         // This should log an error but not panic
@@ -896,7 +896,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::KeepAlive,
         };
 

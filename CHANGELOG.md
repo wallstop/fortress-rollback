@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** network packets now use protocol-v1 framing: sentinel bytes `F5 52`, an exact version byte, reserved flags, and a validated 32-bit connection ID precede the fixed body discriminant. Version 1 rejects legacy 0.9 unversioned packets in both directions; built-in UDP adapters classify rejected legacy/version/flag/sentinel/malformed datagrams and report at most one warning per rejection family per receive poll. Custom raw-byte transports should use `network::codec::decode_message` and `classify_wire_bytes`. The internal wire vocabulary and public `MessageKind` categories now retain hot-join tags 10–16 in every build so discriminants are feature-independent; builds without `hot-join` recognize and reject those bodies rather than treating their tags as unknown. The dead `Input.disconnect_requested` wire byte is removed and tag 17 is a best-effort sender-leaving `Goodbye`, sent three times by explicit `disconnect_player` so the remote `Disconnected` event no longer waits for silence timeout. Graceful `remove_player` remains connection-status-gossip based: treating its target as the recipient of a sender-leaving notice causes reciprocal drops in three-or-more-peer meshes.
 - **Breaking:** `SyncConfig::default().sync_timeout` is now `Some(Duration::from_secs(20))` instead of `None`. Sessions using the default configuration emit `FortressEvent::SyncTimeout` after 20 seconds of unsuccessful synchronization while continuing to retry. Set `sync_timeout: None` explicitly to retain unlimited retries without the diagnostic event.
 - **Breaking:** `ChaosSocket::with_clock()` callbacks now return `web_time::Instant` instead of `std::time::Instant`, allowing the default clock to run on browser `wasm32-unknown-unknown` without panicking. Browser callers with an injected clock must return `web_time::Instant`; native and Emscripten callers require no change because `web_time` re-exports `std::time::Instant` on those targets.
 
@@ -89,10 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. A reserved-slot
     endpoint whose synchronized-but-never-joined peer dies is re-armed on its disconnect timeout, so a
     fresh joiner session from the same address can always be served (a dead joiner cannot permanently
-    poison its slot's endpoint). Each such re-arm advances the endpoint's packet-filter `magic` as a
-    monotonic per-endpoint era counter, so a still-live peer from *any* recent era can never answer (and
-    wedge) the rebuilt handshake — collision is impossible across a 65535-rejoin window, not merely with
-    the immediately-previous era. Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
+    poison its slot's endpoint). Each such re-arm advances the endpoint's packet-filter connection ID as
+    a monotonic per-endpoint era counter, so a still-live peer from *any* recent era can never answer (and
+    wedge) the rebuilt handshake — collision is impossible across the `2^32 - 2^16` valid-ID namespace,
+    not merely with the immediately-previous era. Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
     time).
   - **N-peer meshes (3 or more machines) are supported end-to-end**, for both first-time joins of
     build-time reserved slots and re-joins/reconnections of gracefully-dropped slots: the serving host

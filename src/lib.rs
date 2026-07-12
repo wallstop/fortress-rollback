@@ -284,6 +284,22 @@ pub mod sessions {
 #[doc(hidden)]
 pub mod network {
     pub(crate) const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
+    pub(crate) const WIRE_SENTINEL: [u8; 2] = [0xF5, 0x52];
+    pub(crate) const MIN_SUPPORTED_PROTOCOL_VERSION: u8 = crate::PROTOCOL_VERSION;
+
+    pub(crate) const fn is_valid_conn_id(conn_id: u32) -> bool {
+        conn_id != 0 && conn_id & 0xFFFF != 0
+    }
+
+    #[cfg(feature = "hot-join")]
+    pub(crate) const fn next_conn_id(conn_id: u32) -> u32 {
+        let candidate = conn_id.wrapping_add(1);
+        if candidate.trailing_zeros() >= 16 {
+            candidate.wrapping_add(1)
+        } else {
+            candidate
+        }
+    }
 
     /// Shared fail-closed allocation for socket receive/send buffers.
     mod buffer;
@@ -402,6 +418,14 @@ pub mod __internal {
 // #############
 // # CONSTANTS #
 // #############
+
+/// The exact network protocol version emitted and accepted by this crate.
+///
+/// Any change to bytes that a protocol message can produce or accept requires a
+/// version bump. A new tail variant may reuse a version only when it is optional
+/// for correctness and its sender is gated by an explicitly negotiated feature.
+/// Protocol v1 deliberately rejects legacy unversioned packets.
+pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Internally, -1 represents no frame / invalid frame.
 ///

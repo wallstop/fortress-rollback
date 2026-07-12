@@ -34,7 +34,7 @@ pub struct ConnectionStatus {
     ///
     /// Wraps at [`u16::MAX`]; a single slot toggling 65535 times within one
     /// session is unreachable in practice (the same astronomically-rare,
-    /// documented framing as the protocol packet-filter `magic` era counter).
+    /// documented framing as the protocol packet-filter connection-ID era counter).
     pub epoch: u16,
 }
 
@@ -94,7 +94,6 @@ pub(crate) struct SyncReply {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Input {
     pub peer_connect_status: Vec<ConnectionStatus>,
-    pub disconnect_requested: bool,
     pub start_frame: Frame,
     pub ack_frame: Frame,
     pub bytes: Vec<u8>,
@@ -104,7 +103,6 @@ impl Default for Input {
     fn default() -> Self {
         Self {
             peer_connect_status: Vec::new(),
-            disconnect_requested: false,
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: Vec::new(),
@@ -117,7 +115,6 @@ impl std::fmt::Debug for Input {
         // Destructure to ensure all fields are included when new fields are added.
         let Self {
             peer_connect_status,
-            disconnect_requested,
             start_frame,
             ack_frame,
             bytes,
@@ -125,7 +122,6 @@ impl std::fmt::Debug for Input {
 
         f.debug_struct("Input")
             .field("peer_connect_status", peer_connect_status)
-            .field("disconnect_requested", disconnect_requested)
             .field("start_frame", start_frame)
             .field("ack_frame", ack_frame)
             .field("bytes", &BytesDebug(bytes))
@@ -244,19 +240,35 @@ pub(crate) struct FloorReply {
     pub floors: Vec<Frame>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MessageHeader {
-    pub magic: u16,
+    pub sentinel: [u8; 2],
+    pub protocol_version: u8,
+    pub flags: u8,
+    pub conn_id: u32,
 }
 
-#[cfg(feature = "hot-join")]
+impl MessageHeader {
+    pub(crate) const fn new(conn_id: u32) -> Self {
+        Self {
+            sentinel: super::WIRE_SENTINEL,
+            protocol_version: crate::PROTOCOL_VERSION,
+            flags: 0,
+            conn_id,
+        }
+    }
+}
+
+impl Default for MessageHeader {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JoinRequest {
     /// The player handle (slot index) the joiner wants to occupy.
     pub player_handle: usize,
 }
-
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StateSnapshot {
     /// The frame the serialized state corresponds to. On the 2-peer host path
@@ -302,15 +314,11 @@ pub(crate) struct StateSnapshot {
     /// Optional checksum of the saved state at `frame`.
     pub checksum: Option<u128>,
 }
-
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StateSnapshotAck {
     /// The frame the joiner successfully loaded.
     pub frame: Frame,
 }
-
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReactivateSlot {
     /// The player handle (slot index) the survivor should reopen.
@@ -318,8 +326,6 @@ pub(crate) struct ReactivateSlot {
     /// The activation frame at which the slot becomes live again.
     pub frame: Frame,
 }
-
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReactivateSlotAck {
     /// The player handle (slot index) the survivor reopened.
@@ -335,7 +341,6 @@ pub(crate) struct ReactivateSlotAck {
 /// `frame` is the activation frame `F` of the attempt, carried for attempt
 /// discrimination: receivers ignore a `JoinCommitted` whose `(handle, frame)`
 /// does not match their pending attempt (a stale resend from an earlier serve).
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JoinCommitted {
     /// The player handle (slot index) whose join committed.
@@ -351,13 +356,17 @@ pub(crate) struct JoinCommitted {
 ///
 /// `frame` is the activation frame `F` of the aborted attempt (see
 /// [`JoinCommitted`] for the attempt-discrimination contract).
-#[cfg(feature = "hot-join")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JoinAborted {
     /// The player handle (slot index) whose join aborted.
     pub handle: usize,
     /// The activation frame `F` of the aborted attempt.
     pub frame: Frame,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct Goodbye {
+    pub reason: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,25 +381,20 @@ pub(crate) enum MessageBody {
     KeepAlive,
     // Floor-round messages (double-failure-relay connected-relay reorder fix,
     // S55) are appended AFTER the original core variants so the existing core
-    // discriminants (0..=7) stay stable; the `#[cfg(feature = "hot-join")]`
-    // variants below them are positional and shift accordingly (the
-    // hand-written `codec::decode_message` mirrors this numbering).
+    // discriminants (0..=7) stay stable. The wire vocabulary below is compiled
+    // in every feature build so serde's positional tags never shift; the
+    // hand-written `codec::decode_message` mirrors this numbering.
     FloorRequest(FloorRequest),
     FloorReply(FloorReply),
-    #[cfg(feature = "hot-join")]
     JoinRequest(JoinRequest),
-    #[cfg(feature = "hot-join")]
     StateSnapshot(StateSnapshot),
-    #[cfg(feature = "hot-join")]
     StateSnapshotAck(StateSnapshotAck),
-    #[cfg(feature = "hot-join")]
     ReactivateSlot(ReactivateSlot),
-    #[cfg(feature = "hot-join")]
     ReactivateSlotAck(ReactivateSlotAck),
-    #[cfg(feature = "hot-join")]
     JoinCommitted(JoinCommitted),
-    #[cfg(feature = "hot-join")]
     JoinAborted(JoinAborted),
+    // Protocol-v1 tag 17. Keep above future D14 wire additions.
+    Goodbye(Goodbye),
 }
 
 /// A messages that [`NonBlockingSocket`] sends and receives. When implementing [`NonBlockingSocket`],
@@ -425,7 +429,6 @@ impl MessageBody {
             Self::Input(input) => {
                 LEN_PREFIX
                     + input.peer_connect_status.len() * ConnectionStatus::WIRE_LEN
-                    + 1 // disconnect_requested: bool
                     + FRAME // start_frame
                     + FRAME // ack_frame
                     + LEN_PREFIX
@@ -442,9 +445,7 @@ impl MessageBody {
                     + LEN_PREFIX
                     + reply.floors.len() * FRAME // floors: Vec<Frame>
             },
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest(_) => 8, // player_handle: usize
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot(snapshot) => {
                 FRAME // frame
                     + 8 // num_players: usize
@@ -457,16 +458,12 @@ impl MessageBody {
                     + 1 // Option tag
                     + snapshot.checksum.map_or(0, |_| 16) // Some(u128)
             },
-            #[cfg(feature = "hot-join")]
-            Self::StateSnapshotAck(_) => FRAME, // frame
-            #[cfg(feature = "hot-join")]
-            Self::ReactivateSlot(_) => 8 + FRAME, // handle: usize, frame
-            #[cfg(feature = "hot-join")]
+            Self::StateSnapshotAck(_) => FRAME,      // frame
+            Self::ReactivateSlot(_) => 8 + FRAME,    // handle: usize, frame
             Self::ReactivateSlotAck(_) => 8 + FRAME, // handle: usize, frame
-            #[cfg(feature = "hot-join")]
-            Self::JoinCommitted(_) => 8 + FRAME, // handle: usize, frame
-            #[cfg(feature = "hot-join")]
-            Self::JoinAborted(_) => 8 + FRAME, // handle: usize, frame
+            Self::JoinCommitted(_) => 8 + FRAME,     // handle: usize, frame
+            Self::JoinAborted(_) => 8 + FRAME,       // handle: usize, frame
+            Self::Goodbye(_) => 1,                   // reason: u8
         };
 
         DISCRIMINANT + payload
@@ -489,35 +486,29 @@ impl MessageBody {
             Self::KeepAlive => MessageKind::KeepAlive,
             Self::FloorRequest(_) => MessageKind::FloorRequest,
             Self::FloorReply(_) => MessageKind::FloorReply,
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest(_) => MessageKind::JoinRequest,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot(_) => MessageKind::StateSnapshot,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshotAck(_) => MessageKind::StateSnapshotAck,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlot(_) => MessageKind::ReactivateSlot,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlotAck(_) => MessageKind::ReactivateSlotAck,
-            #[cfg(feature = "hot-join")]
             Self::JoinCommitted(_) => MessageKind::JoinCommitted,
-            #[cfg(feature = "hot-join")]
             Self::JoinAborted(_) => MessageKind::JoinAborted,
+            Self::Goodbye(_) => MessageKind::Goodbye,
         }
     }
 }
 
 impl Message {
     /// The exact number of bytes this message serializes to on the wire under the
-    /// crate's bincode configuration: the [`MessageHeader`] (`magic`: `u16`, 2
-    /// bytes) plus the [`MessageBody`] ([`MessageBody::encoded_len`]).
+    /// crate's bincode configuration: the 8-byte [`MessageHeader`] plus the
+    /// [`MessageBody`] ([`MessageBody::encoded_len`]).
     ///
     /// This is the true payload size a [`NonBlockingSocket`](crate::NonBlockingSocket)
     /// transmits, used for bandwidth accounting. It is computed arithmetically
     /// (alloc-free) and kept wire-exact by a property test against
     /// [`codec::encode`](crate::network::codec::encode).
     pub(crate) fn encoded_len(&self) -> usize {
-        const HEADER: usize = 2; // MessageHeader { magic: u16 }
+        const HEADER: usize = 8;
         HEADER + self.body.encoded_len()
     }
 
@@ -603,7 +594,6 @@ mod tests {
     fn test_input_default() {
         let input = Input::default();
         assert!(input.peer_connect_status.is_empty());
-        assert!(!input.disconnect_requested);
         assert_eq!(input.start_frame, Frame::NULL);
         assert_eq!(input.ack_frame, Frame::NULL);
         assert!(input.bytes.is_empty());
@@ -613,14 +603,13 @@ mod tests {
     fn test_input_debug() {
         let input = Input {
             peer_connect_status: vec![ConnectionStatus::default()],
-            disconnect_requested: true,
             start_frame: Frame::new(10),
             ack_frame: Frame::new(5),
             bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
         };
         let debug = format!("{:?}", input);
         assert!(debug.contains("Input"));
-        assert!(debug.contains("disconnect_requested"));
+        assert!(debug.contains("start_frame"));
         assert!(debug.contains("0xdeadbeef"));
     }
 
@@ -653,7 +642,10 @@ mod tests {
     #[test]
     fn test_message_header_default() {
         let header = MessageHeader::default();
-        assert_eq!(header.magic, 0);
+        assert_eq!(header.sentinel, super::super::WIRE_SENTINEL);
+        assert_eq!(header.protocol_version, crate::PROTOCOL_VERSION);
+        assert_eq!(header.flags, 0);
+        assert_eq!(header.conn_id, 1);
     }
 
     #[test]
@@ -713,7 +705,7 @@ mod tests {
         use crate::network::codec;
 
         let request = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::FloorRequest(FloorRequest { round_seq: 9 }),
         };
         let serialized = codec::encode(&request).expect("serialization should succeed");
@@ -722,7 +714,7 @@ mod tests {
         assert_eq!(request, deserialized);
 
         let reply = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::FloorReply(FloorReply {
                 round_seq: 9,
                 floors: vec![Frame::new(4), Frame::new(10), Frame::NULL, Frame::new(0)],
@@ -738,7 +730,7 @@ mod tests {
     #[allow(clippy::redundant_clone)] // Testing Clone trait implementation
     fn test_message_clone_eq() {
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         let cloned = msg.clone();
@@ -750,7 +742,7 @@ mod tests {
         use crate::network::codec;
 
         let msg = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::SyncRequest(SyncRequest {
                 random_request: 999,
             }),
@@ -780,7 +772,6 @@ mod tests {
                     epoch: 0,
                 },
             ],
-            disconnect_requested: false,
             start_frame: Frame::new(100),
             ack_frame: Frame::new(50),
             bytes: vec![1, 2, 3, 4, 5],
@@ -793,10 +784,23 @@ mod tests {
     }
 
     #[test]
+    fn input_wire_layout_has_no_disconnect_flag() {
+        let message = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::Input(Input::default()),
+        };
+
+        assert_eq!(
+            message.encoded_len(),
+            36,
+            "v1 Input is header(8) + tag(4) + status-len(8) + start(4) + ack(4) + bytes-len(8)"
+        );
+    }
+
+    #[test]
     fn test_bytes_debug_empty() {
         let input = Input {
             peer_connect_status: vec![],
-            disconnect_requested: false,
             start_frame: Frame::NULL,
             ack_frame: Frame::NULL,
             bytes: vec![],
@@ -842,6 +846,10 @@ mod tests {
                 MessageBody::FloorReply(FloorReply::default()),
                 MessageKind::FloorReply,
             ),
+            (
+                MessageBody::Goodbye(Goodbye::default()),
+                MessageKind::Goodbye,
+            ),
         ];
         for (body, expected) in cases {
             assert_eq!(body.kind(), *expected, "body.kind() for {body:?}");
@@ -852,8 +860,6 @@ mod tests {
             };
             assert_eq!(msg.kind(), *expected, "Message::kind() for {body:?}");
         }
-
-        #[cfg(feature = "hot-join")]
         {
             let hot_cases: &[(MessageBody, MessageKind)] = &[
                 (

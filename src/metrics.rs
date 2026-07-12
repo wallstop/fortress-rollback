@@ -635,9 +635,9 @@ impl HotJoinMetrics {
 /// [`PeerMetrics::messages_received_by_kind`] — without exposing the internal
 /// message types.
 ///
-/// The hot-join categories (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`,
-/// `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`) exist
-/// only when the `hot-join` feature is enabled.
+/// The hot-join categories remain present when the `hot-join` feature is disabled
+/// because protocol-v1 wire discriminants are feature-independent. Disabled
+/// builds reject those bodies during bounded wire decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -662,60 +662,30 @@ pub enum MessageKind {
     /// A floor-round reply (the double-failure-relay reorder fix).
     FloorReply,
     /// A hot-join slot-occupancy request.
-    #[cfg(feature = "hot-join")]
     JoinRequest,
     /// A hot-join game-state snapshot.
-    #[cfg(feature = "hot-join")]
     StateSnapshot,
     /// A hot-join snapshot acknowledgement.
-    #[cfg(feature = "hot-join")]
     StateSnapshotAck,
     /// A hot-join slot-reactivation request.
-    #[cfg(feature = "hot-join")]
     ReactivateSlot,
     /// A hot-join slot-reactivation acknowledgement.
-    #[cfg(feature = "hot-join")]
     ReactivateSlotAck,
     /// A hot-join commit notification.
-    #[cfg(feature = "hot-join")]
     JoinCommitted,
     /// A hot-join abort notification.
-    #[cfg(feature = "hot-join")]
     JoinAborted,
+    /// A best-effort graceful disconnect notification.
+    Goodbye,
 }
 
 impl MessageKind {
     /// The number of message categories.
     ///
-    /// Varies with enabled features: seven additional categories exist when the
-    /// `hot-join` feature is on.
-    #[cfg(not(feature = "hot-join"))]
-    pub const COUNT: usize = 10;
-    /// The number of message categories.
-    ///
-    /// Varies with enabled features: seven additional categories exist when the
-    /// `hot-join` feature is on.
-    #[cfg(feature = "hot-join")]
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
 
     /// Every category, in declaration (wire-discriminant) order. Its length is
     /// [`Self::COUNT`].
-    #[cfg(not(feature = "hot-join"))]
-    pub const ALL: [Self; Self::COUNT] = [
-        Self::SyncRequest,
-        Self::SyncReply,
-        Self::Input,
-        Self::InputAck,
-        Self::QualityReport,
-        Self::QualityReply,
-        Self::ChecksumReport,
-        Self::KeepAlive,
-        Self::FloorRequest,
-        Self::FloorReply,
-    ];
-    /// Every category, in declaration (wire-discriminant) order. Its length is
-    /// [`Self::COUNT`].
-    #[cfg(feature = "hot-join")]
     pub const ALL: [Self; Self::COUNT] = [
         Self::SyncRequest,
         Self::SyncReply,
@@ -734,6 +704,7 @@ impl MessageKind {
         Self::ReactivateSlotAck,
         Self::JoinCommitted,
         Self::JoinAborted,
+        Self::Goodbye,
     ];
 
     /// A stable snake_case label for this category, suitable for logging or as a
@@ -751,20 +722,14 @@ impl MessageKind {
             Self::KeepAlive => "keep_alive",
             Self::FloorRequest => "floor_request",
             Self::FloorReply => "floor_reply",
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest => "join_request",
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot => "state_snapshot",
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshotAck => "state_snapshot_ack",
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlot => "reactivate_slot",
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlotAck => "reactivate_slot_ack",
-            #[cfg(feature = "hot-join")]
             Self::JoinCommitted => "join_committed",
-            #[cfg(feature = "hot-join")]
             Self::JoinAborted => "join_aborted",
+            Self::Goodbye => "goodbye",
         }
     }
 
@@ -782,20 +747,14 @@ impl MessageKind {
             Self::KeepAlive => 7,
             Self::FloorRequest => 8,
             Self::FloorReply => 9,
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest => 10,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot => 11,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshotAck => 12,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlot => 13,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlotAck => 14,
-            #[cfg(feature = "hot-join")]
             Self::JoinCommitted => 15,
-            #[cfg(feature = "hot-join")]
             Self::JoinAborted => 16,
+            Self::Goodbye => 17,
         }
     }
 }

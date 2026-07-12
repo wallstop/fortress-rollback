@@ -142,7 +142,7 @@ pub enum ScenarioMix {
 /// - `11`: adds [`GilbertElliottPolicy`], a deterministic two-state
 ///   correlated-loss model on materialized directed links.
 /// - `12`: makes protocol RNG seeds target-width-stable and gives each
-///   hot-join replacement generation an initial protocol magic distinct from
+///   hot-join replacement generation an initial protocol connection ID distinct from
 ///   the generation it replaces. It bounds new schedules to one replacement
 ///   generation because fencing older/per-link protocol eras needs a wider
 ///   model. Schemas <=11 retain their historical seed and validation semantics

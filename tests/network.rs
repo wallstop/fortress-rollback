@@ -14,5 +14,6 @@ mod network {
     pub mod in_process_chaos;
     pub mod multi_process;
     pub mod peer_metrics;
+    pub mod protocol_version;
     pub mod resilience;
 }

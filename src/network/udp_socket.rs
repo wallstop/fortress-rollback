@@ -322,7 +322,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
 
@@ -353,11 +353,11 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg1 = Message {
-            header: MessageHeader { magic: 0x1111 },
+            header: MessageHeader::new(0x1111),
             body: MessageBody::KeepAlive,
         };
         let msg2 = Message {
-            header: MessageHeader { magic: 0x2222 },
+            header: MessageHeader::new(0x2222),
             body: MessageBody::KeepAlive,
         };
 
@@ -444,7 +444,7 @@ mod tests {
         // Note: 0.0.0.0:0 is an invalid destination address
         let invalid_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         // This should log an error but not panic
@@ -527,7 +527,7 @@ mod tests {
         // Send multiple messages - buffer should be reused
         for i in 0..5u16 {
             let msg = Message {
-                header: MessageHeader { magic: i },
+                header: MessageHeader::new(u32::from(i)),
                 body: MessageBody::KeepAlive,
             };
             socket1.send_to(&msg, &addr2);
@@ -547,7 +547,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0xDEAD },
+            header: MessageHeader::new(0xDEAD),
             body: MessageBody::KeepAlive,
         };
 
@@ -555,7 +555,7 @@ mod tests {
         let received = wait_for_messages(&mut socket2, 1, 20);
 
         assert_eq!(received.len(), 1);
-        assert_eq!(received[0].1.header.magic, 0xDEAD);
+        assert_eq!(received[0].1.header.conn_id, 0xDEAD);
         assert!(matches!(received[0].1.body, MessageBody::KeepAlive));
     }
 
@@ -566,7 +566,7 @@ mod tests {
         let self_addr = to_loopback_addr(&socket);
 
         let msg = Message {
-            header: MessageHeader { magic: 0xBEEF },
+            header: MessageHeader::new(0xBEEF),
             body: MessageBody::KeepAlive,
         };
 
@@ -576,6 +576,6 @@ mod tests {
         // Should be able to receive our own message
         let received = wait_for_messages(&mut socket, 1, 20);
         assert_eq!(received.len(), 1);
-        assert_eq!(received[0].1.header.magic, 0xBEEF);
+        assert_eq!(received[0].1.header.conn_id, 0xBEEF);
     }
 }

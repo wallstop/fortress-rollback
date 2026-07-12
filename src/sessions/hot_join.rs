@@ -132,7 +132,7 @@ fn snapshot_wire_len(
         checksum,
     };
     let empty_message = Message {
-        header: MessageHeader { magic: 0 },
+        header: MessageHeader::new(0),
         body: MessageBody::StateSnapshot(skeleton_snapshot),
     };
 

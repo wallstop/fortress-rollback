@@ -42,7 +42,7 @@ use std::fmt;
 use std::io::{self, Write};
 
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
+    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message,
     MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
@@ -51,6 +51,98 @@ use crate::network::messages::{
     StateSnapshotAck,
 };
 use crate::Frame;
+
+/// Best-effort classification of a rejected protocol datagram.
+///
+/// Variants carrying a value are rate-limited by variant family at socket
+/// boundaries: multiple unsupported versions in one poll count as one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WireRejectKind {
+    /// The bytes resemble the legacy, unversioned protocol header.
+    LegacyUnversionedSuspected,
+    /// The packet declares a protocol version this build does not accept.
+    UnsupportedVersion {
+        /// Version byte observed on the wire.
+        seen: u8,
+    },
+    /// The packet sets header flags this protocol version does not define.
+    UnknownFlags {
+        /// Flags byte observed on the wire.
+        seen: u8,
+    },
+    /// The two-byte protocol sentinel does not match.
+    BadSentinel,
+    /// The packet is truncated or otherwise malformed.
+    Malformed,
+}
+
+impl WireRejectKind {
+    pub(super) const fn rate_limit_bit(self) -> u8 {
+        match self {
+            Self::LegacyUnversionedSuspected => 1 << 0,
+            Self::UnsupportedVersion { .. } => 1 << 1,
+            Self::UnknownFlags { .. } => 1 << 2,
+            Self::BadSentinel => 1 << 3,
+            Self::Malformed => 1 << 4,
+        }
+    }
+}
+
+impl fmt::Display for WireRejectKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyUnversionedSuspected => f.write_str("suspected legacy unversioned packet"),
+            Self::UnsupportedVersion { seen } => {
+                write!(f, "unsupported protocol version {seen}")
+            },
+            Self::UnknownFlags { seen } => write!(f, "unknown protocol flags 0x{seen:02x}"),
+            Self::BadSentinel => f.write_str("bad protocol sentinel"),
+            Self::Malformed => f.write_str("malformed protocol packet"),
+        }
+    }
+}
+
+/// Classifies bytes that [`decode_message`] rejected.
+///
+/// This is a diagnostic helper, not a validator: because [`WireRejectKind`] has
+/// no accepted variant, valid v1 bytes also fall through to
+/// [`WireRejectKind::Malformed`]. The legacy test is intentionally heuristic and
+/// may classify a malformed v1 packet as legacy; valid v1 connection IDs make
+/// the layouts unambiguous.
+#[must_use]
+pub fn classify_wire_bytes(bytes: &[u8]) -> WireRejectKind {
+    let legacy_discriminant = bytes.get(2).copied();
+    let legacy_tail = bytes.get(3..6);
+    if bytes.len() >= 6
+        && legacy_discriminant.is_some_and(|variant| variant <= 16)
+        && legacy_tail == Some(&[0, 0, 0])
+    {
+        return WireRejectKind::LegacyUnversionedSuspected;
+    }
+
+    let Some(sentinel) = bytes.get(..2) else {
+        return WireRejectKind::Malformed;
+    };
+    if sentinel != super::WIRE_SENTINEL {
+        return WireRejectKind::BadSentinel;
+    }
+
+    let Some(version) = bytes.get(2).copied() else {
+        return WireRejectKind::Malformed;
+    };
+    if version != crate::PROTOCOL_VERSION {
+        return WireRejectKind::UnsupportedVersion { seen: version };
+    }
+
+    let Some(flags) = bytes.get(3).copied() else {
+        return WireRejectKind::Malformed;
+    };
+    if flags != 0 {
+        return WireRejectKind::UnknownFlags { seen: flags };
+    }
+
+    WireRejectKind::Malformed
+}
 
 // The bincode configuration used throughout Fortress Rollback.
 //
@@ -406,7 +498,6 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
         peer_connect_status.push(decode_connection_status(bytes, cursor)?);
     }
 
-    let disconnect_requested = read_bool(bytes, cursor, "input.disconnect_requested")?;
     let start_frame = Frame::new(read_i32(bytes, cursor, "input.start_frame")?);
     let ack_frame = Frame::new(read_i32(bytes, cursor, "input.ack_frame")?);
 
@@ -420,7 +511,6 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
 
     Ok(Input {
         peer_connect_status,
-        disconnect_requested,
         start_frame,
         ack_frame,
         bytes: input_bytes,
@@ -701,8 +791,36 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// a length that cannot fit in the remaining packet.
 pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     let mut cursor = 0;
+    let sentinel = read_array(bytes, &mut cursor, "message.header.sentinel")?;
+    if sentinel != super::WIRE_SENTINEL {
+        return Err(decode_message_error("invalid message header sentinel"));
+    }
+    let protocol_version =
+        read_array::<1>(bytes, &mut cursor, "message.header.protocol_version")?[0];
+    if protocol_version < super::MIN_SUPPORTED_PROTOCOL_VERSION
+        || protocol_version > crate::PROTOCOL_VERSION
+    {
+        return Err(decode_message_error(format!(
+            "unsupported protocol version {protocol_version}"
+        )));
+    }
+    let flags = read_array::<1>(bytes, &mut cursor, "message.header.flags")?[0];
+    if flags != 0 {
+        return Err(decode_message_error(format!(
+            "unknown protocol flags 0x{flags:02x}"
+        )));
+    }
+    let conn_id = read_u32(bytes, &mut cursor, "message.header.conn_id")?;
+    if !super::is_valid_conn_id(conn_id) {
+        return Err(decode_message_error(format!(
+            "invalid connection ID 0x{conn_id:08x}"
+        )));
+    }
     let header = MessageHeader {
-        magic: read_u16(bytes, &mut cursor, "message.header.magic")?,
+        sentinel,
+        protocol_version,
+        flags,
+        conn_id,
     };
     let variant = read_u32(bytes, &mut cursor, "message.body.variant")?;
     let body = match variant {
@@ -730,8 +848,8 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         7 => MessageBody::KeepAlive,
         // Floor-round variants (double-failure-relay connected-relay reorder fix,
         // S55), appended after the original core block — see the `MessageBody`
-        // enum comment. The `#[cfg(feature = "hot-join")]` variants below them are
-        // therefore at discriminants 10..=16 (each shifted +2 from the original).
+        // enum comment. Hot-join variants occupy discriminants 10..=16 in every
+        // build; builds without the feature recognize and reject them below.
         8 => MessageBody::FloorRequest(FloorRequest {
             round_seq: read_u32(bytes, &mut cursor, "floor_request.round_seq")?,
         }),
@@ -765,6 +883,15 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         16 => MessageBody::JoinAborted(JoinAborted {
             handle: read_usize(bytes, &mut cursor, "join_aborted.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "join_aborted.frame")?),
+        }),
+        #[cfg(not(feature = "hot-join"))]
+        10..=16 => {
+            return Err(decode_message_error(format!(
+                "message body variant {variant} requires the disabled hot-join feature"
+            )))
+        },
+        17 => MessageBody::Goodbye(Goodbye {
+            reason: read_array::<1>(bytes, &mut cursor, "goodbye.reason")?[0],
         }),
         other => {
             return Err(decode_message_error(format!(
@@ -954,6 +1081,12 @@ mod tests {
         MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
     };
 
+    fn wire_prefix(conn_id: u32, variant: u32) -> Vec<u8> {
+        let mut bytes = encode(&MessageHeader::new(conn_id)).unwrap();
+        bytes.extend_from_slice(&variant.to_le_bytes());
+        bytes
+    }
+
     #[test]
     fn test_encode_decode_roundtrip_primitive() {
         let original: u32 = 12345;
@@ -966,7 +1099,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_message() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::SyncRequest(SyncRequest {
                 random_request: 999,
             }),
@@ -978,32 +1111,56 @@ mod tests {
 
     #[test]
     fn codec_wire_format_uses_fixed_little_endian_bytes() {
+        assert_eq!(
+            crate::PROTOCOL_VERSION,
+            1,
+            "wire bytes changed without a version bump"
+        );
         let cases = [
             (
                 "sync_request",
                 Message {
-                    header: MessageHeader { magic: 0xABCD },
+                    header: MessageHeader::new(0xABCD),
                     body: MessageBody::SyncRequest(SyncRequest {
                         random_request: 999,
                     }),
                 },
-                vec![0xCD, 0xAB, 0x00, 0x00, 0x00, 0x00, 0xE7, 0x03, 0x00, 0x00],
+                vec![
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0xCD, 0xAB, 0x00, 0x00, // conn_id
+                    0x00, 0x00, 0x00, 0x00, // MessageBody::SyncRequest tag
+                    0xE7, 0x03, 0x00, 0x00, // random_request
+                ],
             ),
             (
                 "quality_report",
                 Message {
-                    header: MessageHeader { magic: 0x1234 },
+                    header: MessageHeader::new(0x1234),
                     body: MessageBody::QualityReport(QualityReport {
                         frame_advantage: -2,
                         ping: 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10,
                     }),
                 },
                 vec![
-                    0x34, 0x12, // MessageHeader::magic
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
                     0xFE, 0xFF, // frame_advantage: i16 -2
                     0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
                     0x03, 0x02, 0x01, // ping: u128
+                ],
+            ),
+            (
+                "goodbye",
+                Message {
+                    header: MessageHeader::new(0x1234),
+                    body: MessageBody::Goodbye(Goodbye { reason: 7 }),
+                },
+                vec![
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
+                    0x11, 0x00, 0x00, 0x00, // MessageBody::Goodbye tag 17
+                    0x07, // reason
                 ],
             ),
         ];
@@ -1021,20 +1178,124 @@ mod tests {
     }
 
     #[test]
+    fn classify_wire_bytes_uses_stable_reject_precedence() {
+        let legacy = [0x34, 0x12, 16, 0, 0, 0];
+        let mut bad_sentinel = wire_prefix(1, 7);
+        bad_sentinel[0] = 0;
+        let mut unsupported = wire_prefix(1, 7);
+        unsupported[2] = crate::PROTOCOL_VERSION.saturating_add(1);
+        let mut unknown_flags = wire_prefix(1, 7);
+        unknown_flags[3] = 0x80;
+        let valid = wire_prefix(1, 7);
+
+        let cases = [
+            (
+                legacy.as_slice(),
+                WireRejectKind::LegacyUnversionedSuspected,
+            ),
+            (bad_sentinel.as_slice(), WireRejectKind::BadSentinel),
+            (
+                unsupported.as_slice(),
+                WireRejectKind::UnsupportedVersion {
+                    seen: crate::PROTOCOL_VERSION.saturating_add(1),
+                },
+            ),
+            (
+                unknown_flags.as_slice(),
+                WireRejectKind::UnknownFlags { seen: 0x80 },
+            ),
+            (&[0xF5][..], WireRejectKind::Malformed),
+            (valid.as_slice(), WireRejectKind::Malformed),
+        ];
+
+        for (bytes, expected) in cases {
+            assert_eq!(classify_wire_bytes(bytes), expected, "bytes={bytes:02x?}");
+        }
+
+        let sentinel_collision_legacy = [0xF5, 0x52, 1, 0, 0, 0];
+        assert_eq!(
+            classify_wire_bytes(&sentinel_collision_legacy),
+            WireRejectKind::LegacyUnversionedSuspected,
+            "the documented best-effort legacy heuristic takes precedence"
+        );
+    }
+
+    #[test]
+    fn decode_message_rejects_every_invalid_v1_header_before_body_decode() {
+        let valid = wire_prefix(1, 7);
+        for len in 0..valid.len() {
+            assert!(
+                decode_message(&valid[..len]).is_err(),
+                "truncated prefix of {len} bytes must be rejected"
+            );
+        }
+
+        let mut invalid_headers = Vec::new();
+        let mut bad_sentinel = valid.clone();
+        bad_sentinel[1] ^= 1;
+        invalid_headers.push(bad_sentinel);
+        let mut unsupported = valid.clone();
+        unsupported[2] = crate::PROTOCOL_VERSION.saturating_add(1);
+        invalid_headers.push(unsupported);
+        let mut flags = valid;
+        flags[3] = 1;
+        invalid_headers.push(flags);
+        invalid_headers.push(wire_prefix(0, 7));
+        invalid_headers.push(wire_prefix(0x1234_0000, 7));
+
+        for bytes in invalid_headers {
+            assert!(
+                decode_message(&bytes).is_err(),
+                "invalid header must be rejected: {bytes:02x?}"
+            );
+        }
+
+        for conn_id in [1, u32::MAX] {
+            let bytes = wire_prefix(conn_id, 7);
+            assert_eq!(
+                decode_message(&bytes),
+                Ok((
+                    Message {
+                        header: MessageHeader::new(conn_id),
+                        body: MessageBody::KeepAlive,
+                    },
+                    bytes.len(),
+                ))
+            );
+        }
+    }
+
+    #[cfg(not(feature = "hot-join"))]
+    #[test]
+    fn decode_message_recognizes_disabled_hot_join_discriminants() {
+        for variant in 10..=16 {
+            let bytes = wire_prefix(1, variant);
+            let error = decode_message(&bytes).expect_err("disabled body must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires the disabled hot-join feature"),
+                "variant {variant} should be recognized, not reported as unknown: {error}"
+            );
+            assert_eq!(classify_wire_bytes(&bytes), WireRejectKind::Malformed);
+        }
+    }
+
+    #[test]
     fn decode_message_roundtrips_every_body_variant() {
         let messages = [
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::SyncRequest(SyncRequest {
                     random_request: 999,
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::SyncReply(SyncReply { random_reply: 123 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::Input(Input {
                     peer_connect_status: vec![
                         ConnectionStatus {
@@ -1050,50 +1311,53 @@ mod tests {
                             epoch: 7,
                         },
                     ],
-                    disconnect_requested: false,
                     start_frame: Frame::new(100),
                     ack_frame: Frame::new(50),
                     bytes: vec![1, 2, 3, 4, 5],
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::InputAck(InputAck {
                     ack_frame: Frame::new(77),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::QualityReport(QualityReport {
                     frame_advantage: -2,
                     ping: 1_000,
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::QualityReply(QualityReply { pong: 2_000 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::ChecksumReport(ChecksumReport {
                     checksum: 0xDEAD_BEEF,
                     frame: Frame::new(88),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::KeepAlive,
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::FloorRequest(FloorRequest { round_seq: 42 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::FloorReply(FloorReply {
                     round_seq: 42,
                     floors: vec![Frame::new(4), Frame::new(-1), Frame::new(10)],
                 }),
+            },
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::Goodbye(Goodbye { reason: 3 }),
             },
         ];
 
@@ -1141,22 +1405,18 @@ mod tests {
                 .boxed(),
             (
                 pvec(arb_connection_status(), 0..8),
-                any::<bool>(),
                 any::<i32>(),
                 any::<i32>(),
                 pvec(any::<u8>(), 0..64),
             )
-                .prop_map(
-                    |(peer_connect_status, disconnect_requested, start, ack, bytes)| {
-                        MessageBody::Input(Input {
-                            peer_connect_status,
-                            disconnect_requested,
-                            start_frame: Frame::new(start),
-                            ack_frame: Frame::new(ack),
-                            bytes,
-                        })
-                    },
-                )
+                .prop_map(|(peer_connect_status, start, ack, bytes)| {
+                    MessageBody::Input(Input {
+                        peer_connect_status,
+                        start_frame: Frame::new(start),
+                        ack_frame: Frame::new(ack),
+                        bytes,
+                    })
+                })
                 .boxed(),
             any::<i32>()
                 .prop_map(|f| {
@@ -1192,6 +1452,9 @@ mod tests {
                 .prop_map(|(round_seq, floors)| {
                     MessageBody::FloorReply(FloorReply { round_seq, floors })
                 })
+                .boxed(),
+            any::<u8>()
+                .prop_map(|reason| MessageBody::Goodbye(Goodbye { reason }))
                 .boxed(),
         ];
 
@@ -1289,10 +1552,16 @@ mod tests {
             );
         }
 
-        (any::<u16>(), Union::new(bodies)).prop_map(|(magic, body)| Message {
-            header: MessageHeader { magic },
-            body,
-        })
+        (
+            any::<u32>().prop_filter("valid connection ID", |id| {
+                super::super::is_valid_conn_id(*id)
+            }),
+            Union::new(bodies),
+        )
+            .prop_map(|(conn_id, body)| Message {
+                header: MessageHeader::new(conn_id),
+                body,
+            })
     }
 
     proptest::proptest! {
@@ -1321,14 +1590,13 @@ mod tests {
     #[test]
     fn size_of_val_is_constant_while_wire_size_is_not_d1() {
         let tiny = Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::KeepAlive,
         };
         let heavy = Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::Input(Input {
                 peer_connect_status: vec![ConnectionStatus::default(); 16],
-                disconnect_requested: false,
                 start_frame: Frame::new(10_000),
                 ack_frame: Frame::new(9_999),
                 bytes: vec![0xAB; 128],
@@ -1357,7 +1625,7 @@ mod tests {
     #[test]
     fn decode_message_roundtrips_input_without_generic_vec_decode() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::Input(Input {
                 peer_connect_status: vec![
                     ConnectionStatus {
@@ -1371,7 +1639,6 @@ mod tests {
                         epoch: 0,
                     },
                 ],
-                disconnect_requested: false,
                 start_frame: Frame::new(100),
                 ack_frame: Frame::new(50),
                 bytes: vec![1, 2, 3, 4, 5],
@@ -1387,9 +1654,7 @@ mod tests {
 
     #[test]
     fn decode_message_rejects_vec_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
-        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        let mut bytes = wire_prefix(0xABCD, 2);
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // peer_connect_status len
 
         let result = decode_message(&bytes);
@@ -1399,11 +1664,8 @@ mod tests {
 
     #[test]
     fn decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
-        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        let mut bytes = wire_prefix(0xABCD, 2);
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // peer_connect_status len
-        bytes.push(0); // disconnect_requested
         bytes.extend_from_slice(&100_i32.to_le_bytes()); // start_frame
         bytes.extend_from_slice(&50_i32.to_le_bytes()); // ack_frame
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // input.bytes len
@@ -1416,15 +1678,15 @@ mod tests {
     #[test]
     fn decode_message_rejects_negative_connection_status_frame() {
         let message = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::Input(Input {
                 peer_connect_status: vec![ConnectionStatus::default()],
                 ..Input::default()
             }),
         };
         let mut bytes = encode(&message).unwrap();
-        // header (2) + variant (4) + status length (8) + disconnected (1)
-        bytes[15..19].copy_from_slice(&(-2_i32).to_le_bytes());
+        // header (8) + variant (4) + status length (8) + disconnected (1)
+        bytes[21..25].copy_from_slice(&(-2_i32).to_le_bytes());
 
         let result = decode_message(&bytes);
 
@@ -1435,14 +1697,14 @@ mod tests {
     fn decode_message_allows_null_connection_status_and_floor_frames() {
         let messages = [
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::Input(Input {
                     peer_connect_status: vec![ConnectionStatus::default()],
                     ..Input::default()
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::FloorReply(FloorReply {
                     round_seq: 1,
                     floors: vec![Frame::NULL],
@@ -1460,15 +1722,15 @@ mod tests {
     #[test]
     fn decode_message_rejects_negative_floor_reply_frame() {
         let message = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::FloorReply(FloorReply {
                 round_seq: 1,
                 floors: vec![Frame::new(5)],
             }),
         };
         let mut bytes = encode(&message).unwrap();
-        // header (2) + variant (4) + round sequence (4) + floors length (8)
-        bytes[18..22].copy_from_slice(&(-2_i32).to_le_bytes());
+        // header (8) + variant (4) + round sequence (4) + floors length (8)
+        bytes[24..28].copy_from_slice(&(-2_i32).to_le_bytes());
 
         let result = decode_message(&bytes);
 
@@ -1479,7 +1741,7 @@ mod tests {
     fn decode_message_rejects_negative_checksum_frame() {
         for frame in [Frame::NULL, Frame::new(-2)] {
             let message = Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::ChecksumReport(ChecksumReport { checksum: 7, frame }),
             };
             let bytes = encode(&message).unwrap();
@@ -1504,7 +1766,7 @@ mod tests {
     #[test]
     fn decode_message_rejects_trailing_bytes() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::KeepAlive,
         };
         let mut bytes = encode(&original).unwrap();
@@ -1629,7 +1891,7 @@ mod tests {
     #[test]
     fn test_encoding_is_deterministic() {
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         let bytes1 = encode(&msg).unwrap();
@@ -1643,7 +1905,7 @@ mod tests {
     #[test]
     fn test_encode_into_message() {
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         let mut buffer = [0u8; 256];
@@ -1668,6 +1930,12 @@ mod hot_join_tests {
         ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
     };
 
+    fn wire_prefix(conn_id: u32, variant: u32) -> Vec<u8> {
+        let mut bytes = encode(&MessageHeader::new(conn_id)).unwrap();
+        bytes.extend_from_slice(&variant.to_le_bytes());
+        bytes
+    }
+
     fn roundtrip(original: Message) {
         let bytes = encode(&original).unwrap();
         // The generic bincode decode is the authority for the wire format; the manual
@@ -1687,7 +1955,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_request() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinRequest(JoinRequest { player_handle: 3 }),
         });
     }
@@ -1695,7 +1963,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_with_checksum() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(42),
                 num_players: 4,
@@ -1714,7 +1982,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_with_bridge_inputs() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(42),
                 num_players: 3,
@@ -1745,7 +2013,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_without_checksum() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(7),
                 num_players: 2,
@@ -1760,7 +2028,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_empty_state_bytes() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(0),
                 num_players: 1,
@@ -1775,7 +2043,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_ack() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshotAck(StateSnapshotAck {
                 frame: Frame::new(99),
             }),
@@ -1789,9 +2057,7 @@ mod hot_join_tests {
     /// `decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes`.
     #[test]
     fn decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // state_bytes len (absurd)
@@ -1805,9 +2071,7 @@ mod hot_join_tests {
     /// (claims 100 bytes when only a few remain) must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_state_bytes_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&100_u64.to_le_bytes()); // state_bytes len
@@ -1821,9 +2085,7 @@ mod hot_join_tests {
     /// A `checksum` option tag other than 0/1 is invalid under bincode's encoding.
     #[test]
     fn decode_message_rejects_invalid_checksum_option_tag() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1843,9 +2105,7 @@ mod hot_join_tests {
     /// `decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes`.
     #[test]
     fn decode_message_rejects_bridge_inputs_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1861,9 +2121,7 @@ mod hot_join_tests {
     /// before reserve.
     #[test]
     fn decode_message_rejects_bridge_inputs_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1879,9 +2137,7 @@ mod hot_join_tests {
     /// prefix itself missing) must be rejected, never read out of bounds.
     #[test]
     fn decode_message_rejects_snapshot_truncated_before_bridge_inputs() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1899,9 +2155,7 @@ mod hot_join_tests {
     /// reserving — mirrors the `bridge_inputs` battery.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1918,9 +2172,7 @@ mod hot_join_tests {
     /// remaining bytes must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1937,9 +2189,7 @@ mod hot_join_tests {
     /// must be rejected, never read out of bounds.
     #[test]
     fn decode_message_rejects_snapshot_truncated_before_bridge_statuses() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1958,9 +2208,7 @@ mod hot_join_tests {
     /// length bound (`1 * 7 > remaining`), before any element is decoded.
     #[test]
     fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1977,7 +2225,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_snapshot() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(5),
                 num_players: 2,
@@ -1998,7 +2246,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_reactivate_slot() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlot(ReactivateSlot {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2009,7 +2257,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_reactivate_slot_ack() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2022,9 +2270,7 @@ mod hot_join_tests {
     /// out of bounds.
     #[test]
     fn decode_message_rejects_truncated_reactivate_slot() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&13_u32.to_le_bytes()); // MessageBody::ReactivateSlot
+        let mut bytes = wire_prefix(0xABCD, 13);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2036,9 +2282,7 @@ mod hot_join_tests {
     /// A `ReactivateSlotAck` buffer truncated mid-`frame` must likewise be rejected.
     #[test]
     fn decode_message_rejects_truncated_reactivate_slot_ack() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&14_u32.to_le_bytes()); // MessageBody::ReactivateSlotAck
+        let mut bytes = wire_prefix(0xABCD, 14);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2052,7 +2296,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_reactivate_slot() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlot(ReactivateSlot {
                 handle: 1,
                 frame: Frame::new(7),
@@ -2071,7 +2315,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_reactivate_slot_ack() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
                 handle: 1,
                 frame: Frame::new(7),
@@ -2088,7 +2332,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_committed() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinCommitted(JoinCommitted {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2099,7 +2343,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_aborted() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinAborted(JoinAborted {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2112,9 +2356,7 @@ mod hot_join_tests {
     /// out of bounds. Mirrors `decode_message_rejects_truncated_reactivate_slot`.
     #[test]
     fn decode_message_rejects_truncated_join_committed() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&15_u32.to_le_bytes()); // MessageBody::JoinCommitted
+        let mut bytes = wire_prefix(0xABCD, 15);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2126,9 +2368,7 @@ mod hot_join_tests {
     /// A `JoinAborted` buffer truncated mid-`frame` must likewise be rejected.
     #[test]
     fn decode_message_rejects_truncated_join_aborted() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&16_u32.to_le_bytes()); // MessageBody::JoinAborted
+        let mut bytes = wire_prefix(0xABCD, 16);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2142,7 +2382,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_join_committed() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinCommitted(JoinCommitted {
                 handle: 1,
                 frame: Frame::new(7),
@@ -2161,7 +2401,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_join_aborted() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinAborted(JoinAborted {
                 handle: 1,
                 frame: Frame::new(7),

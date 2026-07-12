@@ -497,7 +497,7 @@ sync_remaining = 0 → state := Running
 MessageBody =
     | SyncRequest { random_request: u32 }
     | SyncReply { random_reply: u32 }
-    | Input { peer_connect_status: Vec<ConnectionStatus>, disconnect_requested: bool, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
+    | Input { peer_connect_status: Vec<ConnectionStatus>, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
     | InputAck { ack_frame: Frame }
     | QualityReport { frame_advantage: i16, ping: u128 }
     | QualityReply { pong: u128 }
@@ -505,7 +505,8 @@ MessageBody =
     | KeepAlive
     | FloorRequest { round_seq: u32 }                    -- floor-round protocol (N>=4 double-failure-relay convergence)
     | FloorReply { round_seq: u32, floors: Vec<Frame> }  -- relay's per-slot pessimistic floors
-    -- The following are only present with cfg(feature = "hot-join"):
+    -- Tags 10-16 are reserved in every build; their bodies are handled only with
+    -- cfg(feature = "hot-join"):
     | JoinRequest { player_handle: usize }
     | StateSnapshot { ... }
     | StateSnapshotAck { ... }
@@ -513,6 +514,7 @@ MessageBody =
     | ReactivateSlotAck { ... }
     | JoinCommitted { ... }
     | JoinAborted { frame: Frame }
+    | Goodbye { reason: u8 }                            -- fixed wire tag 17
 ```
 
 ---

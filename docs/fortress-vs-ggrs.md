@@ -276,7 +276,7 @@ let range_value: u32 = rng.gen_range(1..100);
 - **Less browser feature wiring** - GGRS 0.11 browser consumers enable `ggrs = { version = "0.11", features = ["wasm-bindgen"] }`; that feature is browser-only, while GGRS's direct `js-sys` target selection still applies across `wasm32` and does not make it Emscripten-compatible
 - **Explicit deterministic seeds** - Fortress's PCG supplies protocol nonces and ChaosSocket simulation; game simulation should use it only with a fixed seed shared by every peer
 
-**Important:** Fortress also uses this RNG for seeded protocol values such as synchronization magic. Game state should not consume an independently seeded stream; use a fixed, synchronized game RNG and verify it with cross-target checksums.
+**Important:** Fortress also uses this RNG for seeded protocol values such as synchronization connection ID. Game state should not consume an independently seeded stream; use a fixed, synchronized game RNG and verify it with cross-target checksums.
 
 ### Deterministic Hashing Module
 

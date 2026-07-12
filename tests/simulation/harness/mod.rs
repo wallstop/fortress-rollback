@@ -1046,17 +1046,27 @@ fn peer_protocol_seed(schedule: &Schedule, peer: usize) -> u64 {
 }
 
 #[cfg(feature = "hot-join")]
-fn protocol_magic_for_seed(seed: u64) -> u16 {
-    // Keep this in lockstep with UdpProtocol::new: draw the low u16 from
-    // Pcg32 and reject zero. The end-to-end hot-join census guards the
+fn protocol_conn_id_for_seed(seed: u64) -> u32 {
+    // Keep this in lockstep with UdpProtocol::new: draw a u32 from Pcg32 and
+    // reject zero or a zero low-16 block. The end-to-end hot-join census guards the
     // production side of this test-harness coupling.
     let mut rng = Pcg32::seed_from_u64(seed);
     loop {
-        let magic = rng.next_u32() as u16;
-        if magic != 0 {
-            return magic;
+        let conn_id = rng.next_u32();
+        if conn_id != 0 && conn_id & 0xFFFF != 0 {
+            return conn_id;
         }
     }
+}
+
+#[cfg(feature = "hot-join")]
+fn first_distinct_protocol_seed(
+    previous_conn_id: u32,
+    candidates: impl IntoIterator<Item = u64>,
+) -> Option<u64> {
+    candidates
+        .into_iter()
+        .find(|candidate| protocol_conn_id_for_seed(*candidate) != previous_conn_id)
 }
 
 #[cfg(feature = "hot-join")]
@@ -1079,27 +1089,27 @@ fn hot_join_protocol_seed_candidate(
 }
 
 /// Derives a deterministic replacement-generation seed whose initial protocol
-/// magic differs from the departing generation. Reusing the old seed makes a
+/// connection ID differs from the departing generation. Reusing the old seed makes a
 /// replacement synchronize prematurely with survivor endpoints from the old
-/// era; their later rearm advances its magic and the replacement then filters
+/// era; their later rearm advances its connection ID and the replacement then filters
 /// the genuine new-era handshake forever.
 #[cfg(feature = "hot-join")]
 fn hot_join_protocol_seed(schedule: &Schedule, peer: usize, step: u32, previous_seed: u64) -> u64 {
     // Schema <=11 replays the original same-seed replacement semantics so
     // checked-in corpus traces keep their historical identity. Schema 12
-    // gives each replacement generation a distinct initial protocol magic.
+    // gives each replacement generation a distinct initial protocol connection ID.
     if schedule.schema_version < 12 {
         return previous_seed;
     }
-    let previous_magic = protocol_magic_for_seed(previous_seed);
-    for nonce in 0_u32..=u32::from(u16::MAX) {
-        let candidate =
-            hot_join_protocol_seed_candidate(schedule, peer, step, previous_seed, nonce);
-        if protocol_magic_for_seed(candidate) != previous_magic {
-            return candidate;
-        }
-    }
-    panic!("failed to derive a distinct protocol magic for hot-join peer {peer} at step {step}");
+    let previous_conn_id = protocol_conn_id_for_seed(previous_seed);
+    let candidates = (0_u32..=u32::from(u16::MAX))
+        .map(|nonce| hot_join_protocol_seed_candidate(schedule, peer, step, previous_seed, nonce));
+    let Some(seed) = first_distinct_protocol_seed(previous_conn_id, candidates) else {
+        panic!(
+            "failed to derive a distinct protocol connection ID for hot-join peer {peer} at step {step}"
+        );
+    };
+    seed
 }
 
 fn update_spectator_required_min_frame<I: SimInput>(
@@ -1647,7 +1657,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     }
 
     // Build one session per peer. Handles: peer i is Local handle i, Remote
-    // handle j at addrs[j] for j != i. Protocol RNG seeded per peer so magic
+    // handle j at addrs[j] for j != i. Protocol RNG seeded per peer so connection IDs
     // numbers/sync tokens are reproducible.
     let spectator_addr = peer_addr(n);
     let spectator_handle = PlayerHandle::new(n);
@@ -3064,33 +3074,28 @@ mod tests {
         assert_eq!(replacement, repeated);
         assert_ne!(replacement, initial);
         assert_ne!(
-            protocol_magic_for_seed(replacement),
-            protocol_magic_for_seed(initial)
+            protocol_conn_id_for_seed(replacement),
+            protocol_conn_id_for_seed(initial)
         );
         assert_eq!(second_replacement, second_repeated);
         assert_ne!(second_replacement, replacement);
         assert_ne!(
-            protocol_magic_for_seed(second_replacement),
-            protocol_magic_for_seed(replacement)
+            protocol_conn_id_for_seed(second_replacement),
+            protocol_conn_id_for_seed(replacement)
         );
     }
 
     #[cfg(feature = "hot-join")]
     #[test]
-    fn hot_join_protocol_seed_retries_when_nonce_zero_candidate_reuses_previous_magic() {
-        let schedule = schedule::generate(0xB24D, schedule::SimConfig::smoke(4));
+    fn hot_join_protocol_seed_selection_skips_reused_connection_id() {
+        let schedule = schedule::generate(0x5EED_CAFE, schedule::SimConfig::smoke(4));
         let initial = peer_protocol_seed(&schedule, 3);
-        let colliding = hot_join_protocol_seed_candidate(&schedule, 3, 140, initial, 0);
-        let replacement = hot_join_protocol_seed(&schedule, 3, 140, initial);
+        let distinct = hot_join_protocol_seed(&schedule, 3, 140, initial);
 
         assert_eq!(
-            protocol_magic_for_seed(colliding),
-            protocol_magic_for_seed(initial)
-        );
-        assert_ne!(replacement, colliding);
-        assert_ne!(
-            protocol_magic_for_seed(replacement),
-            protocol_magic_for_seed(initial)
+            first_distinct_protocol_seed(protocol_conn_id_for_seed(initial), [initial, distinct],),
+            Some(distinct),
+            "selection must skip a candidate that reproduces the previous connection ID"
         );
     }
 

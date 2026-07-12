@@ -471,7 +471,7 @@ pub struct ProtocolConfig {
     ///
     /// When set to `Some(seed)`, the protocol will use a deterministic RNG seeded
     /// with this value for generating:
-    /// - Session magic numbers (protocol identifiers)
+    /// - Session connection IDs (protocol packet filters)
     /// - Sync request validation tokens
     ///
     /// This enables fully reproducible network sessions, which is useful for:
@@ -480,8 +480,8 @@ pub struct ProtocolConfig {
     /// - Debugging network issues
     ///
     /// When `None` (the default), the protocol uses non-deterministic random values
-    /// for security (harder to predict session IDs) and uniqueness (different magic
-    /// numbers for each session).
+    /// for security (harder to predict session IDs) and uniqueness (different
+    /// connection IDs for each session).
     ///
     /// # Example
     ///

@@ -474,7 +474,7 @@ At this point:
 During synchronization, peers exchange packets to establish:
 
 - Round-trip time measurements
-- Magic number for session identification
+- Protocol-v1 connection ID for packet filtering
 - Confirmation both peers are ready
 
 ```rust
@@ -726,7 +726,7 @@ sequenceDiagram
 This establishes:
 
 - Round-trip time measurement
-- Magic number exchange for packet validation
+- Connection-ID exchange for packet validation
 - Confirmation that both peers are ready
 
 ### During Gameplay
@@ -737,7 +737,10 @@ Regular message exchange:
 graph TD
     MSG["Message"]
     HEADER["MessageHeader"]
-    MAGIC["magic: u16<br/>(Identifies session)"]
+    SENTINEL["sentinel: [F5 52]"]
+    VERSION["version: u8<br/>(exactly 1)"]
+    FLAGS["flags: u8<br/>(reserved, zero)"]
+    CONN["conn_id: u32<br/>(Filters stale sessions)"]
     BODY["MessageBody"]
     INPUT["Input { ... }<br/>(Player inputs)"]
     INPUTACK["InputAck { ... }<br/>(Acknowledge input)"]
@@ -747,10 +750,14 @@ graph TD
     FLOORREQ["FloorRequest<br/>(N&ge;4 relay floor round)"]
     FLOORREP["FloorReply<br/>(Per-slot pessimistic floors)"]
     KEEPALIVE["KeepAlive<br/>(Idle connection upkeep)"]
+    GOODBYE["Goodbye<br/>(Best-effort disconnect)"]
 
     MSG --> HEADER
     MSG --> BODY
-    HEADER --> MAGIC
+    HEADER --> SENTINEL
+    HEADER --> VERSION
+    HEADER --> FLAGS
+    HEADER --> CONN
     BODY --> INPUT
     BODY --> INPUTACK
     BODY --> QUALITY
@@ -759,9 +766,10 @@ graph TD
     BODY --> FLOORREQ
     BODY --> FLOORREP
     BODY --> KEEPALIVE
+    BODY --> GOODBYE
 ```
 
-Hot-join builds (the `hot-join` feature) additionally carry join-lifecycle bodies (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`, `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`).
+Tags 10–16 are reserved for join-lifecycle bodies (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`, `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`) in every build so wire numbering never depends on features. Builds without `hot-join` recognize and reject those bodies.
 
 ### Time Synchronization
 
@@ -896,7 +904,8 @@ The codec module provides centralized, deterministic serialization for all netwo
 - **Centralized Configuration**: Single bincode config with fixed-size integers for deterministic message sizes
 - **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
 - **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
-- **Bounded Peer Decode**: `decode_message` validates network `Message` lengths before allocation
+- **Bounded Peer Decode**: `decode_message` validates the protocol-v1 prelude and network `Message` lengths before allocation
+- **Visible Refusal**: built-in sockets classify rejected legacy, version, flags, sentinel, and malformed packets and rate-limit warnings per receive poll
 
 ```rust
 use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError};
@@ -924,6 +933,7 @@ let len = encode_into(&data, &mut buffer)?;
 | `decode()`        | Decode trusted/local bytes with bytes consumed | Non-peer bytes where count matters |
 | `decode_value()`  | Decode trusted/local bytes ignoring byte count | Convenience when count not needed |
 | `decode_message()` | Decode bounded peer `Message` bytes | Custom socket receive paths |
+| `classify_wire_bytes()` | Diagnose bytes already rejected by `decode_message()` | Custom transport warnings/metrics |
 
 **Why Fixed-Size Integers:**
 

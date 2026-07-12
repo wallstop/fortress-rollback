@@ -16,6 +16,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
 - **Browser clock migration in Unreleased:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#unreleased-browser-chaossocket-clock-callbacks).
 - **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
+- **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
 - **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
@@ -37,6 +38,23 @@ fortress-rollback = { git = "https://github.com/wallstop/fortress-rollback", bra
 # or
 fortress-rollback = { path = "../fortress-rollback" }
 ```
+
+## 0.9 → 0.10 Wire Protocol
+
+Version 0.10 replaces the unversioned six-byte packet prefix with a protocol-v1
+prefix containing sentinel bytes, an exact version, reserved flags, and a 32-bit
+connection ID. Mixed 0.9/0.10 sessions cannot synchronize and must be upgraded as
+one deployment unit.
+
+| Receiver | Sender | Observation |
+| -------- | ------ | ----------- |
+| 0.10 | 0.9 | The packet is rejected as suspected legacy traffic and a rate-limited `NetworkProtocol` warning is reported. The default 20-second `SyncTimeout` event still fires while synchronization retries continue. |
+| 0.9 | 0.10 | The v1 prefix appears as an unknown legacy body discriminant, so the packet is discarded and the old default waits indefinitely unless the application configured its own timeout. |
+
+The `NonBlockingSocket` typed-message API is unchanged. Custom transports that
+receive raw bytes should decode them with `network::codec::decode_message` and
+use `classify_wire_bytes` for rate-limited diagnostics. Packet recordings,
+byte-preserving relays, and replay fixtures must be re-recorded for protocol v1.
 
 ## Import Path Changes
 

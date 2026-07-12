@@ -168,6 +168,41 @@ fn test_synchronize_p2p_sessions() -> Result<(), FortressError> {
     Ok(())
 }
 
+#[test]
+fn disconnect_player_notifies_remote_without_timeout() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (s1, s2, a1, a2) = create_channel_pair();
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .start_p2p_session(s1)?;
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(s2)?;
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
+        .expect("sessions synchronize");
+    drain_sync_events(&mut sess1, &mut sess2);
+    let disconnect_started = clock.now();
+
+    sess1.disconnect_player(PlayerHandle::new(1))?;
+    poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+
+    let disconnects = sess2
+        .events()
+        .filter(|event| matches!(event, FortressEvent::Disconnected { addr } if *addr == a1))
+        .count();
+    assert_eq!(disconnects, 1);
+    assert!(
+        clock.now() - disconnect_started < std::time::Duration::from_secs(1),
+        "Goodbye must not wait for the default disconnect timeout"
+    );
+
+    Ok(())
+}
+
 /// Tests P2P frame advancement between two synchronized sessions.
 ///
 /// Uses the generic `run_p2p_frame_advancement_test_deterministic` helper.
