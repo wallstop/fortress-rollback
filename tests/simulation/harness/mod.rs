@@ -1433,6 +1433,27 @@ fn peer_event_key<I: SimInput>(event: &FortressEvent<I::SessionConfig>) -> Optio
     Some(PeerEventKey { kind, payload })
 }
 
+fn record_first_synchronized_step(
+    first_steps: &mut [Vec<Option<u32>>],
+    peer_by_session_addr: &BTreeMap<SocketAddr, usize>,
+    local: usize,
+    remote_addr: &SocketAddr,
+    step: u32,
+) {
+    let Some(&remote) = peer_by_session_addr.get(remote_addr) else {
+        return;
+    };
+    if remote == local {
+        return;
+    }
+    if let Some(first_step) = first_steps
+        .get_mut(local)
+        .and_then(|row| row.get_mut(remote))
+    {
+        first_step.get_or_insert(step);
+    }
+}
+
 /// Per-step progress dump for the diagnostic path.
 // Deliberate diagnostic stdout: this path only runs under `--run-ignored`
 // manual investigation, where print output IS the deliverable.
@@ -1594,6 +1615,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         net.set_receive_limit(limit);
     }
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
+    let mut peer_by_session_addr: BTreeMap<SocketAddr, usize> = addrs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(peer, addr)| (addr, peer))
+        .collect();
 
     let mut spectator_host_enabled = vec![false; n];
     for &peer in &schedule.config.spectator_hosts {
@@ -1978,7 +2005,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     if !dead[*peer] {
                         let fresh = rebound_peer_addr(*peer);
                         match peers[*peer].binding.rebind(fresh) {
-                            Ok(_) => peers[*peer].source_addrs.push(fresh),
+                            Ok(_) => {
+                                peers[*peer].source_addrs.push(fresh);
+                                peer_by_session_addr.insert(fresh, *peer);
+                            },
                             Err(error) => oracle.observe_runner_error(
                                 "rebind_failed",
                                 *peer,
@@ -2071,13 +2101,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             oracle.observe_desync_event(i, *frame);
                         }
                         if let FortressEvent::Synchronized { addr } = event {
-                            if let Some(remote) =
-                                addrs.iter().position(|candidate| candidate == addr)
-                            {
-                                if remote != i && first_synchronized_step[i][remote].is_none() {
-                                    first_synchronized_step[i][remote] = Some(step);
-                                }
-                            }
+                            record_first_synchronized_step(
+                                &mut first_synchronized_step,
+                                &peer_by_session_addr,
+                                i,
+                                addr,
+                                step,
+                            );
                         }
                         // Closed-loop app model: obey a `WaitRecommendation` by owing
                         // that many skipped advances (max so a stronger one wins).
@@ -2621,6 +2651,30 @@ mod tests {
             assert_eq!(address, rebound_peer_addr(peer));
             assert!((0..=16).all(|canonical| address != peer_addr(canonical)));
         }
+    }
+
+    #[test]
+    fn synchronization_timing_maps_rebound_address_to_logical_peer() {
+        let mut peer_by_session_addr = BTreeMap::from([(peer_addr(1), 1)]);
+        peer_by_session_addr.insert(rebound_peer_addr(1), 1);
+        let mut first_steps = vec![vec![None; 2]; 2];
+
+        record_first_synchronized_step(
+            &mut first_steps,
+            &peer_by_session_addr,
+            0,
+            &rebound_peer_addr(1),
+            23,
+        );
+        record_first_synchronized_step(
+            &mut first_steps,
+            &peer_by_session_addr,
+            0,
+            &rebound_peer_addr(1),
+            24,
+        );
+
+        assert_eq!(first_steps[0][1], Some(23));
     }
 
     #[test]
