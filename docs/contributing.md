@@ -118,3 +118,31 @@ git commit --no-verify -m "emergency fix"
 ```
 
 Note: CI will still run these checks on pull requests
+
+## Release automation
+
+Releases use two manually dispatched GitHub Actions workflows:
+
+1. Run **Release - Prepare PR** from the default branch and choose `patch`,
+   `minor`, or `major`. The workflow rotates the Unreleased changelog notes,
+   synchronizes version references, validates the package, and opens a
+   `release/vX.Y.Z` pull request.
+2. Review and merge that pull request only after its normal CI and reviews are
+   green.
+3. Run **Release - Publish Crate** from the default branch with the exact
+   `X.Y.Z` version. It packages and checksums the crate, publishes it to
+   crates.io, creates the matching tag and GitHub release, and attaches the
+   `.crate` plus its SHA-256 file.
+
+The preparation workflow requires a repository GitHub App whose installation
+can write repository contents and pull requests. Store its App ID as
+`RELEASE_APP_ID` and its private key as `RELEASE_APP_PRIVATE_KEY`. Use a GitHub
+App token because pull requests created with the default
+`GITHUB_TOKEN` do not trigger the normal pull-request CI workflows. The publish
+workflow continues to require `CRATES_IO_TOKEN`.
+
+Both workflows fail if dispatched from a non-default branch. Publishing can
+safely rerun after a partial failure: the workflow skips an existing crates.io
+version only when its registry checksum exactly matches the newly packaged
+crate, and accepts an existing tag only when it points to the selected source
+commit.

@@ -6,15 +6,16 @@ on:
       release_version:
         description: "Version to publish (must match Cargo.toml)"
         required: true
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release-${{ inputs.release_version }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -24,6 +25,16 @@ jobs:
       contents: write
 
     steps:
+      - name: Require default branch dispatch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "::error::Releases must run from ${DEFAULT_BRANCH}; got ${GITHUB_REF}."
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - name: Install Rust
@@ -60,21 +71,15 @@ jobs:
           restore-keys: |
             publish-${{ runner.os }}-cargo-
 
-      - name: Verify version matches tag (if tag push)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Verify release input and source metadata
         run: |
-          TAG_VERSION=${GITHUB_REF#refs/tags/}
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
-          if [ "$TAG_VERSION" != "v${CARGO_VERSION}" ]; then
-            echo "Tag version $TAG_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+          set -euo pipefail
+          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          INPUT_VERSION="${{ github.event.inputs.release_version }}"
+          if ! printf '%s\n' "$INPUT_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "release_version must use strict X.Y.Z semver; got $INPUT_VERSION" >&2
             exit 1
           fi
-
-      - name: Verify workflow_dispatch version input matches Cargo.toml
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
-          INPUT_VERSION="${{ github.event.inputs.release_version }}"
           if [ "$INPUT_VERSION" != "$CARGO_VERSION" ]; then
             echo "workflow_dispatch input release_version=$INPUT_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
             exit 1
@@ -96,8 +101,24 @@ jobs:
             exit 1
           fi
 
-      - name: Publish (dry-run)
-        run: cargo publish --dry-run
+      - name: Package release artifact
+        id: package
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          CRATE_NAME=$(awk -F '"' '/^name = "/ { print $2; exit }' Cargo.toml)
+          cargo package --locked
+          package_path="target/package/${CRATE_NAME}-${CARGO_VERSION}.crate"
+          if [ ! -f "$package_path" ]; then
+            echo "Packaged crate is missing: $package_path" >&2
+            exit 1
+          fi
+          local_checksum=$(sha256sum "$package_path" | awk '{ print $1 }')
+          printf '%s  %s\n' "$local_checksum" "$(basename "$package_path")" > "${package_path}.sha256"
+          echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "path=$package_path" >> "$GITHUB_OUTPUT"
+          echo "checksum=$local_checksum" >> "$GITHUB_OUTPUT"
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -105,16 +126,68 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
+      - name: Upload packaged crate
+        uses: actions/upload-artifact@v7
+        with:
+          name: fortress-rollback-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.path }}
+            ${{ steps.package.outputs.path }}.sha256
+          if-no-files-found: error
+
+      - name: Check crates.io publication state
+        id: registry
+        env:
+          CRATE_NAME: ${{ steps.package.outputs.crate_name }}
+          CARGO_VERSION: ${{ steps.package.outputs.version }}
+          local_checksum: ${{ steps.package.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/crates-io-version.json"
+          status=$(curl --silent --show-error --location --output "$response" --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/${CARGO_VERSION}")
+          if [ "$status" = "404" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$status" != "200" ]; then
+            echo "crates.io returned HTTP $status while checking ${CRATE_NAME} ${CARGO_VERSION}" >&2
+            sed -n '1,20p' "$response"
+            exit 1
+          fi
+          published_checksum=$(jq -r '.version.checksum // empty' "$response")
+          if [ -z "$published_checksum" ] || [ "$published_checksum" != "$local_checksum" ]; then
+            echo "Existing crates.io artifact checksum does not match the packaged crate." >&2
+            echo "local=$local_checksum published=$published_checksum" >&2
+            exit 1
+          fi
+          echo "${CRATE_NAME} ${CARGO_VERSION} already exists on crates.io with the packaged checksum; publish will be skipped."
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+
       - name: Publish to crates.io
+        if: steps.registry.outputs.publish == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish
+        run: cargo publish --locked
 
       - name: Create and push git tag
-        if: github.event_name == 'workflow_dispatch'
         run: |
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          set -euo pipefail
+          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
           TAG_NAME="v${CARGO_VERSION}"
+          SOURCE_SHA=$(git rev-parse HEAD)
+          existing_target=$(git ls-remote origin "refs/tags/${TAG_NAME}^{}" | awk '{ print $1 }')
+          if [ -z "$existing_target" ]; then
+            existing_target=$(git ls-remote origin "refs/tags/${TAG_NAME}" | awk '{ print $1 }')
+          fi
+          if [ -n "$existing_target" ]; then
+            if [ "$existing_target" != "$SOURCE_SHA" ]; then
+              echo "Tag ${TAG_NAME} already exists at ${existing_target}, expected ${SOURCE_SHA}." >&2
+              exit 1
+            fi
+            echo "Tag ${TAG_NAME} already points at ${SOURCE_SHA}."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
@@ -123,11 +196,7 @@ jobs:
       - name: Get version for release
         id: get_version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
+          VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -159,6 +228,9 @@ jobs:
           tag_name: ${{ steps.get_version.outputs.tag }}
           name: ${{ steps.get_version.outputs.tag }}
           body_path: release_notes.md
+          files: |
+            ${{ steps.package.outputs.path }}
+            ${{ steps.package.outputs.path }}.sha256
           draft: false
           prerelease: false
         env:
