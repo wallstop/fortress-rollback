@@ -290,6 +290,21 @@ fn read_i32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResul
     Ok(i32::from_le_bytes(read_array(bytes, cursor, field)?))
 }
 
+fn read_frame(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+    allow_null: bool,
+) -> CodecResult<Frame> {
+    let value = read_i32(bytes, cursor, field)?;
+    if value < 0 && !(allow_null && value == Frame::NULL.as_i32()) {
+        return Err(decode_message_error(format!(
+            "invalid negative frame {value} for {field}"
+        )));
+    }
+    Ok(Frame::new(value))
+}
+
 fn read_u128(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u128> {
     Ok(u128::from_le_bytes(read_array(bytes, cursor, field)?))
 }
@@ -318,7 +333,7 @@ fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<Con
     // `last_frame`, then `epoch`.
     Ok(ConnectionStatus {
         disconnected: read_bool(bytes, cursor, "connection_status.disconnected")?,
-        last_frame: Frame::new(read_i32(bytes, cursor, "connection_status.last_frame")?),
+        last_frame: read_frame(bytes, cursor, "connection_status.last_frame", true)?,
         epoch: read_u16(bytes, cursor, "connection_status.epoch")?,
     })
 }
@@ -439,7 +454,7 @@ fn decode_floor_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<FloorRepl
         ))
     })?;
     for _ in 0..floor_len {
-        floors.push(Frame::new(read_i32(bytes, cursor, "floor_reply.floors")?));
+        floors.push(read_frame(bytes, cursor, "floor_reply.floors", true)?);
     }
     Ok(FloorReply { round_seq, floors })
 }
@@ -681,7 +696,8 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// # Errors
 ///
 /// Returns [`CodecError::DecodeError`] when the message is truncated, contains an
-/// invalid variant or boolean, has trailing bytes, or declares a length that
+/// invalid variant or boolean, has an out-of-domain value in a frame field with
+/// restricted wire semantics, has trailing bytes, or declares a length that
 /// cannot fit in the remaining packet.
 pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     let mut cursor = 0;
@@ -709,7 +725,7 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         }),
         6 => MessageBody::ChecksumReport(ChecksumReport {
             checksum: read_u128(bytes, &mut cursor, "checksum_report.checksum")?,
-            frame: Frame::new(read_i32(bytes, &mut cursor, "checksum_report.frame")?),
+            frame: read_frame(bytes, &mut cursor, "checksum_report.frame", false)?,
         }),
         7 => MessageBody::KeepAlive,
         // Floor-round variants (double-failure-relay connected-relay reorder fix,
@@ -1395,6 +1411,83 @@ mod tests {
         let result = decode_message(&bytes);
 
         assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_connection_status_frame() {
+        let message = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::Input(Input {
+                peer_connect_status: vec![ConnectionStatus::default()],
+                ..Input::default()
+            }),
+        };
+        let mut bytes = encode(&message).unwrap();
+        // header (2) + variant (4) + status length (8) + disconnected (1)
+        bytes[15..19].copy_from_slice(&(-2_i32).to_le_bytes());
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_allows_null_connection_status_and_floor_frames() {
+        let messages = [
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::Input(Input {
+                    peer_connect_status: vec![ConnectionStatus::default()],
+                    ..Input::default()
+                }),
+            },
+            Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::FloorReply(FloorReply {
+                    round_seq: 1,
+                    floors: vec![Frame::NULL],
+                }),
+            },
+        ];
+
+        for message in messages {
+            let bytes = encode(&message).unwrap();
+            let result = decode_message(&bytes);
+            assert_eq!(result, Ok((message, bytes.len())));
+        }
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_floor_reply_frame() {
+        let message = Message {
+            header: MessageHeader { magic: 0xABCD },
+            body: MessageBody::FloorReply(FloorReply {
+                round_seq: 1,
+                floors: vec![Frame::new(5)],
+            }),
+        };
+        let mut bytes = encode(&message).unwrap();
+        // header (2) + variant (4) + round sequence (4) + floors length (8)
+        bytes[18..22].copy_from_slice(&(-2_i32).to_le_bytes());
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_checksum_frame() {
+        for frame in [Frame::NULL, Frame::new(-2)] {
+            let message = Message {
+                header: MessageHeader { magic: 0xABCD },
+                body: MessageBody::ChecksumReport(ChecksumReport { checksum: 7, frame }),
+            };
+            let bytes = encode(&message).unwrap();
+
+            let result = decode_message(&bytes);
+
+            assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+        }
     }
 
     #[test]

@@ -118,7 +118,7 @@ pub struct SyncConfig {
     /// Maximum time to wait for synchronization to complete. If sync takes
     /// longer than this, a `SyncTimeout` event is emitted.
     ///
-    /// Default: `None` (no timeout)
+    /// Default: 20 seconds
     pub sync_timeout: Option<Duration>,
 
     /// Time between input retries during the running phase. If we haven't
@@ -139,7 +139,7 @@ impl Default for SyncConfig {
         Self {
             num_sync_packets: 5,
             sync_retry_interval: Duration::from_millis(200),
-            sync_timeout: None,
+            sync_timeout: Some(Duration::from_secs(20)),
             running_retry_interval: Duration::from_millis(200),
             keepalive_interval: Duration::from_millis(200),
         }
@@ -1676,7 +1676,7 @@ mod tests {
         let config = SyncConfig::default();
         assert_eq!(config.num_sync_packets, 5);
         assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
-        assert!(config.sync_timeout.is_none());
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(20)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(200));
         assert_eq!(config.keepalive_interval, Duration::from_millis(200));
     }
@@ -1798,7 +1798,7 @@ mod tests {
         let display_str = config.to_string();
         assert!(display_str.contains("SyncConfig"));
         assert!(display_str.contains("num_sync_packets: 5"));
-        assert!(display_str.contains("timeout: None"));
+        assert!(display_str.contains("timeout: 20s"));
 
         // Test with timeout
         let config = SyncConfig::lan();

@@ -5084,11 +5084,7 @@ mod tests {
     fn sync_timeout_event_emitted_only_once() {
         let (protocol_config, clock) = mutable_clock_config();
 
-        // Create a protocol with a very short sync timeout
-        let sync_config = SyncConfig {
-            sync_timeout: Some(Duration::from_millis(1)),
-            ..SyncConfig::default()
-        };
+        let sync_config = SyncConfig::default();
 
         let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
             vec![PlayerHandle::new(0)],
@@ -5107,7 +5103,7 @@ mod tests {
         .expect("Failed to create test protocol");
         protocol.synchronize().unwrap();
 
-        advance_test_clock(&clock, Duration::from_millis(2));
+        advance_test_clock(&clock, Duration::from_secs(20) + Duration::from_millis(1));
 
         let connect_status = vec![ConnectionStatus::default(); 2];
 
@@ -6476,7 +6472,7 @@ mod tests {
         let config = SyncConfig::default();
         assert_eq!(config.num_sync_packets, 5);
         assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
-        assert_eq!(config.sync_timeout, None);
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(20)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(200));
         assert_eq!(config.keepalive_interval, Duration::from_millis(200));
     }

@@ -15,6 +15,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
 - **Browser clock migration in Unreleased:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#unreleased-browser-chaossocket-clock-callbacks).
+- **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
 - **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes

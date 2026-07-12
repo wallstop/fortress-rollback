@@ -75,6 +75,48 @@ fn test_start_session() -> Result<(), FortressError> {
 }
 
 #[test]
+fn default_sync_timeout_emits_one_public_event_after_twenty_seconds() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (socket, _silent_remote, _local_addr, remote_addr) = create_channel_pair();
+    let mut session = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
+        .start_p2p_session(socket)?;
+
+    session.poll_remote_clients();
+    session.events().for_each(drop);
+    clock.advance(std::time::Duration::from_secs(20));
+    session.poll_remote_clients();
+    assert!(
+        session
+            .events()
+            .all(|event| !matches!(event, FortressEvent::SyncTimeout { .. })),
+        "the timeout boundary is exclusive"
+    );
+
+    clock.advance(std::time::Duration::from_millis(1));
+    session.poll_remote_clients();
+    let timeout_events: Vec<_> = session
+        .events()
+        .filter_map(|event| match event {
+            FortressEvent::SyncTimeout { addr, elapsed_ms } => Some((addr, elapsed_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(timeout_events, vec![(remote_addr, 20_001)]);
+    assert_eq!(session.current_state(), SessionState::Synchronizing);
+
+    clock.advance(std::time::Duration::from_secs(20));
+    session.poll_remote_clients();
+    assert!(session
+        .events()
+        .all(|event| !matches!(event, FortressEvent::SyncTimeout { .. })));
+
+    Ok(())
+}
+
+#[test]
 fn test_disconnect_player() -> Result<(), FortressError> {
     let clock = TestClock::new();
     let (socket, _addr0) = create_unconnected_socket(10000);
