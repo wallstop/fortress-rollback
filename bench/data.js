@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783829307617,
+  "lastUpdate": 1783874238054,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "70d45e7684fab460c65d6906d616d6e01e53d64e",
-          "message": "Improved session behavior (#154)\n\n## Description\n\nAdds user-facing session resilience and runtime tuning improvements for\nP2P play:\n\n- Runtime per-player input delay adjustment via `set_input_delay`,\nincluding supported mid-session increases.\n- Configurable disconnect handling with a new graceful mode\n(`DisconnectBehavior::ContinueWithout`) that allows remaining peers to\ncontinue after a drop.\n- New explicit graceful removal API (`remove_player`) and a new\n`PeerDropped` event for gameplay/UI handling.\n\nThis keeps backward compatibility by preserving halt-on-drop as the\ndefault (`DisconnectBehavior::Halt`).\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n   - No `unwrap()` in production code\n   - No `expect()` in production code\n   - No `panic!()` or `todo!()`\n   - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/input_delay.rs` (new)\n- `tests/sessions/peer_drop.rs` (new)\n- `tests/sessions.rs` (module registration update)\n\n**Manual testing performed:**\n\n- Not performed for this PR description update.\n\n## Related Issues\n\n- None linked.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Mostly devcontainer + CI workflow changes (tool installation/version\npinning, retries, and link/prose checking) that can affect build\nreliability and developer environment setup, but do not touch runtime\nlibrary logic. Risk is in accidental CI breakage or mismatched tool\nversions across runners/containers.\n> \n> **Overview**\n> **Tooling and CI hardening.** Devcontainer now installs and boots an\noptional Codex CLI (`@openai/codex`) with a persisted `~/.codex` volume\nand non-blocking lifecycle hook (`codex-bootstrap.sh`), and TLA+ tooling\nis version-pinned via `.tla-tools-version` with a shared setup script\nused by both the image and workspace.\n> \n> **More deterministic quality checks.** The `install-cargo-tool` action\nnow verifies cached/install tool versions (new `version-check.sh`) and\nfails on mismatches; `ci-quality` treats `typos` as blocking while\nmaking `cargo-shear`/`cargo-spellcheck` advisory with machine-parsed\noutputs and a clearer summary. Docs CI improves Vale annotation parsing,\nadds external link-check reporting artifacts, and validates Lychee\nconfig before running.\n> \n> **CI reliability tweaks.** Verification/network workflows add\nconcurrency cancellation, Kani version pinning + retry-on-preempt\nbehavior, and cache key fixes (TLA+ cache keyed by\n`.tla-tools-version`). Documentation/examples/changelog are updated to\ndescribe the new runtime input-delay and graceful peer-drop APIs and\ntheir new enum variants.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n4fbc91a7621bb293632de6050f5380ed746bac16. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-05-09T20:40:04-07:00",
-          "tree_id": "0f8839daa88c3ff5bf241e41d4c85bfebf556f8a",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/70d45e7684fab460c65d6906d616d6e01e53d64e"
-        },
-        "date": 1778384700162,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 126,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 175,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 465,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 738,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1088,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 98244,
-            "range": "± 1077",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 36634,
-            "range": "± 830",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6304,6 +6178,144 @@ window.BENCHMARK_DATA = {
           {
             "name": "Message/encoded_len",
             "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b535d3b53fa2b7c44a5074565321aced172bfd75",
+          "message": "Land protocol v1 and coordinated graceful drop (#226)\n\n## Summary\n\n- retain the session-109 20-second default sync timeout and negative\nwire-frame validation\n- add the protocol-v1 12-byte prelude, feature-independent tags,\nvalidated 32-bit connection IDs, and tag-17 explicit-disconnect\n`Goodbye`\n- add the fixed-width v1 session-config handshake and canonical digest\n- fail closed with durable `IncompatibleSession` events on every\ndeterministic configuration mismatch\n- add bounded `codec::{encode_framed, FrameDecoder}` helpers for TCP and\nother raw byte streams\n- add inclusive 1,200-byte portability and 1,472-byte IPv4/UDP\nfragmentation diagnostics with distinct saturating `PeerMetrics`\ncounters\n- add tags 18–22 and a coordinated\nprepare/inventory/backfill/ready/commit graceful-drop barrier that never\nretracts exposed confirmed history\n- add bounded retained-history backfill, atomic freeze-at-cut,\ngeneration fencing, fail-closed timeout handling, and deterministic\nconcurrent-drop rebasing\n- add the `CoordinatedPeerDrop` TLA+ family with fair/fault models and\nan expected ImmediateMin counterexample\n- document best-effort local send/drop semantics, TCP latency/HOL\nbehavior, WebRTC/QUIC/WebTransport guidance, and the transport security\nboundary\n- correct built-in UDP/Tokio oversized-send warnings to report required\nencoded bytes rather than buffer capacity\n\n## Compatibility\n\nThis is the coordinated 0.10.0 breaking wire/API transition. Protocol v1\nrejects legacy 0.9 packets in both directions, and exhaustive matches\nmust handle the new `FortressEvent::IncompatibleSession` and\n`EventKind::IncompatibleSession` variants. Existing event discriminants\nare preserved by appending the new variant. The stream length prefix is\ntransport-local and does not change datagram bytes or deterministic\nstate. `PeerMetrics` is non-exhaustive, so its new counters are\nadditive.\n\n## Validation\n\n- default nextest: 2,827 passed, 73 skipped\n- hot-join nextest: 3,082 passed, 73 skipped\n- default and hot-join/tokio/json all-target clippy with `-D warnings`\n- focused framing split/concatenation/poison/property tests and exact\n1,199/1,200/1,471/1,472 boundary tests\n- 35-test peer-drop slice, D14 lossy/minority-partition simulations, and\nall five new tag byte goldens\n- coordinated-drop TLC suite: base, fair, faults, and expected\nImmediateMin counterexample\n- sweep PR gate\n- semver checks against 0.9.0\n- rustdoc, 223 doc tests (169 passed, 54 ignored), and examples\n- agent preflight, links, semantic doc claims, markdownlint, version\nsync, and changelog policy\n- two-pass adversarial review: all five first-pass findings fixed by a\nseparate pass; fresh re-review reported zero issues\n- Miri budget follow-up: expensive new property probes remain in\nordinary nextest but are skipped under Miri; deterministic framing\ncoverage remains on every Miri shard\n\nExact head: `86e8cd67aa3c7f7ede6c6e401c518826fe875daf`.\n\nRemaining planned wire work: complete the immutable protocol-v1/legacy\ngolden suite beyond the five pinned D14 variants.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Breaking wire protocol and session handshake require fleet-wide\nupgrades; coordinated graceful drop and incompatible-session handling\nchange core disconnect and sync failure semantics.\n> \n> **Overview**\n> **0.10.0** is a coordinated breaking release: all peers must upgrade\ntogether for **protocol-v1** on the wire and for new session/API\nbehavior.\n> \n> **Wire and sync:** Packets gain a versioned prelude (`F5 52`, version\n1, flags, 32-bit connection ID) and reject legacy 0.9 traffic. Sync\nrequest/reply now carry a fixed session-config block and canonical\ndigest; mismatches emit a sticky\n**`FortressEvent::IncompatibleSession`** (new exhaustive match arms on\n`FortressEvent` / `EventKind`). Default **`SyncConfig::sync_timeout`**\nbecomes **20s** (`None` restores unlimited retries). Tag 17\n**`Goodbye`** replaces the old input disconnect byte; graceful-drop tags\n**18–22** support a multi-phase barrier. Datagram bytes are unchanged\nfor UDP; **`codec::encode_framed`** and **`FrameDecoder`** add a\ntransport-local u32-LE envelope for TCP/raw streams.\n> \n> **Graceful drop:** **`remove_player`** and **`ContinueWithout`**\nauto-removal no longer freeze locally on gossip; survivors run a\n**prepare → inventory → backfill → ready → commit** certificate, hold\nconfirmation until a non-retracting cut, then emit **`PeerDropped`**\nonly on commit (failure returns to **`Synchronizing`** without the\nevent). **`CoordinatedPeerDrop`** TLA+ models this with fair/fault\ncompanions and an **ImmediateMin** mutation counterexample.\n> \n> **Observability and docs:** **`PeerMetrics`** adds saturating\n**1,200-byte** portability and **1,472-byte** fragmentation-risk\ncounters (diagnostics only). New **threat model**, migration\n**0.9→0.10** wire section, and transport guidance (best-effort send, TCP\nHOL, prefer datagram rollback paths).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n86e8cd67aa3c7f7ede6c6e401c518826fe875daf. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-12T09:31:44-07:00",
+          "tree_id": "77898bbfd2001bdc6f458cb794764a7b6aa3566d",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b535d3b53fa2b7c44a5074565321aced172bfd75"
+        },
+        "date": 1783874236438,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 115,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 167,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 469,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 700,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1024,
+            "range": "± 33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 129206,
+            "range": "± 1595",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46933,
+            "range": "± 119",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 100",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
             "range": "± 0",
             "unit": "ns/iter"
           },
