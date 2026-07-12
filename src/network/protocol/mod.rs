@@ -13,12 +13,14 @@ pub use state::ProtocolState;
 
 use crate::error::{allocation_failed, SerializationErrorKind};
 use crate::frame_info::PlayerInput;
+use crate::hash::DeterministicHasher;
 use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+    MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
+    SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -32,14 +34,15 @@ use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::{TimeSync, TimeSyncConfig};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{
-    Config, DesyncDetection, FortressError, Frame, InvalidRequestKind, NonBlockingSocket,
-    PlayerHandle,
+    Config, DesyncDetection, FortressError, Frame, IncompatibleSessionReason, InvalidRequestKind,
+    NonBlockingSocket, PlayerHandle,
 };
 use tracing::trace;
 
 use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
+use std::hash::Hasher;
 use std::ops::Add;
 use std::sync::Arc;
 use web_time::{Duration, Instant};
@@ -47,6 +50,159 @@ use web_time::{Duration, Instant};
 use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
+const CONFIG_DIGEST_DOMAIN: &[u8; 8] = b"FRv1-cfg";
+const HOT_JOIN_FEATURE: u32 = 1 << 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HandshakeConfig {
+    min_compat_version: u8,
+    features: u32,
+    config: SessionConfigBlock,
+    config_digest: u64,
+}
+
+impl HandshakeConfig {
+    fn new(config: SessionConfigBlock) -> Self {
+        let features = if cfg!(feature = "hot-join") {
+            HOT_JOIN_FEATURE
+        } else {
+            0
+        };
+        let config_digest = config_digest(config, features);
+        Self {
+            min_compat_version: super::MIN_SUPPORTED_PROTOCOL_VERSION,
+            features,
+            config,
+            config_digest,
+        }
+    }
+
+    const fn from_request(request: SyncRequest) -> Self {
+        Self {
+            min_compat_version: request.min_compat_version,
+            features: request.features,
+            config: request.config,
+            config_digest: request.config_digest,
+        }
+    }
+
+    const fn from_reply(reply: SyncReply) -> Self {
+        Self {
+            min_compat_version: reply.min_compat_version,
+            features: reply.features,
+            config: reply.config,
+            config_digest: reply.config_digest,
+        }
+    }
+
+    const fn request(self, random_request: u32) -> SyncRequest {
+        SyncRequest {
+            random_request,
+            min_compat_version: self.min_compat_version,
+            features: self.features,
+            config: self.config,
+            config_digest: self.config_digest,
+        }
+    }
+
+    const fn reply(self, random_reply: u32) -> SyncReply {
+        SyncReply {
+            random_reply,
+            min_compat_version: self.min_compat_version,
+            features: self.features,
+            config: self.config,
+            config_digest: self.config_digest,
+        }
+    }
+
+    const fn first_mismatch(self, theirs: Self) -> Option<IncompatibleSessionReason> {
+        if self.min_compat_version != theirs.min_compat_version {
+            return Some(IncompatibleSessionReason::ProtocolVersion {
+                ours: self.min_compat_version,
+                theirs: theirs.min_compat_version,
+            });
+        }
+        if self.config.num_players != theirs.config.num_players {
+            return Some(IncompatibleSessionReason::NumPlayers {
+                ours: self.config.num_players,
+                theirs: theirs.config.num_players,
+            });
+        }
+        if self.config.input_bytes_per_player != theirs.config.input_bytes_per_player {
+            return Some(IncompatibleSessionReason::InputWidth {
+                ours: self.config.input_bytes_per_player,
+                theirs: theirs.config.input_bytes_per_player,
+            });
+        }
+        if self.config.fps != theirs.config.fps {
+            return Some(IncompatibleSessionReason::Fps {
+                ours: self.config.fps,
+                theirs: theirs.config.fps,
+            });
+        }
+        if self.config.max_prediction != theirs.config.max_prediction {
+            return Some(IncompatibleSessionReason::MaxPrediction {
+                ours: self.config.max_prediction,
+                theirs: theirs.config.max_prediction,
+            });
+        }
+        if self.config.desync_interval != theirs.config.desync_interval {
+            return Some(IncompatibleSessionReason::DesyncInterval {
+                ours: self.config.desync_interval,
+                theirs: theirs.config.desync_interval,
+            });
+        }
+        if self.features != theirs.features {
+            return Some(IncompatibleSessionReason::Features {
+                ours: self.features,
+                theirs: theirs.features,
+            });
+        }
+        if self.config_digest != theirs.config_digest {
+            return Some(IncompatibleSessionReason::ConfigDigest {
+                ours: self.config_digest,
+                theirs: theirs.config_digest,
+            });
+        }
+        None
+    }
+}
+
+fn config_digest(config: SessionConfigBlock, features: u32) -> u64 {
+    let mut hasher = DeterministicHasher::new();
+    hasher.write(CONFIG_DIGEST_DOMAIN);
+    hasher.write(&config.num_players.to_le_bytes());
+    hasher.write(&config.input_bytes_per_player.to_le_bytes());
+    hasher.write(&config.fps.to_le_bytes());
+    hasher.write(&config.max_prediction.to_le_bytes());
+    hasher.write(&config.desync_interval.to_le_bytes());
+    hasher.write(&features.to_le_bytes());
+    hasher.finish()
+}
+
+fn narrow_u16(field: &'static str, value: usize) -> Result<u16, FortressError> {
+    u16::try_from(value).map_err(|_err| {
+        InvalidRequestKind::ConfigValueOutOfRange {
+            field,
+            min: 0,
+            max: u64::from(u16::MAX),
+            actual: u64::try_from(value).unwrap_or(u64::MAX),
+        }
+        .into()
+    })
+}
+
+fn narrow_u32(field: &'static str, value: usize) -> Result<u32, FortressError> {
+    u32::try_from(value).map_err(|_err| {
+        InvalidRequestKind::ConfigValueOutOfRange {
+            field,
+            min: 0,
+            max: u64::from(u32::MAX),
+            actual: u64::try_from(value).unwrap_or(u64::MAX),
+        }
+        .into()
+    })
+}
 
 /// UDP protocol handler for peer-to-peer communication.
 ///
@@ -96,6 +252,8 @@ where
 
     // sync configuration
     sync_config: SyncConfig,
+    local_handshake: HandshakeConfig,
+    handshake_failed: Option<IncompatibleSessionReason>,
 
     // protocol configuration
     protocol_config: ProtocolConfig,
@@ -580,11 +738,11 @@ fn validate_input_frame_wire_size(
 fn validate_protocol_input_wire_sizes<T: Config>(
     recv_player_num: usize,
     local_players: usize,
-) -> Result<(), FortressError> {
+) -> Result<usize, FortressError> {
     let input_size = validate_default_input_wire_size::<T>()?;
     validate_input_frame_wire_size(input_size, recv_player_num)?;
     validate_input_frame_wire_size(input_size, local_players)?;
-    Ok(())
+    Ok(input_size)
 }
 
 impl<T: Config> UdpProtocol<T> {
@@ -618,7 +776,27 @@ impl<T: Config> UdpProtocol<T> {
 
         handles.sort_unstable();
         let recv_player_num = handles.len();
-        validate_protocol_input_wire_sizes::<T>(recv_player_num, local_players)?;
+        let input_size = validate_protocol_input_wire_sizes::<T>(recv_player_num, local_players)?;
+        let desync_interval = match desync_detection {
+            DesyncDetection::Off => 0,
+            DesyncDetection::On { interval: 0 } => {
+                return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    max: u64::from(u32::MAX),
+                    actual: 0,
+                }
+                .into());
+            },
+            DesyncDetection::On { interval } => interval,
+        };
+        let local_handshake = HandshakeConfig::new(SessionConfigBlock {
+            num_players: narrow_u16("num_players", num_players)?,
+            input_bytes_per_player: narrow_u16("input_bytes_per_player", input_size)?,
+            fps: narrow_u32("fps", fps)?,
+            max_prediction: narrow_u16("max_prediction", max_prediction)?,
+            desync_interval,
+        });
 
         // Initialize protocol RNG if a deterministic seed is provided
         let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
@@ -698,6 +876,8 @@ impl<T: Config> UdpProtocol<T> {
 
             // sync configuration
             sync_config,
+            local_handshake,
+            handshake_failed: None,
 
             // protocol configuration
             protocol_config,
@@ -1196,20 +1376,27 @@ impl<T: Config> UdpProtocol<T> {
         let now = self.now();
         match self.state {
             ProtocolState::Synchronizing => {
-                // Check for sync timeout if configured (emit event only once)
-                if let Some(timeout) = self.sync_config.sync_timeout {
-                    let elapsed = now - self.stats_start_time;
-                    if elapsed > timeout && !self.sync_timeout_event_sent {
-                        self.sync_timeout_event_sent = true;
-                        self.event_queue.push_back(Event::SyncTimeout {
-                            elapsed_ms: elapsed.as_millis(),
-                        });
+                // An incompatible handshake is terminal. Keep the protocol in
+                // Synchronizing so it never counts as connected, but stop all
+                // retries and timeout notifications. Incoming requests remain
+                // answerable through `handle_message` so both peers diagnose
+                // their locally-oriented mismatch.
+                if self.handshake_failed.is_none() {
+                    // Check for sync timeout if configured (emit event only once)
+                    if let Some(timeout) = self.sync_config.sync_timeout {
+                        let elapsed = now - self.stats_start_time;
+                        if elapsed > timeout && !self.sync_timeout_event_sent {
+                            self.sync_timeout_event_sent = true;
+                            self.event_queue.push_back(Event::SyncTimeout {
+                                elapsed_ms: elapsed.as_millis(),
+                            });
+                        }
                     }
-                }
 
-                // some time has passed, let us send another sync request
-                if self.last_send_time + self.sync_config.sync_retry_interval < now {
-                    self.send_sync_request();
+                    // some time has passed, let us send another sync request
+                    if self.last_send_time + self.sync_config.sync_retry_interval < now {
+                        self.send_sync_request();
+                    }
                 }
             },
             ProtocolState::Running => {
@@ -1810,6 +1997,9 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn send_sync_request(&mut self) {
+        if self.handshake_failed.is_some() {
+            return;
+        }
         self.sync_requests_sent += 1;
 
         // Check for excessive retries and emit warning (once)
@@ -1847,9 +2037,7 @@ impl<T: Config> UdpProtocol<T> {
             None => random(),
         };
         self.sync_random_requests.insert(random_number);
-        let body = SyncRequest {
-            random_request: random_number,
-        };
+        let body = self.local_handshake.request(random_number);
         self.queue_message(MessageBody::SyncRequest(body));
     }
 
@@ -2012,10 +2200,15 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `SyncRequest`, answer with a `SyncReply` with the proper data
     fn on_sync_request(&mut self, body: SyncRequest) {
-        let reply_body = SyncReply {
-            random_reply: body.random_request,
-        };
+        // Always answer with our own configuration, including after our local
+        // handshake has failed, so the requester can independently diagnose
+        // the same incompatibility with its own ours/theirs orientation.
+        let reply_body = self.local_handshake.reply(body.random_request);
         self.queue_message(MessageBody::SyncReply(reply_body));
+
+        if self.state == ProtocolState::Synchronizing {
+            self.observe_handshake(HandshakeConfig::from_request(body));
+        }
     }
 
     fn on_goodbye(&mut self, _body: Goodbye) {
@@ -2028,11 +2221,18 @@ impl<T: Config> UdpProtocol<T> {
     /// Upon receiving a `SyncReply`, check validity and either continue the synchronization process or conclude synchronization.
     fn on_sync_reply(&mut self, header: MessageHeader, body: SyncReply) {
         // ignore sync replies when not syncing
-        if self.state != ProtocolState::Synchronizing {
+        if self.state != ProtocolState::Synchronizing || self.handshake_failed.is_some() {
             return;
         }
         // this is not the correct reply
         if !self.sync_random_requests.remove(&body.random_reply) {
+            return;
+        }
+        // A reply's peer-controlled configuration is trusted only after its
+        // random echo proves it answers one of this endpoint's live requests.
+        // Otherwise a stale/forged reply could terminally poison a handshake.
+        self.observe_handshake(HandshakeConfig::from_reply(body));
+        if self.handshake_failed.is_some() {
             return;
         }
         // A correct random echo binds the header connection ID. Lock it
@@ -2061,6 +2261,16 @@ impl<T: Config> UdpProtocol<T> {
             self.state = ProtocolState::Running;
             // register an event
             self.event_queue.push_back(Event::Synchronized);
+        }
+    }
+
+    fn observe_handshake(&mut self, theirs: HandshakeConfig) {
+        if self.handshake_failed.is_some() {
+            return;
+        }
+        if let Some(reason) = self.local_handshake.first_mismatch(theirs) {
+            self.handshake_failed = Some(reason);
+            self.event_queue.push_back(Event::Incompatible { reason });
         }
     }
 
@@ -3186,13 +3396,20 @@ mod tests {
     fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            protocol.on_sync_reply(
-                MessageHeader::new(999),
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let reply = matching_sync_reply(protocol, random);
+            protocol.on_sync_reply(MessageHeader::new(999), reply);
         }
+    }
+
+    fn matching_sync_request<T: Config>(
+        protocol: &UdpProtocol<T>,
+        random_request: u32,
+    ) -> SyncRequest {
+        protocol.local_handshake.request(random_request)
+    }
+
+    fn matching_sync_reply<T: Config>(protocol: &UdpProtocol<T>, random_reply: u32) -> SyncReply {
+        protocol.local_handshake.reply(random_reply)
     }
 
     fn queued_input_body(protocol: &UdpProtocol<TestConfig>) -> &Input {
@@ -3245,9 +3462,7 @@ mod tests {
         protocol.send_queue.clear();
 
         // Simulate receiving a sync request
-        let sync_req = SyncRequest {
-            random_request: 12345,
-        };
+        let sync_req = matching_sync_request(&protocol, 12345);
         protocol.on_sync_request(sync_req);
 
         // Should have queued a reply
@@ -3273,9 +3488,7 @@ mod tests {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
 
             let header = MessageHeader::new(999);
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
         }
 
@@ -3293,9 +3506,7 @@ mod tests {
 
         // Send a reply with the wrong random value
         let header = MessageHeader::new(999);
-        let reply = SyncReply {
-            random_reply: 99999999, // Wrong value
-        };
+        let reply = matching_sync_reply(&protocol, 99_999_999);
         protocol.on_sync_reply(header, reply);
 
         // Should still have same number of remaining roundtrips
@@ -3309,11 +3520,267 @@ mod tests {
 
         // Protocol is in Initializing state, not Synchronizing
         let header = MessageHeader::new(999);
-        let reply = SyncReply { random_reply: 123 };
+        let reply = matching_sync_reply(&protocol, 123);
         protocol.on_sync_reply(header, reply);
 
         // Should still be in initializing
         assert!(!protocol.is_synchronized());
+    }
+
+    #[test]
+    fn config_digest_uses_exact_canonical_v1_bytes() {
+        let config = SessionConfigBlock {
+            num_players: 2,
+            input_bytes_per_player: 4,
+            fps: 60,
+            max_prediction: 8,
+            desync_interval: 60,
+        };
+
+        assert_eq!(config_digest(config, 1), 0x5082_C060_858A_E1C8);
+        assert_ne!(config_digest(config, 0), config_digest(config, 1));
+    }
+
+    #[test]
+    fn handshake_mismatch_reports_each_field_in_locked_precedence_order() {
+        let ours = HandshakeConfig::new(SessionConfigBlock {
+            num_players: 2,
+            input_bytes_per_player: 4,
+            fps: 60,
+            max_prediction: 8,
+            desync_interval: 60,
+        });
+
+        let mut theirs = ours;
+        theirs.min_compat_version = ours.min_compat_version.saturating_add(1);
+        theirs.config.num_players = 3;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::ProtocolVersion {
+                ours: ours.min_compat_version,
+                theirs: theirs.min_compat_version,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.num_players = 3;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 })
+        );
+
+        let mut theirs = ours;
+        theirs.config.input_bytes_per_player = 8;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::InputWidth { ours: 4, theirs: 8 })
+        );
+
+        let mut theirs = ours;
+        theirs.config.fps = 120;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::Fps {
+                ours: 60,
+                theirs: 120,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.max_prediction = 12;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::MaxPrediction {
+                ours: 8,
+                theirs: 12,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.desync_interval = 30;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::DesyncInterval {
+                ours: 60,
+                theirs: 30,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.features ^= HOT_JOIN_FEATURE;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::Features {
+                ours: ours.features,
+                theirs: theirs.features,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config_digest ^= 1;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::ConfigDigest {
+                ours: ours.config_digest,
+                theirs: theirs.config_digest,
+            })
+        );
+        assert_eq!(ours.first_mismatch(ours), None);
+    }
+
+    #[test]
+    fn mismatched_request_replies_with_ours_and_fails_exactly_once() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        protocol.send_queue.clear();
+
+        let mut theirs = protocol.local_handshake;
+        theirs.config.num_players = 3;
+        protocol.on_sync_request(theirs.request(7));
+
+        let expected = IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 };
+        assert_eq!(protocol.handshake_failed, Some(expected));
+        assert_eq!(
+            protocol
+                .event_queue
+                .iter()
+                .filter(|event| matches!(event, Event::Incompatible { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            protocol.send_queue.back().map(|message| &message.body),
+            Some(&MessageBody::SyncReply(protocol.local_handshake.reply(7)))
+        );
+
+        theirs.config.num_players = 4;
+        protocol.on_sync_request(theirs.request(8));
+        assert_eq!(protocol.handshake_failed, Some(expected));
+        assert_eq!(
+            protocol
+                .event_queue
+                .iter()
+                .filter(|event| matches!(event, Event::Incompatible { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(protocol.send_queue.len(), 2, "failed endpoints still reply");
+    }
+
+    #[test]
+    fn reply_validates_echo_before_config_and_mismatch_is_terminal() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        let valid_random = *protocol.sync_random_requests.iter().next().unwrap();
+        let initial_remaining = protocol.sync_remaining_roundtrips;
+        let mut theirs = protocol.local_handshake;
+        theirs.config.fps = 120;
+
+        protocol.on_sync_reply(
+            MessageHeader::new(999),
+            theirs.reply(valid_random ^ u32::MAX),
+        );
+        assert_eq!(protocol.handshake_failed, None);
+        assert_eq!(protocol.sync_remaining_roundtrips, initial_remaining);
+
+        protocol.on_sync_reply(MessageHeader::new(999), theirs.reply(valid_random));
+        assert_eq!(
+            protocol.handshake_failed,
+            Some(IncompatibleSessionReason::Fps {
+                ours: 60,
+                theirs: 120,
+            })
+        );
+        assert_eq!(protocol.remote_conn_id, 0);
+        assert_eq!(protocol.sync_remaining_roundtrips, initial_remaining);
+        assert!(!protocol.is_synchronized());
+    }
+
+    #[test]
+    fn failed_handshake_stops_retries_and_timeout_but_keeps_answering() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let sync_config = SyncConfig {
+            sync_retry_interval: Duration::from_millis(1),
+            sync_timeout: Some(Duration::from_millis(1)),
+            ..SyncConfig::default()
+        };
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            sync_config,
+            protocol_config,
+        );
+        protocol.synchronize().unwrap();
+        let mut theirs = protocol.local_handshake;
+        theirs.config.num_players = 3;
+        protocol.on_sync_request(theirs.request(1));
+        protocol.send_queue.clear();
+        protocol.event_queue.clear();
+
+        advance_test_clock(&clock, Duration::from_secs(1));
+        let events: Vec<_> = protocol.poll(&[]).collect();
+        assert!(events.is_empty());
+        assert!(protocol.send_queue.is_empty());
+
+        protocol.on_sync_request(theirs.request(2));
+        assert_eq!(
+            protocol.send_queue.back().map(|message| &message.body),
+            Some(&MessageBody::SyncReply(protocol.local_handshake.reply(2)))
+        );
+    }
+
+    #[test]
+    fn endpoint_rejects_nonrepresentable_handshake_config() {
+        let make = |num_players, fps, desync_detection| {
+            UdpProtocol::<TestConfig>::new(
+                vec![PlayerHandle::new(0)],
+                test_addr(),
+                num_players,
+                1,
+                8,
+                Duration::from_secs(5),
+                Duration::from_secs(3),
+                fps,
+                desync_detection,
+                SyncConfig::default(),
+                ProtocolConfig::default(),
+                TimeSyncConfig::default(),
+            )
+        };
+
+        assert!(matches!(
+            make(usize::from(u16::MAX) + 1, 60, DesyncDetection::Off),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "num_players",
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            make(2, 60, DesyncDetection::On { interval: 0 }),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    ..
+                }
+            })
+        ));
+        #[cfg(target_pointer_width = "64")]
+        assert!(matches!(
+            make(
+                2,
+                usize::try_from(u64::from(u32::MAX) + 1).unwrap(),
+                DesyncDetection::Off
+            ),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange { field: "fps", .. }
+            })
+        ));
     }
 
     #[test]
@@ -3326,12 +3793,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         assert!(protocol.is_running());
@@ -3385,12 +3847,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         assert_eq!(protocol.remote_conn_id, 999);
@@ -3424,12 +3881,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         let initial_recv_time = protocol.last_recv_time;
@@ -3536,12 +3988,15 @@ mod tests {
 
         protocol.handle_message(&Message {
             header: MessageHeader::new(999),
-            body: MessageBody::SyncRequest(SyncRequest { random_request: 42 }),
+            body: MessageBody::SyncRequest(matching_sync_request(&protocol, 42)),
         });
 
         assert!(matches!(
             protocol.send_queue.front().map(|message| &message.body),
-            Some(MessageBody::SyncReply(SyncReply { random_reply: 42 }))
+            Some(MessageBody::SyncReply(SyncReply {
+                random_reply: 42,
+                ..
+            }))
         ));
     }
 
@@ -3555,12 +4010,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Simulate network interrupt notification was sent
@@ -3593,12 +4043,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Add some pending outputs
@@ -3737,9 +4182,7 @@ mod tests {
             .expect("synchronize queues a random request");
         protocol.handle_message(&Message {
             header: MessageHeader::new(77),
-            body: MessageBody::SyncReply(SyncReply {
-                random_reply: first_random,
-            }),
+            body: MessageBody::SyncReply(matching_sync_reply(&protocol, first_random)),
         });
         assert_eq!(protocol.state, ProtocolState::Synchronizing);
         assert_eq!(protocol.remote_conn_id, 77);
@@ -3753,9 +4196,7 @@ mod tests {
             .expect("the next synchronization round has an outstanding nonce");
         protocol.handle_message(&Message {
             header: MessageHeader::new(78),
-            body: MessageBody::SyncReply(SyncReply {
-                random_reply: second_random,
-            }),
+            body: MessageBody::SyncReply(matching_sync_reply(&protocol, second_random)),
         });
         assert_eq!(protocol.sync_remaining_roundtrips, remaining);
         assert!(protocol.sync_random_requests.contains(&second_random));
@@ -4891,12 +5332,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
         protocol.send_queue.clear();
 
@@ -5004,12 +5440,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Stats start time is set during synchronize(), so with 0 seconds elapsed
@@ -5187,12 +5618,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         let connect_status = vec![ConnectionStatus::default(); 2];
@@ -6006,12 +6432,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
         assert!(protocol.is_running());
 
@@ -6070,12 +6491,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up initial state: we have frame 0
@@ -6121,12 +6537,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // The protocol constructor inserts Frame::NULL entry for decoding first input.
@@ -6192,12 +6603,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up: we have frame 5
@@ -6253,9 +6659,7 @@ mod tests {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             protocol.on_sync_reply(
                 MessageHeader::new(999),
-                SyncReply {
-                    random_reply: random,
-                },
+                matching_sync_reply(&protocol, random),
             );
         }
 
@@ -6382,9 +6786,7 @@ mod tests {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             protocol.on_sync_reply(
                 MessageHeader::new(999),
-                SyncReply {
-                    random_reply: random,
-                },
+                matching_sync_reply(&protocol, random),
             );
         }
         protocol.event_queue.clear();
@@ -6431,12 +6833,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up: we have frame 5
@@ -6662,9 +7059,7 @@ mod tests {
 
             let reply = Message {
                 header: MessageHeader::new(42),
-                body: MessageBody::SyncReply(SyncReply {
-                    random_reply: random,
-                }),
+                body: MessageBody::SyncReply(matching_sync_reply(&protocol, random)),
             };
             protocol.handle_message(&reply);
 
@@ -7295,9 +7690,7 @@ mod tests {
             let random = *ghost.sync_random_requests.iter().next().unwrap();
             ghost.on_sync_reply(
                 MessageHeader::new(early_era_conn_id),
-                SyncReply {
-                    random_reply: random,
-                },
+                matching_sync_reply(&ghost, random),
             );
         }
         assert_eq!(ghost.remote_conn_id, early_era_conn_id);
@@ -7503,9 +7896,7 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
         }
         assert!(protocol.is_running());
@@ -8289,14 +8680,16 @@ mod property_tests {
         .expect("Failed to create test protocol")
     }
 
+    fn matching_sync_reply(protocol: &UdpProtocol<TestConfig>, random_reply: u32) -> SyncReply {
+        protocol.local_handshake.reply(random_reply)
+    }
+
     /// Completes the sync process by simulating all required sync roundtrips.
     fn complete_sync(protocol: &mut UdpProtocol<TestConfig>, num_packets: u32) {
         for _ in 0..num_packets {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let reply = matching_sync_reply(protocol, random);
             protocol.on_sync_reply(header, reply);
         }
     }
@@ -8535,7 +8928,7 @@ mod property_tests {
             // Complete one roundtrip
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            let reply = SyncReply { random_reply: random };
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
 
             prop_assert_eq!(
@@ -8572,7 +8965,7 @@ mod property_tests {
             // (unless by coincidence, which is astronomically unlikely)
             if !protocol.sync_random_requests.contains(&invalid_random) {
                 let header = MessageHeader::new(999);
-                let reply = SyncReply { random_reply: invalid_random };
+                let reply = matching_sync_reply(&protocol, invalid_random);
                 protocol.on_sync_reply(header, reply);
 
                 prop_assert_eq!(
@@ -8954,7 +9347,7 @@ mod property_tests {
             // Get a valid random value
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             let header = MessageHeader::new(999);
-            let reply = SyncReply { random_reply: random };
+            let reply = matching_sync_reply(&protocol, random);
 
             // First reply decrements
             protocol.on_sync_reply(header, reply);

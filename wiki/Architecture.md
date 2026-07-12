@@ -475,6 +475,7 @@ During synchronization, peers exchange packets to establish:
 
 - Round-trip time measurements
 - Protocol-v1 connection ID for packet filtering
+- An exact deterministic-session configuration match
 - Confirmation both peers are ready
 
 ```rust
@@ -508,6 +509,22 @@ loop {
 
 - `Synchronizing { count, total }` — Progress updates
 - `Synchronized { addr }` — Peer fully synchronized
+- `IncompatibleSession { addr, reason }` — Terminal configuration mismatch
+
+Each protocol-v1 sync request and reply carries the peer's compatibility floor,
+player count, fixed serialized input width, frame rate, maximum prediction
+window, checksum interval, protocol feature bits, and a canonical FNV-1a
+digest. Fields are compared in that order. A mismatch is
+terminal for that endpoint: it emits `IncompatibleSession` once, stops retry and
+timeout activity, never reports `Synchronized`, and continues answering sync
+requests with its own configuration so the other peer can diagnose the same
+problem. The session remains in `Synchronizing` until the application tears it
+down or rebuilds it with matching settings.
+
+`DisconnectBehavior` is deliberately absent because it controls only local
+post-disconnect policy. The digest detects accidental configuration drift; it
+is not authentication and does not protect against a Byzantine or on-path
+peer.
 
 **Transition to Running:** Automatic when all remote peers complete handshake
 

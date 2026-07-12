@@ -43,7 +43,8 @@ use std::io::{self, Write};
 
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+    MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
+    SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -374,6 +375,10 @@ fn read_u32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResul
     Ok(u32::from_le_bytes(read_array(bytes, cursor, field)?))
 }
 
+fn read_u64(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u64> {
+    Ok(u64::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
 fn read_i16(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<i16> {
     Ok(i16::from_le_bytes(read_array(bytes, cursor, field)?))
 }
@@ -473,6 +478,62 @@ pub(crate) fn ensure_length_within_remaining(
         )));
     }
     Ok(())
+}
+
+fn decode_session_config(
+    bytes: &[u8],
+    cursor: &mut usize,
+    fields: [&'static str; 5],
+) -> CodecResult<SessionConfigBlock> {
+    let [num_players, input_bytes_per_player, fps, max_prediction, desync_interval] = fields;
+
+    Ok(SessionConfigBlock {
+        num_players: read_u16(bytes, cursor, num_players)?,
+        input_bytes_per_player: read_u16(bytes, cursor, input_bytes_per_player)?,
+        fps: read_u32(bytes, cursor, fps)?,
+        max_prediction: read_u16(bytes, cursor, max_prediction)?,
+        desync_interval: read_u32(bytes, cursor, desync_interval)?,
+    })
+}
+
+fn decode_sync_request(bytes: &[u8], cursor: &mut usize) -> CodecResult<SyncRequest> {
+    Ok(SyncRequest {
+        random_request: read_u32(bytes, cursor, "sync_request.random_request")?,
+        min_compat_version: read_array::<1>(bytes, cursor, "sync_request.min_compat_version")?[0],
+        features: read_u32(bytes, cursor, "sync_request.features")?,
+        config: decode_session_config(
+            bytes,
+            cursor,
+            [
+                "sync_request.config.num_players",
+                "sync_request.config.input_bytes_per_player",
+                "sync_request.config.fps",
+                "sync_request.config.max_prediction",
+                "sync_request.config.desync_interval",
+            ],
+        )?,
+        config_digest: read_u64(bytes, cursor, "sync_request.config_digest")?,
+    })
+}
+
+fn decode_sync_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<SyncReply> {
+    Ok(SyncReply {
+        random_reply: read_u32(bytes, cursor, "sync_reply.random_reply")?,
+        min_compat_version: read_array::<1>(bytes, cursor, "sync_reply.min_compat_version")?[0],
+        features: read_u32(bytes, cursor, "sync_reply.features")?,
+        config: decode_session_config(
+            bytes,
+            cursor,
+            [
+                "sync_reply.config.num_players",
+                "sync_reply.config.input_bytes_per_player",
+                "sync_reply.config.fps",
+                "sync_reply.config.max_prediction",
+                "sync_reply.config.desync_interval",
+            ],
+        )?,
+        config_digest: read_u64(bytes, cursor, "sync_reply.config_digest")?,
+    })
 }
 
 fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
@@ -824,12 +885,8 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     };
     let variant = read_u32(bytes, &mut cursor, "message.body.variant")?;
     let body = match variant {
-        0 => MessageBody::SyncRequest(SyncRequest {
-            random_request: read_u32(bytes, &mut cursor, "sync_request.random_request")?,
-        }),
-        1 => MessageBody::SyncReply(SyncReply {
-            random_reply: read_u32(bytes, &mut cursor, "sync_reply.random_reply")?,
-        }),
+        0 => MessageBody::SyncRequest(decode_sync_request(bytes, &mut cursor)?),
+        1 => MessageBody::SyncReply(decode_sync_reply(bytes, &mut cursor)?),
         2 => MessageBody::Input(decode_input(bytes, &mut cursor)?),
         3 => MessageBody::InputAck(InputAck {
             ack_frame: Frame::new(read_i32(bytes, &mut cursor, "input_ack.ack_frame")?),
@@ -1078,7 +1135,8 @@ mod tests {
     use super::*;
     use crate::network::messages::{
         ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
-        MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+        MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
+        SyncRequest,
     };
 
     fn wire_prefix(conn_id: u32, variant: u32) -> Vec<u8> {
@@ -1102,6 +1160,7 @@ mod tests {
             header: MessageHeader::new(0xABCD),
             body: MessageBody::SyncRequest(SyncRequest {
                 random_request: 999,
+                ..SyncRequest::default()
             }),
         };
         let bytes = encode(&original).unwrap();
@@ -1123,6 +1182,16 @@ mod tests {
                     header: MessageHeader::new(0xABCD),
                     body: MessageBody::SyncRequest(SyncRequest {
                         random_request: 999,
+                        min_compat_version: 1,
+                        features: 1,
+                        config: SessionConfigBlock {
+                            num_players: 2,
+                            input_bytes_per_player: 4,
+                            fps: 60,
+                            max_prediction: 8,
+                            desync_interval: 60,
+                        },
+                        config_digest: 0x5082_C060_858A_E1C8,
                     }),
                 },
                 vec![
@@ -1130,6 +1199,14 @@ mod tests {
                     0xCD, 0xAB, 0x00, 0x00, // conn_id
                     0x00, 0x00, 0x00, 0x00, // MessageBody::SyncRequest tag
                     0xE7, 0x03, 0x00, 0x00, // random_request
+                    0x01, // min_compat_version
+                    0x01, 0x00, 0x00, 0x00, // features
+                    0x02, 0x00, // config.num_players
+                    0x04, 0x00, // config.input_bytes_per_player
+                    0x3C, 0x00, 0x00, 0x00, // config.fps
+                    0x08, 0x00, // config.max_prediction
+                    0x3C, 0x00, 0x00, 0x00, // config.desync_interval
+                    0xC8, 0xE1, 0x8A, 0x85, 0x60, 0xC0, 0x82, 0x50, // config_digest
                 ],
             ),
             (
@@ -1175,6 +1252,36 @@ mod tests {
             assert_eq!(manual, original, "manual decode for {name}");
             assert_eq!(consumed, bytes.len(), "consumed bytes for {name}");
         }
+    }
+
+    #[test]
+    fn decode_message_rejects_every_truncated_handshake_field() {
+        let message = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::SyncRequest(SyncRequest {
+                random_request: 7,
+                min_compat_version: 1,
+                features: 1,
+                config: SessionConfigBlock {
+                    num_players: 2,
+                    input_bytes_per_player: 4,
+                    fps: 60,
+                    max_prediction: 8,
+                    desync_interval: 60,
+                },
+                config_digest: 0x5082_C060_858A_E1C8,
+            }),
+        };
+        let bytes = encode(&message).unwrap();
+        assert_eq!(bytes.len(), 43);
+
+        for len in 0..bytes.len() {
+            assert!(
+                decode_message(&bytes[..len]).is_err(),
+                "truncated handshake prefix of {len} bytes must be rejected"
+            );
+        }
+        assert_eq!(decode_message(&bytes).unwrap(), (message, bytes.len()));
     }
 
     #[test]
@@ -1288,11 +1395,15 @@ mod tests {
                 header: MessageHeader::new(0xABCD),
                 body: MessageBody::SyncRequest(SyncRequest {
                     random_request: 999,
+                    ..SyncRequest::default()
                 }),
             },
             Message {
                 header: MessageHeader::new(0xABCD),
-                body: MessageBody::SyncReply(SyncReply { random_reply: 123 }),
+                body: MessageBody::SyncReply(SyncReply {
+                    random_reply: 123,
+                    ..SyncReply::default()
+                }),
             },
             Message {
                 header: MessageHeader::new(0xABCD),
@@ -1397,11 +1508,83 @@ mod tests {
         // `vec!` literal is the complete set.
         #[cfg_attr(not(feature = "hot-join"), allow(unused_mut))]
         let mut bodies: Vec<BoxedStrategy<MessageBody>> = vec![
-            any::<u32>()
-                .prop_map(|random_request| MessageBody::SyncRequest(SyncRequest { random_request }))
+            (
+                any::<u32>(),
+                any::<u8>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        random_request,
+                        min_compat_version,
+                        features,
+                        num_players,
+                        input_bytes_per_player,
+                        fps,
+                        max_prediction,
+                        desync_interval,
+                        config_digest,
+                    )| {
+                        MessageBody::SyncRequest(SyncRequest {
+                            random_request,
+                            min_compat_version,
+                            features,
+                            config: SessionConfigBlock {
+                                num_players,
+                                input_bytes_per_player,
+                                fps,
+                                max_prediction,
+                                desync_interval,
+                            },
+                            config_digest,
+                        })
+                    },
+                )
                 .boxed(),
-            any::<u32>()
-                .prop_map(|random_reply| MessageBody::SyncReply(SyncReply { random_reply }))
+            (
+                any::<u32>(),
+                any::<u8>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        random_reply,
+                        min_compat_version,
+                        features,
+                        num_players,
+                        input_bytes_per_player,
+                        fps,
+                        max_prediction,
+                        desync_interval,
+                        config_digest,
+                    )| {
+                        MessageBody::SyncReply(SyncReply {
+                            random_reply,
+                            min_compat_version,
+                            features,
+                            config: SessionConfigBlock {
+                                num_players,
+                                input_bytes_per_player,
+                                fps,
+                                max_prediction,
+                                desync_interval,
+                            },
+                            config_digest,
+                        })
+                    },
+                )
                 .boxed(),
             (
                 pvec(arb_connection_status(), 0..8),

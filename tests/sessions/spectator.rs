@@ -98,6 +98,7 @@ fn test_synchronize_with_host() -> Result<(), FortressError> {
         .start_p2p_session(socket1)?;
 
     let mut spec_sess = SessionBuilder::<StubConfig>::new()
+        .with_num_players(1)?
         .with_protocol_config(protocol_config(&clock))
         .start_spectator_session(host_addr, socket2)
         .expect("spectator session should start");

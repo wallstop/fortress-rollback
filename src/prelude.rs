@@ -78,7 +78,7 @@ pub use crate::{Frame, PlayerHandle, PlayerType, NULL_FRAME};
 pub use crate::{DesyncDetection, InputStatus, SessionState};
 
 // Request and event handling
-pub use crate::{handle_requests, FortressEvent, FortressRequest};
+pub use crate::{handle_requests, FortressEvent, FortressRequest, IncompatibleSessionReason};
 
 // Event drain iterator
 pub use crate::EventDrain;

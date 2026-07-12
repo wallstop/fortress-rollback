@@ -152,7 +152,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.9", features = ["tokio"] }
+/// fortress-rollback = { version = "0.10", features = ["tokio"] }
 /// ```
 ///
 /// # Example
@@ -1588,6 +1588,102 @@ pub type HandleVec = SmallVec<[PlayerHandle; 8]>;
 /// [`handle_requests!`]: crate::handle_requests
 pub type RequestVec<T> = SmallVec<[FortressRequest<T>; 4]>;
 
+/// Why a remote endpoint cannot join this deterministic session.
+///
+/// Values are oriented from the endpoint that emits the event: `ours` is the
+/// local configuration and `theirs` is the received configuration.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum IncompatibleSessionReason {
+    /// The peer requires a different protocol compatibility floor.
+    ProtocolVersion {
+        /// The local protocol compatibility floor.
+        ours: u8,
+        /// The remote protocol compatibility floor.
+        theirs: u8,
+    },
+    /// The peers configured different player counts.
+    NumPlayers {
+        /// The local player count.
+        ours: u16,
+        /// The remote player count.
+        theirs: u16,
+    },
+    /// The peers serialize one player's input to different fixed widths.
+    InputWidth {
+        /// The local serialized input width in bytes.
+        ours: u16,
+        /// The remote serialized input width in bytes.
+        theirs: u16,
+    },
+    /// The peers configured different simulation rates.
+    Fps {
+        /// The local simulation rate.
+        ours: u32,
+        /// The remote simulation rate.
+        theirs: u32,
+    },
+    /// The peers configured different prediction windows.
+    MaxPrediction {
+        /// The local maximum prediction window.
+        ours: u16,
+        /// The remote maximum prediction window.
+        theirs: u16,
+    },
+    /// The peers configured different checksum intervals (`0` means disabled).
+    DesyncInterval {
+        /// The local checksum interval, or zero when disabled.
+        ours: u32,
+        /// The remote checksum interval, or zero when disabled.
+        theirs: u32,
+    },
+    /// The peers support different protocol feature sets.
+    Features {
+        /// The local protocol feature bitset.
+        ours: u32,
+        /// The remote protocol feature bitset.
+        theirs: u32,
+    },
+    /// The explicit fields matched but their canonical configuration digests did not.
+    ConfigDigest {
+        /// The local canonical configuration digest.
+        ours: u64,
+        /// The remote canonical configuration digest.
+        theirs: u64,
+    },
+}
+
+impl std::fmt::Display for IncompatibleSessionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProtocolVersion { ours, theirs } => {
+                write!(f, "protocol version (ours={ours}, theirs={theirs})")
+            },
+            Self::NumPlayers { ours, theirs } => {
+                write!(f, "player count (ours={ours}, theirs={theirs})")
+            },
+            Self::InputWidth { ours, theirs } => {
+                write!(f, "input width (ours={ours}, theirs={theirs})")
+            },
+            Self::Fps { ours, theirs } => write!(f, "fps (ours={ours}, theirs={theirs})"),
+            Self::MaxPrediction { ours, theirs } => {
+                write!(f, "maximum prediction (ours={ours}, theirs={theirs})")
+            },
+            Self::DesyncInterval { ours, theirs } => {
+                write!(f, "desync interval (ours={ours}, theirs={theirs})")
+            },
+            Self::Features { ours, theirs } => {
+                write!(f, "features (ours=0x{ours:08x}, theirs=0x{theirs:08x})")
+            },
+            Self::ConfigDigest { ours, theirs } => {
+                write!(
+                    f,
+                    "configuration digest (ours=0x{ours:016x}, theirs=0x{theirs:016x})"
+                )
+            },
+        }
+    }
+}
+
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
 /// # Handling Events
@@ -1755,6 +1851,16 @@ where
         /// Address of the joined peer.
         addr: T::Address,
     },
+    /// The remote endpoint advertised a session configuration that cannot
+    /// participate in this deterministic session. The endpoint stops
+    /// synchronization permanently but continues answering sync requests so
+    /// both peers can diagnose the mismatch.
+    IncompatibleSession {
+        /// The address of the incompatible endpoint.
+        addr: T::Address,
+        /// The first mismatching field in stable protocol order.
+        reason: IncompatibleSessionReason,
+    },
 }
 
 impl<T: Config> FortressEvent<T> {
@@ -1776,6 +1882,7 @@ impl<T: Config> FortressEvent<T> {
             Self::WaitRecommendation { .. } => EventKind::WaitRecommendation,
             Self::DesyncDetected { .. } => EventKind::DesyncDetected,
             Self::SyncTimeout { .. } => EventKind::SyncTimeout,
+            Self::IncompatibleSession { .. } => EventKind::IncompatibleSession,
             Self::ReplayDesync { .. } => EventKind::ReplayDesync,
             Self::SpectatorDivergence { .. } => EventKind::SpectatorDivergence,
             Self::InputDelayRecommendation { .. } => EventKind::InputDelayRecommendation,
@@ -1834,6 +1941,9 @@ where
             ),
             Self::SyncTimeout { addr, elapsed_ms } => {
                 write!(f, "SyncTimeout(addr={}, elapsed={}ms)", addr, elapsed_ms)
+            },
+            Self::IncompatibleSession { addr, reason } => {
+                write!(f, "IncompatibleSession(addr={addr}, reason={reason})")
             },
             Self::ReplayDesync {
                 frame,
@@ -2725,6 +2835,11 @@ mod tests {
                 format!("addr={addr}"),
                 format!("elapsed={elapsed_ms}ms"),
             ],
+            FortressEvent::IncompatibleSession { addr, reason } => vec![
+                "IncompatibleSession(".to_string(),
+                format!("addr={addr}"),
+                format!("reason={reason}"),
+            ],
             FortressEvent::ReplayDesync {
                 frame,
                 expected_checksum,
@@ -2833,6 +2948,10 @@ mod tests {
             FortressEvent::SyncTimeout {
                 addr: test_addr(8080),
                 elapsed_ms: 10000,
+            },
+            FortressEvent::IncompatibleSession {
+                addr: test_addr(8081),
+                reason: IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 },
             },
             FortressEvent::ReplayDesync {
                 frame: Frame::new(42),

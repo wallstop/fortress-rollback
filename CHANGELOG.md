@@ -14,13 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-12
+
 ### Added
 
 - `SessionMetrics::unknown_source_packets` counts decoded protocol messages received from addresses that are not configured endpoints for a P2P or spectator session. The first such message also emits a `NetworkProtocol` warning with its source address; later warnings are suppressed for the session while the cumulative counter continues rising. This makes stale traffic, source spoofing, and NAT rebinding distinguishable from pure peer silence. Malformed datagrams rejected by a socket before decoding remain outside this session-level counter.
 
 ### Changed
 
-- **Breaking:** network packets now use protocol-v1 framing: sentinel bytes `F5 52`, an exact version byte, reserved flags, and a validated 32-bit connection ID precede the fixed body discriminant. Version 1 rejects legacy 0.9 unversioned packets in both directions; built-in UDP adapters classify rejected legacy/version/flag/sentinel/malformed datagrams and report at most one warning per rejection family per receive poll. Custom raw-byte transports should use `network::codec::decode_message` and `classify_wire_bytes`. The internal wire vocabulary and public `MessageKind` categories now retain hot-join tags 10–16 in every build so discriminants are feature-independent; builds without `hot-join` recognize and reject those bodies rather than treating their tags as unknown. The dead `Input.disconnect_requested` wire byte is removed and tag 17 is a best-effort sender-leaving `Goodbye`, sent three times by explicit `disconnect_player` so the remote `Disconnected` event no longer waits for silence timeout. Graceful `remove_player` remains connection-status-gossip based: treating its target as the recipient of a sender-leaving notice causes reciprocal drops in three-or-more-peer meshes.
+- **Breaking:** network packets now use protocol-v1 framing: sentinel bytes `F5 52`, an exact version byte, reserved flags, and a validated 32-bit connection ID precede the fixed body discriminant. Version 1 rejects legacy 0.9 unversioned packets in both directions; built-in UDP adapters classify rejected legacy/version/flag/sentinel/malformed datagrams and report at most one warning per rejection family per receive poll. Custom raw-byte transports should use `network::codec::decode_message` and `classify_wire_bytes`. The sync request and reply now carry a fixed-width session configuration block and canonical digest; peers with different player counts, serialized input widths, frame rates, prediction windows, checksum intervals, protocol feature sets, or compatibility floors stop synchronizing and emit the new `FortressEvent::IncompatibleSession` with an `IncompatibleSessionReason`. The exhaustive `FortressEvent` and `EventKind` enums both gain `IncompatibleSession` variants and require new match arms. Network startup rejects handshake fields that cannot fit their fixed wire widths and rejects `DesyncDetection::On { interval: 0 }`, because zero encodes disabled detection. `DisconnectBehavior` remains local policy and is intentionally excluded. The internal wire vocabulary and public `MessageKind` categories now retain hot-join tags 10–16 in every build so discriminants are feature-independent; builds without `hot-join` recognize and reject those bodies rather than treating their tags as unknown. The dead `Input.disconnect_requested` wire byte is removed and tag 17 is a best-effort sender-leaving `Goodbye`, sent three times by explicit `disconnect_player` so the remote `Disconnected` event no longer waits for silence timeout. Graceful `remove_player` remains connection-status-gossip based: treating its target as the recipient of a sender-leaving notice causes reciprocal drops in three-or-more-peer meshes.
 - **Breaking:** `SyncConfig::default().sync_timeout` is now `Some(Duration::from_secs(20))` instead of `None`. Sessions using the default configuration emit `FortressEvent::SyncTimeout` after 20 seconds of unsuccessful synchronization while continuing to retry. Set `sync_timeout: None` explicitly to retain unlimited retries without the diagnostic event.
 - **Breaking:** `ChaosSocket::with_clock()` callbacks now return `web_time::Instant` instead of `std::time::Instant`, allowing the default clock to run on browser `wasm32-unknown-unknown` without panicking. Browser callers with an injected clock must return `web_time::Instant`; native and Emscripten callers require no change because `web_time` re-exports `std::time::Instant` on those targets.
 
@@ -745,7 +747,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.9"
+fortress-rollback = "0.10"
 ```
 
 ### Import Path Change
@@ -805,7 +807,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0

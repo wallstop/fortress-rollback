@@ -26,6 +26,7 @@ const fn event_retention(kind: EventKind) -> EventRetention {
         | EventKind::NetworkResumed
         | EventKind::DesyncDetected
         | EventKind::SyncTimeout
+        | EventKind::IncompatibleSession
         | EventKind::ReplayDesync
         | EventKind::SpectatorDivergence
         | EventKind::PeerDropped => EventRetention::Durable,
@@ -234,12 +235,13 @@ mod tests {
             (EventKind::WaitRecommendation, EventRetention::Routine),
             (EventKind::DesyncDetected, EventRetention::Durable),
             (EventKind::SyncTimeout, EventRetention::Durable),
+            (EventKind::IncompatibleSession, EventRetention::Durable),
             (EventKind::ReplayDesync, EventRetention::Durable),
             (EventKind::SpectatorDivergence, EventRetention::Durable),
             (EventKind::InputDelayRecommendation, EventRetention::Routine),
             (EventKind::PeerDropped, EventRetention::Durable),
         ];
-        assert_eq!(cases.len(), 12);
+        assert_eq!(cases.len(), 13);
         for (kind, expected) in cases {
             assert_eq!(
                 event_retention(kind),
@@ -250,7 +252,7 @@ mod tests {
 
         #[cfg(feature = "hot-join")]
         {
-            assert_eq!(EventKind::COUNT, 14);
+            assert_eq!(EventKind::COUNT, 15);
             assert_eq!(
                 event_retention(EventKind::JoinRequested),
                 EventRetention::Routine

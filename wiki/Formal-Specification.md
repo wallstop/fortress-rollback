@@ -478,25 +478,46 @@ stateDiagram-v2
 -- State
 sync_remaining: ℕ = NUM_SYNC_PACKETS = 5
 sync_requests: Set<u32>
+handshake_failed: Option<IncompatibleSessionReason> = None
+local_handshake: HandshakeConfig
 
 -- Initiator
-SEND: SyncRequest { random: rand() }
+SEND: SyncRequest { random: rand(), handshake: local_handshake }
       sync_requests := sync_requests ∪ {random}
 
 -- Responder (on SyncRequest)
-SEND: SyncReply { random: request.random }
+SEND: SyncReply { random: request.random, handshake: local_handshake }
+first_mismatch(local_handshake, request.handshake) != None →
+    handshake_failed := first_mismatch(local_handshake, request.handshake)
 
 -- Initiator (on SyncReply where reply.random ∈ sync_requests)
-sync_remaining := sync_remaining - 1
+first_mismatch(local_handshake, reply.handshake) != None →
+    handshake_failed := first_mismatch(local_handshake, reply.handshake)
+first_mismatch(local_handshake, reply.handshake) = None → sync_remaining := sync_remaining - 1
 sync_remaining = 0 → state := Running
+
+handshake_failed != None →
+    state = Synchronizing
+    ∧ no further SyncRequest retries
+    ∧ no SyncTimeout event
+    ∧ exactly one IncompatibleSession event
+    ∧ every received SyncRequest still receives local_handshake
 ```
+
+`SessionConfigBlock` contains fixed-width player count, serialized input width,
+FPS, maximum prediction, and desync interval fields. Compatibility floor and
+feature bits are compared before the canonical digest. Mismatch precedence is
+protocol floor, player count, input width, FPS, maximum prediction, desync
+interval, feature bits, then digest.
 
 ### Message Types
 
 ```
 MessageBody =
-    | SyncRequest { random_request: u32 }
-    | SyncReply { random_reply: u32 }
+    | SyncRequest { random_request: u32, min_compat_version: u8, features: u32,
+                    config: SessionConfigBlock, config_digest: u64 }
+    | SyncReply { random_reply: u32, min_compat_version: u8, features: u32,
+                  config: SessionConfigBlock, config_digest: u64 }
     | Input { peer_connect_status: Vec<ConnectionStatus>, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
     | InputAck { ack_frame: Frame }
     | QualityReport { frame_advantage: i16, ping: u128 }

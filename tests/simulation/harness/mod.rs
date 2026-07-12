@@ -1424,7 +1424,8 @@ fn peer_event_key<I: SimInput>(event: &FortressEvent<I::SessionConfig>) -> Optio
         | FortressEvent::NetworkInterrupted { addr, .. }
         | FortressEvent::NetworkResumed { addr }
         | FortressEvent::DesyncDetected { addr, .. }
-        | FortressEvent::SyncTimeout { addr, .. } => PeerEventPayload::Addr(*addr),
+        | FortressEvent::SyncTimeout { addr, .. }
+        | FortressEvent::IncompatibleSession { addr, .. } => PeerEventPayload::Addr(*addr),
         FortressEvent::PeerDropped { handle, addr } => PeerEventPayload::PlayerAddr {
             handle: *handle,
             addr: *addr,

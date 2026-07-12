@@ -82,13 +82,31 @@ impl std::fmt::Display for ConnectionStatus {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct SessionConfigBlock {
+    pub num_players: u16,
+    pub input_bytes_per_player: u16,
+    pub fps: u32,
+    pub max_prediction: u16,
+    /// `0` means [`crate::DesyncDetection::Off`].
+    pub desync_interval: u32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct SyncRequest {
     pub random_request: u32, // please reply back with this random data
+    pub min_compat_version: u8,
+    pub features: u32,
+    pub config: SessionConfigBlock,
+    pub config_digest: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct SyncReply {
     pub random_reply: u32, // here's your random data back
+    pub min_compat_version: u8,
+    pub features: u32,
+    pub config: SessionConfigBlock,
+    pub config_digest: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,8 +442,13 @@ impl MessageBody {
         const LEN_PREFIX: usize = 8; // collection length (usize -> u64 with fixed-int)
 
         let payload = match self {
-            Self::SyncRequest(_) => 4, // random_request: u32
-            Self::SyncReply(_) => 4,   // random_reply: u32
+            Self::SyncRequest(_) | Self::SyncReply(_) => {
+                4 // random token: u32
+                    + 1 // min_compat_version: u8
+                    + 4 // features: u32
+                    + 14 // SessionConfigBlock
+                    + 8 // config_digest: u64
+            },
             Self::Input(input) => {
                 LEN_PREFIX
                     + input.peer_connect_status.len() * ConnectionStatus::WIRE_LEN
@@ -651,11 +674,20 @@ mod tests {
     #[test]
     fn test_message_body_variants() {
         // Test each variant can be created and compared
-        let sync_req = MessageBody::SyncRequest(SyncRequest { random_request: 42 });
-        let sync_req2 = MessageBody::SyncRequest(SyncRequest { random_request: 42 });
+        let sync_req = MessageBody::SyncRequest(SyncRequest {
+            random_request: 42,
+            ..SyncRequest::default()
+        });
+        let sync_req2 = MessageBody::SyncRequest(SyncRequest {
+            random_request: 42,
+            ..SyncRequest::default()
+        });
         assert_eq!(sync_req, sync_req2);
 
-        let sync_reply = MessageBody::SyncReply(SyncReply { random_reply: 123 });
+        let sync_reply = MessageBody::SyncReply(SyncReply {
+            random_reply: 123,
+            ..SyncReply::default()
+        });
         let debug = format!("{:?}", sync_reply);
         assert!(debug.contains("SyncReply"));
 
@@ -745,6 +777,7 @@ mod tests {
             header: MessageHeader::new(0xABCD),
             body: MessageBody::SyncRequest(SyncRequest {
                 random_request: 999,
+                ..SyncRequest::default()
             }),
         };
 

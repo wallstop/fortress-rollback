@@ -2183,6 +2183,9 @@ impl<T: Config> SpectatorSession<T> {
             Event::SyncTimeout { elapsed_ms } => {
                 self.enqueue_event(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
+            Event::Incompatible { reason } => {
+                self.enqueue_event(FortressEvent::IncompatibleSession { addr, reason });
+            },
             // add the input and all associated information
             Event::Input {
                 input,

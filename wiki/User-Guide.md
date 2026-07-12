@@ -2072,7 +2072,7 @@ fn try_lower_delay<C: Config>(
 
 #### `FortressEvent::InputDelayRecommendation`
 
-The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
+The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ---
 
@@ -2103,7 +2103,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send"] }
+fortress-rollback = { version = "0.10", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2138,7 +2138,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["tokio"] }
+fortress-rollback = { version = "0.10", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2175,7 +2175,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["json"] }
+fortress-rollback = { version = "0.10", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2205,7 +2205,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["paranoid"] }
+fortress-rollback = { version = "0.10", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2303,19 +2303,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send"] }
+fortress-rollback = { version = "0.10", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -3476,6 +3476,21 @@ let config = SyncConfig {
 - `SyncConfig::competitive()` - Fast sync with strict timeouts (4 packets, 100ms, 3s timeout)
 - `SyncConfig::extreme()` - Extreme burst loss survival (20 packets, 250ms, 30s timeout)
 - `SyncConfig::stress_test()` - Automated testing only (40 packets, 150ms, 60s timeout)
+
+Protocol v1 also verifies the deterministic settings on both endpoints before
+the session can run. Player count, serialized input width, FPS, maximum
+prediction, desync-check interval, and compiled protocol features must match.
+If they do not, each endpoint emits one
+`FortressEvent::IncompatibleSession { addr, reason }`, stops its sync retries,
+and remains in `SessionState::Synchronizing`. Treat this event as terminal for
+that session and rebuild it after correcting the reported field. A mismatch
+does not later produce `SyncTimeout`.
+
+Network-session values must fit the fixed handshake fields: player count,
+serialized input width, and maximum prediction fit `u16`; FPS and the desync
+interval fit `u32`. `DesyncDetection::On { interval: 0 }` is invalid because
+wire value zero means detection is off. `DisconnectBehavior` may differ because
+it is local policy rather than deterministic simulation configuration.
 
 ### ProtocolConfig (Network Protocol)
 

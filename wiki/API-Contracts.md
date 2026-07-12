@@ -266,6 +266,9 @@ Each API is documented with:
 **Errors:**
 
 - `InvalidRequestStructured { kind: NotEnoughPlayers { expected, actual } }` - not all player handles `0..num_players` have been registered
+- `InvalidRequestStructured { kind: ConfigValueOutOfRange { .. } }` - a
+  player count, serialized input width, FPS, prediction window, or desync
+  interval cannot be represented by the fixed protocol-v1 handshake
 
 **Panics:** Never
 
@@ -886,6 +889,19 @@ FortressRequest::AdvanceFrame { inputs }
 ## Event Catalog
 
 `FortressEvent<T>` is **not** `#[non_exhaustive]`. Adding new variants is a breaking change for exhaustive matches; recent additions are listed below.
+
+### `IncompatibleSession`
+
+`IncompatibleSession { addr, reason }` is emitted exactly once when a remote
+endpoint advertises a different deterministic session configuration during
+synchronization. The reason reports the first field in stable protocol order
+and orients `ours`/`theirs` to the emitting endpoint. That endpoint remains
+`Synchronizing`, never emits `Synchronized` or a later `SyncTimeout`, stops sync
+retries, and continues answering remote sync requests with its local block.
+
+Applications should treat the event as terminal, destroy the session, and
+rebuild it after correcting the reported configuration. `DisconnectBehavior`
+is local policy and is not compared.
 
 ### Selected `FortressEvent` Variants — Disconnect, Graceful Drop, and Input Delay
 

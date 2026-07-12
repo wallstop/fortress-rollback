@@ -912,7 +912,7 @@ These specifications model the key algorithms from:
 | TLA+ Module | Rust Implementation |
 |-------------|---------------------|
 | `NetworkProtocol` | `src/network/protocol/mod.rs` (UdpProtocol) |
-| `SyncHandshakeV1` / `SyncHandshakeV1Fair` / `SyncHandshakeV1Mismatch` | `src/network/protocol/mod.rs` (v1 sync request/reply config negotiation planned for M5) |
+| `SyncHandshakeV1` / `SyncHandshakeV1Fair` / `SyncHandshakeV1Mismatch` | `src/network/protocol/mod.rs` (landed v1 sync request/reply config negotiation, sticky mismatch failure, and retry/timeout suppression) |
 | `InputQueue` | `src/input_queue/mod.rs` (InputQueue; `freeze_at`, `set_frozen_value_at`, `roll_confirmed_input_to`, `confirmed_input`) |
 | `Rollback` | `src/sync_layer/mod.rs` (SyncLayer), `src/sessions/p2p_session.rs` |
 | `Concurrency` | `src/sync_layer/game_state_cell.rs` (GameStateCell, GameStateAccessor) |

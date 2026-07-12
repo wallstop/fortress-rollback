@@ -58,6 +58,8 @@ pub enum EventKind {
     DesyncDetected,
     /// [`FortressEvent::SyncTimeout`](crate::FortressEvent::SyncTimeout).
     SyncTimeout,
+    /// [`FortressEvent::IncompatibleSession`](crate::FortressEvent::IncompatibleSession).
+    IncompatibleSession,
     /// [`FortressEvent::ReplayDesync`](crate::FortressEvent::ReplayDesync).
     ReplayDesync,
     /// [`FortressEvent::SpectatorDivergence`](crate::FortressEvent::SpectatorDivergence).
@@ -80,13 +82,13 @@ impl EventKind {
     /// Varies with enabled features: two additional categories exist when the
     /// `hot-join` feature is on.
     #[cfg(not(feature = "hot-join"))]
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     /// The number of event categories.
     ///
     /// Varies with enabled features: two additional categories exist when the
     /// `hot-join` feature is on.
     #[cfg(feature = "hot-join")]
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
 
     /// Every category, in declaration order. Its length is [`Self::COUNT`].
     #[cfg(not(feature = "hot-join"))]
@@ -99,6 +101,7 @@ impl EventKind {
         Self::WaitRecommendation,
         Self::DesyncDetected,
         Self::SyncTimeout,
+        Self::IncompatibleSession,
         Self::ReplayDesync,
         Self::SpectatorDivergence,
         Self::InputDelayRecommendation,
@@ -115,6 +118,7 @@ impl EventKind {
         Self::WaitRecommendation,
         Self::DesyncDetected,
         Self::SyncTimeout,
+        Self::IncompatibleSession,
         Self::ReplayDesync,
         Self::SpectatorDivergence,
         Self::InputDelayRecommendation,
@@ -136,6 +140,7 @@ impl EventKind {
             Self::WaitRecommendation => "wait_recommendation",
             Self::DesyncDetected => "desync_detected",
             Self::SyncTimeout => "sync_timeout",
+            Self::IncompatibleSession => "incompatible_session",
             Self::ReplayDesync => "replay_desync",
             Self::SpectatorDivergence => "spectator_divergence",
             Self::InputDelayRecommendation => "input_delay_recommendation",
@@ -159,14 +164,15 @@ impl EventKind {
             Self::WaitRecommendation => 5,
             Self::DesyncDetected => 6,
             Self::SyncTimeout => 7,
-            Self::ReplayDesync => 8,
-            Self::SpectatorDivergence => 9,
-            Self::InputDelayRecommendation => 10,
-            Self::PeerDropped => 11,
+            Self::IncompatibleSession => 8,
+            Self::ReplayDesync => 9,
+            Self::SpectatorDivergence => 10,
+            Self::InputDelayRecommendation => 11,
+            Self::PeerDropped => 12,
             #[cfg(feature = "hot-join")]
-            Self::JoinRequested => 12,
+            Self::JoinRequested => 13,
             #[cfg(feature = "hot-join")]
-            Self::PeerJoined => 13,
+            Self::PeerJoined => 14,
         }
     }
 }
@@ -1048,7 +1054,7 @@ mod tests {
     #[test]
     fn fortress_event_kind_maps_every_variant() {
         let a = addr();
-        let cases: [(FortressEvent<TestConfig>, EventKind); 12] = [
+        let cases: [(FortressEvent<TestConfig>, EventKind); 13] = [
             (
                 FortressEvent::Synchronizing {
                     addr: a,
@@ -1097,6 +1103,13 @@ mod tests {
                     elapsed_ms: 0,
                 },
                 EventKind::SyncTimeout,
+            ),
+            (
+                FortressEvent::IncompatibleSession {
+                    addr: a,
+                    reason: crate::IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 },
+                },
+                EventKind::IncompatibleSession,
             ),
             (
                 FortressEvent::ReplayDesync {

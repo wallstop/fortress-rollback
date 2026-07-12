@@ -1300,12 +1300,27 @@ impl<T: Config> SessionBuilder<T> {
             .validate_frame_delay(self.input_delay)?;
         self.validate_rollback_window_storage()?;
         self.protocol_config.validate()?;
+        self.validate_network_desync_detection()?;
         Ok(())
     }
 
     fn validate_spectator_config(&self) -> Result<(), FortressError> {
         self.protocol_config.validate()?;
-        self.spectator_config.validate()
+        self.spectator_config.validate()?;
+        self.validate_network_desync_detection()
+    }
+
+    fn validate_network_desync_detection(&self) -> Result<(), FortressError> {
+        if self.desync_detection == (DesyncDetection::On { interval: 0 }) {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "desync_detection.interval",
+                min: 1,
+                max: u64::from(u32::MAX),
+                actual: 0,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     fn validate_synctest_config(&self) -> Result<(), FortressError> {
@@ -1540,15 +1555,23 @@ impl<T: Config> SessionBuilder<T> {
                     // callers can distinguish IO (socket), protocol, and config
                     // failures (and `AllocationFailed`) instead of forcing every
                     // cause to a single opaque endpoint-creation error.
-                    let endpoint =
-                        self.create_endpoint(handles, peer_addr.clone(), self.local_players)?;
+                    let endpoint = self.create_endpoint(
+                        handles,
+                        peer_addr.clone(),
+                        self.local_players,
+                        self.desync_detection,
+                    )?;
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
                     // the host of the spectator sends inputs for all players;
                     // propagate the original error verbatim (see above).
-                    let endpoint =
-                        self.create_endpoint(handles, peer_addr.clone(), self.num_players)?;
+                    let endpoint = self.create_endpoint(
+                        handles,
+                        peer_addr.clone(),
+                        self.num_players,
+                        DesyncDetection::Off,
+                    )?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),
@@ -1818,8 +1841,12 @@ impl<T: Config> SessionBuilder<T> {
         for (player_type, handles) in addr_count.into_iter() {
             match player_type {
                 PlayerType::Remote(peer_addr) => {
-                    let mut endpoint =
-                        self.create_endpoint(handles, peer_addr.clone(), self.local_players)?;
+                    let mut endpoint = self.create_endpoint(
+                        handles,
+                        peer_addr.clone(),
+                        self.local_players,
+                        self.desync_detection,
+                    )?;
                     // Defer input processing until the snapshot is applied: the
                     // joiner must not ack the host's inputs before the activation
                     // frame is known (acking would let the host trim its
@@ -1829,8 +1856,12 @@ impl<T: Config> SessionBuilder<T> {
                     self.player_reg.remotes.insert(peer_addr, endpoint);
                 },
                 PlayerType::Spectator(peer_addr) => {
-                    let endpoint =
-                        self.create_endpoint(handles, peer_addr.clone(), self.num_players)?;
+                    let endpoint = self.create_endpoint(
+                        handles,
+                        peer_addr.clone(),
+                        self.num_players,
+                        DesyncDetection::Off,
+                    )?;
                     self.player_reg.spectators.insert(peer_addr, endpoint);
                 },
                 PlayerType::Local => (),
@@ -2202,6 +2233,7 @@ impl<T: Config> SessionBuilder<T> {
         handles: Vec<PlayerHandle>,
         peer_addr: T::Address,
         local_players: usize,
+        desync_detection: DesyncDetection,
     ) -> Result<UdpProtocol<T>, FortressError> {
         // create the endpoint, set parameters
         let mut endpoint = UdpProtocol::new(
@@ -2213,7 +2245,7 @@ impl<T: Config> SessionBuilder<T> {
             self.disconnect_timeout,
             self.disconnect_notify_start,
             self.fps,
-            self.desync_detection,
+            desync_detection,
             self.sync_config,
             self.protocol_config.clone(),
             self.time_sync_config,
@@ -2640,6 +2672,58 @@ mod tests {
             },
             other => panic!("expected combined storage range error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn every_network_session_start_rejects_zero_desync_interval() {
+        let invalid_mode = DesyncDetection::On { interval: 0 };
+
+        let p2p_error = single_local_builder()
+            .with_desync_detection_mode(invalid_mode)
+            .start_p2p_session(DummySocket)
+            .unwrap_err();
+        assert!(matches!(
+            p2p_error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            }
+        ));
+
+        let spectator = SessionBuilder::<TestConfig>::new()
+            .with_desync_detection_mode(invalid_mode)
+            .start_spectator_session(test_addr(7_502), DummySocket);
+        assert!(spectator.is_none());
+
+        let multi_spectator = SessionBuilder::<TestConfig>::new()
+            .with_desync_detection_mode(invalid_mode)
+            .start_spectator_session_multi(&[test_addr(7_503)], DummySocket);
+        assert!(multi_spectator.is_none());
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn hot_join_session_start_rejects_zero_desync_interval_without_remote_endpoints() {
+        let error = single_local_builder()
+            .with_desync_detection_mode(DesyncDetection::On { interval: 0 })
+            .start_hot_join_session(DummySocket, test_addr(7_504))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]

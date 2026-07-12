@@ -9910,6 +9910,9 @@ impl<T: Config> P2PSession<T> {
                 }
                 self.enqueue_event(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
+            Event::Incompatible { reason } => {
+                self.enqueue_event(FortressEvent::IncompatibleSession { addr, reason });
+            },
             // add the input and all associated information
             Event::Input { input, player, .. } => {
                 // input only comes from remote players, not spectators
@@ -10362,7 +10365,10 @@ mod tests {
     fn sync_request_message() -> Message {
         Message {
             header: MessageHeader::new(0),
-            body: MessageBody::SyncRequest(SyncRequest { random_request: 0 }),
+            body: MessageBody::SyncRequest(SyncRequest {
+                random_request: 0,
+                ..SyncRequest::default()
+            }),
         }
     }
 
@@ -16785,14 +16791,16 @@ mod tests {
             socket: Box<dyn NonBlockingSocket<SocketAddr>>,
             protos: BTreeMap<SocketAddr, UdpProtocol<TestConfig>>,
             status: Vec<ConnectionStatus>,
+            desync_detection: DesyncDetection,
         }
 
         impl ManualJoiner {
-            fn new(bus: &MeshBus, addr: SocketAddr) -> Self {
+            fn new(bus: &MeshBus, addr: SocketAddr, desync_detection: DesyncDetection) -> Self {
                 Self {
                     socket: Box::new(bus.socket(addr)),
                     protos: BTreeMap::new(),
                     status: vec![ConnectionStatus::default(); 3],
+                    desync_detection,
                 }
             }
 
@@ -16808,7 +16816,7 @@ mod tests {
                     Duration::from_secs(2),
                     Duration::from_millis(500),
                     60,
-                    DesyncDetection::Off,
+                    self.desync_detection,
                     SyncConfig::default(),
                     clock.protocol_config(),
                     TimeSyncConfig::default(),
@@ -17270,7 +17278,8 @@ mod tests {
             // driven at the protocol level (the `ManualJoiner` harness speaks
             // the same `UdpProtocol` handshake a real spectator session would).
             let mut spectator = spectator_on_b.then(|| {
-                let mut spectator = ManualJoiner::new(&duo.bus.clone(), addr_d());
+                let mut spectator =
+                    ManualJoiner::new(&duo.bus.clone(), addr_d(), DesyncDetection::Off);
                 spectator.connect(addr_b(), 1, &duo.clock.clone());
                 spectator
             });
@@ -17457,7 +17466,7 @@ mod tests {
             let mut duo = mesh_with_dropped_slot_varying(600, 6);
 
             // --- Rejoin: manual joiner attaches at C's address, syncs to A.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
 
@@ -17759,7 +17768,7 @@ mod tests {
             }
 
             // --- Rejoin: manual joiner attaches at C's address, syncs to A.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -17923,7 +17932,7 @@ mod tests {
             duo.advance_both(91, 201);
 
             // Rejoin while the misprediction is outstanding.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -18024,7 +18033,7 @@ mod tests {
             let f_pre = duo.b.local_connect_status[2];
             assert!(f_pre.disconnected, "slot 2 is dropped on B");
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -18219,7 +18228,7 @@ mod tests {
 
             let pre_status = duo.b.local_connect_status[2];
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -18437,7 +18446,7 @@ mod tests {
 
             // --- Reach a REOPENED pending on B (the byte-identity abort
             // test's choreography).
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -18617,7 +18626,7 @@ mod tests {
 
             // --- Reach a REOPENED pending on B (the abort-probe
             // choreography).
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -18780,7 +18789,7 @@ mod tests {
 
             duo.bus.block(addr_a(), addr_b(), "JoinAborted");
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -19120,7 +19129,7 @@ mod tests {
         /// joiner driver and the activation frame. Shared by the
         /// user-initiated-kick tests (session-33 round-3 review Finding 2).
         fn reach_reopened_pending_with_leaked_input(duo: &mut Duo) -> (ManualJoiner, Frame) {
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -19317,7 +19326,7 @@ mod tests {
             // B must not hear the commit until the test says so.
             duo.bus.block(addr_a(), addr_b(), "JoinCommitted");
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -19496,7 +19505,7 @@ mod tests {
             duo.bus.block(addr_c(), addr_b(), "Input");
 
             // --- Standard rejoin through B's reopen + ack.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -19749,7 +19758,7 @@ mod tests {
         fn npeer_survivor_ignores_mismatched_lifecycle_messages() {
             let mut duo = mesh_with_dropped_slot(600, 6);
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -19921,7 +19930,7 @@ mod tests {
             assert!(pre_status.disconnected, "slot 2 starts dropped on B");
 
             // --- Reach a REOPENED pending on B.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -20104,7 +20113,7 @@ mod tests {
                 duo.advance_both(240 + i, 80);
             }
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -20328,7 +20337,7 @@ mod tests {
                 duo.advance_both(53, 80);
             }
 
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -20736,7 +20745,7 @@ mod tests {
 
             // --- Attempt 1: B reopens + acks; the joiner never acks the
             // snapshot, so A Phase-4 aborts; B never hears it.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -20918,7 +20927,7 @@ mod tests {
             // lifecycle so the pending stays held past the conclusion).
             duo.bus.block(addr_a(), addr_b(), "JoinAborted");
             duo.bus.block(addr_a(), addr_b(), "JoinCommitted");
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -21439,7 +21448,7 @@ mod tests {
 
             // The joiner syncs to A and requests slot 2; the directive fan-out
             // begins (only `Input` is blocked A->B, not `ReactivateSlot`).
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -21592,7 +21601,7 @@ mod tests {
 
             // Joiner -> A; the serve opens (A holds the agreed minimum) and
             // the directive retransmits to B every poll.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -21690,7 +21699,7 @@ mod tests {
             // The joiner syncs to A and starts requesting slot 2. Pre-fix the
             // serve opens immediately (S covers the divergent gap); post-fix
             // the open is deferred while B's claim is still CONNECTED at A.
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -22080,7 +22089,7 @@ mod tests {
 
             // Open a serve + deliver the directive so B holds a PRE-reopen
             // pending (the joiner never syncs to B).
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -22232,7 +22241,7 @@ mod tests {
             // Open the serve and drive it to the CAPTURED state; B reopens
             // and acks; the joiner receives the snapshot but does NOT ack
             // yet (the commit barrier stays open).
-            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c());
+            let mut c2 = ManualJoiner::new(&duo.bus.clone(), addr_c(), duo.a.desync_detection);
             c2.connect(addr_a(), 0, &duo.clock.clone());
             sync_joiner_with(&mut duo, &mut c2, addr_a());
             c2.proto_mut(addr_a()).send_join_request(2);
@@ -23762,7 +23771,7 @@ mod tests {
         fn npeer_joiner_with_own_spectator_flushes_contiguously_from_snapshot_frame() {
             let mut duo = mesh_with_dropped_slot_varying(600, 6);
             let mut c2 = RealJoiner::new_with_spectator(&duo.bus.clone(), &duo.clock.clone());
-            let mut spectator = ManualJoiner::new(&duo.bus.clone(), addr_e());
+            let mut spectator = ManualJoiner::new(&duo.bus.clone(), addr_e(), DesyncDetection::Off);
             spectator.connect_spectator(addr_c(), 3, &duo.clock.clone());
             let mut received: BTreeMap<i32, BTreeMap<usize, u8>> = BTreeMap::new();
 
@@ -23992,7 +24001,7 @@ mod tests {
             assert_eq!(joiner.current_state(), SessionState::HotJoining);
             let mut joiner_shadow = Shadow::default();
 
-            let mut spectator = ManualJoiner::new(&bus, addr_e());
+            let mut spectator = ManualJoiner::new(&bus, addr_e(), DesyncDetection::Off);
             spectator.connect_spectator(addr_c(), 2, &clock);
             let mut received: BTreeMap<i32, BTreeMap<usize, u8>> = BTreeMap::new();
 
@@ -25819,7 +25828,7 @@ mod tests {
                 &duo.bus.clone(),
                 &duo.clock.clone(),
                 60,
-                DesyncDetection::Off,
+                duo.a.desync_detection,
             );
             let mut second_f = Frame::NULL;
             for i in 0..600_u32 {
@@ -26023,7 +26032,7 @@ mod tests {
                 &duo.bus.clone(),
                 &duo.clock.clone(),
                 60,
-                DesyncDetection::Off,
+                duo.a.desync_detection,
             );
 
             // Drive to: joiner buffered, serve aborted on A (slot stays
@@ -26187,7 +26196,7 @@ mod tests {
                 &duo.bus.clone(),
                 &duo.clock.clone(),
                 60,
-                DesyncDetection::Off,
+                duo.a.desync_detection,
             );
 
             // Drive to: joiner buffered + serve COMMITTED on A (the barrier
@@ -26612,7 +26621,7 @@ mod tests {
                 &duo.bus.clone(),
                 &duo.clock.clone(),
                 60,
-                DesyncDetection::Off,
+                duo.a.desync_detection,
             );
 
             // Drive to: buffered + committed on A (B acks flow normally).

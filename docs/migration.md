@@ -14,10 +14,10 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - Ensure your `Config::Address` type implements `Ord` + `PartialOrd` (in addition to `Clone + Eq + Hash`).
 - Rename types: `GgrsError` → `FortressError`, `GgrsEvent` → `FortressEvent`, `GgrsRequest` → `FortressRequest`.
 - All examples/tests now import `fortress_rollback`; mirror that pattern in your code.
-- **Browser clock migration in Unreleased:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#unreleased-browser-chaossocket-clock-callbacks).
+- **Browser clock migration in 0.10:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#010-browser-chaossocket-clock-callbacks).
 - **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
 - **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
-- **New in Unreleased:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [Unreleased section](#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
+- **New in 0.10:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [0.10 section](#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
 
@@ -28,7 +28,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.9"  # current version
+fortress-rollback = "0.10"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
@@ -448,7 +448,7 @@ The trait is available in the prelude: `use fortress_rollback::prelude::*;`
 
 For comprehensive examples including a generic game loop, see the [User Guide — Using the Session Trait](user-guide.md#using-the-session-trait).
 
-## Unreleased: Browser ChaosSocket Clock Callbacks
+## 0.10: Browser ChaosSocket Clock Callbacks
 
 `ChaosSocket::with_clock()` now accepts callbacks that return
 `web_time::Instant`. The default clock needs no migration. Browser
@@ -486,7 +486,40 @@ Native and `wasm32-unknown-emscripten` callers remain source-compatible because
 cross-platform import everywhere keeps one clock implementation portable across
 native, browser, and Godot Web builds.
 
-## Unreleased: Runtime Input Delay, Disconnect Behavior, Graceful Peer Removal, and Spectator Divergence
+## 0.10: Protocol-v1 Session Compatibility Handshake
+
+Protocol-v1 peers now exchange deterministic session settings during the sync
+handshake. Mixed 0.9/v1 traffic is rejected by framing before synchronization;
+two v1 peers whose compatibility floor, player count, serialized input width,
+FPS, maximum prediction, desync interval, compiled protocol features, or
+canonical digest differ emit
+`FortressEvent::IncompatibleSession` and remain synchronizing without further
+retries or a later timeout.
+
+Applications that exhaustively match `FortressEvent` must add an arm:
+
+```rust
+FortressEvent::IncompatibleSession { addr, reason } => {
+    eprintln!("cannot synchronize with {addr}: {reason}");
+    // Tear down this session and rebuild it with matching settings.
+}
+```
+
+Applications that exhaustively match metrics categories must likewise add
+`EventKind::IncompatibleSession`; its stable string is
+`"incompatible_session"`.
+
+The reason's `ours` and `theirs` values are oriented to the endpoint emitting
+the event. `DisconnectBehavior` is intentionally not compared because it is a
+local response policy. Custom socket APIs are unchanged, but byte recorders,
+relays, and fixtures must use the new fixed-width sync request/reply bodies.
+
+Network startup now rejects values that cannot be represented by the handshake
+(`u16` player count/input width/prediction window and `u32` FPS/checksum
+interval), plus `DesyncDetection::On { interval: 0 }`. Use
+`DesyncDetection::Off` to disable checksum comparison.
+
+## 0.10: Runtime Input Delay, Disconnect Behavior, Graceful Peer Removal, and Spectator Divergence
 
 The forthcoming release introduces fail-closed redundant spectator divergence plus three `P2PSession` capabilities: runtime input-delay adjustment, configurable disconnect behavior, and explicit graceful peer removal. The `P2PSession` behavior is **additive or compatibility-preserving** for configurations whose prediction window plus input delay fits the input queue; previously unsafe larger combinations now fail construction as described below. Sessions default to `DisconnectBehavior::Halt`, and the legacy `disconnect_player` continues to work unchanged. The spectator divergence behavior affects only failover spectators connected to redundant hosts that disagree. The breaking-change implications are limited to **exhaustive matches** on the public enums listed below.
 

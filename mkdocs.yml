@@ -213,6 +213,7 @@ nav:
       - Migration Guide: migration.md
   - Architecture:
       - Overview: architecture.md
+      - Threat Model: threat-model.md
       - Fortress vs GGRS: fortress-vs-ggrs.md
   - Specifications:
       - specs/README.md
