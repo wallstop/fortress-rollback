@@ -421,8 +421,11 @@ pub struct ProtocolConfig {
 
     /// Number of checksums to retain for desync detection history.
     ///
-    /// Higher values can detect older desyncs but use more memory.
-    /// Only relevant when desync detection is enabled.
+    /// The history is bounded by scheduled checksum frames, independent of
+    /// whether every peer has supplied or matched a checksum for those frames.
+    /// Missing local checksums can therefore leave fewer than this many entries.
+    /// Higher values can detect older desyncs but use more memory. Only relevant
+    /// when desync detection is enabled.
     ///
     /// Default: 32
     pub max_checksum_history: usize,

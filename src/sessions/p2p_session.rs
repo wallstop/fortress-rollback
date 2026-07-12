@@ -11943,6 +11943,14 @@ impl<T: Config> P2PSession<T> {
                             .observe_checksum_history_len(self.local_checksum_history.len());
                     }
 
+                    // Retention is deliberately governed by the configured
+                    // scheduled-frame window, not peer `last_verified_frame`
+                    // cursors. Those cursors advance only on a match, so using
+                    // their minimum as a prune floor would let a mismatching or
+                    // silent peer retain history without a deterministic bound.
+                    // Run this even when the exact saved cell has no checksum:
+                    // the schedule still advanced and older evidence must remain
+                    // bounded, though the history may contain fewer than the cap.
                     let max_history = self.protocol_config.max_checksum_history;
                     if self.local_checksum_history.len() > max_history {
                         let oldest_frame_to_keep =
@@ -14525,6 +14533,69 @@ mod tests {
         assert!(
             session.last_sent_checksum_frame.is_null(),
             "send cursor must not advance on an exact-match miss"
+        );
+    }
+
+    /// A saved cell can legitimately have no checksum when the application did
+    /// not provide one. The send cursor must then remain stationary so the frame
+    /// can be retried, but checksum-history retention must still run against the
+    /// scheduled frame. This pins the size-cap contract independently of peer
+    /// verification cursors and covers the skipped-insert/stale-prune arm.
+    #[test]
+    fn missing_local_checksum_still_prunes_history_by_scheduled_frame() {
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
+            .with_protocol_config(ProtocolConfig {
+                max_checksum_history: 2,
+                ..ProtocolConfig::default()
+            })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player B")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .expect("remote player D")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+
+        for f in 0..=3 {
+            let request = session.sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                assert_eq!(frame, Frame::new(f));
+                // In particular, frame 3 has an exact saved-state hit but no
+                // checksum, so insertion is skipped without taking the early
+                // missing-cell return.
+                assert!(cell.save(frame, Some(0u8), None));
+            }
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(3), session.save_mode);
+        session.last_sent_checksum_frame = Frame::new(2);
+        for frame in 0..=2 {
+            session
+                .local_checksum_history
+                .insert(Frame::new(frame), frame as u128);
+        }
+
+        session.check_checksum_send_interval();
+
+        assert_eq!(
+            session.last_sent_checksum_frame,
+            Frame::new(2),
+            "missing checksum must leave the send cursor ready to retry frame 3"
+        );
+        assert_eq!(
+            session
+                .local_checksum_history
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Frame::new(2)],
+            "scheduled frame 3 with a cap of 2 must prune frames older than 2"
         );
     }
 

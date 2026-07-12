@@ -1837,6 +1837,7 @@ mod sync_layer_tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     #[repr(C)]
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -2644,6 +2645,62 @@ mod sync_layer_tests {
         // Negative frame
         let cell = sync_layer.saved_state_by_frame(Frame::new(-1));
         assert!(cell.is_none());
+    }
+
+    #[test]
+    fn advance_frame_saturates_at_i32_max_without_corrupting_saved_states() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _observer_guard = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        // Three cells make MAX-1 and MAX occupy distinct slots, while still
+        // exercising the same modulo indexing used by production rollback rings.
+        let mut sync_layer = SyncLayer::<TestConfig>::new(0, 2);
+        sync_layer.current_frame = Frame::new(i32::MAX - 1);
+
+        let penultimate = sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = penultimate {
+            assert_eq!(frame, Frame::new(i32::MAX - 1));
+            assert!(cell.save(frame, Some(41), Some(0x41)));
+        }
+
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(i32::MAX));
+        assert!(observer.is_empty(), "reaching i32::MAX is still valid");
+
+        let terminal = sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = terminal {
+            assert_eq!(frame, Frame::new(i32::MAX));
+            assert!(cell.save(frame, Some(42), Some(0x42)));
+        }
+
+        // The overflow attempt must degrade loudly and deterministically: no
+        // panic, no wrap to a negative frame, and no movement past i32::MAX.
+        sync_layer.advance_frame();
+        assert_eq!(sync_layer.current_frame(), Frame::new(i32::MAX));
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1, "overflow must report exactly once");
+        assert_eq!(
+            violations[0].severity,
+            crate::telemetry::ViolationSeverity::Error
+        );
+        assert_eq!(
+            violations[0].kind,
+            crate::telemetry::ViolationKind::ArithmeticOverflow
+        );
+
+        // Saturation must not alias or overwrite either high-frame saved-state
+        // cell through a wrapped/negative modulo conversion.
+        let penultimate = sync_layer
+            .saved_state_by_frame(Frame::new(i32::MAX - 1))
+            .expect("penultimate frame remains addressable");
+        assert_eq!(penultimate.load(), Some(41));
+        assert_eq!(penultimate.checksum(), Some(0x41));
+        let terminal = sync_layer
+            .saved_state_by_frame(Frame::new(i32::MAX))
+            .expect("terminal frame remains addressable");
+        assert_eq!(terminal.load(), Some(42));
+        assert_eq!(terminal.checksum(), Some(0x42));
     }
 
     #[test]
