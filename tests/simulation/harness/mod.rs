@@ -1614,13 +1614,18 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     if let Some(limit) = options.receive_message_limit {
         net.set_receive_limit(limit);
     }
+    let collect_receive_timing = options.receive_message_limit.is_some();
     let addrs: Vec<SocketAddr> = (0..n).map(peer_addr).collect();
-    let mut peer_by_session_addr: BTreeMap<SocketAddr, usize> = addrs
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(peer, addr)| (addr, peer))
-        .collect();
+    let mut peer_by_session_addr: BTreeMap<SocketAddr, usize> = if collect_receive_timing {
+        addrs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(peer, addr)| (addr, peer))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
 
     let mut spectator_host_enabled = vec![false; n];
     for &peer in &schedule.config.spectator_hosts {
@@ -1802,8 +1807,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut wait_frames_obeyed = vec![0_u64; n];
     let mut local_input_ordinals = vec![0_u32; n];
     let mut progress_samples = Vec::new();
-    let mut first_running_step = vec![None; n];
-    let mut first_synchronized_step = vec![vec![None; n]; n];
+    let mut first_running_step = if collect_receive_timing {
+        vec![None; n]
+    } else {
+        Vec::new()
+    };
+    let mut first_synchronized_step = if collect_receive_timing {
+        vec![vec![None; n]; n]
+    } else {
+        Vec::new()
+    };
     let progress_interval = schedule.config.steps.div_ceil(12).max(1);
     // Peers whose app model never drains the session event queue (models a
     // wedged event consumer). Their bounded `event_queue` fills and the session
@@ -2007,7 +2020,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         match peers[*peer].binding.rebind(fresh) {
                             Ok(_) => {
                                 peers[*peer].source_addrs.push(fresh);
-                                peer_by_session_addr.insert(fresh, *peer);
+                                if collect_receive_timing {
+                                    peer_by_session_addr.insert(fresh, *peer);
+                                }
                             },
                             Err(error) => oracle.observe_runner_error(
                                 "rebind_failed",
@@ -2100,14 +2115,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
                         }
-                        if let FortressEvent::Synchronized { addr } = event {
-                            record_first_synchronized_step(
-                                &mut first_synchronized_step,
-                                &peer_by_session_addr,
-                                i,
-                                addr,
-                                step,
-                            );
+                        if collect_receive_timing {
+                            if let FortressEvent::Synchronized { addr } = event {
+                                record_first_synchronized_step(
+                                    &mut first_synchronized_step,
+                                    &peer_by_session_addr,
+                                    i,
+                                    addr,
+                                    step,
+                                );
+                            }
                         }
                         // Closed-loop app model: obey a `WaitRecommendation` by owing
                         // that many skipped advances (max so a stronger one wins).
@@ -2233,11 +2250,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
-        for (peer, slot) in peers.iter().enumerate() {
-            if first_running_step[peer].is_none()
-                && slot.session.current_state() == SessionState::Running
-            {
-                first_running_step[peer] = Some(step);
+        if collect_receive_timing {
+            for (peer, slot) in peers.iter().enumerate() {
+                if first_running_step[peer].is_none()
+                    && slot.session.current_state() == SessionState::Running
+                {
+                    first_running_step[peer] = Some(step);
+                }
             }
         }
 
