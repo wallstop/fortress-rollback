@@ -63,6 +63,7 @@ def repo(tmp_path: Path) -> Path:
     _write(tmp_path, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 1;\n")
     _write(tmp_path, "src/network/wire_golden_v1.rs", "const V1: &[u8] = &[1];\n")
     _write(tmp_path, "src/network/wire_golden_legacy_0_9.rs", "const V0: &[u8] = &[0];\n")
+    _write(tmp_path, "tests/network/wire_golden_legacy_0_9.rs", "const V0: &[u8] = &[0];\n")
     _write(tmp_path, "src/network/codec.rs", "")
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-qm", "base")
@@ -79,7 +80,14 @@ def test_new_version_fixture_passes_without_bump(repo: Path) -> None:
     assert HOOK.check_diff(repo, cached=True)
 
 
-@pytest.mark.parametrize("path", ["src/network/wire_golden_v1.rs", "src/network/wire_golden_legacy_0_9.rs"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/network/wire_golden_v1.rs",
+        "src/network/wire_golden_legacy_0_9.rs",
+        "tests/network/wire_golden_legacy_0_9.rs",
+    ],
+)
 def test_existing_fixture_change_fails(repo: Path, path: str, capsys: pytest.CaptureFixture[str]) -> None:
     _write(repo, path, "changed\n")
     assert not HOOK.check_diff(repo)
