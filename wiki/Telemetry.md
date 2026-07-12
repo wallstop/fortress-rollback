@@ -16,17 +16,18 @@ Monitor P2P session performance with structured telemetry events. Track rollback
 4. [`TelemetryEvent` Enum](#telemetryevent-enum)
 5. [`CollectingTelemetry` (Built-in)](#collectingtelemetry-built-in)
 6. [Custom Telemetry Observer](#custom-telemetry-observer)
-7. [Spec Violation Observability](#spec-violation-observability)
+7. [Pull-Based Metrics](#pull-based-metrics)
+8. [Spec Violation Observability](#spec-violation-observability)
    - [`ViolationObserver` Trait](#violationobserver-trait)
    - [`SpecViolation` Struct](#specviolation-struct)
    - [`CollectingObserver`](#collectingobserver)
    - [`TracingObserver`](#tracingobserver)
    - [`ViolationKind` Variants](#violationkind-variants)
    - [`ViolationSeverity` Levels](#violationseverity-levels)
-8. [Event Flow](#event-flow)
-9. [Use Cases](#use-cases)
-10. [Integration Tips](#integration-tips)
-11. [See Also](#see-also)
+9. [Event Flow](#event-flow)
+10. [Use Cases](#use-cases)
+11. [Integration Tips](#integration-tips)
+12. [See Also](#see-also)
 
 ---
 
@@ -163,6 +164,40 @@ impl SessionTelemetry for MetricsTelemetry {
     }
 }
 ```
+
+---
+
+## Pull-Based Metrics
+
+`P2PSession::metrics()` returns an always-on `SessionMetrics` snapshot. It complements the
+callback API with cumulative counters and high-water marks that remain available without a
+telemetry observer. `peer_metrics(handle)` returns wire-exact traffic and gauges for
+one remote player or spectator. Both snapshots are cheap to copy and support JSON serialization
+with the `json` feature.
+
+| Signal | Interpretation |
+| --- | --- |
+| `resimulated_frames / frames_advanced` | Fraction of simulation work spent repairing rollbacks |
+| `rollback_depth_histogram` / `max_rollback_depth` | Distribution and worst rollback cost |
+| `stall_count` | Advances blocked by a full prediction window |
+| `confirmation_lag_current` / `max` | Speculative distance ahead of confirmed history |
+| `checksums_mismatched` | Confirmed desync incidents |
+| `event_queue_high_water` / `events_discarded_total` | Whether the application drains events fast enough |
+| `unknown_source_packets` | Decoded traffic ignored because its source is not a configured endpoint |
+| `pending_output_len` | Unacknowledged per-peer input backlog |
+| `ping_ms` | Latest quality-report round-trip measurement |
+| `portability_risk_messages_sent` | Messages at or above the conservative 1,200-byte path budget |
+| `fragmentation_risk_messages_sent` | Messages at or above the common 1,472-byte IPv4/UDP payload ceiling |
+
+`PeerMetrics::bytes_sent` and `bytes_received` are exact Fortress wire payload sizes. They exclude
+IP/UDP headers. `NetworkStats::kbps_sent` uses those serialized sizes plus an estimated header and
+reports decimal kilobits per second. Its ping and frame-advantage gauges update on the configured
+`ProtocolConfig::quality_report_interval` (200 ms by default), so they provide snapshots rather
+than per-packet measurements.
+
+Poll snapshots on a bounded interval and export deltas for monotonic counters. Do not sum gauges.
+Alert immediately on checksum mismatches or discarded events; choose workload-specific bounds for
+rollback rate, confirmation lag, stalls, pending output, and hot-join duration.
 
 ---
 
@@ -340,4 +375,7 @@ sequenceDiagram
 ## See Also
 
 - [User Guide](User-Guide) — integrating Fortress Rollback into your game
+- [Production Checklist](Production-Checklist) — release monitoring requirements
+- [Desync Playbook](Desync-Playbook) — incident capture and reproduction
+- [Network Tuning](Tuning) — interpreting baseline metrics
 - [Architecture Overview](Architecture) — system design and module structure

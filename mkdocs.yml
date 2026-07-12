@@ -208,8 +208,12 @@ nav:
   - Home: index.md
   - Getting Started:
       - User Guide: user-guide.md
+      - Production Checklist: production-checklist.md
+      - Network Tuning: tuning.md
       - Match Replay: replay.md
       - Session Telemetry: telemetry.md
+      - Desync Playbook: desync-playbook.md
+      - Disconnect and Rejoin: reconnect-playbook.md
       - Migration Guide: migration.md
   - Architecture:
       - Overview: architecture.md

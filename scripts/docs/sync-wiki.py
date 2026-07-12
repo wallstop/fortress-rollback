@@ -89,6 +89,10 @@ WIKI_STRUCTURE = {
     "tlaplus-tooling-research.md": "TLAplus-Tooling-Research",
     "replay.md": "Replay",
     "telemetry.md": "Telemetry",
+    "production-checklist.md": "Production-Checklist",
+    "desync-playbook.md": "Desync-Playbook",
+    "reconnect-playbook.md": "Reconnect-Playbook",
+    "tuning.md": "Tuning",
     # Specs directory
     "specs/formal-spec.md": "Formal-Specification",
     "specs/determinism-model.md": "Determinism-Model",
@@ -1099,6 +1103,10 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 - [User Guide](User-Guide)
 - [Match Replay](Replay)
 - [Session Telemetry](Telemetry)
+- [Production Checklist](Production-Checklist)
+- [Network Tuning](Tuning)
+- [Desync Playbook](Desync-Playbook)
+- [Disconnect and Rejoin](Reconnect-Playbook)
 - [Architecture](Architecture)
 - [Threat Model](Threat-Model)
 - [Migration](Migration)

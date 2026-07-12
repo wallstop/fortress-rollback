@@ -3,8 +3,8 @@ mod ex_game;
 use clap::Parser;
 use ex_game::{FortressConfig, Game};
 use fortress_rollback::{
-    DesyncDetection, PlayerHandle, PlayerType, SaveMode, SessionBuilder, SessionState,
-    UdpNonBlockingSocket,
+    DesyncDetection, FortressEvent, PlayerHandle, PlayerType, SaveMode, SessionBuilder,
+    SessionState, UdpNonBlockingSocket,
 };
 // Note: Import SyncHealth when implementing termination logic (see comment block below)
 // use fortress_rollback::SyncHealth;
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // create a Fortress Rollback session
     let mut sess_build = SessionBuilder::<FortressConfig>::new()
-        .with_num_players(num_players)
+        .with_num_players(num_players)?
         // (optional) customize desync detection interval (default: 60 frames)
         .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // (optional) set expected update frequency
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Or set the prediction window to 0 to use lockstep netcode instead (i.e. no rollbacks).
         .with_max_prediction_window(8)
         // (optional) set input delay for the local player
-        .with_input_delay(2).unwrap()
+        .with_input_delay(2)?
         // (optional) by default, Fortress Rollback will ask you to save the game state every frame. If your
         // saving of game state takes much longer than advancing the game state N times, you can
         // improve performance by turning sparse saving mode on (N == average number of predictions
@@ -103,6 +103,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // time variables for tick rate
     let mut last_update = Instant::now();
     let mut accumulator = Duration::ZERO;
+    let mut recommended_skips = 0_u32;
+    let mut rollback_sample_at = Instant::now();
+    let mut previous_rollbacks = 0_u64;
+    let mut rollbacks_per_second = 0.0_f64;
 
     loop {
         // communicate, receive and send packets
@@ -111,6 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // print Fortress Rollback events
         for event in sess.events() {
             info!("Event: {:?}", event);
+            if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                recommended_skips = recommended_skips.max(skip_frames);
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -163,6 +170,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // frames are only happening if the sessions are synchronized
             if sess.current_state() == SessionState::Running {
+                // WaitRecommendation slows simulation without delaying network polling.
+                if recommended_skips > 0 {
+                    recommended_skips = recommended_skips.saturating_sub(1);
+                    continue;
+                }
+
                 // add input for all local  players
                 for handle in sess.local_player_handles() {
                     sess.add_local_input(handle, game.local_input(handle))?;
@@ -177,6 +190,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // render the game state
         game.render();
+
+        let metrics = sess.metrics();
+        let sample_elapsed = Instant::now().duration_since(rollback_sample_at);
+        if sample_elapsed >= Duration::from_secs(1) {
+            let rollback_delta = metrics.rollback_count.saturating_sub(previous_rollbacks);
+            rollbacks_per_second = rollback_delta as f64 / sample_elapsed.as_secs_f64();
+            previous_rollbacks = metrics.rollback_count;
+            rollback_sample_at = Instant::now();
+        }
+
+        let summary = format!(
+            "rollback/s {:.1}  max depth {}  lag {}/{}  stalls {}",
+            rollbacks_per_second,
+            metrics.max_rollback_depth,
+            metrics.confirmation_lag_current,
+            metrics.confirmation_lag_max,
+            metrics.stall_count
+        );
+        draw_text(&summary, 20.0, 65.0, 18.0, WHITE);
+
+        let mut peer_line_y = 85.0;
+        for handle in sess.remote_player_handles() {
+            if let Ok(stats) = sess.network_stats(handle) {
+                let peer_line = format!(
+                    "peer {handle}: {}ms  {}kbps  health {:?}",
+                    stats.ping,
+                    stats.kbps_sent,
+                    sess.sync_health(handle)
+                );
+                draw_text(&peer_line, 20.0, peer_line_y, 18.0, LIGHTGRAY);
+                peer_line_y += 20.0;
+            }
+        }
 
         // wait for the next loop (macroquad wants it so)
         next_frame().await;
