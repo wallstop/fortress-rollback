@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783894283914,
+  "lastUpdate": 1783899288882,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "db2815a303a8b52c6e6b6c4a5f892f770fe2b61a",
-          "message": "Bump version (#161)\n\n## Description\n\n<!-- Provide a clear and concise description of your changes. -->\n<!-- What problem does this solve? Why is this change needed? -->\n\n## Type of Change\n\n<!-- Check all that apply -->\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [ ] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n<!-- Describe how you tested your changes -->\n<!-- Include any relevant details about your testing environment -->\n\n**Tests added/modified:**\n\n- (None)\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n<!-- Link any related issues using GitHub keywords -->\n<!-- Examples: Fixes #123, Closes #456, Relates to #789 -->\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Low risk: only updates crate version metadata and adds a `0.8.1`\nchangelog entry; no functional code changes are included in this diff.\n> \n> **Overview**\n> Bumps the crate version from `0.8.0` to `0.8.1` in\n`Cargo.toml`/`Cargo.lock` and updates `CHANGELOG.md` to publish the\n`0.8.1` release notes.\n> \n> Updates the changelog compare links so `[Unreleased]` now tracks from\n`v0.8.1` and adds a `[0.8.1]` comparison reference.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb63c194e38d9c8d31266ce86ededc683be40addc. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-05-16T08:58:15-07:00",
-          "tree_id": "2c6fb1399a229792e6ff630437b1d87880ef3094",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/db2815a303a8b52c6e6b6c4a5f892f770fe2b61a"
-        },
-        "date": 1778947388534,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 445,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 707,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1034,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 103877,
-            "range": "± 796",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 27450,
-            "range": "± 846",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 99",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6322,6 +6196,144 @@ window.BENCHMARK_DATA = {
           {
             "name": "P2PSession/metrics",
             "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sync_layer_noop",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bb7122b59d9311090065c5bb4ea266bb0bc001fd",
+          "message": "Publish M6 operations guides and reference metrics (#231)\n\n## What changed\n\n- add production readiness, desync response, disconnect/rejoin, and\nmeasured network-tuning guides\n- synchronize every new page into MkDocs and the generated GitHub wiki\n- document pull-based metrics, wire accounting, MTU risk, and\nquality-report cadence\n- update the graphical P2P example to obey WaitRecommendation while\npolling and render live session/peer health\n- fix the example's previously unchecked fallible builder calls\n\n## Why\n\nM6 requires operational guidance and a reference client that\ndemonstrates the behavior applications must ship. The tuning guide\npublishes schema-v2 sweep evidence, including release-mode N=16 4-byte\nand 32-byte rows, instead of relying on qualitative presets alone.\n\n## Impact\n\nNo wire or library API behavior changes. Users gain deployable\noperations guidance; the graphical example now demonstrates time-sync\nbackpressure and metrics monitoring.\n\n## Validation\n\n- cargo clippy --workspace --all-targets --features tokio,json\n- cargo nextest run --no-capture (2,834 passed; 73 skipped)\n- cargo test --doc --features json -- --nocapture (161 passed; 50\nignored)\n- cargo check --example ex_game_p2p --features graphical-examples,json\n- release-mode full_matrix_sweep (1 passed; N=16 rows zero desync)\n- markdownlint, local link check (1,431 links), strict wiki validation,\ndoc-claims, typos, and agent preflight\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Documentation, wiki sync, doc comments, and example-only loop changes;\nno library runtime or protocol logic modified.\n> \n> **Overview**\n> Adds **four new operational guides** (production checklist, desync\nincident playbook, disconnect/rejoin playbook, network tuning with\nchecked-in sweep baselines) and wires them into **MkDocs**, **wiki\nsync**, and **sidebar** navigation.\n> \n> **Telemetry** gains a **Pull-Based Metrics** section documenting\n`metrics()` / `peer_metrics()`, wire-byte accounting, MTU risk counters,\nand quality-report cadence; **See Also** links cross-reference the new\nguides. **`NetworkStats::ping`** doc comments now state updates happen\non the quality-report interval, not per packet.\n> \n> The **`ex_game_p2p`** example propagates fallible `SessionBuilder`\ncalls with `?`, handles **`WaitRecommendation`** by skipping simulation\nticks while still polling, and draws live rollback/lag/stall and\nper-peer ping/kbps/**`sync_health`** overlays.\n> \n> No rollback protocol or wire-format behavior changes beyond\ndocumentation clarity.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n556d6c6381bc9413afcb375a65f2f4a7a2273fad. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-07-12T16:29:47-07:00",
+          "tree_id": "3617d49e6bc2121f1810b50dd9587d8091baa03b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/bb7122b59d9311090065c5bb4ea266bb0bc001fd"
+        },
+        "date": 1783899288361,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 122,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 169,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 469,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 747,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1103,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 134342,
+            "range": "± 193",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 50853,
+            "range": "± 3703",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 21,
             "range": "± 0",
             "unit": "ns/iter"
           },
