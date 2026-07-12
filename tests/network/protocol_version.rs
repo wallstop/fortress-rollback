@@ -12,7 +12,7 @@ use crate::common::TestClock;
 use fortress_rollback::telemetry::{CollectingObserver, ViolationKind, ViolationSeverity};
 use fortress_rollback::{
     FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
-    UdpNonBlockingSocket, PROTOCOL_VERSION,
+    SyncConfig, UdpNonBlockingSocket, PROTOCOL_VERSION,
 };
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
@@ -97,12 +97,17 @@ fn legacy_handshake_is_classified_and_times_out_without_synchronizing() {
     let raw_peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let raw_peer_addr = raw_peer.local_addr().unwrap();
     let observer = Arc::new(CollectingObserver::new());
+    let sync_config = SyncConfig::default();
+    let sync_timeout = sync_config
+        .sync_timeout
+        .expect("the default sync config must bound synchronization");
     let protocol_config = ProtocolConfig {
         clock: Some(clock.as_protocol_clock()),
         ..ProtocolConfig::default()
     };
     let mut session = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config)
+        .with_sync_config(sync_config)
         .with_violation_observer(observer.clone())
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .unwrap()
@@ -135,7 +140,7 @@ fn legacy_handshake_is_classified_and_times_out_without_synchronizing() {
         .contains("suspected legacy unversioned packet"));
     assert_eq!(session.current_state(), SessionState::Synchronizing);
 
-    clock.advance(Duration::from_millis(20_001));
+    clock.advance(sync_timeout + Duration::from_millis(1));
     session.poll_remote_clients();
     let events: Vec<_> = session.events().collect();
     assert_eq!(

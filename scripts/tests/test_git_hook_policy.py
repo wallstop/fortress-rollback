@@ -66,6 +66,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "scripts/docs/**",
     "scripts/tests/**",
     "scripts/ci/check-doc-claims.sh",
+    "scripts/hooks/check-wire-golden-immutable.py",
     "scripts/ci/check-derive-bounds.sh",
     ".markdownlint.json",
     ".markdown-link-check.json",
@@ -97,6 +98,7 @@ VERSION_SYNC_REQUIRED_PATH_GLOBS = {
 }
 VERSION_SYNC_REQUIRED_PATHS = {
     "scripts/sync-version.sh",
+    "scripts/hooks/check-wire-golden-immutable.py",
     ".github/workflows/ci-version-sync.yml",
 }
 
