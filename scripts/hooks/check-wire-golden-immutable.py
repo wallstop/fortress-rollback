@@ -344,7 +344,7 @@ def _expected_match_is_exhaustive(suite: str) -> bool:
     offsets = _line_offsets(suite)
     top_level = _top_level_lines(suite)
     declaration = re.compile(
-        r"^(?:pub\(super\)\s+)?fn expected\(body: &MessageBody\) -> &'static \[u8\] \{$"
+        r"^(?:pub(?:\s*\([^)]*\))?\s+)?fn expected\(body: &MessageBody\) -> &'static \[u8\] \{$"
     )
     candidates = [
         (index, line)

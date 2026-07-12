@@ -214,6 +214,25 @@ def test_successor_version_marker_accepts_rust_visibility(
     assert HOOK.check_diff(repo)
 
 
+@pytest.mark.parametrize("visibility", ["pub ", "pub(super) ", "pub(crate) "])
+def test_successor_expected_accepts_rust_visibility(
+    repo: Path, visibility: str
+) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        suite.read_text(encoding="utf-8").replace(
+            "fn expected(body: &MessageBody)",
+            f"{visibility}fn expected(body: &MessageBody)",
+        ),
+        encoding="utf-8",
+    )
+
+    assert HOOK.check_diff(repo)
+
+
 def test_downgrade_or_missing_matching_suite_does_not_excuse_change(repo: Path) -> None:
     _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
     _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 0;\n")
