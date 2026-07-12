@@ -1793,14 +1793,14 @@ mod tests {
 
     #[test]
     fn sync_config_display() {
-        // Test default (no timeout)
+        // Test the default timeout.
         let config = SyncConfig::default();
         let display_str = config.to_string();
         assert!(display_str.contains("SyncConfig"));
         assert!(display_str.contains("num_sync_packets: 5"));
         assert!(display_str.contains("timeout: 20s"));
 
-        // Test with timeout
+        // Test a preset timeout.
         let config = SyncConfig::lan();
         let display_str = config.to_string();
         assert!(display_str.contains("SyncConfig"));
