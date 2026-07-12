@@ -55,6 +55,40 @@ pub type SimClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// mirroring the built-in sockets' per-poll decode cap. Excess messages stay
 /// queued in the inbox for the next poll (never dropped).
 pub const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
+/// Largest receive-poll limit accepted by test-only diagnostics.
+pub const MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL: usize = 1_024;
+
+/// Per-socket evidence that bounded receive polls defer rather than drop work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimReceiveStats {
+    pub receive_polls: u64,
+    pub messages_returned: u64,
+    pub cap_limited_polls: u64,
+    pub max_due_before_drain: u64,
+    pub max_returned_batch: u64,
+    pub max_remainder_after_drain: u64,
+    pub drained_after_cap: bool,
+}
+
+impl SimReceiveStats {
+    /// Merges another address generation belonging to the same logical peer.
+    pub fn merge(&mut self, other: Self) {
+        self.receive_polls = self.receive_polls.saturating_add(other.receive_polls);
+        self.messages_returned = self
+            .messages_returned
+            .saturating_add(other.messages_returned);
+        self.cap_limited_polls = self
+            .cap_limited_polls
+            .saturating_add(other.cap_limited_polls);
+        self.max_due_before_drain = self.max_due_before_drain.max(other.max_due_before_drain);
+        self.max_returned_batch = self.max_returned_batch.max(other.max_returned_batch);
+        self.max_remainder_after_drain = self
+            .max_remainder_after_drain
+            .max(other.max_remainder_after_drain);
+        self.drained_after_cap |= other.drained_after_cap;
+    }
+}
 
 /// Modeled UDP payload bytes per IPv4 fragment under a conventional 1500-byte
 /// path MTU (20-byte IPv4 header + 8-byte UDP header).
@@ -519,6 +553,9 @@ struct SimNetState<M> {
     fragmentation_drop_counts: BTreeMap<(SocketAddr, SocketAddr), u64>,
     /// Total live entries across every link's bandwidth reservation queue.
     bandwidth_reservation_count: usize,
+    receive_limit: usize,
+    receive_stats_enabled: bool,
+    receive_stats: BTreeMap<SocketAddr, SimReceiveStats>,
 }
 
 impl<M: Clone> SimNetState<M> {
@@ -1277,8 +1314,34 @@ impl<M: Clone> SimNetState<M> {
         let Some(queue) = self.inboxes.get_mut(&addr) else {
             return Vec::new();
         };
-        let take = queue.len().min(MAX_RECEIVE_MESSAGES_PER_POLL);
-        queue.drain(..take).collect()
+        let before = queue.len();
+        let take = before.min(self.receive_limit);
+        let messages: Vec<_> = queue.drain(..take).collect();
+        let after = queue.len();
+        if self.receive_stats_enabled {
+            let stats = self.receive_stats.entry(addr).or_default();
+            let was_cap_limited = stats.cap_limited_polls > 0;
+            stats.receive_polls = stats.receive_polls.saturating_add(1);
+            stats.messages_returned = stats
+                .messages_returned
+                .saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
+            if before > self.receive_limit {
+                stats.cap_limited_polls = stats.cap_limited_polls.saturating_add(1);
+            }
+            stats.max_due_before_drain = stats
+                .max_due_before_drain
+                .max(u64::try_from(before).unwrap_or(u64::MAX));
+            stats.max_returned_batch = stats
+                .max_returned_batch
+                .max(u64::try_from(take).unwrap_or(u64::MAX));
+            stats.max_remainder_after_drain = stats
+                .max_remainder_after_drain
+                .max(u64::try_from(after).unwrap_or(u64::MAX));
+            if was_cap_limited && after == 0 {
+                stats.drained_after_cap = true;
+            }
+        }
+        messages
     }
 
     /// Flushes a link's held queue into delivery at the current instant,
@@ -1353,6 +1416,9 @@ impl<M: Clone> SimNet<M> {
                 blocked_drop_counts: BTreeMap::new(),
                 fragmentation_drop_counts: BTreeMap::new(),
                 bandwidth_reservation_count: 0,
+                receive_limit: MAX_RECEIVE_MESSAGES_PER_POLL,
+                receive_stats_enabled: false,
+                receive_stats: BTreeMap::new(),
             })),
         }
     }
@@ -1558,6 +1624,33 @@ impl<M: Clone> SimNet<M> {
         self.lock().unattached = policy;
     }
 
+    /// Enables receive diagnostics and selects the per-socket poll limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `limit` is zero or exceeds
+    /// [`MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL`]. This is test-only
+    /// configuration and invalid constants are harness bugs.
+    pub fn set_receive_limit(&self, limit: usize) {
+        assert!(
+            (1..=MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL).contains(&limit),
+            "receive limit must be within 1..={MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL}"
+        );
+        let mut state = self.lock();
+        state.receive_limit = limit;
+        state.receive_stats_enabled = true;
+        let attached: Vec<_> = state.inboxes.keys().copied().collect();
+        for addr in attached {
+            state.receive_stats.entry(addr).or_default();
+        }
+    }
+
+    /// Snapshot of opt-in per-socket receive diagnostics.
+    #[must_use]
+    pub fn receive_stats(&self) -> BTreeMap<SocketAddr, SimReceiveStats> {
+        self.lock().receive_stats.clone()
+    }
+
     /// Snapshot of the delivery/drop counters.
     #[must_use]
     pub fn stats(&self) -> SimNetStats {
@@ -1688,8 +1781,8 @@ impl<M: Clone> SimSocket<M> {
             .send(from, to, payload);
     }
 
-    /// Receives every payload due for this socket (bounded per call by
-    /// [`MAX_RECEIVE_MESSAGES_PER_POLL`]; the remainder stays queued).
+    /// Receives every payload due for this socket (bounded per call by the
+    /// configured receive limit, 256 by default; the remainder stays queued).
     #[must_use]
     pub fn recv_payloads(&self) -> Vec<(SocketAddr, M)> {
         let binding = self
@@ -2272,6 +2365,7 @@ mod tests {
     fn receive_is_bounded_per_poll_and_never_loses_the_remainder() {
         let (clock, _offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_receive_limit(MAX_RECEIVE_MESSAGES_PER_POLL);
         let a = net.attach(addr(1));
         let b = net.attach(addr(2));
 
@@ -2288,6 +2382,54 @@ mod tests {
             Some(u32::try_from(MAX_RECEIVE_MESSAGES_PER_POLL).unwrap()),
             "remainder must continue in order"
         );
+        assert_eq!(
+            net.receive_stats().get(&addr(2)).copied(),
+            Some(SimReceiveStats {
+                receive_polls: 2,
+                messages_returned: u64::try_from(total).unwrap(),
+                cap_limited_polls: 1,
+                max_due_before_drain: u64::try_from(total).unwrap(),
+                max_returned_batch: u64::try_from(MAX_RECEIVE_MESSAGES_PER_POLL).unwrap(),
+                max_remainder_after_drain: 40,
+                drained_after_cap: true,
+            })
+        );
+    }
+
+    #[test]
+    fn receive_cap_diagnostics_distinguish_exact_limit_from_deferred_work() {
+        for depth in [0, 255, 256, 257] {
+            let (clock, _offset) = manual_clock();
+            let net: SimNet<u32> = SimNet::new(7, clock);
+            net.set_receive_limit(MAX_RECEIVE_MESSAGES_PER_POLL);
+            let a = net.attach(addr(1));
+            let b = net.attach(addr(2));
+            for value in 0..depth {
+                a.send_payload(addr(2), u32::try_from(value).unwrap());
+            }
+
+            let first = b.recv_payloads();
+            let stats = net.receive_stats().get(&addr(2)).copied().unwrap();
+            assert_eq!(first.len(), depth.min(MAX_RECEIVE_MESSAGES_PER_POLL));
+            assert_eq!(stats.cap_limited_polls, u64::from(depth > 256));
+            assert_eq!(stats.max_remainder_after_drain, u64::from(depth > 256));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "receive limit must be within 1..=1024")]
+    fn receive_limit_rejects_zero() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_receive_limit(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "receive limit must be within 1..=1024")]
+    fn receive_limit_rejects_values_above_diagnostic_bound() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_receive_limit(MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL + 1);
     }
 
     #[test]

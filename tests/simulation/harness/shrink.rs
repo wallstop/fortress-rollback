@@ -152,6 +152,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         .pending_output_probe_link
         .and_then(|(from, to)| Some((remap_index(from, removed)?, remap_index(to, removed)?)));
     RunOptions {
+        receive_message_limit: options.receive_message_limit,
         corrupt_state_from: remap_peer_frame(options.corrupt_state_from, removed),
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
@@ -845,6 +846,9 @@ mod tests {
             blocked_drops_by_link: BTreeMap::new(),
             fragmentation_drops_by_link: BTreeMap::new(),
             link_stats_by_link: BTreeMap::new(),
+            receive_stats_by_peer: Vec::new(),
+            first_running_step: Vec::new(),
+            first_synchronized_step: Vec::new(),
             load_game_state_observations: Vec::new(),
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
             progress_samples: Vec::new(),
@@ -998,6 +1002,7 @@ mod tests {
         ];
         schedule.heal_at = 20;
         let options = RunOptions {
+            receive_message_limit: Some(512),
             corrupt_state_from: Some((3, 8)),
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
@@ -1014,6 +1019,7 @@ mod tests {
         assert_eq!(mapped.corrupt_state_from, Some((2, 8)));
         assert_eq!(mapped.corrupt_checksum_from, None);
         assert_eq!(mapped.probe_confirmed_at, Some(19));
+        assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
