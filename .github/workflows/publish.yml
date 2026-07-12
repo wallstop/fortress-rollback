@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: release-${{ inputs.release_version }}
+  group: release-${{ github.event.inputs.release_version }}
   cancel-in-progress: false
 
 jobs:

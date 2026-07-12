@@ -32,6 +32,7 @@ def test_publish_workflow_has_one_manual_entrypoint() -> None:
     assert "workflow_dispatch:" in on_block
     assert "push:" not in on_block
     assert "concurrency:" in text
+    assert "group: release-${{ github.event.inputs.release_version }}" in text
     assert "Require default branch dispatch" in text
 
 
