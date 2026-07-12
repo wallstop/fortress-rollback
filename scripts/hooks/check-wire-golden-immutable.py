@@ -285,22 +285,136 @@ def _has_registered_test_module(codec: str, version: int) -> bool:
     )
 
 
-def _has_unconditional_golden_test(suite: str, version: int) -> bool:
+def _golden_test_body(suite: str, version: int) -> str | None:
+    """Return the registered top-level golden test body, or None."""
     lines = suite.splitlines()
     offsets = _line_offsets(suite)
     top_level = _top_level_lines(suite)
     declaration = (
         f"fn every_protocol_v{version}_variant_has_immutable_exact_bytes() {{"
     )
-    return any(
-        line.strip() == declaration
-        and index in top_level
-        and _attributes_before(
-            suite, offsets[index] + len(line) - len(line.lstrip())
-        )
-        == ["#[test]"]
-        for index, line in enumerate(lines)
+    for index, line in enumerate(lines):
+        if (
+            line.strip() != declaration
+            or index not in top_level
+            or _attributes_before(
+                suite, offsets[index] + len(line) - len(line.lstrip())
+            )
+            != ["#[test]"]
+        ):
+            continue
+        return _balanced_body_after(suite, offsets[index])
+    return None
+
+
+def _balanced_body_after(text: str, start: int) -> str | None:
+    """Return the balanced braced body beginning at or after `start`."""
+    opening = text.find("{", start)
+    if opening == -1:
+        return None
+    depth = 1
+    cursor = opening + 1
+    while cursor < len(text) and depth:
+        if text[cursor] == "{":
+            depth += 1
+        elif text[cursor] == "}":
+            depth -= 1
+        cursor += 1
+    return None if depth else text[opening + 1 : cursor - 1]
+
+
+def _top_level_segments(text: str) -> list[str]:
+    """Split comma-separated Rust syntax without splitting nested delimiters."""
+    segments: list[str] = []
+    start = 0
+    depths = {"{": 0, "(": 0, "[": 0}
+    closing = {"}": "{", ")": "(", "]": "["}
+    for index, char in enumerate(text):
+        if char in depths:
+            depths[char] += 1
+        elif char in closing and depths[closing[char]] > 0:
+            depths[closing[char]] -= 1
+        elif char == "," and all(depth == 0 for depth in depths.values()):
+            segments.append(text[start:index])
+            start = index + 1
+    segments.append(text[start:])
+    return segments
+
+
+def _expected_match_is_exhaustive(suite: str) -> bool:
+    """Require the expected-byte mapping to use only explicit MessageBody arms."""
+    lines = suite.splitlines()
+    offsets = _line_offsets(suite)
+    top_level = _top_level_lines(suite)
+    declaration = re.compile(
+        r"^(?:pub\(super\)\s+)?fn expected\(body: &MessageBody\) -> &'static \[u8\] \{$"
     )
+    candidates = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if index in top_level and declaration.fullmatch(line.strip())
+    ]
+    if len(candidates) != 1:
+        return False
+    index, line = candidates[0]
+    item_start = offsets[index] + len(line) - len(line.lstrip())
+    if _attributes_before(suite, item_start):
+        return False
+    function_body = _balanced_body_after(suite, offsets[index])
+    if function_body is None:
+        return False
+    function_body = function_body.strip()
+    match_declaration = re.match(r"match\s+body\s*\{", function_body)
+    if match_declaration is None:
+        return False
+    opening = function_body.find("{", match_declaration.start())
+    depth = 1
+    cursor = opening + 1
+    while cursor < len(function_body) and depth:
+        if function_body[cursor] == "{":
+            depth += 1
+        elif function_body[cursor] == "}":
+            depth -= 1
+        cursor += 1
+    if depth or function_body[cursor:].strip() not in {"", ";"}:
+        return False
+    match_body = function_body[opening + 1 : cursor - 1]
+    explicit_pattern = re.compile(
+        r"MessageBody::[A-Z][A-Za-z0-9_]*(?:\([^|]*\)|\{[^|]*\})?"
+    )
+    arms = [arm.strip() for arm in _top_level_segments(match_body) if arm.strip()]
+    if not arms:
+        return False
+    for arm in arms:
+        parts = arm.split("=>")
+        if len(parts) != 2 or explicit_pattern.fullmatch(parts[0].strip()) is None:
+            return False
+    return True
+
+
+def _suite_has_required_structure(suite: str, codec: str, version: int) -> bool:
+    """Require a registered successor suite with load-bearing wire assertions."""
+    suite = _rust_code_only(suite)
+    codec = _rust_code_only(codec)
+    if _has_top_level_disabling_inner_attribute(suite) or _has_top_level_disabling_inner_attribute(
+        codec
+    ):
+        return False
+    suite_lines = suite.splitlines()
+    suite_top_level = _top_level_lines(suite)
+    marker_line = f"const WIRE_GOLDEN_VERSION: u8 = {version};"
+    marker = any(
+        line.strip() == marker_line and index in suite_top_level
+        for index, line in enumerate(suite_lines)
+    )
+    body = _golden_test_body(suite, version)
+    if not marker or body is None or not _has_registered_test_module(codec, version):
+        return False
+    compact_body = re.sub(r"\s+", "", body)
+    required_call = (
+        "super::assert_wire_golden_suite(WIRE_GOLDEN_VERSION,fixtures(),expected);"
+    )
+    return compact_body == required_call and _expected_match_is_exhaustive(suite)
 
 
 def _candidate_has_version_suite(
@@ -316,24 +430,7 @@ def _candidate_has_version_suite(
         )
     except (OSError, UnicodeError, RuntimeError):
         return False
-    suite = _rust_code_only(suite)
-    codec = _rust_code_only(codec)
-    if _has_top_level_disabling_inner_attribute(suite) or _has_top_level_disabling_inner_attribute(
-        codec
-    ):
-        return False
-    suite_lines = suite.splitlines()
-    suite_top_level = _top_level_lines(suite)
-    marker_line = f"const WIRE_GOLDEN_VERSION: u8 = {version};"
-    marker = any(
-        line.strip() == marker_line and index in suite_top_level
-        for index, line in enumerate(suite_lines)
-    )
-    return (
-        marker
-        and _has_unconditional_golden_test(suite, version)
-        and _has_registered_test_module(codec, version)
-    )
+    return _suite_has_required_structure(suite, codec, version)
 
 
 def check_diff(
@@ -374,17 +471,33 @@ def check_diff(
     return False
 
 
+def check_local(repo_root: Path) -> bool:
+    """Check both worktree and index views against HEAD."""
+    worktree_ok = check_diff(repo_root)
+    index_ok = check_diff(repo_root, cached=True)
+    return worktree_ok and index_ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cached", action="store_true", help="compare HEAD with the index")
     parser.add_argument(
+        "--local", action="store_true", help="check both worktree and index views"
+    )
+    parser.add_argument(
         "--base-ref", help="compare a committed base ref with HEAD (CI/PR mode)"
     )
     args = parser.parse_args()
-    if args.cached and args.base_ref:
-        parser.error("--cached and --base-ref are mutually exclusive")
+    selected_modes = sum((args.cached, args.local, args.base_ref is not None))
+    if selected_modes > 1:
+        parser.error("--cached, --local, and --base-ref are mutually exclusive")
     repo_root = Path(__file__).resolve().parents[2]
-    return 0 if check_diff(repo_root, cached=args.cached, base_ref=args.base_ref) else 1
+    passed = (
+        check_local(repo_root)
+        if args.local
+        else check_diff(repo_root, cached=args.cached, base_ref=args.base_ref)
+    )
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

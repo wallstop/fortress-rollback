@@ -37,12 +37,15 @@ def _add_v2_suite(repo: Path) -> None:
         repo,
         "src/network/wire_golden_v2.rs",
         "const WIRE_GOLDEN_VERSION: u8 = 2;\n"
+        "fn expected(body: &MessageBody) -> &'static [u8] {\n"
+        "    match body { MessageBody::KeepAlive => &[2] }\n"
+        "}\n"
+        "fn fixtures() -> Vec<(&'static str, Message)> {\n"
+        "    MessageKind::ALL.into_iter().map(fixture_for_kind).collect()\n"
+        "}\n"
         "#[test]\n"
         "fn every_protocol_v2_variant_has_immutable_exact_bytes() {\n"
-        "    assert_eq!(PROTOCOL_VERSION, WIRE_GOLDEN_VERSION);\n"
-        "    match body { MessageBody::KeepAlive => {} }\n"
-        "    encode(&body);\n"
-        "    decode_message(&bytes);\n"
+        "    super::assert_wire_golden_suite(WIRE_GOLDEN_VERSION, fixtures(), expected);\n"
         "}\n",
     )
     _write(
@@ -111,16 +114,159 @@ def test_empty_or_unwired_successor_does_not_excuse_change(repo: Path) -> None:
     _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
     _write(repo, "src/network/wire_golden_v2.rs", "")
     assert not HOOK.check_diff(repo)
+
+
+def test_wired_but_vacuous_successor_does_not_excuse_change(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
     _write(
         repo,
         "src/network/wire_golden_v2.rs",
         "const WIRE_GOLDEN_VERSION: u8 = 2;\n"
-        "#[test]\nfn every_protocol_v2_variant_has_immutable_exact_bytes() {\n"
-        "    assert_eq!(PROTOCOL_VERSION, WIRE_GOLDEN_VERSION);\n"
-        "    match body { MessageBody::KeepAlive => {} }\n"
-        "    encode(&body); decode_message(&bytes);\n}\n",
+        "#[test]\n"
+        "fn every_protocol_v2_variant_has_immutable_exact_bytes() {}\n",
+    )
+    _write(
+        repo,
+        "src/network/codec.rs",
+        '#[cfg(test)]\n#[path = "wire_golden_v2.rs"]\nmod wire_golden_v2;\n',
     )
     assert not HOOK.check_diff(repo)
+
+
+@pytest.mark.parametrize(
+    "catch_all",
+    [
+        "_ => &[2]",
+        "_\n => &[2]",
+        "other => &[2]",
+        "MessageBody::KeepAlive => &[2], _ => &[3]",
+        "MessageBody::KeepAlive => &[2], other => &[3]",
+    ],
+)
+def test_successor_catch_all_mapping_does_not_excuse_change(
+    repo: Path, catch_all: str
+) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        suite.read_text(encoding="utf-8").replace(
+            "MessageBody::KeepAlive => &[2]", catch_all
+        ),
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+def test_successor_test_body_must_delegate_to_shared_harness(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        suite.read_text(encoding="utf-8").replace(
+            "super::assert_wire_golden_suite(WIRE_GOLDEN_VERSION, fixtures(), expected);",
+            "assert_eq!(WIRE_GOLDEN_VERSION, 2);",
+        ),
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+def test_local_harness_shadow_does_not_replace_shared_harness(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    text = suite.read_text(encoding="utf-8").replace(
+        "super::assert_wire_golden_suite", "assert_wire_golden_suite"
+    )
+    suite.write_text(
+        "fn assert_wire_golden_suite<A, B, C>(_: A, _: B, _: C) {}\n"
+        + text,
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+def test_cfg_disabled_expected_decoy_does_not_hide_active_catch_all(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    text = suite.read_text(encoding="utf-8")
+    decoy = (
+        "#[cfg(any())]\n"
+        "fn expected(body: &MessageBody) -> &'static [u8] {\n"
+        "    match body { MessageBody::KeepAlive => &[2] }\n"
+        "}\n"
+    )
+    suite.write_text(
+        decoy + text.replace("MessageBody::KeepAlive => &[2]", "_ => &[2]"),
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    [
+        "#[cfg(any())] let _guard = match body { MessageBody::KeepAlive => &[2] };",
+        "discard!(match body { MessageBody::KeepAlive => &[2] });",
+    ],
+)
+def test_discarded_explicit_match_does_not_hide_returned_helper(
+    repo: Path, decoy: str
+) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    text = suite.read_text(encoding="utf-8")
+    old = "match body { MessageBody::KeepAlive => &[2] }"
+    replacement = f"{decoy}\n    actual_expected(body)"
+    suite.write_text(
+        "fn actual_expected(_: &MessageBody) -> &'static [u8] { &[2] }\n"
+        + text.replace(old, replacement),
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "_ | MessageBody::KeepAlive",
+        "x @ _ | MessageBody::KeepAlive",
+    ],
+)
+def test_successor_or_pattern_catch_all_does_not_excuse_change(
+    repo: Path, pattern: str
+) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        suite.read_text(encoding="utf-8").replace("MessageBody::KeepAlive", pattern),
+        encoding="utf-8",
+    )
+    assert not HOOK.check_diff(repo)
+
+
+def test_unrelated_catch_all_does_not_reject_explicit_expected_mapping(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        "fn unrelated(value: Option<u8>) { match value { _ => {} } }\n"
+        + suite.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    assert HOOK.check_diff(repo)
 
 
 def test_comment_only_successor_and_wiring_do_not_excuse_change(repo: Path) -> None:
@@ -326,6 +472,16 @@ def test_cached_mode_accepts_staged_protocol_bump(repo: Path) -> None:
     _git(repo, "add", "src/network/wire_golden_v1.rs", "src/network/wire_golden_v2.rs", "src/lib.rs")
     _git(repo, "add", "src/network/codec.rs")
     assert HOOK.check_diff(repo, cached=True)
+
+
+def test_local_mode_catches_staged_rewrite_restored_in_worktree(repo: Path) -> None:
+    path = "src/network/wire_golden_v1.rs"
+    _write(repo, path, "staged rewrite\n")
+    _git(repo, "add", path)
+    _git(repo, "restore", "--source=HEAD", "--worktree", path)
+
+    assert HOOK.check_diff(repo), "worktree-only view reproduces the historical blind spot"
+    assert not HOOK.check_local(repo)
 
 
 def test_multiple_failures_are_sorted(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

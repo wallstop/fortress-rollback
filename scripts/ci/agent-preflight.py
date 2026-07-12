@@ -330,7 +330,11 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
             PlannedCheck(
                 check_id="wire-golden-immutable",
                 description="prevent released wire fixture changes without a protocol bump",
-                command=[PYTHON_EXECUTABLE, "scripts/hooks/check-wire-golden-immutable.py"],
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/hooks/check-wire-golden-immutable.py",
+                    "--local",
+                ],
                 fix_hint=(
                     "Restore released wire fixtures, or bump PROTOCOL_VERSION and add the next "
                     "versioned golden suite."
