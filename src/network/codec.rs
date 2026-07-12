@@ -696,9 +696,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// # Errors
 ///
 /// Returns [`CodecError::DecodeError`] when the message is truncated, contains an
-/// invalid variant or boolean, has an out-of-domain value in a frame field with
-/// restricted wire semantics, has trailing bytes, or declares a length that
-/// cannot fit in the remaining packet.
+/// invalid variant or boolean, contains an invalid connection-status,
+/// floor-gossip, or checksum-report frame value, has trailing bytes, or declares
+/// a length that cannot fit in the remaining packet.
 pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     let mut cursor = 0;
     let header = MessageHeader {
