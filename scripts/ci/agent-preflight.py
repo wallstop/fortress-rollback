@@ -337,7 +337,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 ],
                 fix_hint=(
                     "Restore released wire fixtures, or bump PROTOCOL_VERSION and add the next "
-                    "versioned golden suite."
+                    "versioned golden suite as the active registration."
                 ),
             )
         )

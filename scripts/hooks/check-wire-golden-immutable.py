@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 _VERSION_RE = re.compile(r"^pub const PROTOCOL_VERSION: u8 = (\d+);$", re.MULTILINE)
-_V1_RE = re.compile(r"^(?:src|tests)/network/wire_golden_v\d+\.rs$")
+_VERSIONED_GOLDEN_RE = re.compile(
+    r"^(?:src|tests)/network/wire_golden_v\d+\.rs$"
+)
 _LEGACY_PATHS = {
     "src/network/wire_golden_legacy_0_9.rs",
     "tests/network/wire_golden_legacy_0_9.rs",
@@ -20,7 +22,7 @@ _VERSION_PATH = "src/lib.rs"
 
 def protected_path(path: str) -> bool:
     """Return whether `path` is a released immutable wire fixture."""
-    return path in _LEGACY_PATHS or _V1_RE.fullmatch(path) is not None
+    return path in _LEGACY_PATHS or _VERSIONED_GOLDEN_RE.fullmatch(path) is not None
 
 
 def parse_protocol_version(text: str) -> int:
@@ -44,7 +46,7 @@ def _git(repo_root: Path, args: list[str]) -> bytes:
 def _changed_existing_goldens(
     repo_root: Path, cached: bool, base_ref: str | None
 ) -> list[str]:
-    args = ["diff", "--name-status", "-z"]
+    args = ["diff", "--name-status", "--find-renames", "--find-copies-harder", "-z"]
     if cached:
         args.append("--cached")
     args.extend([base_ref, "HEAD"] if base_ref is not None else ["HEAD"])
@@ -60,15 +62,20 @@ def _changed_existing_goldens(
             index += 2
             if status.startswith("R") and protected_path(old):
                 changed.add(old)
-            if status.startswith("C") and protected_path(new):
-                # A copied path is an addition, so it has no immutable base.
-                continue
+            if protected_path(new) and _base_has_path(repo_root, new, base_ref):
+                changed.add(new)
         else:
             path = fields[index].decode("utf-8", errors="strict")
             index += 1
             if status[0] != "A" and protected_path(path):
                 changed.add(path)
     return sorted(changed)
+
+
+def _base_has_path(repo_root: Path, path: str, base_ref: str | None) -> bool:
+    """Return whether `path` existed in the selected comparison base."""
+    base = base_ref if base_ref is not None else "HEAD"
+    return bool(_git(repo_root, ["ls-tree", "-z", "--name-only", base, "--", path]))
 
 
 def _candidate_version_text(repo_root: Path, cached: bool) -> str:
@@ -88,15 +95,30 @@ def _candidate_file_text(
 
 
 def _added_paths(repo_root: Path, cached: bool, base_ref: str | None) -> set[str]:
-    args = ["diff", "--name-only", "--diff-filter=A", "-z"]
+    args = [
+        "diff",
+        "--name-status",
+        "--diff-filter=ACR",
+        "--find-renames",
+        "--find-copies-harder",
+        "-z",
+    ]
     if cached:
         args.append("--cached")
     args.extend([base_ref, "HEAD"] if base_ref is not None else ["HEAD"])
-    paths = {
-        field.decode("utf-8", errors="strict")
-        for field in _git(repo_root, args).split(b"\0")
-        if field
-    }
+    fields = _git(repo_root, args).split(b"\0")
+    paths: set[str] = set()
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index].decode("ascii", errors="strict")
+        index += 1
+        if status.startswith(("R", "C")):
+            index += 1
+            paths.add(fields[index].decode("utf-8", errors="strict"))
+            index += 1
+        else:
+            paths.add(fields[index].decode("utf-8", errors="strict"))
+            index += 1
     if not cached and base_ref is None:
         paths.update(
             field.decode("utf-8", errors="strict")
@@ -285,6 +307,17 @@ def _has_registered_test_module(codec: str, version: int) -> bool:
     )
 
 
+def _registered_version_modules(codec: str) -> set[int]:
+    """Return top-level versioned golden modules compiled by the current codec."""
+    top_level = _top_level_lines(codec)
+    declaration = re.compile(r"mod wire_golden_v(\d+);")
+    return {
+        int(match.group(1))
+        for index, line in enumerate(codec.splitlines())
+        if index in top_level and (match := declaration.fullmatch(line.strip()))
+    }
+
+
 def _golden_test_body(suite: str, version: int) -> str | None:
     """Return the registered top-level golden test body, or None."""
     lines = suite.splitlines()
@@ -408,7 +441,12 @@ def _suite_has_required_structure(suite: str, codec: str, version: int) -> bool:
         for index, line in enumerate(suite_lines)
     )
     body = _golden_test_body(suite, version)
-    if not marker or body is None or not _has_registered_test_module(codec, version):
+    if (
+        not marker
+        or body is None
+        or not _has_registered_test_module(codec, version)
+        or _registered_version_modules(codec) != {version}
+    ):
         return False
     compact_body = re.sub(r"\s+", "", body)
     required_call = (
@@ -465,7 +503,7 @@ def check_diff(
             file=sys.stderr,
         )
     print(
-        "  remedy: restore the historical fixture, or increase PROTOCOL_VERSION and add its matching wire_golden_vN.rs suite",
+        "  remedy: restore the historical fixture, or increase PROTOCOL_VERSION and replace the active versioned registration with its matching wire_golden_vN.rs suite",
         file=sys.stderr,
     )
     return False

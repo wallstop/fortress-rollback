@@ -143,6 +143,9 @@ fn fixtures() -> [(&'static str, &'static [u8]); 17] {
 }
 
 fn legacy_header_accepts(bytes: &[u8]) -> bool {
+    if bytes.get(..2) != Some(&[0x34, 0x12]) {
+        return false;
+    }
     let Some(tag_bytes) = bytes.get(2..6) else {
         return false;
     };
@@ -166,6 +169,13 @@ fn every_legacy_fixture_is_classified_and_rejected_by_v1() {
             "v1 decoder must reject legacy {variant}"
         );
     }
+}
+
+#[test]
+fn legacy_header_rejects_wrong_magic_even_with_a_known_tag() {
+    assert!(!legacy_header_accepts(&[
+        0x00, 0x00, 0x07, 0x00, 0x00, 0x00
+    ]));
 }
 
 #[test]

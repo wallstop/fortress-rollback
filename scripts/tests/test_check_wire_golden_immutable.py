@@ -102,6 +102,71 @@ def test_deleted_or_renamed_fixture_fails(repo: Path) -> None:
     assert not HOOK.check_diff(repo)
 
 
+def test_rename_from_unprotected_path_onto_existing_golden_fails(repo: Path) -> None:
+    replacement = "src/network/replacement.rs"
+    golden = "src/network/wire_golden_v1.rs"
+    _write(repo, replacement, "const V1: &[u8] = &[9];\n")
+    _git(repo, "add", replacement)
+    _git(repo, "commit", "-qm", "add replacement candidate")
+    (repo / golden).unlink()
+    _git(repo, "mv", replacement, golden)
+
+    assert not HOOK.check_diff(repo)
+
+
+def test_rename_status_onto_base_golden_is_protected(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replacement = "src/network/replacement.rs"
+    golden = "src/network/wire_golden_v1.rs"
+
+    def fake_git(_repo: Path, args: list[str]) -> bytes:
+        if args[0] == "diff":
+            return f"R100\0{replacement}\0{golden}\0".encode()
+        if args[0] == "ls-tree":
+            return f"{golden}\0".encode()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(HOOK, "_git", fake_git)
+    assert HOOK._changed_existing_goldens(repo, cached=False, base_ref=None) == [
+        golden
+    ]
+
+
+def test_successor_suite_introduced_by_rename_counts_as_added(repo: Path) -> None:
+    _add_v2_suite(repo)
+    source = "src/network/future_wire_golden.rs"
+    (repo / "src/network/wire_golden_v2.rs").rename(repo / source)
+    _write(repo, "src/network/codec.rs", "")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "stage future suite source")
+
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _git(repo, "mv", source, "src/network/wire_golden_v2.rs")
+    _write(
+        repo,
+        "src/network/codec.rs",
+        '#[cfg(test)]\n#[path = "wire_golden_v2.rs"]\nmod wire_golden_v2;\n',
+    )
+
+    assert HOOK.check_diff(repo)
+
+
+def test_successor_suite_must_replace_old_active_registration(repo: Path) -> None:
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    _add_v2_suite(repo)
+    codec = repo / "src/network/codec.rs"
+    codec.write_text(
+        codec.read_text(encoding="utf-8")
+        + '#[cfg(test)]\n#[path = "wire_golden_v1.rs"]\nmod wire_golden_v1;\n',
+        encoding="utf-8",
+    )
+
+    assert not HOOK.check_diff(repo)
+
+
 def test_real_protocol_bump_allows_fixture_change(repo: Path) -> None:
     _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
     _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
