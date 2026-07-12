@@ -2313,6 +2313,7 @@ mod tests {
 
         /// Stream framing is an envelope only: it must preserve the exact
         /// protocol-v1 bytes for every body variant.
+        #[cfg_attr(miri, ignore)] // arbitrary-message proptest takes ~8 minutes on Windows Miri
         #[test]
         fn encode_framed_wraps_exact_arbitrary_message_bytes(msg in arb_message()) {
             let payload = encode(&msg).expect("arbitrary message must encode");
@@ -2327,6 +2328,7 @@ mod tests {
 
         /// Arbitrary fragmentation of both the length prefix and payload cannot
         /// change the decoded message or byte-consumption accounting.
+        #[cfg_attr(miri, ignore)] // proptest takes ~2 minutes on Windows Miri; every split is unit-tested
         #[test]
         fn frame_decoder_roundtrips_keep_alive_at_arbitrary_split(
             conn_low in 1_u32..=u32::from(u16::MAX),
@@ -2353,6 +2355,7 @@ mod tests {
         /// A single read may contain many complete frames, but each `push`
         /// yields exactly one and reports the suffix boundary without buffering
         /// an unbounded decoded-message queue.
+        #[cfg_attr(miri, ignore)] // proptest takes ~4 minutes on Windows Miri; deterministic coverage remains
         #[test]
         fn frame_decoder_preserves_arbitrary_concatenated_frame_order(
             conn_lows in proptest::collection::vec(1_u32..=u32::from(u16::MAX), 0..32),
