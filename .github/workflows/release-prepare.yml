@@ -95,6 +95,7 @@ jobs:
       - name: Validate prepared release
         run: |
           set -euo pipefail
+          pip install pytest --quiet
           cargo metadata --locked --no-deps --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
           bash scripts/sync-version.sh --check
           python3 scripts/hooks/check-changelog-unreleased.py
