@@ -242,7 +242,7 @@ Each API is documented with:
 **Notes:**
 
 - Default is `DisconnectBehavior::Halt`, preserving the legacy GGRS-style halt-on-drop semantics.
-- `DisconnectBehavior::ContinueWithout` enables graceful peer drop on the **automatic** disconnect-timeout path: the dropped peer's input queue is frozen at the last confirmed input, `FortressEvent::PeerDropped` and `FortressEvent::Disconnected` are both emitted, and remaining peers continue advancing.
+- `DisconnectBehavior::ContinueWithout` enables coordinated graceful peer drop on the **automatic** disconnect-timeout path. Survivors hold confirmation until the same certificate described for `remove_player` commits; only then are `PeerDropped` and `Disconnected` emitted and remaining peers continue advancing.
 - The setting governs only the automatic-timeout path. The explicit `P2PSession::remove_player` always performs a graceful drop regardless of this setting; the legacy `P2PSession::disconnect_player` retains its non-graceful semantics regardless of this setting.
 
 ---
@@ -532,7 +532,7 @@ Each API is documented with:
 
 - Every player handle owned by the dropped endpoint is marked as disconnected on the local connection-status table (multi-handle endpoints — multiple handles sharing a single address — are wound down in full)
 - The corresponding network endpoint is disconnected
-- Future inputs for any disconnected handle use the default value (the input queue is **not** frozen — see `remove_player` for graceful drop, which freezes the queue and replays the last confirmed input)
+- Future inputs for any disconnected handle use the default value (the input queue is **not** frozen — see `remove_player` for coordinated graceful drop, which freezes at the certified cut)
 
 **Errors:**
 
@@ -561,13 +561,20 @@ Each API is documented with:
 
 **Pre:** None — all caller-side conditions are validated and returned via the Errors section below.
 
-**Post:**
+**Accepted-call post:**
 
-- Every non-spectator player handle owned by the dropped endpoint is marked disconnected on the local connection-status table
-- Every non-spectator handle's input queue is **frozen**: it repeats its last confirmed input forever for remaining peers' simulation
-- The corresponding network endpoint is disconnected
-- One `FortressEvent::PeerDropped { handle, addr }` per non-spectator handle at the dropped address is queued, **followed by** exactly one `FortressEvent::Disconnected { addr }` in the same batch
-- `confirmed_frame()` continues to advance for remaining peers
+- The local intent is started, joined to an equivalent operation, or queued behind an active operation. `Ok(())` does not mean the drop has committed.
+- While active, the confirmed frontier is held at least at every frame previously exposed as confirmed.
+
+**Certified-commit post:**
+
+- Every declared survivor reported matching inventory/ready evidence for one non-retracting cut; retained-history gaps were backfilled before readiness.
+- Every non-spectator player handle owned by the dropped endpoint is atomically frozen and marked disconnected at that cut.
+- The corresponding network endpoint is disconnected.
+- One `FortressEvent::PeerDropped { handle, addr }` per non-spectator handle at the dropped address is queued, **followed by** exactly one `FortressEvent::Disconnected { addr }` in the same batch.
+- `confirmed_frame()` can continue to advance for remaining peers.
+
+**Protocol failure post:** Participant loss, unavailable/conflicting retained history, resource refusal, or a two-second timeout returns the session to `Synchronizing`, preserves the held confirmed prefix, and emits no `PeerDropped`.
 
 **Errors:**
 
@@ -581,6 +588,7 @@ Each API is documented with:
 **Notes:**
 
 - Always opts in to graceful-drop semantics regardless of the session's `DisconnectBehavior`. The configured `DisconnectBehavior` only governs the **automatic** disconnect-timeout path.
+- `poll_remote_clients()` drives prepare, inventory, backfill, ready, commit, retransmission, relay, and timeout processing. A one-survivor certificate may commit inside `remove_player`; larger certificates are asynchronous. Concurrent removals serialize deterministically.
 - The `PeerDropped` event coexists with the legacy `Disconnected` event; new code should match on `PeerDropped` for graceful-drop-aware handling.
 - Operates on the **Remote** endpoint at the targeted address only. A `Spectator` endpoint registered at the same `T::Address` is an independent endpoint and is **not** affected — it remains running until it disconnects on its own. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
 
@@ -908,7 +916,7 @@ is local policy and is not compared.
 
 | Variant                                                                      | When emitted                                                                                                                                                         | Coexisting events                                                                                                                                                         |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PeerDropped { handle, addr }`                                               | Auto-removal under `DisconnectBehavior::ContinueWithout` after a disconnect timeout, **or** explicit `P2PSession::remove_player` call                                | One event per non-spectator handle at the dropped address; followed by exactly one `Disconnected { addr }` after all `PeerDropped` for the same address in the same batch |
+| `PeerDropped { handle, addr }`                                               | The coordinated survivor certificate initiated by an automatic `ContinueWithout` timeout or explicit `remove_player` commits                                       | One event per non-spectator handle at the dropped address; followed by exactly one `Disconnected { addr }` after all `PeerDropped` for the same address in the same batch |
 | `Disconnected { addr }`                                                      | Always emitted on peer drop (legacy event); under `Halt` it appears alone, under graceful drop it appears once per address after that address's `PeerDropped` events | Optionally preceded by one or more `PeerDropped { handle, addr }` (graceful drop, one per handle at the dropped address)                                                  |
 | `InputDelayRecommendation { player_handle, current_delay, suggested_delay }` | Reserved for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.**                                       | None                                                                                                                                                                      |
 | `SpectatorDivergence { frame, player, primary_addr, conflicting_addr }`      | A failover spectator received conflicting same-frame input for `player` from two connected redundant hosts                                                          | Followed by terminal `FortressError::SpectatorDivergence` on future `advance_frame` calls                                                                                 |

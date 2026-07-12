@@ -387,6 +387,134 @@ pub(crate) struct Goodbye {
     pub reason: u8,
 }
 
+/// Stable identity of one coordinated graceful-drop attempt.
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub(crate) struct DropOperationId {
+    /// Smallest player handle owned by the coordinating endpoint.
+    pub coordinator: u16,
+    /// Connected-era generation of `coordinator` when the attempt opened.
+    pub coordinator_generation: u16,
+    /// Coordinator-local monotonic operation sequence.
+    pub sequence: u32,
+    /// Digest of the canonical sorted [`DropTarget`] list.
+    pub target_set_digest: u64,
+}
+
+/// One player slot owned by the endpoint being gracefully dropped.
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub(crate) struct DropTarget {
+    /// Player handle of the target slot.
+    pub handle: u16,
+    /// Connected-era generation the operation is fenced to.
+    pub generation: u16,
+}
+
+/// Opens a coordinated graceful-drop attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct DropPrepare {
+    pub operation: DropOperationId,
+    /// Canonical sorted target slots belonging to the departing endpoint.
+    pub targets: Vec<DropTarget>,
+    /// Canonical sorted survivor endpoint representatives.
+    pub participants: Vec<u16>,
+}
+
+/// Phase represented by a [`DropReport`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum DropReportStage {
+    /// Initial exposed-confirmation and retained-history inventory.
+    #[default]
+    Inventory,
+    /// The participant has verified the selected cut and its digest.
+    Ready,
+    /// The participant has applied the commit idempotently.
+    Committed,
+}
+
+/// Contiguous retained input range for one target slot.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DropReceipt {
+    pub target: u16,
+    pub available_from: Frame,
+    pub contiguous_through: Frame,
+}
+
+impl Default for DropReceipt {
+    fn default() -> Self {
+        Self {
+            target: 0,
+            available_from: Frame::NULL,
+            contiguous_through: Frame::NULL,
+        }
+    }
+}
+
+/// Participant inventory, ready acknowledgement, or committed acknowledgement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DropReport {
+    pub operation: DropOperationId,
+    pub participant: u16,
+    pub stage: DropReportStage,
+    /// Highest frame this participant has exposed as confirmed.
+    pub exposed_confirmed: Frame,
+    /// Selected non-retracting cut for ready/committed reports.
+    pub cut: Frame,
+    /// Digest of every target input at `cut` for ready/committed reports.
+    pub cut_digest: u64,
+    /// Per-target retained ranges for inventory reports.
+    pub receipts: Vec<DropReceipt>,
+}
+
+/// One bounded chunk of target input history used to close receipt gaps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DropBackfill {
+    pub operation: DropOperationId,
+    pub chunk_index: u16,
+    pub chunk_count: u16,
+    pub start_frame: Frame,
+    pub frame_count: u16,
+    /// Fixed-width target inputs in frame-major, canonical-target order.
+    pub bytes: Vec<u8>,
+}
+
+/// Irrevocable coordinated graceful-drop decision.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DropCommit {
+    pub operation: DropOperationId,
+    pub cut: Frame,
+    pub cut_digest: u64,
+}
+
+/// Why a coordinated graceful-drop attempt closed without committing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum DropAbortReason {
+    /// A deterministically higher-priority concurrent operation won.
+    Superseded,
+    /// No participant retained enough target history to form a safe cut.
+    MissingHistory,
+    /// Two retained copies disagreed on a target input.
+    ConflictingHistory,
+    /// A declared survivor disappeared before the operation completed.
+    ParticipantLost,
+    /// The bounded operation deadline elapsed.
+    Timeout,
+    /// A target or participant generation changed during the operation.
+    GenerationChanged,
+    /// A configured allocation or protocol bound would be exceeded.
+    ResourceLimit,
+}
+
+/// Closes an uncommitted coordinated graceful-drop attempt.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DropAbort {
+    pub operation: DropOperationId,
+    pub reason: DropAbortReason,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MessageBody {
     SyncRequest(SyncRequest),
@@ -411,8 +539,15 @@ pub(crate) enum MessageBody {
     ReactivateSlotAck(ReactivateSlotAck),
     JoinCommitted(JoinCommitted),
     JoinAborted(JoinAborted),
-    // Protocol-v1 tag 17. Keep above future D14 wire additions.
+    // Protocol-v1 tag 17.
     Goodbye(Goodbye),
+    // D14 coordinated graceful-drop barrier, tags 18..=22. These stay in every
+    // feature build so the v1 discriminants remain feature-independent.
+    DropPrepare(DropPrepare),
+    DropReport(DropReport),
+    DropBackfill(DropBackfill),
+    DropCommit(DropCommit),
+    DropAbort(DropAbort),
 }
 
 /// A messages that [`NonBlockingSocket`] sends and receives. When implementing [`NonBlockingSocket`],
@@ -487,6 +622,34 @@ impl MessageBody {
             Self::JoinCommitted(_) => 8 + FRAME,     // handle: usize, frame
             Self::JoinAborted(_) => 8 + FRAME,       // handle: usize, frame
             Self::Goodbye(_) => 1,                   // reason: u8
+            Self::DropPrepare(prepare) => {
+                16 // DropOperationId
+                    + LEN_PREFIX
+                    + prepare.targets.len() * 4 // DropTarget
+                    + LEN_PREFIX
+                    + prepare.participants.len() * 2 // u16 handles
+            },
+            Self::DropReport(report) => {
+                16 // DropOperationId
+                    + 2 // participant
+                    + 4 // DropReportStage discriminant
+                    + FRAME // exposed_confirmed
+                    + FRAME // cut
+                    + 8 // cut_digest
+                    + LEN_PREFIX
+                    + report.receipts.len() * (2 + FRAME + FRAME)
+            },
+            Self::DropBackfill(backfill) => {
+                16 // DropOperationId
+                    + 2 // chunk_index
+                    + 2 // chunk_count
+                    + FRAME // start_frame
+                    + 2 // frame_count
+                    + LEN_PREFIX
+                    + backfill.bytes.len()
+            },
+            Self::DropCommit(_) => 16 + FRAME + 8,
+            Self::DropAbort(_) => 16 + 4, // operation + DropAbortReason discriminant
         };
 
         DISCRIMINANT + payload
@@ -517,6 +680,11 @@ impl MessageBody {
             Self::JoinCommitted(_) => MessageKind::JoinCommitted,
             Self::JoinAborted(_) => MessageKind::JoinAborted,
             Self::Goodbye(_) => MessageKind::Goodbye,
+            Self::DropPrepare(_) => MessageKind::DropPrepare,
+            Self::DropReport(_) => MessageKind::DropReport,
+            Self::DropBackfill(_) => MessageKind::DropBackfill,
+            Self::DropCommit(_) => MessageKind::DropCommit,
+            Self::DropAbort(_) => MessageKind::DropAbort,
         }
     }
 }
@@ -882,6 +1050,48 @@ mod tests {
             (
                 MessageBody::Goodbye(Goodbye::default()),
                 MessageKind::Goodbye,
+            ),
+            (
+                MessageBody::DropPrepare(DropPrepare::default()),
+                MessageKind::DropPrepare,
+            ),
+            (
+                MessageBody::DropReport(DropReport {
+                    operation: DropOperationId::default(),
+                    participant: 0,
+                    stage: DropReportStage::Inventory,
+                    exposed_confirmed: Frame::NULL,
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                    receipts: Vec::new(),
+                }),
+                MessageKind::DropReport,
+            ),
+            (
+                MessageBody::DropBackfill(DropBackfill {
+                    operation: DropOperationId::default(),
+                    chunk_index: 0,
+                    chunk_count: 1,
+                    start_frame: Frame::NULL,
+                    frame_count: 0,
+                    bytes: Vec::new(),
+                }),
+                MessageKind::DropBackfill,
+            ),
+            (
+                MessageBody::DropCommit(DropCommit {
+                    operation: DropOperationId::default(),
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                }),
+                MessageKind::DropCommit,
+            ),
+            (
+                MessageBody::DropAbort(DropAbort {
+                    operation: DropOperationId::default(),
+                    reason: DropAbortReason::Superseded,
+                }),
+                MessageKind::DropAbort,
             ),
         ];
         for (body, expected) in cases {

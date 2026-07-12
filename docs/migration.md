@@ -848,8 +848,9 @@ for event in session.events() {
 ```
 
 ```rust
-// After (option 2): drop a specific peer immediately (kick / surrender / leave).
+// After (option 2): propose a coordinated drop (kick / surrender / leave).
 match session.remove_player(conceding_remote) {
+    // Intent accepted. Keep polling until PeerDropped proves commit.
     Ok(()) => {},
     Err(FortressError::InvalidRequestStructured {
         kind: InvalidRequestKind::PlayerAlreadyRemoved { .. },
@@ -860,7 +861,7 @@ match session.remove_player(conceding_remote) {
 }
 ```
 
-The legacy `disconnect_player` is preserved for back-compat. New code should prefer `remove_player` for graceful drops; see [User Guide — Choosing Between `disconnect_player` and `remove_player`](user-guide.md#choosing-between-disconnect_player-and-remove_player) for the full distinction.
+The legacy `disconnect_player` is preserved for back-compat. New code should prefer `remove_player` for graceful drops, but must account for its asynchronous certificate: keep calling `poll_remote_clients`, treat `PeerDropped` as commit evidence, and treat a return to `Synchronizing` without that event as fail-closed. See [User Guide — Choosing Between `disconnect_player` and `remove_player`](user-guide.md#choosing-between-disconnect_player-and-remove_player) for the full distinction.
 
 ### Before / After: `handles_by_address` now takes `&T::Address`
 

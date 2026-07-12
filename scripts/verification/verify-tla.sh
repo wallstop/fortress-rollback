@@ -74,6 +74,7 @@ SPECS=(
     "SpectatorFailover"
     "SpectatorReactivationEpoch"
     "PeerDrop"
+    "CoordinatedPeerDrop"
     "NPeerReactivation"
     "NPeerServeFreezeConvergence"
     "FreezeConvergence"
@@ -86,6 +87,14 @@ SPECS=(
 # unrelated non-zero exit must fail CI rather than masquerade as a mutation hit.
 EXPECTED_FAILURE_CHECKS=(
     "SyncHandshakeV1HandlersDisabled"
+    "CoordinatedPeerDropImmediateMin"
+)
+
+# Positive companion configurations that share a base module but carry
+# different fairness/fault assumptions and temporal properties.
+ADDITIONAL_CHECKS=(
+    "CoordinatedPeerDropFair"
+    "CoordinatedPeerDropFaults"
 )
 
 # Track results
@@ -361,13 +370,120 @@ verify_sync_handshake_handlers_disabled() {
     return 1
 }
 
+verify_coordinated_peer_drop_immediate_min() {
+    local verbose="${1:-false}"
+    local label="CoordinatedPeerDropImmediateMin"
+    local output_file
+    output_file=$(mktemp)
+
+    local -a tlc_cmd=(
+        java
+        "-Xmx$TLA_MEMORY"
+        -XX:+UseParallelGC
+        -jar "$TLA_TOOLS_JAR"
+        -deadlock
+        -workers "$TLA_WORKERS"
+        -lncheck final
+        -config "$TLA_DIR/CoordinatedPeerDrop_ImmediateMin.cfg"
+        "$TLA_DIR/CoordinatedPeerDrop.tla"
+    )
+    local -a run_cmd
+    if [[ -n "$TLA_SPEC_TIMEOUT" ]] && command -v timeout &> /dev/null; then
+        run_cmd=(timeout "$TLA_SPEC_TIMEOUT" "${tlc_cmd[@]}")
+    else
+        run_cmd=("${tlc_cmd[@]}")
+    fi
+
+    echo -e "${BLUE}Verifying $label expected counterexample...${NC}"
+    local exit_code=0
+    if [[ "$verbose" == "true" ]]; then
+        (cd "$TLA_DIR" && "${run_cmd[@]}") 2>&1 | tee "$output_file" || exit_code=$?
+    else
+        (cd "$TLA_DIR" && "${run_cmd[@]}") > "$output_file" 2>&1 || exit_code=$?
+    fi
+
+    local expected_property='Error: Invariant ConfirmedHistoryImmutable is violated.'
+    if [[ $exit_code -eq 12 ]] \
+        && grep -Fq "$expected_property" "$output_file" \
+        && grep -Fq '/\ committedOp = ' "$output_file" \
+        && grep -qE '^[1-9][0-9,]* states generated,.* distinct states found' "$output_file" \
+        && ! grep -Eq 'Parsing or semantic analysis failed|Unable to access jarfile|Exception in thread|TLC threw' "$output_file"; then
+        echo -e "${GREEN}✓ $label produced the expected confirmed-history counterexample${NC}"
+        RESULTS[$label]="PASS"
+        ((PASSED++))
+        rm -f "$output_file"
+        return 0
+    fi
+
+    echo -e "${RED}✗ $label did not produce the required invariant counterexample${NC}"
+    echo "TLC output (last 20 lines):"
+    tail -20 "$output_file"
+    RESULTS[$label]="FAIL"
+    ((FAILED++))
+    rm -f "$output_file"
+    return 1
+}
+
+verify_coordinated_peer_drop_companion() {
+    local label="$1"
+    local cfg_file="$2"
+    local verbose="${3:-false}"
+    local output_file
+    output_file=$(mktemp)
+
+    local -a tlc_cmd=(
+        java
+        "-Xmx$TLA_MEMORY"
+        -XX:+UseParallelGC
+        -jar "$TLA_TOOLS_JAR"
+        -deadlock
+        -workers "$TLA_WORKERS"
+        -lncheck final
+        -config "$TLA_DIR/$cfg_file"
+        "$TLA_DIR/CoordinatedPeerDrop.tla"
+    )
+    local -a run_cmd
+    if [[ -n "$TLA_SPEC_TIMEOUT" ]] && command -v timeout &> /dev/null; then
+        run_cmd=(timeout "$TLA_SPEC_TIMEOUT" "${tlc_cmd[@]}")
+    else
+        run_cmd=("${tlc_cmd[@]}")
+    fi
+
+    echo -e "${BLUE}Verifying $label...${NC}"
+    local exit_code=0
+    if [[ "$verbose" == "true" ]]; then
+        (cd "$TLA_DIR" && "${run_cmd[@]}") 2>&1 | tee "$output_file" || exit_code=$?
+    else
+        (cd "$TLA_DIR" && "${run_cmd[@]}") > "$output_file" 2>&1 || exit_code=$?
+    fi
+
+    if [[ $exit_code -eq 0 ]] \
+        && grep -Fq 'Model checking completed. No error has been found.' "$output_file" \
+        && grep -qE '^[1-9][0-9,]* states generated,.* 0 states left on queue' "$output_file" \
+        && ! grep -Eq 'Error:|Parsing or semantic analysis failed|Unable to access jarfile|Exception in thread|TLC threw' "$output_file"; then
+        echo -e "${GREEN}✓ $label passed${NC}"
+        RESULTS[$label]="PASS"
+        ((PASSED++))
+        rm -f "$output_file"
+        return 0
+    fi
+
+    echo -e "${RED}✗ $label failed${NC}"
+    echo "TLC output (last 20 lines):"
+    tail -20 "$output_file"
+    RESULTS[$label]="FAIL"
+    ((FAILED++))
+    rm -f "$output_file"
+    return 1
+}
+
 print_summary() {
     echo ""
     echo "=========================================="
     echo "TLA+ Verification Summary"
     echo "=========================================="
 
-    for spec in "${SPECS[@]}" "${EXPECTED_FAILURE_CHECKS[@]}"; do
+    for spec in "${SPECS[@]}" "${EXPECTED_FAILURE_CHECKS[@]}" "${ADDITIONAL_CHECKS[@]}"; do
         local result="${RESULTS[$spec]:-SKIP}"
         local color="$NC"
         local symbol="?"
@@ -483,6 +599,28 @@ main() {
         : # A prior failure already requested an immediate stop.
     elif [[ -z "$target_spec" || "$target_spec" == "SyncHandshakeV1" ]]; then
         if ! verify_sync_handshake_handlers_disabled "$verbose"; then
+            any_failed=true
+        fi
+        echo ""
+    fi
+
+    # The graceful-drop mutation is part of the coordinated barrier gate.
+    if [[ "$any_failed" == "true" && "$fail_fast" == "true" ]]; then
+        :
+    elif [[ -z "$target_spec" || "$target_spec" == "CoordinatedPeerDrop" ]]; then
+        if ! verify_coordinated_peer_drop_immediate_min "$verbose"; then
+            any_failed=true
+        fi
+        echo ""
+
+        if ! verify_coordinated_peer_drop_companion \
+            "CoordinatedPeerDropFair" "CoordinatedPeerDrop_Fair.cfg" "$verbose"; then
+            any_failed=true
+        fi
+        echo ""
+
+        if ! verify_coordinated_peer_drop_companion \
+            "CoordinatedPeerDropFaults" "CoordinatedPeerDrop_Faults.cfg" "$verbose"; then
             any_failed=true
         fi
         echo ""

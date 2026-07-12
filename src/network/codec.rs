@@ -42,9 +42,10 @@ use std::fmt;
 use std::io::{self, Write};
 
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
-    SyncRequest,
+    ChecksumReport, ConnectionStatus, DropAbort, DropAbortReason, DropBackfill, DropCommit,
+    DropOperationId, DropPrepare, DropReceipt, DropReport, DropReportStage, DropTarget, FloorReply,
+    FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader, QualityReply,
+    QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -616,6 +617,182 @@ fn decode_floor_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<FloorRepl
         floors.push(read_frame(bytes, cursor, "floor_reply.floors", true)?);
     }
     Ok(FloorReply { round_seq, floors })
+}
+
+fn decode_drop_operation_id(
+    bytes: &[u8],
+    cursor: &mut usize,
+    prefix: &'static str,
+) -> CodecResult<DropOperationId> {
+    let coordinator = match prefix {
+        "drop_prepare" => "drop_prepare.operation.coordinator",
+        "drop_report" => "drop_report.operation.coordinator",
+        "drop_backfill" => "drop_backfill.operation.coordinator",
+        "drop_commit" => "drop_commit.operation.coordinator",
+        "drop_abort" => "drop_abort.operation.coordinator",
+        _ => "drop.operation.coordinator",
+    };
+    let coordinator_generation = match prefix {
+        "drop_prepare" => "drop_prepare.operation.coordinator_generation",
+        "drop_report" => "drop_report.operation.coordinator_generation",
+        "drop_backfill" => "drop_backfill.operation.coordinator_generation",
+        "drop_commit" => "drop_commit.operation.coordinator_generation",
+        "drop_abort" => "drop_abort.operation.coordinator_generation",
+        _ => "drop.operation.coordinator_generation",
+    };
+    let sequence = match prefix {
+        "drop_prepare" => "drop_prepare.operation.sequence",
+        "drop_report" => "drop_report.operation.sequence",
+        "drop_backfill" => "drop_backfill.operation.sequence",
+        "drop_commit" => "drop_commit.operation.sequence",
+        "drop_abort" => "drop_abort.operation.sequence",
+        _ => "drop.operation.sequence",
+    };
+    let target_set_digest = match prefix {
+        "drop_prepare" => "drop_prepare.operation.target_set_digest",
+        "drop_report" => "drop_report.operation.target_set_digest",
+        "drop_backfill" => "drop_backfill.operation.target_set_digest",
+        "drop_commit" => "drop_commit.operation.target_set_digest",
+        "drop_abort" => "drop_abort.operation.target_set_digest",
+        _ => "drop.operation.target_set_digest",
+    };
+    Ok(DropOperationId {
+        coordinator: read_u16(bytes, cursor, coordinator)?,
+        coordinator_generation: read_u16(bytes, cursor, coordinator_generation)?,
+        sequence: read_u32(bytes, cursor, sequence)?,
+        target_set_digest: read_u64(bytes, cursor, target_set_digest)?,
+    })
+}
+
+fn decode_drop_prepare(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropPrepare> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_prepare")?;
+    let target_len = read_usize(bytes, cursor, "drop_prepare.targets.len")?;
+    ensure_length_within_remaining(bytes, *cursor, target_len, 4, "drop_prepare.targets")?;
+    // alloc-bound: the peer-controlled count must fit as fixed 4-byte records
+    // in this already-bounded packet before any reservation is attempted.
+    let mut targets = Vec::new();
+    targets.try_reserve_exact(target_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {target_len} drop targets"))
+    })?;
+    for _ in 0..target_len {
+        targets.push(DropTarget {
+            handle: read_u16(bytes, cursor, "drop_prepare.targets.handle")?,
+            generation: read_u16(bytes, cursor, "drop_prepare.targets.generation")?,
+        });
+    }
+
+    let participant_len = read_usize(bytes, cursor, "drop_prepare.participants.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        participant_len,
+        2,
+        "drop_prepare.participants",
+    )?;
+    // alloc-bound: the count is bounded by fixed u16 records remaining in the packet.
+    let mut participants = Vec::new();
+    participants
+        .try_reserve_exact(participant_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {participant_len} drop participants"
+            ))
+        })?;
+    for _ in 0..participant_len {
+        participants.push(read_u16(bytes, cursor, "drop_prepare.participants.handle")?);
+    }
+    Ok(DropPrepare {
+        operation,
+        targets,
+        participants,
+    })
+}
+
+fn decode_drop_report_stage(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropReportStage> {
+    match read_u32(bytes, cursor, "drop_report.stage")? {
+        0 => Ok(DropReportStage::Inventory),
+        1 => Ok(DropReportStage::Ready),
+        2 => Ok(DropReportStage::Committed),
+        other => Err(decode_message_error(format!(
+            "invalid drop report stage {other}"
+        ))),
+    }
+}
+
+fn decode_drop_report(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropReport> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_report")?;
+    let participant = read_u16(bytes, cursor, "drop_report.participant")?;
+    let stage = decode_drop_report_stage(bytes, cursor)?;
+    let exposed_confirmed = read_frame(bytes, cursor, "drop_report.exposed_confirmed", true)?;
+    let cut = read_frame(bytes, cursor, "drop_report.cut", true)?;
+    let cut_digest = read_u64(bytes, cursor, "drop_report.cut_digest")?;
+    let receipt_len = read_usize(bytes, cursor, "drop_report.receipts.len")?;
+    ensure_length_within_remaining(bytes, *cursor, receipt_len, 10, "drop_report.receipts")?;
+    // alloc-bound: each peer-controlled entry has a checked fixed 10-byte footprint.
+    let mut receipts = Vec::new();
+    receipts.try_reserve_exact(receipt_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {receipt_len} drop receipts"))
+    })?;
+    for _ in 0..receipt_len {
+        receipts.push(DropReceipt {
+            target: read_u16(bytes, cursor, "drop_report.receipts.target")?,
+            available_from: read_frame(bytes, cursor, "drop_report.receipts.available_from", true)?,
+            contiguous_through: read_frame(
+                bytes,
+                cursor,
+                "drop_report.receipts.contiguous_through",
+                true,
+            )?,
+        });
+    }
+    Ok(DropReport {
+        operation,
+        participant,
+        stage,
+        exposed_confirmed,
+        cut,
+        cut_digest,
+        receipts,
+    })
+}
+
+fn decode_drop_backfill(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropBackfill> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_backfill")?;
+    let chunk_index = read_u16(bytes, cursor, "drop_backfill.chunk_index")?;
+    let chunk_count = read_u16(bytes, cursor, "drop_backfill.chunk_count")?;
+    let start_frame = read_frame(bytes, cursor, "drop_backfill.start_frame", true)?;
+    let frame_count = read_u16(bytes, cursor, "drop_backfill.frame_count")?;
+    let byte_len = read_usize(bytes, cursor, "drop_backfill.bytes.len")?;
+    let source = take_bytes(bytes, cursor, byte_len, "drop_backfill.bytes")?;
+    // alloc-bound: `byte_len` has already been proven to fit in the unread packet.
+    let mut payload = Vec::new();
+    payload.try_reserve_exact(byte_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {byte_len} drop backfill bytes"))
+    })?;
+    payload.extend_from_slice(source);
+    Ok(DropBackfill {
+        operation,
+        chunk_index,
+        chunk_count,
+        start_frame,
+        frame_count,
+        bytes: payload,
+    })
+}
+
+fn decode_drop_abort_reason(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropAbortReason> {
+    match read_u32(bytes, cursor, "drop_abort.reason")? {
+        0 => Ok(DropAbortReason::Superseded),
+        1 => Ok(DropAbortReason::MissingHistory),
+        2 => Ok(DropAbortReason::ConflictingHistory),
+        3 => Ok(DropAbortReason::ParticipantLost),
+        4 => Ok(DropAbortReason::Timeout),
+        5 => Ok(DropAbortReason::GenerationChanged),
+        6 => Ok(DropAbortReason::ResourceLimit),
+        other => Err(decode_message_error(format!(
+            "invalid drop abort reason {other}"
+        ))),
+    }
 }
 
 /// Reads a bincode `Option<u128>` encoded under fixed-int config: a one-byte
@@ -1287,6 +1464,18 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         },
         17 => MessageBody::Goodbye(Goodbye {
             reason: read_array::<1>(bytes, &mut cursor, "goodbye.reason")?[0],
+        }),
+        18 => MessageBody::DropPrepare(decode_drop_prepare(bytes, &mut cursor)?),
+        19 => MessageBody::DropReport(decode_drop_report(bytes, &mut cursor)?),
+        20 => MessageBody::DropBackfill(decode_drop_backfill(bytes, &mut cursor)?),
+        21 => MessageBody::DropCommit(DropCommit {
+            operation: decode_drop_operation_id(bytes, &mut cursor, "drop_commit")?,
+            cut: read_frame(bytes, &mut cursor, "drop_commit.cut", true)?,
+            cut_digest: read_u64(bytes, &mut cursor, "drop_commit.cut_digest")?,
+        }),
+        22 => MessageBody::DropAbort(DropAbort {
+            operation: decode_drop_operation_id(bytes, &mut cursor, "drop_abort")?,
+            reason: decode_drop_abort_reason(bytes, &mut cursor)?,
         }),
         other => {
             return Err(decode_message_error(format!(
@@ -2030,6 +2219,236 @@ mod tests {
         }
     }
 
+    fn drop_operation() -> DropOperationId {
+        DropOperationId {
+            coordinator: 2,
+            coordinator_generation: 7,
+            sequence: 0x1020_3040,
+            target_set_digest: 0x0102_0304_0506_0708,
+        }
+    }
+
+    fn drop_bodies() -> Vec<(u32, MessageBody)> {
+        vec![
+            (
+                18,
+                MessageBody::DropPrepare(DropPrepare {
+                    operation: drop_operation(),
+                    targets: vec![
+                        DropTarget {
+                            handle: 4,
+                            generation: 9,
+                        },
+                        DropTarget {
+                            handle: 5,
+                            generation: 9,
+                        },
+                    ],
+                    participants: vec![0, 1, 2, 3],
+                }),
+            ),
+            (
+                19,
+                MessageBody::DropReport(DropReport {
+                    operation: drop_operation(),
+                    participant: 1,
+                    stage: DropReportStage::Inventory,
+                    exposed_confirmed: Frame::new(30),
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                    receipts: vec![
+                        DropReceipt {
+                            target: 4,
+                            available_from: Frame::new(10),
+                            contiguous_through: Frame::new(31),
+                        },
+                        DropReceipt {
+                            target: 5,
+                            available_from: Frame::new(11),
+                            contiguous_through: Frame::new(31),
+                        },
+                    ],
+                }),
+            ),
+            (
+                20,
+                MessageBody::DropBackfill(DropBackfill {
+                    operation: drop_operation(),
+                    chunk_index: 1,
+                    chunk_count: 3,
+                    start_frame: Frame::new(24),
+                    frame_count: 2,
+                    bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+                }),
+            ),
+            (
+                21,
+                MessageBody::DropCommit(DropCommit {
+                    operation: drop_operation(),
+                    cut: Frame::new(31),
+                    cut_digest: 0x1112_1314_1516_1718,
+                }),
+            ),
+            (
+                22,
+                MessageBody::DropAbort(DropAbort {
+                    operation: drop_operation(),
+                    reason: DropAbortReason::ConflictingHistory,
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn coordinated_drop_v1_goldens_roundtrip_with_manual_generic_parity() {
+        for (tag, body) in drop_bodies() {
+            let original = Message {
+                header: MessageHeader::new(0x1234),
+                body,
+            };
+            let bytes = encode(&original).unwrap();
+            let expected: &[u8] = match tag {
+                18 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x09,
+                    0x00, 0x05, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
+                ],
+                19 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x1F,
+                    0x00, 0x00, 0x00, 0x05, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
+                ],
+                20 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x01, 0x00, 0x03, 0x00, 0x18, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD,
+                ],
+                21 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x1F, 0x00, 0x00, 0x00, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
+                    0x11,
+                ],
+                22 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x02, 0x00, 0x00, 0x00,
+                ],
+                other => panic!("missing coordinated-drop golden for tag {other}"),
+            };
+            assert_eq!(
+                bytes, expected,
+                "immutable protocol-v1 golden for tag {tag}"
+            );
+            assert_eq!(bytes.get(8..12), Some(tag.to_le_bytes().as_slice()));
+            assert_eq!(original.encoded_len(), bytes.len());
+
+            let generic: Message = decode_value(&bytes).unwrap();
+            let (manual, consumed) = decode_message(&bytes).unwrap();
+            assert_eq!(generic, original, "generic decode for drop tag {tag}");
+            assert_eq!(manual, original, "manual decode for drop tag {tag}");
+            assert_eq!(consumed, bytes.len());
+        }
+    }
+
+    #[test]
+    fn coordinated_drop_decoder_rejects_invalid_typed_discriminants() {
+        let report = Message {
+            header: MessageHeader::new(1),
+            body: drop_bodies().remove(1).1,
+        };
+        let mut report_bytes = encode(&report).unwrap();
+        report_bytes[30..34].copy_from_slice(&3_u32.to_le_bytes());
+        let report_error = decode_message(&report_bytes).unwrap_err();
+        assert!(report_error
+            .to_string()
+            .contains("invalid drop report stage 3"));
+
+        let abort = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::DropAbort(DropAbort {
+                operation: drop_operation(),
+                reason: DropAbortReason::Superseded,
+            }),
+        };
+        let mut abort_bytes = encode(&abort).unwrap();
+        abort_bytes[28..32].copy_from_slice(&7_u32.to_le_bytes());
+        let abort_error = decode_message(&abort_bytes).unwrap_err();
+        assert!(abort_error
+            .to_string()
+            .contains("invalid drop abort reason 7"));
+    }
+
+    #[test]
+    fn coordinated_drop_report_stages_and_abort_reasons_roundtrip_exhaustively() {
+        for stage in [
+            DropReportStage::Inventory,
+            DropReportStage::Ready,
+            DropReportStage::Committed,
+        ] {
+            let message = Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::DropReport(DropReport {
+                    operation: drop_operation(),
+                    participant: 1,
+                    stage,
+                    exposed_confirmed: Frame::new(2),
+                    cut: Frame::new(3),
+                    cut_digest: 4,
+                    receipts: Vec::new(),
+                }),
+            };
+            let bytes = encode(&message).unwrap();
+            assert_eq!(decode_message(&bytes).unwrap().0, message);
+        }
+
+        for reason in [
+            DropAbortReason::Superseded,
+            DropAbortReason::MissingHistory,
+            DropAbortReason::ConflictingHistory,
+            DropAbortReason::ParticipantLost,
+            DropAbortReason::Timeout,
+            DropAbortReason::GenerationChanged,
+            DropAbortReason::ResourceLimit,
+        ] {
+            let message = Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::DropAbort(DropAbort {
+                    operation: drop_operation(),
+                    reason,
+                }),
+            };
+            let bytes = encode(&message).unwrap();
+            assert_eq!(decode_message(&bytes).unwrap().0, message);
+        }
+    }
+
+    #[test]
+    fn coordinated_drop_decoder_rejects_unrepresentable_vector_lengths_before_allocating() {
+        let prepare = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::DropPrepare(DropPrepare {
+                operation: drop_operation(),
+                targets: Vec::new(),
+                participants: Vec::new(),
+            }),
+        };
+        let mut bytes = encode(&prepare).unwrap();
+        bytes[28..36].copy_from_slice(&u64::MAX.to_le_bytes());
+        let error = decode_message(&bytes).unwrap_err();
+        assert!(error.to_string().contains("drop_prepare.targets"));
+        assert!(
+            error.to_string().contains("exceeds") || error.to_string().contains("overflows"),
+            "unexpected length-bound error: {error}"
+        );
+    }
+
     /// A `ConnectionStatus` with arbitrary field values (used by the wire-size
     /// property strategies for both `Input` and `StateSnapshot`).
     fn arb_connection_status() -> impl proptest::strategy::Strategy<Value = ConnectionStatus> {
@@ -2185,6 +2604,100 @@ mod tests {
                 .boxed(),
             any::<u8>()
                 .prop_map(|reason| MessageBody::Goodbye(Goodbye { reason }))
+                .boxed(),
+            (
+                pvec(
+                    (any::<u16>(), any::<u16>())
+                        .prop_map(|(handle, generation)| DropTarget { handle, generation }),
+                    0..4,
+                ),
+                pvec(any::<u16>(), 0..4),
+            )
+                .prop_map(|(targets, participants)| {
+                    MessageBody::DropPrepare(DropPrepare {
+                        operation: drop_operation(),
+                        targets,
+                        participants,
+                    })
+                })
+                .boxed(),
+            (
+                any::<u16>(),
+                0_u8..3,
+                any::<i32>(),
+                any::<i32>(),
+                any::<u64>(),
+                pvec(
+                    (any::<u16>(), any::<i32>(), any::<i32>()).prop_map(
+                        |(target, available, through)| DropReceipt {
+                            target,
+                            available_from: Frame::new(available),
+                            contiguous_through: Frame::new(through),
+                        },
+                    ),
+                    0..4,
+                ),
+            )
+                .prop_map(|(participant, stage, exposed, cut, cut_digest, receipts)| {
+                    let stage = match stage {
+                        0 => DropReportStage::Inventory,
+                        1 => DropReportStage::Ready,
+                        _ => DropReportStage::Committed,
+                    };
+                    MessageBody::DropReport(DropReport {
+                        operation: drop_operation(),
+                        participant,
+                        stage,
+                        exposed_confirmed: Frame::new(exposed),
+                        cut: Frame::new(cut),
+                        cut_digest,
+                        receipts,
+                    })
+                })
+                .boxed(),
+            (
+                any::<u16>(),
+                any::<u16>(),
+                any::<i32>(),
+                any::<u16>(),
+                pvec(any::<u8>(), 0..64),
+            )
+                .prop_map(|(chunk_index, chunk_count, start, frame_count, bytes)| {
+                    MessageBody::DropBackfill(DropBackfill {
+                        operation: drop_operation(),
+                        chunk_index,
+                        chunk_count,
+                        start_frame: Frame::new(start),
+                        frame_count,
+                        bytes,
+                    })
+                })
+                .boxed(),
+            (any::<i32>(), any::<u64>())
+                .prop_map(|(cut, cut_digest)| {
+                    MessageBody::DropCommit(DropCommit {
+                        operation: drop_operation(),
+                        cut: Frame::new(cut),
+                        cut_digest,
+                    })
+                })
+                .boxed(),
+            (0_u8..7)
+                .prop_map(|reason| {
+                    let reason = match reason {
+                        0 => DropAbortReason::Superseded,
+                        1 => DropAbortReason::MissingHistory,
+                        2 => DropAbortReason::ConflictingHistory,
+                        3 => DropAbortReason::ParticipantLost,
+                        4 => DropAbortReason::Timeout,
+                        5 => DropAbortReason::GenerationChanged,
+                        _ => DropAbortReason::ResourceLimit,
+                    };
+                    MessageBody::DropAbort(DropAbort {
+                        operation: drop_operation(),
+                        reason,
+                    })
+                })
                 .boxed(),
         ];
 

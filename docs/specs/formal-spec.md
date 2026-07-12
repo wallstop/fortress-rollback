@@ -664,6 +664,54 @@ not alter the deterministic protocol-v1 message format.
     ◇(spectator_behind(m) ∧ m < n))
 ```
 
+### SAFE-12: Coordinated graceful-drop history immutability
+
+The protocol-v1 graceful-removal implementation under review is a distributed
+barrier, not an immediate local freeze. Each survivor first holds its
+exposed-confirmed high-water and reports that value plus every target's receipt
+and retained input range. The certified cut is the maximum over every reported
+exposed frame and every reported target receipt. Bounded, value-bearing
+backfill closes each receipt-to-cut gap before a survivor becomes ready. A
+commit is applied atomically at each survivor and is idempotent, relayed, and
+fenced by the exact target generation and operation ID.
+
+For every survivor `p`, committed cut `C`, and frame `f` already exposed by
+`p`, the public target input remains the canonical input:
+
+```
+committed(p, C) ∧ f ≤ exposed_high_water(p) → reported_input(p, f) = input(f)
+```
+
+`specs/tla/CoordinatedPeerDrop.tla` models two serialized operation IDs over two
+membership/target eras with independent per-survivor commit. The runtime defers
+a prepare received while a prior commit closes, discards its stale participant
+vector after membership changes, and re-derives the intent in the current era;
+the bounded model represents this as `RebaseNextMembershipEra` and rejects
+messages carrying an older era. The base safety model permits reordered
+delivery; explicit handlers cover duplicate backfill/commit and stale-era
+messages. Its receipt witness requires the certified cut to rise strictly above
+every exposed high-water because one reported receipt is higher. Its enforced
+`ImmediateMin` mutation demonstrates D14: choosing the minimum receipt can
+freeze below another survivor's exposed high-water and rewrite confirmed
+history.
+
+The `CoordinatedPeerDrop_Fair.cfg` companion assumes fault-free fair progress
+and proves both operations resolve, including receipt-raised cut selection,
+membership-era rebasing, positive backfill, duplicate handling, and stale-era
+rejection. The
+`CoordinatedPeerDrop_Faults.cfg` companion permits arbitrary message loss and
+models timeout, missing retained history, exhausted backfill budget,
+conflicting overlap, participant loss, and generation drift. Once any survivor
+prepares, explicit fairness of a terminal fault and `Fail` propagation proves
+every survivor eventually fails closed; no success liveness is claimed under
+permanent loss. This fault claim is deliberately pre-commit: after a survivor
+applies a certified commit, timeout only closes its bounded retransmission
+journal and participant loss cannot revert the emitted drop. The model likewise
+excludes `Committed` from timeout, participant-loss, and `Fail` transitions.
+The model covers one target input stream and two fixed survivor identities;
+changing participant cardinality and multi-handle endpoint composition remain
+implementation/test obligations.
+
 ---
 
 ## Constants
@@ -705,6 +753,7 @@ not alter the deterministic protocol-v1 message format.
 | Checksum exchange             | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |
 | Spectator session             | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
 | Concurrency model             | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`)      |
+| Graceful-drop barrier model | TLA+ | ✅ Implemented (`specs/tla/CoordinatedPeerDrop.tla`) |
 
 ---
 
@@ -712,5 +761,6 @@ not alter the deterministic protocol-v1 message format.
 
 | Version | Date       | Changes                                                      |
 | ------- | ---------- | ------------------------------------------------------------ |
+| 1.1     | 2026-07-12 | Added the coordinated graceful-drop safety model and D14 mutation gate |
 | 1.0     | 2025-12-06 | Complete specification with invariants, components, protocol |
 | 0.1     | 2025-12-06 | Initial draft                                                |

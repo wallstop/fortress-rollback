@@ -11,7 +11,7 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
-    run, RunOptions, RunReport,
+    run, RunOptions, RunReport, TraceSessionState,
 };
 use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
@@ -202,16 +202,12 @@ nightly_shard_test!(nightly_seed_shard_5_holds_invariants, 5);
 nightly_shard_test!(nightly_seed_shard_6_holds_invariants, 6);
 nightly_shard_test!(nightly_seed_shard_7_holds_invariants, 7);
 
-/// Known production defect discovered by the first lifecycle nightly shard:
-/// a lossy one-caller graceful removal can lower the victim's eventual freeze
-/// below a frame another survivor already returned as confirmed, rewriting
-/// that survivor's historical input query. This remains ignored/known-red
-/// until removal gains a coordinated receipt/backfill barrier; the green
-/// nightly matrix excludes only this unsupported retirement × lossy-noise
-/// cross-product above.
+/// Permanent D14 regression: the minimized lossy one-caller removal schedule
+/// previously rewrote target slot 4 at frame 327 after late gossip lowered its
+/// freeze. The coordinated receipt/backfill barrier must preserve the entire
+/// exposed prefix and still finish with a stable survivor freeze.
 #[test]
-#[ignore = "known confirmed-history rewrite under lossy graceful removal"]
-fn lossy_graceful_remove_rewrites_confirmed_history_known_defect() {
+fn lossy_graceful_remove_preserves_confirmed_history_d14() {
     let schedule: Schedule = serde_json::from_str(include_str!(
         "known_failures/d14-lossy-graceful-remove.json"
     ))
@@ -224,13 +220,14 @@ fn lossy_graceful_remove_rewrites_confirmed_history_known_defect() {
         .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { by: 3, target: 4 })));
     let report = run(&schedule, &RunOptions::default());
     assert!(
-        report.verdict.failures.iter().any(|failure| matches!(
+        !report.verdict.failures.iter().any(|failure| matches!(
             failure,
             OracleFailure::ConfirmedInputDivergence { frame: 327, .. }
         )),
-        "known defect no longer reproduces; flip this to a green regression: {:?}",
+        "the exact historical D14 rewrite returned: {:?}",
         report.verdict.failures
     );
+    report.expect_pass(&schedule);
 }
 
 #[test]
@@ -898,45 +895,40 @@ fn partition_under_halt_preserves_one_shared_confirmed_prefix_d13() {
     );
 }
 
-/// CAP documentation test, `ContinueWithout` side: the same partition FORKS
-/// the session — each half drops the other, freezes their slots, and keeps
-/// confirming on its own divergent timeline. Availability is chosen over
-/// consistency, permanently: dropped endpoints are terminal, so healing the
-/// network can never re-merge the halves. This pins the fork as documented,
-/// deliberate behavior (and records whether the library's own in-band desync
-/// detection can see across it).
+/// A symmetric partition cannot form an all-survivor graceful-drop
+/// certificate. `ContinueWithout` therefore preserves one held prefix and
+/// fails closed instead of forking the two halves.
 #[test]
-fn partition_under_continue_without_forks_into_divergent_halves() {
+fn partition_under_continue_without_preserves_prefix_and_fails_closed() {
     let schedule = split_brain_schedule(DropPolicy::ContinueWithout);
     let report = run(&schedule, &RunOptions::default());
     let failures = &report.verdict.failures;
     assert!(
-        failures
-            .iter()
-            .any(|f| matches!(
-                f,
-                OracleFailure::ConfirmedInputDivergence { .. }
-                    | OracleFailure::StateDivergence { .. }
-            )),
-        "ContinueWithout must fork the mesh (divergence expected): {failures:?}\nfinal_confirmed={:?}",
+        !failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+        )),
+        "the certificate hold must prevent every divergence: {failures:?}"
+    );
+    assert!(
+        report
+            .final_confirmed
+            .windows(2)
+            .all(|frames| frames[0] == frames[1]),
+        "all peers must retain one shared prefix: {:?}",
         report.final_confirmed
     );
-    for (peer, confirmed) in report.final_confirmed.iter().enumerate() {
-        assert!(
-            *confirmed > 200,
-            "peer {peer} must keep confirming on its half of the fork \
-             (availability): final_confirmed={:?}\nfailures={failures:?}",
-            report.final_confirmed
-        );
-    }
-    let inband = failures
-        .iter()
-        .filter(|f| matches!(f, OracleFailure::InbandDesyncDetected { .. }))
-        .count();
-    assert_eq!(
-        inband, 0,
-        "documenting: the fork is invisible to in-band desync detection \
-         (ghost traffic from dropped endpoints is discarded): {failures:?}"
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    assert!(
+        final_snapshot
+            .session_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Synchronizing),
+        "every uncertified partition must fail closed: {:?}",
+        final_snapshot.session_states
     );
 }
 
@@ -1739,12 +1731,13 @@ fn spectator_failover_survives_configured_host_kill_under_partition() {
         partitioned_report.verdict.failures.iter().any(|failure| {
             matches!(
                 failure,
-                OracleFailure::SpectatorDivergenceEvent { .. }
-                    | OracleFailure::SpectatorSessionError { .. }
+                OracleFailure::Violation { violation, .. }
+                    if violation.contains("coordinated graceful drop")
+                        && violation.contains("failed closed: Timeout")
             )
         }),
-        "partition-only control should fail through spectator divergence, not an \
-         unrelated oracle class: {:?}",
+        "partition-only control should fail through the uncertified graceful-drop \
+         barrier before spectator failover can commit: {:?}",
         partitioned_report.verdict.failures
     );
 

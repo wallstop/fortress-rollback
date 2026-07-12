@@ -1814,8 +1814,10 @@ where
     ///    explicit form opts in to graceful-drop semantics regardless of the
     ///    configured `DisconnectBehavior`.
     ///
-    /// In both cases the dropped peer's input queue is frozen and will repeat
-    /// their last confirmed input forever for remaining peers' simulation.
+    /// In both cases this event is emitted only after the coordinated survivor
+    /// certificate commits. The dropped peer's input queue is then frozen at
+    /// the certified cut and repeats that input forever for remaining peers'
+    /// simulation. A failed or timed-out certificate emits no `PeerDropped`.
     ///
     /// # Coexistence with [`Self::Disconnected`]
     ///

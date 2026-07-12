@@ -683,12 +683,22 @@ pub enum MessageKind {
     JoinAborted,
     /// A best-effort graceful disconnect notification.
     Goodbye,
+    /// Opens a coordinated graceful-drop barrier.
+    DropPrepare,
+    /// Participant inventory/readiness/commit acknowledgement for a graceful drop.
+    DropReport,
+    /// A bounded target-input backfill chunk for a graceful drop.
+    DropBackfill,
+    /// An irrevocable coordinated graceful-drop decision.
+    DropCommit,
+    /// A coordinated graceful-drop abort notification.
+    DropAbort,
 }
 
 impl MessageKind {
     /// The number of message categories.
     ///
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 23;
 
     /// Every category, in declaration (wire-discriminant) order. Its length is
     /// [`Self::COUNT`].
@@ -711,6 +721,11 @@ impl MessageKind {
         Self::JoinCommitted,
         Self::JoinAborted,
         Self::Goodbye,
+        Self::DropPrepare,
+        Self::DropReport,
+        Self::DropBackfill,
+        Self::DropCommit,
+        Self::DropAbort,
     ];
 
     /// A stable snake_case label for this category, suitable for logging or as a
@@ -736,6 +751,11 @@ impl MessageKind {
             Self::JoinCommitted => "join_committed",
             Self::JoinAborted => "join_aborted",
             Self::Goodbye => "goodbye",
+            Self::DropPrepare => "drop_prepare",
+            Self::DropReport => "drop_report",
+            Self::DropBackfill => "drop_backfill",
+            Self::DropCommit => "drop_commit",
+            Self::DropAbort => "drop_abort",
         }
     }
 
@@ -761,6 +781,11 @@ impl MessageKind {
             Self::JoinCommitted => 15,
             Self::JoinAborted => 16,
             Self::Goodbye => 17,
+            Self::DropPrepare => 18,
+            Self::DropReport => 19,
+            Self::DropBackfill => 20,
+            Self::DropCommit => 21,
+            Self::DropAbort => 22,
         }
     }
 }

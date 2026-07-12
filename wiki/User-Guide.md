@@ -2775,7 +2775,7 @@ let adjusted_time = if session.frames_ahead() > 2 {
 A `P2PSession` exposes two complementary mechanisms for reacting to a remote peer that goes away:
 
 1. **`DisconnectBehavior`** — a session-wide policy that controls what happens when the **automatic** disconnect-timeout fires for a peer that has gone silent.
-2. **`P2PSession::remove_player`** — an **explicit** method to drop a peer immediately (e.g., kick, surrender, "leave match").
+2. **`P2PSession::remove_player`** — an **explicit** method to propose a coordinated peer drop (e.g., kick, surrender, "leave match").
 
 Both can produce graceful drops where the session continues advancing for the surviving peers; the policy controls only the automatic-timeout path, while `remove_player` always opts into the graceful flow. Together they give applications a single, consistent way to handle players leaving mid-match.
 
@@ -2798,7 +2798,7 @@ pub enum DisconnectBehavior {
 
 `Halt` preserves the legacy GGRS-style "stop on any peer drop" behavior: after a timeout fires, `confirmed_frame()` stops advancing and the next `advance_frame()` will be unable to progress. This is the default for backwards compatibility.
 
-`ContinueWithout` makes the **automatic** disconnect-timeout follow the same graceful-drop sequence as the explicit [`remove_player`](#explicit-peer-removal-with-remove_player) call: the dropped peer's input queue is **frozen** (it repeats their last confirmed input forever, with [`InputStatus::Disconnected`](#handling-disconnected-players)), a [`FortressEvent::PeerDropped`](#reacting-to-peerdropped-events) event is queued, and remaining peers keep advancing using the frozen input.
+`ContinueWithout` makes the **automatic** disconnect-timeout start the same coordinated certificate as an explicit [`remove_player`](#explicit-peer-removal-with-remove_player) call. Survivors hold confirmation and reconcile the target's retained input suffix; only a certified commit freezes the queue at the agreed cut, queues [`FortressEvent::PeerDropped`](#reacting-to-peerdropped-events), and lets the remaining peers continue. A certificate failure returns the session to `Synchronizing` without emitting the drop.
 
 > **Note:** `DisconnectBehavior` governs only the **automatic** disconnect-timeout path. The legacy [`P2PSession::disconnect_player`](#choosing-between-disconnect_player-and-remove_player) retains its non-graceful semantics regardless of this setting; use `remove_player` for an explicit graceful drop.
 
@@ -2934,20 +2934,20 @@ where
 pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError>;
 ```
 
-`remove_player` performs a graceful drop **immediately**, regardless of the configured `DisconnectBehavior`. Use it whenever the drop is initiated by application logic rather than by network silence:
+`remove_player` starts (or joins) a coordinated graceful drop, regardless of the configured `DisconnectBehavior`. Returning `Ok(())` means the intent was accepted; it does not mean the drop has committed. Use it whenever application logic initiates the drop:
 
 - The player chose to leave the match (concession, surrender, "leave game" UI button).
 - A moderator or host kicked the player.
 - The application detects, out-of-band, that the peer is unreachable and wants to fail fast rather than wait out the disconnect timeout.
 
-On invocation, `remove_player` performs the same sequence as the auto-timeout path under `ContinueWithout`:
+Every reachable survivor then drives the same bounded protocol from `poll_remote_clients()`:
 
-1. Marks the player disconnected on the local connection-status table.
-2. Freezes the player's input queue (it repeats the last confirmed input forever for remaining peers' simulation).
-3. Disconnects the underlying network endpoint.
-4. Emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
+1. Holds its confirmed frontier and reports its exposed-confirmed high-water plus retained target-input range.
+2. Agrees on a non-retracting cut and backfills any missing retained suffix before declaring ready.
+3. Commits only after every declared survivor has supplied a matching ready certificate.
+4. Atomically freezes every player handle at the target address at that cut, disconnects the endpoint, and emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
 
-The combined effect is that surviving peers see exactly the same protocol-level state as if the dropped peer had timed out under `ContinueWithout`, but the drop happens on the next session call instead of after a timeout.
+Keep polling until the events arrive. A two-endpoint session has only one survivor and can commit during the call. In larger sessions, participant loss, unavailable/conflicting retained history, resource refusal, or the two-second operation timeout fails closed: the session returns to `Synchronizing`, the confirmed frontier does not advance past the held prefix, and no `PeerDropped` event is emitted. Concurrent removals are serialized deterministically.
 
 ```rust
 use fortress_rollback::{
@@ -2960,8 +2960,8 @@ fn handle_concede<C: Config>(
 ) -> Result<(), FortressError> {
     match session.remove_player(conceding_remote) {
         Ok(()) => {
-            // The next events() call will yield PeerDropped + Disconnected
-            // for `conceding_remote`. Surviving peers continue advancing.
+            // Intent accepted. Continue polling; PeerDropped + Disconnected
+            // arrive only after the survivor certificate commits.
             Ok(())
         },
         Err(FortressError::InvalidRequestStructured {
@@ -3002,8 +3002,8 @@ The session also exposes a legacy `disconnect_player(handle)` method preserved f
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Marks player disconnected          | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
 | Disconnects network endpoint       | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
-| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt`                                                                                                                                                                                                                                                                                                                                              | **Yes** — last confirmed input repeats forever; surviving peers keep advancing |
-| Emits `FortressEvent::PeerDropped` | **No**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | **Yes**, immediately followed by `Disconnected`                                |
+| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt`                                                                                                                                                                                                                                                                                                                                              | **At certified commit** — the input at the agreed cut repeats forever          |
+| Emits `FortressEvent::PeerDropped` | **No**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | **Yes at certified commit**, followed by `Disconnected`                        |
 | Honors `DisconnectBehavior`        | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts (remaining peers can no longer produce inputs from the dropped peer's endpoint, so `advance_frame` cannot progress). Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `advance_frame` halts just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy           |
 | Use case                           | Back-compat with code written against GGRS's `disconnect_player`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Application-driven graceful drop (kick, surrender, leave match)                |
 

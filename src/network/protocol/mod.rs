@@ -18,9 +18,9 @@ use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
-    SyncRequest,
+    ChecksumReport, ConnectionStatus, DropAbort, DropBackfill, DropCommit, DropPrepare, DropReport,
+    FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader,
+    QualityReply, QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -56,6 +56,31 @@ const PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD: usize = 1200;
 const IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD: usize = 1472;
 const CONFIG_DIGEST_DOMAIN: &[u8; 8] = b"FRv1-cfg";
 const HOT_JOIN_FEATURE: u32 = 1 << 0;
+/// Per-endpoint D14 carrier mailbox bound, aligned with the raw receive-poll cap.
+const MAX_RECEIVED_DROP_MESSAGES: usize = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+
+/// One coordinated graceful-drop control message carried by a running endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DropControlMessage {
+    Prepare(DropPrepare),
+    Report(DropReport),
+    Backfill(DropBackfill),
+    Commit(DropCommit),
+    Abort(DropAbort),
+}
+
+impl DropControlMessage {
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    fn into_body(self) -> MessageBody {
+        match self {
+            Self::Prepare(body) => MessageBody::DropPrepare(body),
+            Self::Report(body) => MessageBody::DropReport(body),
+            Self::Backfill(body) => MessageBody::DropBackfill(body),
+            Self::Commit(body) => MessageBody::DropCommit(body),
+            Self::Abort(body) => MessageBody::DropAbort(body),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HandshakeConfig {
@@ -229,6 +254,10 @@ where
     handles: Arc<[PlayerHandle]>,
     send_queue: VecDeque<Message>,
     event_queue: VecDeque<Event<T>>,
+    /// Bounded running-state mailbox drained by session-level D14 orchestration.
+    received_drop_messages: VecDeque<DropControlMessage>,
+    /// Rate-limits a full-mailbox diagnostic to once per endpoint era.
+    drop_mailbox_warning_sent: bool,
 
     // state
     state: ProtocolState,
@@ -864,6 +893,8 @@ impl<T: Config> UdpProtocol<T> {
             handles,
             send_queue: VecDeque::new(),
             event_queue: VecDeque::new(),
+            received_drop_messages: VecDeque::new(),
+            drop_mailbox_warning_sent: false,
 
             // state
             state: ProtocolState::Initializing,
@@ -2209,6 +2240,21 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::FloorReply(body) => self.on_floor_reply(body),
             MessageBody::KeepAlive => (),
             MessageBody::Goodbye(body) => self.on_goodbye(*body),
+            MessageBody::DropPrepare(body) => {
+                self.on_drop_control_message(DropControlMessage::Prepare(body.clone()));
+            },
+            MessageBody::DropReport(body) => {
+                self.on_drop_control_message(DropControlMessage::Report(body.clone()));
+            },
+            MessageBody::DropBackfill(body) => {
+                self.on_drop_control_message(DropControlMessage::Backfill(body.clone()));
+            },
+            MessageBody::DropCommit(body) => {
+                self.on_drop_control_message(DropControlMessage::Commit(*body));
+            },
+            MessageBody::DropAbort(body) => {
+                self.on_drop_control_message(DropControlMessage::Abort(*body));
+            },
             #[cfg(feature = "hot-join")]
             MessageBody::JoinRequest(body) => self.on_join_request(body),
             #[cfg(feature = "hot-join")]
@@ -2268,6 +2314,23 @@ impl<T: Config> UdpProtocol<T> {
             self.event_queue.push_back(Event::Disconnected);
             self.disconnect_event_sent = true;
         }
+    }
+
+    /// Stages one running-state D14 control message for the session layer.
+    fn on_drop_control_message(&mut self, message: DropControlMessage) {
+        if self.received_drop_messages.len() >= MAX_RECEIVED_DROP_MESSAGES {
+            if !self.drop_mailbox_warning_sent {
+                self.drop_mailbox_warning_sent = true;
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "coordinated graceful-drop mailbox reached its {}-message bound; dropping further control messages until the session drains it",
+                    MAX_RECEIVED_DROP_MESSAGES
+                );
+            }
+            return;
+        }
+        self.received_drop_messages.push_back(message);
     }
 
     /// Upon receiving a `SyncReply`, check validity and either continue the synchronization process or conclude synchronization.
@@ -2967,6 +3030,26 @@ impl<T: Config> UdpProtocol<T> {
             checksum,
         };
         self.queue_message(MessageBody::ChecksumReport(body));
+    }
+
+    /// Queues one coordinated graceful-drop control message. No-op unless the
+    /// endpoint is running; synchronization and terminal states cannot carry a
+    /// lifecycle operation from an unbound or closed connection era.
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    pub(crate) fn send_drop_control_message(&mut self, message: DropControlMessage) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(message.into_body());
+    }
+
+    /// Drains every coordinated graceful-drop control message staged since the
+    /// previous drain. The endpoint mailbox itself is bounded by
+    /// [`MAX_RECEIVED_DROP_MESSAGES`].
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    pub(crate) fn take_received_drop_messages(&mut self) -> Drain<'_, DropControlMessage> {
+        self.drop_mailbox_warning_sent = false;
+        self.received_drop_messages.drain(..)
     }
 
     /// Queues a `JoinRequest` for the slot `player_handle`. No-op unless `Running`.
@@ -8356,6 +8439,143 @@ mod tests {
 
         assert!(protocol.pending_output.is_empty());
         assert!(protocol.send_queue.is_empty());
+    }
+
+    fn drop_control_messages() -> [DropControlMessage; 5] {
+        use crate::network::messages::{
+            DropAbortReason, DropOperationId, DropReceipt, DropReportStage, DropTarget,
+        };
+
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 3,
+            sequence: 4,
+            target_set_digest: 5,
+        };
+        [
+            DropControlMessage::Prepare(DropPrepare {
+                operation,
+                targets: vec![DropTarget {
+                    handle: 1,
+                    generation: 2,
+                }],
+                participants: vec![0, 2],
+            }),
+            DropControlMessage::Report(DropReport {
+                operation,
+                participant: 2,
+                stage: DropReportStage::Inventory,
+                exposed_confirmed: Frame::new(10),
+                cut: Frame::NULL,
+                cut_digest: 0,
+                receipts: vec![DropReceipt {
+                    target: 1,
+                    available_from: Frame::new(3),
+                    contiguous_through: Frame::new(11),
+                }],
+            }),
+            DropControlMessage::Backfill(DropBackfill {
+                operation,
+                chunk_index: 0,
+                chunk_count: 1,
+                start_frame: Frame::new(11),
+                frame_count: 1,
+                bytes: vec![7],
+            }),
+            DropControlMessage::Commit(DropCommit {
+                operation,
+                cut: Frame::new(11),
+                cut_digest: 9,
+            }),
+            DropControlMessage::Abort(DropAbort {
+                operation,
+                reason: DropAbortReason::Superseded,
+            }),
+        ]
+    }
+
+    #[test]
+    fn drop_control_carrier_is_running_only_and_fifo() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        for message in drop_control_messages() {
+            protocol.send_drop_control_message(message);
+        }
+        assert!(protocol.send_queue.is_empty());
+
+        protocol.force_running_for_tests();
+        let messages = drop_control_messages();
+        for message in messages.iter().cloned() {
+            protocol.send_drop_control_message(message);
+        }
+        assert_eq!(protocol.send_queue.len(), messages.len());
+        for kind in [
+            crate::MessageKind::DropPrepare,
+            crate::MessageKind::DropReport,
+            crate::MessageKind::DropBackfill,
+            crate::MessageKind::DropCommit,
+            crate::MessageKind::DropAbort,
+        ] {
+            assert_eq!(protocol.messages_sent_by_kind.get(kind), 1);
+        }
+
+        for message in messages.iter().cloned() {
+            protocol.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: message.into_body(),
+            });
+        }
+        let received: Vec<_> = protocol.take_received_drop_messages().collect();
+        assert_eq!(received, messages);
+        for kind in [
+            crate::MessageKind::DropPrepare,
+            crate::MessageKind::DropReport,
+            crate::MessageKind::DropBackfill,
+            crate::MessageKind::DropCommit,
+            crate::MessageKind::DropAbort,
+        ] {
+            assert_eq!(protocol.messages_received_by_kind.get(kind), 1);
+        }
+        assert_eq!(protocol.take_received_drop_messages().count(), 0);
+    }
+
+    #[test]
+    fn drop_control_mailbox_stays_within_receive_poll_bound() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        protocol.force_running_for_tests();
+        let message = drop_control_messages()
+            .into_iter()
+            .nth(3)
+            .expect("drop control fixture has a commit");
+
+        for _ in 0..=MAX_RECEIVED_DROP_MESSAGES {
+            protocol.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: message.clone().into_body(),
+            });
+        }
+
+        assert_eq!(
+            protocol.take_received_drop_messages().count(),
+            MAX_RECEIVED_DROP_MESSAGES
+        );
+        assert!(!protocol.drop_mailbox_warning_sent);
+    }
+
+    #[test]
+    fn drop_control_receive_is_ignored_while_synchronizing() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        protocol.synchronize().unwrap();
+
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(1),
+            body: drop_control_messages()
+                .into_iter()
+                .next()
+                .expect("drop control fixture is non-empty")
+                .into_body(),
+        });
+
+        assert_eq!(protocol.take_received_drop_messages().count(), 0);
     }
 
     // ==========================================
