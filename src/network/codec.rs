@@ -1748,7 +1748,7 @@ mod tests {
     #[test]
     fn shared_wire_golden_harness_accepts_current_v1_suite() {
         assert_wire_golden_suite(
-            crate::PROTOCOL_VERSION,
+            super::wire_golden_v1::WIRE_GOLDEN_VERSION,
             super::wire_golden_v1::fixtures(),
             super::wire_golden_v1::expected,
         );

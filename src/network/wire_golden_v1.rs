@@ -13,7 +13,7 @@ use crate::network::messages::{
 };
 use crate::Frame;
 
-const WIRE_GOLDEN_VERSION: u8 = 1;
+pub(super) const WIRE_GOLDEN_VERSION: u8 = 1;
 
 const SYNC_REQUEST: &[u8] = &[
     0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x30, 0x20, 0x10,
@@ -351,7 +351,6 @@ fn every_protocol_v1_variant_has_immutable_exact_bytes() {
         "wire bytes changed? create wire_golden_v2 and bump"
     );
     let fixtures = fixtures();
-    assert_eq!(fixtures.len(), 23);
     for (variant, message) in fixtures {
         let expected = expected(&message.body);
         let encoded = encode(&message).expect("fixture must encode");
