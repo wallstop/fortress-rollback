@@ -1,0 +1,161 @@
+name: Release - Prepare PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semantic version bump"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+        required: true
+      dry_run:
+        description: "Validate and show the release diff without opening a PR"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Require default branch dispatch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "::error::Release preparation must run from ${DEFAULT_BRANCH}; got ${GITHUB_REF}."
+            exit 1
+          fi
+
+      - name: Require release GitHub App credentials
+        if: ${{ !inputs.dry_run }}
+        env:
+          RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_APP_ID:-}" ] || [ -z "${RELEASE_APP_PRIVATE_KEY:-}" ]; then
+            echo "::error::RELEASE_APP_ID and RELEASE_APP_PRIVATE_KEY are required so the prepared PR triggers CI."
+            exit 1
+          fi
+
+      - name: Generate release GitHub App token
+        id: app-token
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Prepare release files
+        id: prepare
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/prepare_release.py --bump "${BUMP}" | tee "${RUNNER_TEMP}/prepare-release.txt"
+          prepared_version="$(sed -n 's/^prepared_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
+          if ! printf '%s\n' "${prepared_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::Release preparation did not produce a strict X.Y.Z version."
+            exit 1
+          fi
+          echo "version=${prepared_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Synchronize version references
+        run: bash scripts/sync-version.sh
+
+      - name: Validate prepared release
+        run: |
+          set -euo pipefail
+          pip install pytest --quiet
+          cargo metadata --locked --no-deps --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          bash scripts/sync-version.sh --check
+          python3 scripts/hooks/check-changelog-unreleased.py
+          python3 -m pytest scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
+          cargo publish --dry-run --locked --allow-dirty
+
+      - name: Show dry-run diff
+        if: ${{ inputs.dry_run }}
+        run: git --no-pager diff -- Cargo.toml Cargo.lock CHANGELOG.md README.md docs examples src
+
+      - name: Push release branch and open PR
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="release/v${VERSION}"
+          if git ls-remote --exit-code --heads origin "${branch}" > "${RUNNER_TEMP}/release-branch.txt" 2>&1; then
+            echo "::error::Release branch ${branch} already exists."
+            exit 1
+          elif [ "$?" -ne 2 ]; then
+            echo "::error::Could not determine whether ${branch} exists."
+            sed -n '1,20p' "${RUNNER_TEMP}/release-branch.txt"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" > "${RUNNER_TEMP}/release-tag.txt" 2>&1; then
+            echo "::error::Release tag v${VERSION} already exists."
+            exit 1
+          elif [ "$?" -ne 2 ]; then
+            echo "::error::Could not determine whether tag v${VERSION} exists."
+            sed -n '1,20p' "${RUNNER_TEMP}/release-tag.txt"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "::error::Release preparation produced no changes."
+            exit 1
+          fi
+          git commit -m "Prepare v${VERSION} release"
+
+          # Match the repository's established token handling in wiki-sync.yml:
+          # keep credentials out of URLs and let git request them only at push.
+          # shellcheck disable=SC2016
+          git config --local credential.helper '!f() { echo "password=${GH_TOKEN}"; }; f'
+          git config --local credential.https://github.com.username "x-access-token"
+          git push origin "HEAD:refs/heads/${branch}"
+
+          body_file="${RUNNER_TEMP}/release-pr.md"
+          {
+            echo "Automated preparation for Fortress Rollback v${VERSION}."
+            echo
+            echo "Closes #227"
+            echo
+            echo "After this PR is green and merged, run **Release - Publish Crate** on \`${DEFAULT_BRANCH}\` with \`${VERSION}\`."
+          } > "${body_file}"
+          gh pr create --repo "${GITHUB_REPOSITORY}" --base "${DEFAULT_BRANCH}" --head "${branch}" \
+            --title "Prepare v${VERSION} release" --body-file "${body_file}"
