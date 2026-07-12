@@ -133,7 +133,7 @@ def test_rename_status_onto_base_golden_is_protected(
     ]
 
 
-def test_successor_suite_introduced_by_rename_counts_as_added(repo: Path) -> None:
+def test_successor_suite_introduced_by_rename_is_accepted(repo: Path) -> None:
     _add_v2_suite(repo)
     source = "src/network/future_wire_golden.rs"
     (repo / "src/network/wire_golden_v2.rs").rename(repo / source)
@@ -144,6 +144,28 @@ def test_successor_suite_introduced_by_rename_counts_as_added(repo: Path) -> Non
     _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
     _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
     _git(repo, "mv", source, "src/network/wire_golden_v2.rs")
+    _write(
+        repo,
+        "src/network/codec.rs",
+        '#[cfg(test)]\n#[path = "wire_golden_v2.rs"]\nmod wire_golden_v2;\n',
+    )
+
+    assert HOOK.check_diff(repo)
+
+
+def test_preexisting_future_suite_can_be_completed_with_version_bump(repo: Path) -> None:
+    _add_v2_suite(repo)
+    _write(repo, "src/network/codec.rs", "")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "stage future v2 suite")
+
+    _write(repo, "src/network/wire_golden_v1.rs", "changed\n")
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 2;\n")
+    suite = repo / "src/network/wire_golden_v2.rs"
+    suite.write_text(
+        suite.read_text(encoding="utf-8").replace("&[2]", "&[3]"),
+        encoding="utf-8",
+    )
     _write(
         repo,
         "src/network/codec.rs",

@@ -94,42 +94,6 @@ def _candidate_file_text(
     return (repo_root / path).read_text(encoding="utf-8")
 
 
-def _added_paths(repo_root: Path, cached: bool, base_ref: str | None) -> set[str]:
-    args = [
-        "diff",
-        "--name-status",
-        "--diff-filter=ACR",
-        "--find-renames",
-        "--find-copies-harder",
-        "-z",
-    ]
-    if cached:
-        args.append("--cached")
-    args.extend([base_ref, "HEAD"] if base_ref is not None else ["HEAD"])
-    fields = _git(repo_root, args).split(b"\0")
-    paths: set[str] = set()
-    index = 0
-    while index < len(fields) and fields[index]:
-        status = fields[index].decode("ascii", errors="strict")
-        index += 1
-        if status.startswith(("R", "C")):
-            index += 1
-            paths.add(fields[index].decode("utf-8", errors="strict"))
-            index += 1
-        else:
-            paths.add(fields[index].decode("utf-8", errors="strict"))
-            index += 1
-    if not cached and base_ref is None:
-        paths.update(
-            field.decode("utf-8", errors="strict")
-            for field in _git(
-                repo_root, ["ls-files", "--others", "--exclude-standard", "-z"]
-            ).split(b"\0")
-            if field
-        )
-    return paths
-
-
 def _rust_code_only(text: str) -> str:
     """Blank comments and literal syntax while preserving code layout/path text."""
     output: list[str] = []
@@ -461,8 +425,6 @@ def _candidate_has_version_suite(
     repo_root: Path, version: int, cached: bool, base_ref: str | None
 ) -> bool:
     path = f"src/network/wire_golden_v{version}.rs"
-    if path not in _added_paths(repo_root, cached, base_ref):
-        return False
     try:
         suite = _candidate_file_text(repo_root, path, cached, base_ref)
         codec = _candidate_file_text(
