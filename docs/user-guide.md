@@ -3443,7 +3443,7 @@ use web_time::Duration;
 let config = SyncConfig {
     num_sync_packets: 5,                              // Roundtrips required (default: 5)
     sync_retry_interval: Duration::from_millis(200), // Retry interval (default: 200ms)
-    sync_timeout: Some(Duration::from_secs(20)),     // Default timeout
+    sync_timeout: Some(Duration::from_secs(20)),     // Optional timeout (default: 20s; None disables)
     running_retry_interval: Duration::from_millis(200), // Input retry interval (default: 200ms)
     keepalive_interval: Duration::from_millis(200),  // Keepalive interval (default: 200ms)
     ..Default::default()  // Forward compatibility
