@@ -8,7 +8,10 @@ pub struct NetworkStats {
     /// The length of the send queue is a rough indication of the quality of the connection. The longer the send queue, the higher the round-trip time between the
     /// clients. The send queue will also be longer than usual during high packet loss situations.
     pub send_queue_len: usize,
-    /// The roundtrip packet transmission time as calculated by Fortress Rollback.
+    /// The most recently measured round-trip packet transmission time, in
+    /// milliseconds. The gauge updates through quality-report exchanges at
+    /// [`ProtocolConfig::quality_report_interval`](crate::ProtocolConfig::quality_report_interval)
+    /// (200 ms by default), not on every packet.
     pub ping: u128,
     /// The estimated outbound bandwidth to this peer, in **kilobits per second**
     /// (bits ÷ 1000). Computed from the wire-exact serialized size of every sent
