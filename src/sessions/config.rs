@@ -118,7 +118,7 @@ pub struct SyncConfig {
     /// Maximum time to wait for synchronization to complete. If sync takes
     /// longer than this, a `SyncTimeout` event is emitted.
     ///
-    /// Default: 20 seconds
+    /// Default: `Some(Duration::from_secs(20))`
     pub sync_timeout: Option<Duration>,
 
     /// Time between input retries during the running phase. If we haven't
