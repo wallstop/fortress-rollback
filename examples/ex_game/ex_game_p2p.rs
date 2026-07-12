@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in sess.events() {
             info!("Event: {:?}", event);
             if let FortressEvent::WaitRecommendation { skip_frames } = event {
-                recommended_skips = recommended_skips.max(skip_frames);
+                recommended_skips = skip_frames;
             }
         }
 
