@@ -25,8 +25,9 @@ This document specifies preconditions, postconditions, and invariants for all pu
 7. [Request Handling](#request-handling)
 8. [Error Catalog](#error-catalog)
 9. [Event Catalog](#event-catalog)
-10. [Cross-Cutting Invariants](#cross-cutting-invariants)
-11. [Revision History](#revision-history)
+10. [Network Stream Framing](#network-stream-framing)
+11. [Cross-Cutting Invariants](#cross-cutting-invariants)
+12. [Revision History](#revision-history)
 
 ---
 
@@ -914,6 +915,43 @@ is local policy and is not compared.
 
 ---
 
+## Network Stream Framing
+
+### `codec::encode_framed(message) -> CodecResult<Vec<u8>>`
+
+**Pre:** `message` is a valid Fortress network message.
+
+**Post:** Returns `u32::to_le_bytes(payload.len()) || payload`, where `payload` is byte-for-byte
+equal to `codec::encode(message)` and does not exceed `DEFAULT_MAX_FRAME_LEN`.
+
+**Errors:** Returns `CodecError::EncodeError` on length overflow, an over-limit payload, encoding
+failure, or failed fallible reservation.
+
+**Panics:** Never
+
+### `FrameDecoder::push(input) -> CodecResult<(Option<Message>, usize)>`
+
+**Pre:** After any prior error, the underlying stream has been discarded and `reset` has been
+called before bytes from a new stream are supplied.
+
+**Post:** Consumes no more than `input.len()`, buffers only one incomplete bounded frame, and yields
+at most one exactly decoded `Message`. A suffix after that frame remains unconsumed for the caller.
+
+**Errors:** Rejects zero-length or over-limit declarations before payload allocation, failed
+fallible reservation, malformed/trailing message bytes, poisoned state, and incomplete state at
+`finish()`. Every decode error poisons the decoder until `reset()`.
+
+**Panics:** Never
+
+**Invariant:** Stream framing is a transport envelope only. It does not change protocol-v1
+datagram bytes, rollback determinism, or the `Message` body format.
+
+### `NonBlockingSocket::send_to(message, address)`
+
+**Post:** Best-effort submission only. The adapter may drop or delay the message locally, including
+inside a congestion-controlled QUIC sender stack. Fortress Rollback's redundant unacknowledged-input
+window repairs ordinary omissions through later messages; this call is not a delivery guarantee.
+
 ## Cross-Cutting Invariants
 
 These invariants are preserved across ALL public API calls:
@@ -929,6 +967,7 @@ These invariants are preserved across ALL public API calls:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.2     | 2026-07-12 | Added bounded TCP/byte-stream framing contracts for `codec::encode_framed` and `FrameDecoder`. |
 | 1.1     | 2026-05-07 | Added contracts for runtime input delay (`P2PSession::set_input_delay`, `P2PSession::input_delay`), configurable disconnect behavior (`SessionBuilder::with_disconnect_behavior`, `P2PSession::disconnect_behavior`), and explicit graceful peer removal (`P2PSession::remove_player`). Documented new `InvalidRequestKind`/`InternalErrorKind` variants and the new `FortressEvent::PeerDropped` and `FortressEvent::InputDelayRecommendation` events. Added Event Catalog. |
 | 1.0     | 2025-12-06 | Complete API contracts                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 0.1     | 2025-12-06 | Initial draft                                                                                                                                                                                                                                                                                                                                                                                                                                                                |

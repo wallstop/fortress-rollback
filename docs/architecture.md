@@ -922,7 +922,9 @@ The codec module provides centralized, deterministic serialization for all netwo
 - **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
 - **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
 - **Bounded Peer Decode**: `decode_message` validates the protocol-v1 prelude and network `Message` lengths before allocation
+- **Bounded Stream Framing**: `encode_framed` and `FrameDecoder` add a u32-LE envelope for byte streams without changing datagram wire bytes
 - **Visible Refusal**: built-in sockets classify rejected legacy, version, flags, sentinel, and malformed packets and rate-limit warnings per receive poll
+- **Datagram-size Visibility**: protocol endpoints count messages at the inclusive 1,200-byte portable-datagram budget and the 1,472-byte IPv4/UDP fragmentation boundary, with distinct one-per-endpoint-era warning and alarm diagnostics
 
 ```rust
 use fortress_rollback::network::codec::{encode, decode, encode_into, CodecError};
@@ -951,6 +953,13 @@ let len = encode_into(&data, &mut buffer)?;
 | `decode_value()`  | Decode trusted/local bytes ignoring byte count | Convenience when count not needed |
 | `decode_message()` | Decode bounded peer `Message` bytes | Custom socket receive paths |
 | `classify_wire_bytes()` | Diagnose bytes already rejected by `decode_message()` | Custom transport warnings/metrics |
+| `encode_framed()` | Prefix one `Message` with its u32-LE encoded length | TCP and other raw byte streams |
+| `FrameDecoder` | Incrementally buffer one bounded stream frame | Partial or concatenated stream reads |
+
+The stream envelope is transport-local: its four-byte length prefix is not part of protocol-v1's
+datagram format or deterministic simulation state. `FrameDecoder` yields at most one message per
+call so a large socket read cannot create an unbounded internal decoded-message queue. Datagram
+endpoints retain message boundaries and continue to use `encode` / `decode_message` directly.
 
 **Why Fixed-Size Integers:**
 

@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `SessionMetrics::unknown_source_packets` counts decoded protocol messages received from addresses that are not configured endpoints for a P2P or spectator session. The first such message also emits a `NetworkProtocol` warning with its source address; later warnings are suppressed for the session while the cumulative counter continues rising. This makes stale traffic, source spoofing, and NAT rebinding distinguishable from pure peer silence. Malformed datagrams rejected by a socket before decoding remain outside this session-level counter.
+- `network::codec::{encode_framed, FrameDecoder}` provide bounded u32-little-endian message framing for TCP and other raw byte streams. The incremental decoder accepts partial and concatenated reads, yields at most one message per call with exact consumption accounting, rejects zero or over-64-MiB declarations before allocation, and remains poisoned after malformed input until reset for a new connection. Datagram wire bytes are unchanged.
 
 ### Changed
 
@@ -157,7 +158,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packets_sent` / `packets_received`, a per-`MessageKind` breakdown of each direction
   (`messages_sent_by_kind` / `messages_received_by_kind`, both `MessageKindCounts` serializing as a
   self-describing label map, with `total()` equal to the matching packet counter), input
-  `input_bytes_pre_compression` / `input_bytes_post_compression` totals, and the instantaneous
+  `input_bytes_pre_compression` / `input_bytes_post_compression` totals; the saturating
+  `portability_risk_messages_sent` / `fragmentation_risk_messages_sent` counters record messages
+  at or above the 1,200-byte cross-transport budget and 1,472-byte IPv4/UDP fragmentation boundary,
+  respectively, with one warning/alarm per endpoint era; and the instantaneous
   `pending_output_len`, `pending_checksums_len`, `ping_ms`, and `remote_frame_advantage` gauges. `MessageKind`
   is a payload-free mirror of the protocol's wire messages (`as_str()`, `ALL`, `COUNT`); `PeerMetrics` is
   `#[non_exhaustive]` and offers `to_json()` / `to_json_pretty()` under the `json` feature. Byte counts are

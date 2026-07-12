@@ -336,6 +336,14 @@ impl std::error::Error for CodecError {}
 /// Result type for codec operations.
 pub type CodecResult<T> = Result<T, CodecError>;
 
+/// Hard payload-byte ceiling for one length-prefixed stream frame.
+///
+/// A stream frame is a four-byte little-endian payload length followed by one
+/// encoded [`Message`]. The prefix itself is not included in this limit. The
+/// ceiling matches the crate's existing 64 MiB hostile-decode ceiling, keeping
+/// a peer-controlled stream length from driving an unbounded allocation.
+pub const DEFAULT_MAX_FRAME_LEN: usize = crate::rle::DEFAULT_MAX_DECODED_LEN;
+
 fn decode_message_error(message: impl Into<String>) -> CodecError {
     CodecError::decode(message, CodecOperation::DecodeMessage)
 }
@@ -737,6 +745,336 @@ pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
     })?;
     encode_append(value, &mut buffer)?;
     Ok(buffer)
+}
+
+/// Encodes one network [`Message`] for a byte-stream transport.
+///
+/// The returned bytes contain a four-byte little-endian `u32` payload length,
+/// followed by exactly the bytes produced by [`encode`] for `message`. The
+/// length excludes the four-byte prefix. Datagram and message-oriented
+/// transports should continue to use [`encode`] directly.
+///
+/// # Errors
+///
+/// Returns [`CodecError::EncodeError`] if the message cannot be encoded, its
+/// payload exceeds [`DEFAULT_MAX_FRAME_LEN`], its length cannot fit in `u32`,
+/// framed-length arithmetic overflows, or the output allocation cannot be
+/// reserved.
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::{network::codec::encode_framed, Message};
+///
+/// fn write_frame(message: &Message) -> Result<Vec<u8>, fortress_rollback::network::codec::CodecError> {
+///     encode_framed(message)
+/// }
+/// # let _ = write_frame;
+/// ```
+pub fn encode_framed(message: &Message) -> CodecResult<Vec<u8>> {
+    encode_framed_with_max_len(message, DEFAULT_MAX_FRAME_LEN)
+}
+
+fn encode_framed_with_max_len(message: &Message, max_frame_len: usize) -> CodecResult<Vec<u8>> {
+    const PREFIX_LEN: usize = std::mem::size_of::<u32>();
+
+    let payload_len = encoded_len(message)?;
+    if payload_len > max_frame_len {
+        return Err(CodecError::encode(
+            format!("frame payload length {payload_len} exceeds maximum {max_frame_len}"),
+            CodecOperation::EncodeMessage,
+        ));
+    }
+    let wire_payload_len = u32::try_from(payload_len).map_err(|_err| {
+        CodecError::encode(
+            format!("frame payload length {payload_len} does not fit in u32"),
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    let framed_len = PREFIX_LEN.checked_add(payload_len).ok_or_else(|| {
+        CodecError::encode(
+            "framed message length overflow",
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    let mut framed = Vec::new();
+    framed.try_reserve_exact(framed_len).map_err(|_err| {
+        CodecError::encode(
+            format!("failed to reserve {framed_len} framed message bytes"),
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    framed.extend_from_slice(&wire_payload_len.to_le_bytes());
+    let written = encode_append(message, &mut framed)?;
+    if written != payload_len {
+        return Err(CodecError::encode(
+            format!(
+                "framed message length changed while encoding: counted {payload_len}, wrote {written}"
+            ),
+            CodecOperation::EncodeMessage,
+        ));
+    }
+    Ok(framed)
+}
+
+/// Incremental decoder for length-prefixed network messages on byte streams.
+///
+/// Each frame starts with a four-byte little-endian `u32` payload length that
+/// excludes the prefix, followed by one encoded [`Message`]. A decoder buffers
+/// only an incomplete prefix or payload and yields at most one message from each
+/// [`push`](Self::push) call. The returned consumed-byte count lets callers feed
+/// the unconsumed suffix back immediately without an unbounded internal message
+/// queue.
+///
+/// A malformed frame poisons the decoder because a corrupt length may make later
+/// byte boundaries untrustworthy. Call [`reset`](Self::reset) only after the
+/// underlying stream has been discarded or re-established; it is not a safe way
+/// to resynchronize within a corrupt stream.
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::{network::codec::FrameDecoder, Message};
+/// # use fortress_rollback::network::codec::CodecError;
+///
+/// fn read_chunk<'a>(
+///     decoder: &mut FrameDecoder,
+///     mut bytes: &'a [u8],
+///     mut on_message: impl FnMut(Message),
+/// ) -> Result<&'a [u8], fortress_rollback::network::codec::CodecError> {
+///     while !bytes.is_empty() {
+///         let (message, consumed) = decoder.push(bytes)?;
+///         bytes = bytes.get(consumed..).unwrap_or_default();
+///         if let Some(message) = message {
+///             on_message(message);
+///         }
+///         if consumed == 0 {
+///             break;
+///         }
+///     }
+///     Ok(bytes)
+/// }
+/// # fn main() -> Result<(), CodecError> {
+/// # let mut decoder = FrameDecoder::new();
+/// # let _suffix = read_chunk(&mut decoder, &[], |_message| {})?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct FrameDecoder {
+    max_frame_len: usize,
+    prefix: [u8; std::mem::size_of::<u32>()],
+    prefix_len: usize,
+    expected_payload_len: Option<usize>,
+    payload: Vec<u8>,
+    poisoned: bool,
+}
+
+impl FrameDecoder {
+    const PREFIX_LEN: usize = std::mem::size_of::<u32>();
+
+    /// Creates a decoder with the [`DEFAULT_MAX_FRAME_LEN`] payload ceiling.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            prefix: [0; Self::PREFIX_LEN],
+            prefix_len: 0,
+            expected_payload_len: None,
+            payload: Vec::new(),
+            poisoned: false,
+        }
+    }
+
+    /// Creates a decoder with a smaller, caller-selected payload ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] when `max_frame_len` is zero or
+    /// exceeds the hard [`DEFAULT_MAX_FRAME_LEN`] ceiling.
+    pub fn try_with_max_frame_len(max_frame_len: usize) -> CodecResult<Self> {
+        if max_frame_len == 0 || max_frame_len > DEFAULT_MAX_FRAME_LEN {
+            return Err(CodecError::decode(
+                format!(
+                    "frame decoder maximum must be in 1..={DEFAULT_MAX_FRAME_LEN}, got {max_frame_len}"
+                ),
+                CodecOperation::DecodeMessage,
+            ));
+        }
+        Ok(Self {
+            max_frame_len,
+            ..Self::new()
+        })
+    }
+
+    /// Feeds stream bytes into the decoder and yields at most one message.
+    ///
+    /// The returned `usize` is the exact number of bytes consumed from `input`.
+    /// When `input` contains more than one frame, this method stops after the
+    /// first and leaves the suffix to the caller. Partial prefixes and payloads
+    /// are buffered and return `Ok((None, input.len()))`. Empty input is inert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] if a declared payload is zero or
+    /// exceeds this decoder's limit, allocation fails, the completed payload is
+    /// not exactly one valid [`Message`], or the decoder was already poisoned by
+    /// an earlier error. Every error poisons the decoder until [`reset`](Self::reset).
+    pub fn push(&mut self, input: &[u8]) -> CodecResult<(Option<Message>, usize)> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
+        }
+        if input.is_empty() {
+            return Ok((None, 0));
+        }
+
+        let mut consumed = 0;
+        if self.expected_payload_len.is_none() {
+            let prefix_needed = Self::PREFIX_LEN.saturating_sub(self.prefix_len);
+            let take = prefix_needed.min(input.len());
+            let Some(source) = input.get(..take) else {
+                return self.poison("frame prefix slice out of bounds");
+            };
+            let Some(prefix_end) = self.prefix_len.checked_add(take) else {
+                return self.poison("frame prefix offset overflow");
+            };
+            let Some(destination) = self.prefix.get_mut(self.prefix_len..prefix_end) else {
+                return self.poison("frame prefix destination out of bounds");
+            };
+            destination.copy_from_slice(source);
+            self.prefix_len = prefix_end;
+            consumed = take;
+
+            if self.prefix_len < Self::PREFIX_LEN {
+                return Ok((None, consumed));
+            }
+
+            let declared = usize::try_from(u32::from_le_bytes(self.prefix)).map_err(|_err| {
+                self.poisoned = true;
+                CodecError::decode(
+                    "frame payload length does not fit in usize",
+                    CodecOperation::DecodeMessage,
+                )
+            })?;
+            if declared == 0 {
+                return self.poison("frame payload length must be non-zero");
+            }
+            if declared > self.max_frame_len {
+                return self.poison(format!(
+                    "frame payload length {declared} exceeds maximum {}",
+                    self.max_frame_len
+                ));
+            }
+            if let Err(_err) = self.payload.try_reserve_exact(declared) {
+                return self.poison(format!("failed to reserve {declared} frame payload bytes"));
+            }
+            self.expected_payload_len = Some(declared);
+        }
+
+        let Some(expected) = self.expected_payload_len else {
+            return self.poison("frame decoder lost its expected payload length");
+        };
+        let payload_needed = expected.saturating_sub(self.payload.len());
+        let available = input.len().saturating_sub(consumed);
+        let take = payload_needed.min(available);
+        let Some(input_end) = consumed.checked_add(take) else {
+            return self.poison("frame input offset overflow");
+        };
+        let Some(source) = input.get(consumed..input_end) else {
+            return self.poison("frame payload slice out of bounds");
+        };
+        // alloc-bound: the full peer-declared payload length was bounded by
+        // `max_frame_len` and reserved fallibly before any payload byte is copied.
+        self.payload.extend_from_slice(source);
+        consumed = input_end;
+
+        if self.payload.len() < expected {
+            return Ok((None, consumed));
+        }
+
+        match decode_message(&self.payload) {
+            Ok((message, decoded_len)) if decoded_len == expected => {
+                self.prefix_len = 0;
+                self.expected_payload_len = None;
+                self.payload.clear();
+                Ok((Some(message), consumed))
+            },
+            Ok((_message, decoded_len)) => self.poison(format!(
+                "decoded frame consumed {decoded_len} bytes, expected {expected}"
+            )),
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            },
+        }
+    }
+
+    /// Verifies that the stream ended exactly between frames.
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] if the decoder is poisoned or holds an
+    /// incomplete length prefix or payload. An incomplete end poisons the decoder.
+    pub fn finish(&mut self) -> CodecResult<()> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
+        }
+        if self.prefix_len == 0 && self.expected_payload_len.is_none() {
+            return Ok(());
+        }
+        if let Some(expected) = self.expected_payload_len {
+            return self.poison(format!(
+                "incomplete frame payload: buffered {} of {expected} bytes",
+                self.payload.len()
+            ));
+        }
+        self.poison(format!(
+            "incomplete length prefix: buffered {} of {} bytes",
+            self.prefix_len,
+            Self::PREFIX_LEN
+        ))
+    }
+
+    /// Clears all buffered state and releases its payload allocation.
+    ///
+    /// Use this only for a new or otherwise independently re-established stream;
+    /// reset cannot locate a trustworthy boundary in the stream that failed.
+    pub fn reset(&mut self) {
+        self.prefix = [0; Self::PREFIX_LEN];
+        self.prefix_len = 0;
+        self.expected_payload_len = None;
+        self.payload = Vec::new();
+        self.poisoned = false;
+    }
+
+    /// Returns the configured maximum payload size, excluding the prefix.
+    #[must_use]
+    pub const fn max_frame_len(&self) -> usize {
+        self.max_frame_len
+    }
+
+    /// Returns the number of prefix and payload bytes currently buffered.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.prefix_len.saturating_add(self.payload.len())
+    }
+
+    fn poison<T>(&mut self, message: impl Into<String>) -> CodecResult<T> {
+        self.poisoned = true;
+        Err(CodecError::decode(message, CodecOperation::DecodeMessage))
+    }
+
+    fn poisoned_error() -> CodecError {
+        CodecError::decode(
+            "frame decoder is poisoned; reset it only for a new stream",
+            CodecOperation::DecodeMessage,
+        )
+    }
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Encodes a value into an existing byte slice.
@@ -1143,6 +1481,215 @@ mod tests {
         let mut bytes = encode(&MessageHeader::new(conn_id)).unwrap();
         bytes.extend_from_slice(&variant.to_le_bytes());
         bytes
+    }
+
+    fn keep_alive(conn_id: u32) -> Message {
+        Message {
+            header: MessageHeader::new(conn_id),
+            body: MessageBody::KeepAlive,
+        }
+    }
+
+    fn drain_framed(decoder: &mut FrameDecoder, mut bytes: &[u8]) -> CodecResult<Vec<Message>> {
+        let mut messages = Vec::new();
+        while !bytes.is_empty() {
+            let (message, consumed) = decoder.push(bytes)?;
+            assert!(consumed > 0, "non-empty input must make progress");
+            bytes = bytes
+                .get(consumed..)
+                .expect("decoder consumption is in bounds");
+            if let Some(message) = message {
+                messages.push(message);
+            }
+        }
+        Ok(messages)
+    }
+
+    #[test]
+    fn encode_framed_prefixes_exact_payload_length_in_little_endian() {
+        let message = keep_alive(0xABCD);
+        let payload = encode(&message).unwrap();
+
+        let framed = encode_framed(&message).unwrap();
+
+        assert_eq!(
+            framed.get(..4),
+            Some((payload.len() as u32).to_le_bytes().as_slice())
+        );
+        assert_eq!(framed.get(4..), Some(payload.as_slice()));
+        assert_eq!(framed.len(), payload.len() + 4);
+    }
+
+    #[test]
+    fn frame_decoder_accepts_every_single_split_of_prefix_and_payload() {
+        let message = keep_alive(0xABCD);
+        let framed = encode_framed(&message).unwrap();
+
+        for split in 0..=framed.len() {
+            let mut decoder = FrameDecoder::new();
+            let (first, consumed) = decoder.push(&framed[..split]).unwrap();
+            assert_eq!(consumed, split, "split {split}");
+            assert_eq!(first, (split == framed.len()).then(|| message.clone()));
+            let (second, consumed) = decoder.push(&framed[split..]).unwrap();
+            assert_eq!(consumed, framed.len() - split, "split {split}");
+            assert_eq!(second, (split != framed.len()).then(|| message.clone()));
+            assert_eq!(decoder.buffered_len(), 0);
+            assert_eq!(decoder.finish(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn frame_decoder_accepts_one_byte_chunks() {
+        let message = keep_alive(0xABCD);
+        let framed = encode_framed(&message).unwrap();
+        let mut decoder = FrameDecoder::new();
+        let mut decoded = None;
+
+        for byte in &framed {
+            let (next, consumed) = decoder.push(std::slice::from_ref(byte)).unwrap();
+            assert_eq!(consumed, 1);
+            assert!(decoded.is_none());
+            if next.is_some() {
+                decoded = next;
+            }
+        }
+
+        assert_eq!(decoded, Some(message));
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn frame_decoder_consumes_only_one_of_multiple_frames_per_call() {
+        let messages = [keep_alive(1), keep_alive(2), keep_alive(3)];
+        let mut stream = Vec::new();
+        for message in &messages {
+            stream.extend_from_slice(&encode_framed(message).unwrap());
+        }
+        let first_len = encode_framed(&messages[0]).unwrap().len();
+        let mut decoder = FrameDecoder::new();
+
+        let (first, consumed) = decoder.push(&stream).unwrap();
+
+        assert_eq!(first, Some(messages[0].clone()));
+        assert_eq!(consumed, first_len);
+        assert_eq!(
+            drain_framed(&mut decoder, &stream[consumed..]).unwrap(),
+            messages[1..]
+        );
+    }
+
+    #[test]
+    fn frame_decoder_empty_input_is_inert() {
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(decoder.push(&[]), Ok((None, 0)));
+        assert_eq!(decoder.buffered_len(), 0);
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn frame_decoder_limit_validation_is_fail_closed() {
+        assert!(FrameDecoder::try_with_max_frame_len(0).is_err());
+        assert!(FrameDecoder::try_with_max_frame_len(DEFAULT_MAX_FRAME_LEN + 1).is_err());
+        assert!(FrameDecoder::try_with_max_frame_len(usize::MAX).is_err());
+
+        let decoder = FrameDecoder::try_with_max_frame_len(DEFAULT_MAX_FRAME_LEN).unwrap();
+        assert_eq!(decoder.max_frame_len(), DEFAULT_MAX_FRAME_LEN);
+        assert_eq!(FrameDecoder::new().max_frame_len(), DEFAULT_MAX_FRAME_LEN);
+    }
+
+    #[test]
+    fn frame_decoder_accepts_exact_limit_and_rejects_one_byte_over_before_payload() {
+        let message = keep_alive(1);
+        let payload = encode(&message).unwrap();
+        let mut exact = FrameDecoder::try_with_max_frame_len(payload.len()).unwrap();
+        assert_eq!(
+            exact.push(&encode_framed(&message).unwrap()).unwrap(),
+            (Some(message), payload.len() + 4)
+        );
+
+        let mut over = FrameDecoder::try_with_max_frame_len(payload.len() - 1).unwrap();
+        let prefix = u32::try_from(payload.len()).unwrap().to_le_bytes();
+        let error = over.push(&prefix).expect_err("over-limit prefix must fail");
+        assert!(error.to_string().contains("exceeds maximum"));
+        assert!(over.push(&[]).unwrap_err().to_string().contains("poisoned"));
+    }
+
+    #[test]
+    fn frame_decoder_rejects_zero_length_and_remains_poisoned_until_reset() {
+        let mut decoder = FrameDecoder::new();
+        let error = decoder.push(&0_u32.to_le_bytes()).unwrap_err();
+        assert!(error.to_string().contains("must be non-zero"));
+        assert!(decoder
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("poisoned"));
+        assert!(decoder
+            .push(&encode_framed(&keep_alive(1)).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("poisoned"));
+
+        decoder.reset();
+
+        assert_eq!(
+            drain_framed(&mut decoder, &encode_framed(&keep_alive(1)).unwrap()).unwrap(),
+            vec![keep_alive(1)]
+        );
+    }
+
+    #[test]
+    fn frame_decoder_malformed_or_trailing_payload_poison_decoder() {
+        let valid_payload = encode(&keep_alive(1)).unwrap();
+        let cases = [vec![0xFF], {
+            let mut trailing = valid_payload;
+            trailing.push(0);
+            trailing
+        }];
+
+        for payload in cases {
+            let mut framed = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+            framed.extend_from_slice(&payload);
+            let mut decoder = FrameDecoder::new();
+
+            assert!(decoder.push(&framed).is_err());
+            assert!(decoder
+                .push(&[])
+                .unwrap_err()
+                .to_string()
+                .contains("poisoned"));
+        }
+    }
+
+    #[test]
+    fn frame_decoder_finish_distinguishes_partial_prefix_and_payload() {
+        let framed = encode_framed(&keep_alive(1)).unwrap();
+        for prefix_len in 1..4 {
+            let mut decoder = FrameDecoder::new();
+            assert_eq!(decoder.push(&framed[..prefix_len]), Ok((None, prefix_len)));
+            let error = decoder.finish().unwrap_err();
+            assert!(error.to_string().contains("incomplete length prefix"));
+        }
+
+        let mut decoder = FrameDecoder::new();
+        let partial_len = framed.len() - 1;
+        assert_eq!(
+            decoder.push(&framed[..partial_len]),
+            Ok((None, partial_len))
+        );
+        let error = decoder.finish().unwrap_err();
+        assert!(error.to_string().contains("incomplete frame payload"));
+        assert!(error.to_string().contains("11 of 12"));
+    }
+
+    #[test]
+    fn encode_framed_limit_helper_accepts_exact_and_rejects_over_limit() {
+        let message = keep_alive(1);
+        let payload_len = encode(&message).unwrap().len();
+
+        assert!(encode_framed_with_max_len(&message, payload_len).is_ok());
+        let error = encode_framed_with_max_len(&message, payload_len - 1).unwrap_err();
+        assert!(error.to_string().contains("exceeds maximum"));
     }
 
     #[test]
@@ -1762,6 +2309,68 @@ mod tests {
                 "encoded_len diverged from wire bytes for {:?}",
                 msg
             );
+        }
+
+        /// Stream framing is an envelope only: it must preserve the exact
+        /// protocol-v1 bytes for every body variant.
+        #[test]
+        fn encode_framed_wraps_exact_arbitrary_message_bytes(msg in arb_message()) {
+            let payload = encode(&msg).expect("arbitrary message must encode");
+            let framed = encode_framed(&msg).expect("bounded arbitrary message must frame");
+            let prefix = u32::try_from(payload.len())
+                .expect("property payload is tiny")
+                .to_le_bytes();
+
+            proptest::prop_assert_eq!(framed.get(..4), Some(prefix.as_slice()));
+            proptest::prop_assert_eq!(framed.get(4..), Some(payload.as_slice()));
+        }
+
+        /// Arbitrary fragmentation of both the length prefix and payload cannot
+        /// change the decoded message or byte-consumption accounting.
+        #[test]
+        fn frame_decoder_roundtrips_keep_alive_at_arbitrary_split(
+            conn_low in 1_u32..=u32::from(u16::MAX),
+            split_seed in proptest::prelude::any::<usize>(),
+        ) {
+            let message = keep_alive(conn_low);
+            let framed = encode_framed(&message).expect("keep-alive must frame");
+            let split = split_seed % (framed.len() + 1);
+            let mut decoder = FrameDecoder::new();
+
+            let (first, first_consumed) = decoder
+                .push(&framed[..split])
+                .expect("first fragment must decode or buffer");
+            let (second, second_consumed) = decoder
+                .push(&framed[split..])
+                .expect("second fragment must complete or be empty");
+
+            proptest::prop_assert_eq!(first_consumed, split);
+            proptest::prop_assert_eq!(second_consumed, framed.len() - split);
+            proptest::prop_assert_eq!(first.or(second), Some(message));
+            proptest::prop_assert_eq!(decoder.finish(), Ok(()));
+        }
+
+        /// A single read may contain many complete frames, but each `push`
+        /// yields exactly one and reports the suffix boundary without buffering
+        /// an unbounded decoded-message queue.
+        #[test]
+        fn frame_decoder_preserves_arbitrary_concatenated_frame_order(
+            conn_lows in proptest::collection::vec(1_u32..=u32::from(u16::MAX), 0..32),
+        ) {
+            let messages: Vec<_> = conn_lows.into_iter().map(keep_alive).collect();
+            let mut stream = Vec::new();
+            for message in &messages {
+                stream.extend_from_slice(
+                    &encode_framed(message).expect("keep-alive must frame")
+                );
+            }
+            let mut decoder = FrameDecoder::new();
+
+            let decoded = drain_framed(&mut decoder, &stream)
+                .expect("concatenated valid frames must decode");
+
+            proptest::prop_assert_eq!(decoded, messages);
+            proptest::prop_assert_eq!(decoder.finish(), Ok(()));
         }
     }
 

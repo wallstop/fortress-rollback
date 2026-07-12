@@ -564,6 +564,27 @@ MessageBody =
     ∧ decoded_message_count(poll) ≤ MAX_RECEIVE_MESSAGES_PER_POLL)
 ```
 
+### SAFE-1c: Stream Frame and Datagram Diagnostic Bounds
+
+```
+□(∀frame ∈ AcceptedStreamFrames:
+    0 < declared_payload_len(frame) ≤ DEFAULT_MAX_FRAME_LEN
+    ∧ decoded_message_bytes(frame) = declared_payload_len(frame))
+□(∀push ∈ StreamDecoderPushes:
+    yielded_message_count(push) ≤ 1
+    ∧ buffered_frame_count(push) ≤ 1)
+□(∀msg ∈ QueuedUdpMessages:
+    encoded_len(msg) ≥ 1200 ⇒ portability_risk_messages_sent' =
+        saturating_increment(portability_risk_messages_sent))
+□(∀msg ∈ QueuedUdpMessages:
+    encoded_len(msg) ≥ 1472 ⇒ fragmentation_risk_messages_sent' =
+        saturating_increment(fragmentation_risk_messages_sent))
+```
+
+The 1,200- and 1,472-byte rules are telemetry, not acceptance bounds: endpoints still queue a
+valid message, while diagnosing each threshold once per endpoint era. The stream prefix is a transport envelope and therefore does
+not alter the deterministic protocol-v1 message format.
+
 ### SAFE-2: No Invalid Frame Access
 
 ```

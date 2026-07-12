@@ -911,6 +911,19 @@ pub struct PeerMetrics {
     /// **after** delta/RLE compression.
     pub input_bytes_post_compression: u64,
 
+    /// Cumulative logical messages whose complete Fortress wire payload was at
+    /// least 1200 bytes when queued for this endpoint. This conservative budget
+    /// is portable across common UDP, WebRTC, QUIC-datagram, and tunneled paths;
+    /// it is advisory and is not path-MTU discovery.
+    pub portability_risk_messages_sent: u64,
+
+    /// Cumulative logical messages whose complete Fortress wire payload
+    /// was at least 1472 bytes when queued for this endpoint. That is the common
+    /// IPv4/UDP payload ceiling for a 1500-byte path MTU (20-byte IPv4 header +
+    /// 8-byte UDP header); IPv6, tunnels, VPNs, or IPv4 options can fragment at
+    /// smaller sizes. This counter is diagnostic, not path-MTU discovery.
+    pub fragmentation_risk_messages_sent: u64,
+
     /// **Gauge.** The number of input frames queued for (re)transmission that the
     /// peer has not yet acknowledged — the connection-backpressure signal also
     /// reported as
@@ -1344,6 +1357,8 @@ mod tests {
         assert_eq!(m.messages_received_by_kind.total(), 0);
         assert_eq!(m.input_bytes_pre_compression, 0);
         assert_eq!(m.input_bytes_post_compression, 0);
+        assert_eq!(m.portability_risk_messages_sent, 0);
+        assert_eq!(m.fragmentation_risk_messages_sent, 0);
         assert_eq!(m.pending_output_len, 0);
         assert_eq!(m.pending_checksums_len, 0);
         assert_eq!(m.ping_ms, 0);
@@ -1355,11 +1370,21 @@ mod tests {
     fn peer_metrics_serializes_kind_breakdown_as_labeled_map() {
         let mut m = PeerMetrics {
             packets_sent: 1,
+            portability_risk_messages_sent: 3,
+            fragmentation_risk_messages_sent: 2,
             ..Default::default()
         };
         m.messages_sent_by_kind.record(MessageKind::Input);
         let json = m.to_json().expect("json serialization succeeds");
         assert!(json.contains(r#""packets_sent":1"#), "{json}");
+        assert!(
+            json.contains(r#""portability_risk_messages_sent":3"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""fragmentation_risk_messages_sent":2"#),
+            "{json}"
+        );
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""input":1"#), "{json}");
         assert!(json.contains(r#""keep_alive":0"#), "{json}");

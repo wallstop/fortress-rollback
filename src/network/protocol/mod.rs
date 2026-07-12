@@ -50,6 +50,10 @@ use web_time::{Duration, Instant};
 use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
+/// Conservative payload budget shared by common datagram transports.
+const PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD: usize = 1200;
+/// Common IPv4/UDP payload ceiling under a 1500-byte path MTU.
+const IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD: usize = 1472;
 const CONFIG_DIGEST_DOMAIN: &[u8; 8] = b"FRv1-cfg";
 const HOT_JOIN_FEATURE: u32 = 1 << 0;
 
@@ -398,6 +402,13 @@ where
     // batched into `Input` packets, for realized-compression accounting.
     input_bytes_pre_compression: u64,
     input_bytes_post_compression: u64,
+    // Logical messages at or above the conservative 1200-byte cross-transport
+    // budget and the 1472-byte IPv4 fragmentation boundary. Count every
+    // occurrence but diagnose each threshold once per endpoint era.
+    portability_risk_messages_sent: u64,
+    portability_warning_sent: bool,
+    fragmentation_risk_messages_sent: u64,
+    fragmentation_alarm_sent: bool,
     round_trip_time: u128,
     /// Origin instant for quality-report `ping` timestamps, captured from the
     /// protocol clock at endpoint construction. The peer echoes `ping` back
@@ -925,6 +936,10 @@ impl<T: Config> UdpProtocol<T> {
             messages_received_by_kind: MessageKindCounts::default(),
             input_bytes_pre_compression: 0,
             input_bytes_post_compression: 0,
+            portability_risk_messages_sent: 0,
+            portability_warning_sent: false,
+            fragmentation_risk_messages_sent: 0,
+            fragmentation_alarm_sent: false,
             round_trip_time: 0,
             ping_epoch_base: now,
             last_send_time: now,
@@ -1075,6 +1090,8 @@ impl<T: Config> UdpProtocol<T> {
             messages_received_by_kind: self.messages_received_by_kind,
             input_bytes_pre_compression: self.input_bytes_pre_compression,
             input_bytes_post_compression: self.input_bytes_post_compression,
+            portability_risk_messages_sent: self.portability_risk_messages_sent,
+            fragmentation_risk_messages_sent: self.fragmentation_risk_messages_sent,
             pending_output_len: u64::try_from(self.pending_output.len()).unwrap_or(u64::MAX),
             pending_checksums_len: u64::try_from(self.pending_checksums.len()).unwrap_or(u64::MAX),
             ping_ms: self.round_trip_time,
@@ -2069,6 +2086,41 @@ impl<T: Config> UdpProtocol<T> {
         // set the header
         let header = MessageHeader::new(self.conn_id);
         let msg = Message { header, body };
+        let encoded_len = msg.encoded_len();
+
+        if encoded_len >= PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD {
+            self.portability_risk_messages_sent =
+                self.portability_risk_messages_sent.saturating_add(1);
+            if !self.portability_warning_sent {
+                self.portability_warning_sent = true;
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Message queued for {:?} reaches the portable datagram payload budget: kind={}, encoded_bytes={}, threshold={}. Further portability warnings are suppressed for this endpoint era; inspect PeerMetrics::portability_risk_messages_sent for the cumulative count.",
+                    self.peer_addr,
+                    msg.kind(),
+                    encoded_len,
+                    PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD
+                );
+            }
+        }
+
+        if encoded_len >= IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD {
+            self.fragmentation_risk_messages_sent =
+                self.fragmentation_risk_messages_sent.saturating_add(1);
+            if !self.fragmentation_alarm_sent {
+                self.fragmentation_alarm_sent = true;
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Message queued for {:?} reaches the IPv4/UDP fragmentation boundary: kind={}, encoded_bytes={}, threshold={}. Further fragmentation alarms are suppressed for this endpoint era; inspect PeerMetrics::fragmentation_risk_messages_sent for the cumulative count.",
+                    self.peer_addr,
+                    msg.kind(),
+                    encoded_len,
+                    IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD
+                );
+            }
+        }
 
         self.packets_sent = self.packets_sent.saturating_add(1);
         self.last_send_time = self.now();
@@ -2078,7 +2130,7 @@ impl<T: Config> UdpProtocol<T> {
         // matches `codec::encode(&msg).len()` exactly (property-tested).
         // Saturating so the lifetime counter degrades to a ceiling rather than
         // wrapping (or panicking under overflow-checks) on any target.
-        self.bytes_sent = self.bytes_sent.saturating_add(msg.encoded_len() as u64);
+        self.bytes_sent = self.bytes_sent.saturating_add(encoded_len as u64);
         // Per-kind send tally: one bucket per packet keeps
         // `messages_sent_by_kind.total() == packets_sent`.
         self.messages_sent_by_kind.record(msg.kind());
@@ -5454,6 +5506,122 @@ mod tests {
     // ==========================================
     // Peer Metrics Tests (M2 §5.2)
     // ==========================================
+
+    fn input_body_with_message_len<T: Config>(
+        protocol: &UdpProtocol<T>,
+        target_len: usize,
+    ) -> MessageBody {
+        let mut input = Input {
+            peer_connect_status: Vec::new(),
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: Vec::new(),
+        };
+        let base_len = Message {
+            header: MessageHeader::new(protocol.conn_id),
+            body: MessageBody::Input(input.clone()),
+        }
+        .encoded_len();
+        input.bytes = vec![0; target_len.checked_sub(base_len).unwrap()];
+        let body = MessageBody::Input(input);
+        assert_eq!(
+            Message {
+                header: MessageHeader::new(protocol.conn_id),
+                body: body.clone(),
+            }
+            .encoded_len(),
+            target_len
+        );
+        body
+    }
+
+    #[test]
+    fn mtu_guard_counts_inclusive_boundaries_and_diagnoses_once() {
+        use crate::telemetry::{
+            push_violation_observer, CollectingObserver, ViolationKind, ViolationObserver,
+            ViolationSeverity,
+        };
+
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        for len in [1199, 1200, 1471, 1472] {
+            protocol.queue_message(input_body_with_message_len(&protocol, len));
+        }
+
+        let metrics = protocol.peer_metrics();
+        assert_eq!(metrics.portability_risk_messages_sent, 3);
+        assert_eq!(metrics.fragmentation_risk_messages_sent, 1);
+        let diagnostics = observer.violations();
+        let portability: Vec<_> = diagnostics
+            .iter()
+            .filter(|violation| {
+                violation
+                    .message
+                    .contains("portable datagram payload budget")
+            })
+            .collect();
+        let fragmentation: Vec<_> = diagnostics
+            .iter()
+            .filter(|violation| violation.message.contains("fragmentation boundary"))
+            .collect();
+        assert_eq!(portability.len(), 1);
+        assert_eq!(portability[0].severity, ViolationSeverity::Warning);
+        assert_eq!(portability[0].kind, ViolationKind::NetworkProtocol);
+        assert!(portability[0].message.contains("encoded_bytes=1200"));
+        assert!(portability[0].message.contains("threshold=1200"));
+        assert_eq!(fragmentation.len(), 1);
+        assert_eq!(fragmentation[0].severity, ViolationSeverity::Error);
+        assert_eq!(fragmentation[0].kind, ViolationKind::NetworkProtocol);
+        assert!(fragmentation[0].message.contains("encoded_bytes=1472"));
+        assert!(fragmentation[0].message.contains("threshold=1472"));
+    }
+
+    #[test]
+    fn mtu_fragmentation_counter_saturates() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.portability_risk_messages_sent = u64::MAX;
+        protocol.portability_warning_sent = true;
+        protocol.fragmentation_risk_messages_sent = u64::MAX;
+        protocol.fragmentation_alarm_sent = true;
+
+        let oversized =
+            input_body_with_message_len(&protocol, IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD);
+        protocol.queue_message(oversized);
+
+        assert_eq!(
+            protocol.peer_metrics().portability_risk_messages_sent,
+            u64::MAX
+        );
+        assert_eq!(
+            protocol.peer_metrics().fragmentation_risk_messages_sent,
+            u64::MAX
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn oversized_hot_join_snapshot_uses_shared_fragmentation_guard() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let snapshot = StateSnapshot {
+            frame: Frame::new(4),
+            num_players: 2,
+            state_bytes: vec![0; IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+
+        protocol.queue_message(MessageBody::StateSnapshot(snapshot));
+
+        let metrics = protocol.peer_metrics();
+        assert_eq!(metrics.portability_risk_messages_sent, 1);
+        assert_eq!(metrics.fragmentation_risk_messages_sent, 1);
+    }
 
     #[test]
     fn peer_metrics_send_accounting_matches_wire_bytes_and_kinds() {

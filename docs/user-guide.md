@@ -2355,7 +2355,7 @@ Matchbox's optional `ggrs` feature implements the upstream GGRS `NonBlockingSock
 3. In `receive_all_messages`, poll at most a fixed number of items from the split receiver and decode each with `codec::decode_message`, leaving excess packets queued for later. Do not use `WebRtcChannel::receive()` here because it drains the entire Matchbox queue into a new `Vec`.
 4. Implement Fortress Rollback's `NonBlockingSocket<matchbox_socket::PeerId>` for that local adapter and pass it to `SessionBuilder`.
 
-#### Custom Transport (WebSockets, etc.)
+#### Custom Transport (WebSockets, TCP, etc.)
 
 For other transports, implement `NonBlockingSocket`:
 
@@ -2399,6 +2399,47 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 ```
 
 See the [custom socket example](../examples/custom_socket.rs) for a complete implementation guide.
+
+WebSockets already preserve message boundaries, so the adapter above should use `encode` and
+`decode_message`. A raw byte stream such as TCP does not. For TCP, send
+`codec::encode_framed(message)` and feed each received chunk to a per-connection
+`codec::FrameDecoder`; honor the returned consumed-byte count and immediately feed any suffix
+back to the decoder. `FrameDecoder` uses a four-byte little-endian payload length, rejects zero or
+over-limit frames before allocating, and becomes poisoned after a malformed frame. Discard that
+connection before calling `reset`; an arbitrary byte offset is not a trustworthy frame boundary.
+
+Set `TCP_NODELAY` on every rollback TCP connection. At 60 Hz, waiting roughly 40 ms for Nagle and
+delayed-ACK interaction costs about 2.4 frames before network jitter is considered. TCP also has
+head-of-line blocking: one packet waiting on a 200 ms retransmission stalls about 12 frames, which
+exceeds the default eight-frame prediction window. Fortress Rollback's reliable-FIFO simulations
+show this as a stall followed by catch-up, not deterministic divergence, but it is still a poor
+latency profile for live play. TCP retransmissions are deduplicated by the stack and do not surface
+duplicate payloads to the application.
+
+Prefer freshness-preserving datagrams for rollback traffic. WebRTC data channels should be
+unordered and unreliable (`WebRtcSocket::new_unreliable` in Matchbox); reserve separate reliable
+channels for application traffic that truly needs delivery. For QUIC, use
+[RFC 9221 datagrams](https://datatracker.ietf.org/doc/html/rfc9221) rather than ordered streams.
+[WebTransport](https://www.w3.org/TR/webtransport/) provides the corresponding browser-friendly
+deployment path and is generally preferable to raw TCP/WebSocket rollback traffic.
+
+`NonBlockingSocket::send_to` is best effort even when it returns normally. A transport may drop or
+delay a message in its local sender path; QUIC datagrams, in particular, remain subject to the
+sender stack's congestion controller. Do not block awaiting delivery. The protocol repeatedly
+includes its unacknowledged input window, so a later packet repairs ordinary local or network
+omissions.
+
+The built-in protocol applies two inclusive size diagnostics. Messages at least 1,200 bytes
+increment `PeerMetrics::portability_risk_messages_sent` and trigger one warning per endpoint era;
+1,200 bytes is a conservative budget across common UDP, WebRTC, QUIC-datagram, and tunneled paths.
+Messages at least 1,472 bytes also increment `fragmentation_risk_messages_sent` and trigger one
+fragmentation alarm per era. That boundary is the UDP payload remaining from a 1,500-byte Ethernet
+MTU after a 20-byte IPv4 header and eight-byte UDP header; tunnels, IPv6, and smaller path MTUs can
+fragment sooner. These are diagnostics, not send failures or discovered path MTUs. Fragment loss
+compounds: a roughly 4 KiB
+message needs three such fragments, so independent 5% fragment loss gives
+`1 - 0.95^3 = 14.3%` effective message loss. Keep rollback packets comfortably below the path MTU
+and use snapshots or other large control payloads sparingly.
 
 #### Building for Browser WASM
 

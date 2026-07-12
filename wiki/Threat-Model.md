@@ -31,6 +31,19 @@ spoofing or on-path attackers are in scope.
   allocation.
 - Built-in sockets cap each poll at 256 raw receive attempts and 256 decoded
   messages. Protocol output and recovery queues are bounded.
+- Raw byte-stream adapters can use `codec::FrameDecoder`, which rejects zero or
+  over-64-MiB length declarations before payload allocation, buffers at most one
+  incomplete frame, and remains poisoned after malformed input until the
+  connection is replaced.
+- Protocol endpoints count messages at or above a conservative 1,200-byte
+  cross-transport budget and warn once per endpoint era. At or above the
+  1,472-byte IPv4/UDP fragmentation boundary they also increment a distinct
+  counter and emit one alarm. These diagnostics are not path-MTU discovery and
+  do not reject an otherwise valid message.
+- A socket send is best-effort and may be dropped or delayed by the local
+  adapter or a congestion-controlled QUIC sender stack. The redundant input
+  window tolerates ordinary omissions; authentication wrappers must preserve
+  this non-blocking contract.
 - A validated 32-bit connection ID filters stale and cross-session traffic
   after synchronization; sync replies must echo an outstanding random token.
 - The v1 handshake compares the protocol floor, player count, fixed input
@@ -92,6 +105,14 @@ remains available, while requiring crypto in the core would expand the unsafe,
 SIMD, dependency-vetting, and portability surface. Dominant browser
 deployments already carry authenticated DTLS, and applications can wrap the
 socket boundary today.
+
+A stream length prefix provides boundaries, not authenticity. Apply an AEAD or
+HMAC outside the framed Fortress payload when hostile peers or networks are in
+scope, and close the connection after any framing or authentication failure.
+Likewise, reliable ordered delivery does not remove denial-of-service risk:
+TCP and ordered QUIC streams can head-of-line block all later rollback inputs
+behind one lost segment. Prefer authenticated unreliable datagrams for live
+rollback traffic where the platform permits them.
 
 ## Dishonest-Peer Capabilities
 

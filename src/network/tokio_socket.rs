@@ -110,7 +110,7 @@ use std::net::SocketAddr;
 
 use tokio::net::UdpSocket;
 
-use crate::network::buffer::zeroed_buffer;
+use crate::network::buffer::{report_send_buffer_too_small, zeroed_buffer};
 use crate::network::codec;
 use crate::network::socket_receive;
 use crate::report_violation;
@@ -455,12 +455,7 @@ impl TokioUdpSocket {
                 buf
             },
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::NetworkProtocol,
-                    "Message too large for send buffer ({} bytes), falling back to allocation.",
-                    provided
-                );
+                report_send_buffer_too_small(msg, provided);
                 match codec::encode(msg) {
                     Ok(buf) => {
                         self.send_encoded_packet_async(&buf, addr).await;
@@ -567,12 +562,7 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
         let len = match codec::encode_into(msg, &mut self.send_buffer) {
             Ok(len) => len,
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::NetworkProtocol,
-                    "Message too large for send buffer ({} bytes), falling back to allocation. Consider reducing input struct size.",
-                    provided
-                );
+                report_send_buffer_too_small(msg, provided);
                 // Fall back to allocating encode
                 match codec::encode(msg) {
                     Ok(buf) => {

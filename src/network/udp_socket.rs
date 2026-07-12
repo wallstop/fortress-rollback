@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
-use crate::network::buffer::zeroed_buffer;
+use crate::network::buffer::{report_send_buffer_too_small, zeroed_buffer};
 use crate::network::codec;
 use crate::network::socket_receive;
 use crate::report_violation;
@@ -112,12 +112,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                 // The message is larger than our send buffer. This is unusual but we can
                 // handle it by falling back to allocation. Log a warning since this suggests
                 // the message is unusually large (possibly large input structs).
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::NetworkProtocol,
-                    "Message too large for send buffer ({} bytes), falling back to allocation. Consider reducing input struct size.",
-                    provided
-                );
+                report_send_buffer_too_small(msg, provided);
                 // Fall back to allocating encode
                 match codec::encode(msg) {
                     Ok(buf) => {

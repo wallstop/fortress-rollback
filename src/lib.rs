@@ -2345,6 +2345,11 @@ pub trait Config: 'static + Send + Sync {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+/// A successful [`send_to`](Self::send_to) call is best effort: an adapter may
+/// drop or delay a message locally, including when a QUIC sender stack applies
+/// congestion control. The protocol's redundant unacknowledged-input window is
+/// designed to tolerate those omissions; adapters must not turn this method
+/// into a blocking delivery guarantee.
 ///
 /// # Allocation contract
 ///
@@ -2441,6 +2446,11 @@ pub trait Config: 'static {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+/// A completed [`send_to`](Self::send_to) call is best effort: an adapter may
+/// drop or delay a message locally, including when a QUIC sender stack applies
+/// congestion control. The protocol's redundant unacknowledged-input window is
+/// designed to tolerate those omissions; adapters must not turn this method
+/// into a blocking delivery guarantee.
 ///
 /// # Allocation contract
 ///
