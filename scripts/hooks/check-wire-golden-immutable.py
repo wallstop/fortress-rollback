@@ -435,9 +435,11 @@ def _suite_has_required_structure(suite: str, codec: str, version: int) -> bool:
         return False
     suite_lines = suite.splitlines()
     suite_top_level = _top_level_lines(suite)
-    marker_line = f"const WIRE_GOLDEN_VERSION: u8 = {version};"
+    marker_line = re.compile(
+        rf"^(?:pub(?:\s*\([^)]*\))?\s+)?const WIRE_GOLDEN_VERSION: u8 = {version};$"
+    )
     marker = any(
-        line.strip() == marker_line and index in suite_top_level
+        marker_line.fullmatch(line.strip()) is not None and index in suite_top_level
         for index, line in enumerate(suite_lines)
     )
     body = _golden_test_body(suite, version)
