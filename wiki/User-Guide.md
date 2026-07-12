@@ -1594,7 +1594,15 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
         self.incoming
             .drain(..batch_len)
             .filter_map(|(addr, bytes)| {
-                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (addr, msg))
+                match codec::decode_message(&bytes) {
+                    Ok((msg, _consumed)) => Some((addr, msg)),
+                    Err(_error) => {
+                        // Rate-limit one warning per rejection family per poll in production.
+                        let reject = codec::classify_wire_bytes(&bytes);
+                        eprintln!("rejected packet from {addr:?}: {reject}");
+                        None
+                    }
+                }
             })
             .collect()
     }
@@ -2375,7 +2383,15 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
         self.incoming
             .drain(..batch_len)
             .filter_map(|(peer, bytes)| {
-                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (peer, msg))
+                match codec::decode_message(&bytes) {
+                    Ok((msg, _consumed)) => Some((peer, msg)),
+                    Err(_error) => {
+                        // Rate-limit one warning per rejection family per poll in production.
+                        let reject = codec::classify_wire_bytes(&bytes);
+                        eprintln!("rejected packet from {peer:?}: {reject}");
+                        None
+                    }
+                }
             })
             .collect()
     }
