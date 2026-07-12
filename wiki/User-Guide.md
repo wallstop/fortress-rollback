@@ -1594,7 +1594,15 @@ impl NonBlockingSocket<MyAddress> for MyCustomSocket {
         self.incoming
             .drain(..batch_len)
             .filter_map(|(addr, bytes)| {
-                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (addr, msg))
+                match codec::decode_message(&bytes) {
+                    Ok((msg, _consumed)) => Some((addr, msg)),
+                    Err(_error) => {
+                        // Rate-limit one warning per rejection family per poll in production.
+                        let reject = codec::classify_wire_bytes(&bytes);
+                        eprintln!("rejected packet from {addr:?}: {reject}");
+                        None
+                    }
+                }
             })
             .collect()
     }
@@ -2064,7 +2072,7 @@ fn try_lower_delay<C: Config>(
 
 #### `FortressEvent::InputDelayRecommendation`
 
-The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#unreleased-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
+The library reserves a `FortressEvent::InputDelayRecommendation { player_handle, current_delay, suggested_delay }` variant for application-level heuristics or future automatic emitters. **No built-in emitter currently produces this event.** Application code may construct and dispatch its own recommendations through the standard event channel and react to them via [`set_input_delay`](#adjusting-input-delay-at-runtime), or simply call `set_input_delay` directly from its own scheduling logic. Exhaustive matches on `FortressEvent` must still handle the variant — see the [Migration Guide](Migration#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ---
 
@@ -2095,7 +2103,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send"] }
+fortress-rollback = { version = "0.10", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2130,7 +2138,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["tokio"] }
+fortress-rollback = { version = "0.10", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2167,7 +2175,7 @@ Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telem
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["json"] }
+fortress-rollback = { version = "0.10", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2197,7 +2205,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["paranoid"] }
+fortress-rollback = { version = "0.10", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2295,19 +2303,19 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send"] }
+fortress-rollback = { version = "0.10", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "paranoid"] }
 
 # Development with examples
 [dependencies]
-fortress-rollback = { version = "0.9", features = ["sync-send", "graphical-examples"] }
+fortress-rollback = { version = "0.10", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -2347,7 +2355,7 @@ Matchbox's optional `ggrs` feature implements the upstream GGRS `NonBlockingSock
 3. In `receive_all_messages`, poll at most a fixed number of items from the split receiver and decode each with `codec::decode_message`, leaving excess packets queued for later. Do not use `WebRtcChannel::receive()` here because it drains the entire Matchbox queue into a new `Vec`.
 4. Implement Fortress Rollback's `NonBlockingSocket<matchbox_socket::PeerId>` for that local adapter and pass it to `SessionBuilder`.
 
-#### Custom Transport (WebSockets, etc.)
+#### Custom Transport (WebSockets, TCP, etc.)
 
 For other transports, implement `NonBlockingSocket`:
 
@@ -2375,7 +2383,15 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
         self.incoming
             .drain(..batch_len)
             .filter_map(|(peer, bytes)| {
-                codec::decode_message(&bytes).ok().map(|(msg, _consumed)| (peer, msg))
+                match codec::decode_message(&bytes) {
+                    Ok((msg, _consumed)) => Some((peer, msg)),
+                    Err(_error) => {
+                        // Rate-limit one warning per rejection family per poll in production.
+                        let reject = codec::classify_wire_bytes(&bytes);
+                        eprintln!("rejected packet from {peer:?}: {reject}");
+                        None
+                    }
+                }
             })
             .collect()
     }
@@ -2383,6 +2399,47 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 ```
 
 See the [custom socket example](https://github.com/wallstop/fortress-rollback/blob/main/examples/custom_socket.rs) for a complete implementation guide.
+
+WebSockets already preserve message boundaries, so the adapter above should use `encode` and
+`decode_message`. A raw byte stream such as TCP does not. For TCP, send
+`codec::encode_framed(message)` and feed each received chunk to a per-connection
+`codec::FrameDecoder`; honor the returned consumed-byte count and immediately feed any suffix
+back to the decoder. `FrameDecoder` uses a four-byte little-endian payload length, rejects zero or
+over-limit frames before allocating, and becomes poisoned after a malformed frame. Discard that
+connection before calling `reset`; an arbitrary byte offset is not a trustworthy frame boundary.
+
+Set `TCP_NODELAY` on every rollback TCP connection. At 60 Hz, waiting roughly 40 ms for Nagle and
+delayed-ACK interaction costs about 2.4 frames before network jitter is considered. TCP also has
+head-of-line blocking: one packet waiting on a 200 ms retransmission stalls about 12 frames, which
+exceeds the default eight-frame prediction window. Fortress Rollback's reliable-FIFO simulations
+show this as a stall followed by catch-up, not deterministic divergence, but it is still a poor
+latency profile for live play. TCP retransmissions are deduplicated by the stack and do not surface
+duplicate payloads to the application.
+
+Prefer freshness-preserving datagrams for rollback traffic. WebRTC data channels should be
+unordered and unreliable (`WebRtcSocket::new_unreliable` in Matchbox); reserve separate reliable
+channels for application traffic that truly needs delivery. For QUIC, use
+[RFC 9221 datagrams](https://datatracker.ietf.org/doc/html/rfc9221) rather than ordered streams.
+[WebTransport](https://www.w3.org/TR/webtransport/) provides the corresponding browser-friendly
+deployment path and is generally preferable to raw TCP/WebSocket rollback traffic.
+
+`NonBlockingSocket::send_to` is best effort even when it returns normally. A transport may drop or
+delay a message in its local sender path; QUIC datagrams, in particular, remain subject to the
+sender stack's congestion controller. Do not block awaiting delivery. The protocol repeatedly
+includes its unacknowledged input window, so a later packet repairs ordinary local or network
+omissions.
+
+The built-in protocol applies two inclusive size diagnostics. Messages at least 1,200 bytes
+increment `PeerMetrics::portability_risk_messages_sent` and trigger one warning per endpoint era;
+1,200 bytes is a conservative budget across common UDP, WebRTC, QUIC-datagram, and tunneled paths.
+Messages at least 1,472 bytes also increment `fragmentation_risk_messages_sent` and trigger one
+fragmentation alarm per era. That boundary is the UDP payload remaining from a 1,500-byte Ethernet
+MTU after a 20-byte IPv4 header and eight-byte UDP header; tunnels, IPv6, and smaller path MTUs can
+fragment sooner. These are diagnostics, not send failures or discovered path MTUs. Fragment loss
+compounds: a roughly 4 KiB
+message needs three such fragments, so independent 5% fragment loss gives
+`1 - 0.95^3 = 14.3%` effective message loss. Keep rollback packets comfortably below the path MTU
+and use snapshots or other large control payloads sparingly.
 
 #### Building for Browser WASM
 
@@ -2718,7 +2775,7 @@ let adjusted_time = if session.frames_ahead() > 2 {
 A `P2PSession` exposes two complementary mechanisms for reacting to a remote peer that goes away:
 
 1. **`DisconnectBehavior`** — a session-wide policy that controls what happens when the **automatic** disconnect-timeout fires for a peer that has gone silent.
-2. **`P2PSession::remove_player`** — an **explicit** method to drop a peer immediately (e.g., kick, surrender, "leave match").
+2. **`P2PSession::remove_player`** — an **explicit** method to propose a coordinated peer drop (e.g., kick, surrender, "leave match").
 
 Both can produce graceful drops where the session continues advancing for the surviving peers; the policy controls only the automatic-timeout path, while `remove_player` always opts into the graceful flow. Together they give applications a single, consistent way to handle players leaving mid-match.
 
@@ -2741,7 +2798,7 @@ pub enum DisconnectBehavior {
 
 `Halt` preserves the legacy GGRS-style "stop on any peer drop" behavior: after a timeout fires, `confirmed_frame()` stops advancing and the next `advance_frame()` will be unable to progress. This is the default for backwards compatibility.
 
-`ContinueWithout` makes the **automatic** disconnect-timeout follow the same graceful-drop sequence as the explicit [`remove_player`](#explicit-peer-removal-with-remove_player) call: the dropped peer's input queue is **frozen** (it repeats their last confirmed input forever, with [`InputStatus::Disconnected`](#handling-disconnected-players)), a [`FortressEvent::PeerDropped`](#reacting-to-peerdropped-events) event is queued, and remaining peers keep advancing using the frozen input.
+`ContinueWithout` makes the **automatic** disconnect-timeout start the same coordinated certificate as an explicit [`remove_player`](#explicit-peer-removal-with-remove_player) call. Survivors hold confirmation and reconcile the target's retained input suffix; only a certified commit freezes the queue at the agreed cut, queues [`FortressEvent::PeerDropped`](#reacting-to-peerdropped-events), and lets the remaining peers continue. A certificate failure returns the session to `Synchronizing` without emitting the drop.
 
 > **Note:** `DisconnectBehavior` governs only the **automatic** disconnect-timeout path. The legacy [`P2PSession::disconnect_player`](#choosing-between-disconnect_player-and-remove_player) retains its non-graceful semantics regardless of this setting; use `remove_player` for an explicit graceful drop.
 
@@ -2877,20 +2934,20 @@ where
 pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError>;
 ```
 
-`remove_player` performs a graceful drop **immediately**, regardless of the configured `DisconnectBehavior`. Use it whenever the drop is initiated by application logic rather than by network silence:
+`remove_player` starts (or joins) a coordinated graceful drop, regardless of the configured `DisconnectBehavior`. Returning `Ok(())` means the intent was accepted; it does not mean the drop has committed. Use it whenever application logic initiates the drop:
 
 - The player chose to leave the match (concession, surrender, "leave game" UI button).
 - A moderator or host kicked the player.
 - The application detects, out-of-band, that the peer is unreachable and wants to fail fast rather than wait out the disconnect timeout.
 
-On invocation, `remove_player` performs the same sequence as the auto-timeout path under `ContinueWithout`:
+Every reachable survivor then drives the same bounded protocol from `poll_remote_clients()`:
 
-1. Marks the player disconnected on the local connection-status table.
-2. Freezes the player's input queue (it repeats the last confirmed input forever for remaining peers' simulation).
-3. Disconnects the underlying network endpoint.
-4. Emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
+1. Holds its confirmed frontier and reports its exposed-confirmed high-water plus retained target-input range.
+2. Agrees on a non-retracting cut and backfills any missing retained suffix before declaring ready.
+3. Commits only after every declared survivor has supplied a matching ready certificate.
+4. Atomically freezes every player handle at the target address at that cut, disconnects the endpoint, and emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
 
-The combined effect is that surviving peers see exactly the same protocol-level state as if the dropped peer had timed out under `ContinueWithout`, but the drop happens on the next session call instead of after a timeout.
+Keep polling until the events arrive. A two-endpoint session has only one survivor and can commit during the call. In larger sessions, participant loss, unavailable/conflicting retained history, resource refusal, or the two-second operation timeout fails closed: the session returns to `Synchronizing`, the confirmed frontier does not advance past the held prefix, and no `PeerDropped` event is emitted. Concurrent removals are serialized deterministically.
 
 ```rust
 use fortress_rollback::{
@@ -2903,8 +2960,8 @@ fn handle_concede<C: Config>(
 ) -> Result<(), FortressError> {
     match session.remove_player(conceding_remote) {
         Ok(()) => {
-            // The next events() call will yield PeerDropped + Disconnected
-            // for `conceding_remote`. Surviving peers continue advancing.
+            // Intent accepted. Continue polling; PeerDropped + Disconnected
+            // arrive only after the survivor certificate commits.
             Ok(())
         },
         Err(FortressError::InvalidRequestStructured {
@@ -2945,8 +3002,8 @@ The session also exposes a legacy `disconnect_player(handle)` method preserved f
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Marks player disconnected          | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
 | Disconnects network endpoint       | Yes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Yes                                                                            |
-| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt`                                                                                                                                                                                                                                                                                                                                              | **Yes** — last confirmed input repeats forever; surviving peers keep advancing |
-| Emits `FortressEvent::PeerDropped` | **No**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | **Yes**, immediately followed by `Disconnected`                                |
+| Freezes input queue                | **No** — remaining peers no longer produce confirmed inputs from the dropped peer's endpoint, so `advance_frame` cannot make progress past the dropped peer's last confirmed frame under default `Halt`                                                                                                                                                                                                                                                                                                                                              | **At certified commit** — the input at the agreed cut repeats forever          |
+| Emits `FortressEvent::PeerDropped` | **No**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | **Yes at certified commit**, followed by `Disconnected`                        |
 | Honors `DisconnectBehavior`        | **No** — `disconnect_player` always performs the legacy non-graceful drop regardless of `DisconnectBehavior`. Under default `Halt` the session halts (remaining peers can no longer produce inputs from the dropped peer's endpoint, so `advance_frame` cannot progress). Under `ContinueWithout` it does **not** auto-promote to the graceful flow; the queue is not frozen, no `PeerDropped` is emitted, and `advance_frame` halts just as it does under `Halt`. To get the graceful sequence with explicit removal, call `remove_player` instead. | **No** — always performs the graceful sequence, regardless of policy           |
 | Use case                           | Back-compat with code written against GGRS's `disconnect_player`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Application-driven graceful drop (kick, surrender, leave match)                |
 
@@ -3443,7 +3500,7 @@ use web_time::Duration;
 let config = SyncConfig {
     num_sync_packets: 5,                              // Roundtrips required (default: 5)
     sync_retry_interval: Duration::from_millis(200), // Retry interval (default: 200ms)
-    sync_timeout: None,                              // Optional timeout (default: None)
+    sync_timeout: Some(Duration::from_secs(20)),     // Optional timeout (default: 20s; None disables)
     running_retry_interval: Duration::from_millis(200), // Input retry interval (default: 200ms)
     keepalive_interval: Duration::from_millis(200),  // Keepalive interval (default: 200ms)
     ..Default::default()  // Forward compatibility
@@ -3460,6 +3517,21 @@ let config = SyncConfig {
 - `SyncConfig::competitive()` - Fast sync with strict timeouts (4 packets, 100ms, 3s timeout)
 - `SyncConfig::extreme()` - Extreme burst loss survival (20 packets, 250ms, 30s timeout)
 - `SyncConfig::stress_test()` - Automated testing only (40 packets, 150ms, 60s timeout)
+
+Protocol v1 also verifies the deterministic settings on both endpoints before
+the session can run. Player count, serialized input width, FPS, maximum
+prediction, desync-check interval, and compiled protocol features must match.
+If they do not, each endpoint emits one
+`FortressEvent::IncompatibleSession { addr, reason }`, stops its sync retries,
+and remains in `SessionState::Synchronizing`. Treat this event as terminal for
+that session and rebuild it after correcting the reported field. A mismatch
+does not later produce `SyncTimeout`.
+
+Network-session values must fit the fixed handshake fields: player count,
+serialized input width, and maximum prediction fit `u16`; FPS and the desync
+interval fit `u32`. `DesyncDetection::On { interval: 0 }` is invalid because
+wire value zero means detection is off. `DisconnectBehavior` may differ because
+it is local policy rather than deterministic simulation configuration.
 
 ### ProtocolConfig (Network Protocol)
 

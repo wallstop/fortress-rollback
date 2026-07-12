@@ -79,6 +79,7 @@ WIKI_STRUCTURE = {
     "index.md": "Home",
     "user-guide.md": "User-Guide",
     "architecture.md": "Architecture",
+    "threat-model.md": "Threat-Model",
     "migration.md": "Migration",
     "changelog.md": "Changelog",
     "contributing.md": "Contributing",
@@ -1099,6 +1100,7 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 - [Match Replay](Replay)
 - [Session Telemetry](Telemetry)
 - [Architecture](Architecture)
+- [Threat Model](Threat-Model)
 - [Migration](Migration)
 
 ## Specifications

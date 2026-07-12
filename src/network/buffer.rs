@@ -18,7 +18,21 @@
 //! `from_socket_with_buffer_sizes` — inherits them without re-implementing the
 //! checks (and so cannot drift out of agreement).
 
+use crate::network::messages::Message;
+use crate::report_violation;
+use crate::telemetry::{ViolationKind, ViolationSeverity};
 use std::io::{Error, ErrorKind};
+
+/// Reports a reused send buffer that was too small for `message`.
+pub(crate) fn report_send_buffer_too_small(message: &Message, provided: usize) {
+    report_violation!(
+        ViolationSeverity::Warning,
+        ViolationKind::NetworkProtocol,
+        "Message requires {} encoded bytes but the send buffer holds {} bytes; falling back to allocation. Consider reducing input struct size.",
+        message.encoded_len(),
+        provided
+    );
+}
 
 /// Allocates a zero-initialized buffer of exactly `size` bytes, rejecting a
 /// zero size and reporting allocation failure as a recoverable error.
@@ -57,6 +71,11 @@ pub(crate) fn zeroed_buffer(size: usize, name: &'static str) -> Result<Vec<u8>, 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::network::messages::{MessageBody, MessageHeader};
+    use crate::telemetry::{
+        push_violation_observer, CollectingObserver, ViolationObserver, ViolationSeverity,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn zeroed_buffer_zero_size_is_rejected_as_invalid_input() {
@@ -77,5 +96,26 @@ mod tests {
         // not "large enough", so the minimum boundary is exercised explicitly.
         let buffer = zeroed_buffer(1, "test buffer").expect("one byte must succeed");
         assert_eq!(buffer.len(), 1);
+    }
+
+    #[test]
+    fn send_buffer_warning_reports_required_encoded_length_and_capacity() {
+        let message = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::KeepAlive,
+        };
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        report_send_buffer_too_small(&message, 3);
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, ViolationSeverity::Warning);
+        assert_eq!(violations[0].kind, ViolationKind::NetworkProtocol);
+        assert!(violations[0]
+            .message
+            .contains(&format!("requires {} encoded bytes", message.encoded_len())));
+        assert!(violations[0].message.contains("holds 3 bytes"));
     }
 }

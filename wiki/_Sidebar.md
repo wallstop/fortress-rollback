@@ -8,6 +8,7 @@
 - [Match Replay](Replay)
 - [Session Telemetry](Telemetry)
 - [Architecture](Architecture)
+- [Threat Model](Threat-Model)
 - [Migration](Migration)
 
 ## Specifications

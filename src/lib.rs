@@ -152,7 +152,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.9", features = ["tokio"] }
+/// fortress-rollback = { version = "0.10", features = ["tokio"] }
 /// ```
 ///
 /// # Example
@@ -284,6 +284,22 @@ pub mod sessions {
 #[doc(hidden)]
 pub mod network {
     pub(crate) const MAX_RECEIVE_MESSAGES_PER_POLL: usize = 256;
+    pub(crate) const WIRE_SENTINEL: [u8; 2] = [0xF5, 0x52];
+    pub(crate) const MIN_SUPPORTED_PROTOCOL_VERSION: u8 = crate::PROTOCOL_VERSION;
+
+    pub(crate) const fn is_valid_conn_id(conn_id: u32) -> bool {
+        conn_id != 0 && conn_id & 0xFFFF != 0
+    }
+
+    #[cfg(feature = "hot-join")]
+    pub(crate) const fn next_conn_id(conn_id: u32) -> u32 {
+        let candidate = conn_id.wrapping_add(1);
+        if candidate.trailing_zeros() >= 16 {
+            candidate.wrapping_add(1)
+        } else {
+            candidate
+        }
+    }
 
     /// Shared fail-closed allocation for socket receive/send buffers.
     mod buffer;
@@ -402,6 +418,14 @@ pub mod __internal {
 // #############
 // # CONSTANTS #
 // #############
+
+/// The exact network protocol version emitted and accepted by this crate.
+///
+/// Any change to bytes that a protocol message can produce or accept requires a
+/// version bump. A new tail variant may reuse a version only when it is optional
+/// for correctness and its sender is gated by an explicitly negotiated feature.
+/// Protocol v1 deliberately rejects legacy unversioned packets.
+pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Internally, -1 represents no frame / invalid frame.
 ///
@@ -1564,6 +1588,102 @@ pub type HandleVec = SmallVec<[PlayerHandle; 8]>;
 /// [`handle_requests!`]: crate::handle_requests
 pub type RequestVec<T> = SmallVec<[FortressRequest<T>; 4]>;
 
+/// Why a remote endpoint cannot join this deterministic session.
+///
+/// Values are oriented from the endpoint that emits the event: `ours` is the
+/// local configuration and `theirs` is the received configuration.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum IncompatibleSessionReason {
+    /// The peer requires a different protocol compatibility floor.
+    ProtocolVersion {
+        /// The local protocol compatibility floor.
+        ours: u8,
+        /// The remote protocol compatibility floor.
+        theirs: u8,
+    },
+    /// The peers configured different player counts.
+    NumPlayers {
+        /// The local player count.
+        ours: u16,
+        /// The remote player count.
+        theirs: u16,
+    },
+    /// The peers serialize one player's input to different fixed widths.
+    InputWidth {
+        /// The local serialized input width in bytes.
+        ours: u16,
+        /// The remote serialized input width in bytes.
+        theirs: u16,
+    },
+    /// The peers configured different simulation rates.
+    Fps {
+        /// The local simulation rate.
+        ours: u32,
+        /// The remote simulation rate.
+        theirs: u32,
+    },
+    /// The peers configured different prediction windows.
+    MaxPrediction {
+        /// The local maximum prediction window.
+        ours: u16,
+        /// The remote maximum prediction window.
+        theirs: u16,
+    },
+    /// The peers configured different checksum intervals (`0` means disabled).
+    DesyncInterval {
+        /// The local checksum interval, or zero when disabled.
+        ours: u32,
+        /// The remote checksum interval, or zero when disabled.
+        theirs: u32,
+    },
+    /// The peers support different protocol feature sets.
+    Features {
+        /// The local protocol feature bitset.
+        ours: u32,
+        /// The remote protocol feature bitset.
+        theirs: u32,
+    },
+    /// The explicit fields matched but their canonical configuration digests did not.
+    ConfigDigest {
+        /// The local canonical configuration digest.
+        ours: u64,
+        /// The remote canonical configuration digest.
+        theirs: u64,
+    },
+}
+
+impl std::fmt::Display for IncompatibleSessionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProtocolVersion { ours, theirs } => {
+                write!(f, "protocol version (ours={ours}, theirs={theirs})")
+            },
+            Self::NumPlayers { ours, theirs } => {
+                write!(f, "player count (ours={ours}, theirs={theirs})")
+            },
+            Self::InputWidth { ours, theirs } => {
+                write!(f, "input width (ours={ours}, theirs={theirs})")
+            },
+            Self::Fps { ours, theirs } => write!(f, "fps (ours={ours}, theirs={theirs})"),
+            Self::MaxPrediction { ours, theirs } => {
+                write!(f, "maximum prediction (ours={ours}, theirs={theirs})")
+            },
+            Self::DesyncInterval { ours, theirs } => {
+                write!(f, "desync interval (ours={ours}, theirs={theirs})")
+            },
+            Self::Features { ours, theirs } => {
+                write!(f, "features (ours=0x{ours:08x}, theirs=0x{theirs:08x})")
+            },
+            Self::ConfigDigest { ours, theirs } => {
+                write!(
+                    f,
+                    "configuration digest (ours=0x{ours:016x}, theirs=0x{theirs:016x})"
+                )
+            },
+        }
+    }
+}
+
 /// Notifications that you can receive from the session. Handling them is up to the user.
 ///
 /// # Handling Events
@@ -1694,8 +1814,10 @@ where
     ///    explicit form opts in to graceful-drop semantics regardless of the
     ///    configured `DisconnectBehavior`.
     ///
-    /// In both cases the dropped peer's input queue is frozen and will repeat
-    /// their last confirmed input forever for remaining peers' simulation.
+    /// In both cases this event is emitted only after the coordinated survivor
+    /// certificate commits. The dropped peer's input queue is then frozen at
+    /// the certified cut and repeats that input forever for remaining peers'
+    /// simulation. A failed or timed-out certificate emits no `PeerDropped`.
     ///
     /// # Coexistence with [`Self::Disconnected`]
     ///
@@ -1731,6 +1853,16 @@ where
         /// Address of the joined peer.
         addr: T::Address,
     },
+    /// The remote endpoint advertised a session configuration that cannot
+    /// participate in this deterministic session. The endpoint stops
+    /// synchronization permanently but continues answering sync requests so
+    /// both peers can diagnose the mismatch.
+    IncompatibleSession {
+        /// The address of the incompatible endpoint.
+        addr: T::Address,
+        /// The first mismatching field in stable protocol order.
+        reason: IncompatibleSessionReason,
+    },
 }
 
 impl<T: Config> FortressEvent<T> {
@@ -1752,6 +1884,7 @@ impl<T: Config> FortressEvent<T> {
             Self::WaitRecommendation { .. } => EventKind::WaitRecommendation,
             Self::DesyncDetected { .. } => EventKind::DesyncDetected,
             Self::SyncTimeout { .. } => EventKind::SyncTimeout,
+            Self::IncompatibleSession { .. } => EventKind::IncompatibleSession,
             Self::ReplayDesync { .. } => EventKind::ReplayDesync,
             Self::SpectatorDivergence { .. } => EventKind::SpectatorDivergence,
             Self::InputDelayRecommendation { .. } => EventKind::InputDelayRecommendation,
@@ -1810,6 +1943,9 @@ where
             ),
             Self::SyncTimeout { addr, elapsed_ms } => {
                 write!(f, "SyncTimeout(addr={}, elapsed={}ms)", addr, elapsed_ms)
+            },
+            Self::IncompatibleSession { addr, reason } => {
+                write!(f, "IncompatibleSession(addr={addr}, reason={reason})")
             },
             Self::ReplayDesync {
                 frame,
@@ -2211,6 +2347,11 @@ pub trait Config: 'static + Send + Sync {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+/// A successful [`send_to`](Self::send_to) call is best effort: an adapter may
+/// drop or delay a message locally, including when a QUIC sender stack applies
+/// congestion control. The protocol's redundant unacknowledged-input window is
+/// designed to tolerate those omissions; adapters must not turn this method
+/// into a blocking delivery guarantee.
 ///
 /// # Allocation contract
 ///
@@ -2307,6 +2448,11 @@ pub trait Config: 'static {
 /// However you wish to send and receive messages, it should be implemented through these two methods.
 /// Messages should be sent in an UDP-like fashion, unordered and unreliable.
 /// Fortress Rollback has an internal protocol on top of this to make sure all important information is sent and received.
+/// A completed [`send_to`](Self::send_to) call is best effort: an adapter may
+/// drop or delay a message locally, including when a QUIC sender stack applies
+/// congestion control. The protocol's redundant unacknowledged-input window is
+/// designed to tolerate those omissions; adapters must not turn this method
+/// into a blocking delivery guarantee.
 ///
 /// # Allocation contract
 ///
@@ -2701,6 +2847,11 @@ mod tests {
                 format!("addr={addr}"),
                 format!("elapsed={elapsed_ms}ms"),
             ],
+            FortressEvent::IncompatibleSession { addr, reason } => vec![
+                "IncompatibleSession(".to_string(),
+                format!("addr={addr}"),
+                format!("reason={reason}"),
+            ],
             FortressEvent::ReplayDesync {
                 frame,
                 expected_checksum,
@@ -2809,6 +2960,10 @@ mod tests {
             FortressEvent::SyncTimeout {
                 addr: test_addr(8080),
                 elapsed_ms: 10000,
+            },
+            FortressEvent::IncompatibleSession {
+                addr: test_addr(8081),
+                reason: IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 },
             },
             FortressEvent::ReplayDesync {
                 frame: Frame::new(42),

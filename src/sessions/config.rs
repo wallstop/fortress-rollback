@@ -118,7 +118,7 @@ pub struct SyncConfig {
     /// Maximum time to wait for synchronization to complete. If sync takes
     /// longer than this, a `SyncTimeout` event is emitted.
     ///
-    /// Default: `None` (no timeout)
+    /// Default: `Some(Duration::from_secs(20))`
     pub sync_timeout: Option<Duration>,
 
     /// Time between input retries during the running phase. If we haven't
@@ -139,7 +139,7 @@ impl Default for SyncConfig {
         Self {
             num_sync_packets: 5,
             sync_retry_interval: Duration::from_millis(200),
-            sync_timeout: None,
+            sync_timeout: Some(Duration::from_secs(20)),
             running_retry_interval: Duration::from_millis(200),
             keepalive_interval: Duration::from_millis(200),
         }
@@ -471,7 +471,7 @@ pub struct ProtocolConfig {
     ///
     /// When set to `Some(seed)`, the protocol will use a deterministic RNG seeded
     /// with this value for generating:
-    /// - Session magic numbers (protocol identifiers)
+    /// - Session connection IDs (protocol packet filters)
     /// - Sync request validation tokens
     ///
     /// This enables fully reproducible network sessions, which is useful for:
@@ -480,8 +480,8 @@ pub struct ProtocolConfig {
     /// - Debugging network issues
     ///
     /// When `None` (the default), the protocol uses non-deterministic random values
-    /// for security (harder to predict session IDs) and uniqueness (different magic
-    /// numbers for each session).
+    /// for security (harder to predict session IDs) and uniqueness (different
+    /// connection IDs for each session).
     ///
     /// # Example
     ///
@@ -1676,7 +1676,7 @@ mod tests {
         let config = SyncConfig::default();
         assert_eq!(config.num_sync_packets, 5);
         assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
-        assert!(config.sync_timeout.is_none());
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(20)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(200));
         assert_eq!(config.keepalive_interval, Duration::from_millis(200));
     }
@@ -1793,14 +1793,14 @@ mod tests {
 
     #[test]
     fn sync_config_display() {
-        // Test default (no timeout)
+        // Test the default timeout.
         let config = SyncConfig::default();
         let display_str = config.to_string();
         assert!(display_str.contains("SyncConfig"));
         assert!(display_str.contains("num_sync_packets: 5"));
-        assert!(display_str.contains("timeout: None"));
+        assert!(display_str.contains("timeout: 20s"));
 
-        // Test with timeout
+        // Test a preset timeout.
         let config = SyncConfig::lan();
         let display_str = config.to_string();
         assert!(display_str.contains("SyncConfig"));

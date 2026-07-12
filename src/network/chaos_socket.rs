@@ -1031,7 +1031,7 @@ mod tests {
         use crate::network::messages::{MessageBody, MessageHeader};
 
         Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::KeepAlive,
         }
     }
@@ -1916,7 +1916,7 @@ mod tests {
             .map(|i| {
                 use crate::network::messages::{MessageBody, MessageHeader};
                 Message {
-                    header: MessageHeader { magic: i },
+                    header: MessageHeader::new(i),
                     body: MessageBody::KeepAlive,
                 }
             })
@@ -1946,11 +1946,11 @@ mod tests {
 
         // Verify FIFO order
         for (i, (_addr, msg)) in received.iter().enumerate() {
-            let expected_magic = i as u16;
+            let expected_magic = u32::try_from(i).unwrap();
             assert_eq!(
-                msg.header.magic, expected_magic,
-                "Packet {} has wrong magic: expected {}, got {}",
-                i, expected_magic, msg.header.magic
+                msg.header.conn_id, expected_magic,
+                "Packet {} has wrong conn_id: expected {}, got {}",
+                i, expected_magic, msg.header.conn_id
             );
         }
     }

@@ -108,7 +108,7 @@ pub use game_state_cell::{GameStateAccessor, GameStateCell};
 pub use saved_states::SavedStates;
 
 use crate::frame_info::PlayerInput;
-use crate::input_queue::InputQueue;
+use crate::input_queue::{InputQueue, RetainedHistoryError, RetainedInputRange};
 use crate::network::messages::ConnectionStatus;
 use crate::proof_vec::ProofVec;
 use crate::sessions::config::SaveMode;
@@ -125,6 +125,29 @@ use crate::{
     Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
     InternalErrorKind, InvalidFrameReason, PlayerHandle,
 };
+
+/// A retained-history transaction failed before commit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionalHistoryError {
+    TooManyHandles {
+        count: usize,
+        maximum: usize,
+    },
+    InvalidPlayerHandle {
+        handle: PlayerHandle,
+        max_handle: PlayerHandle,
+    },
+    MissingQueue {
+        handle: PlayerHandle,
+    },
+    DuplicateHandle {
+        handle: PlayerHandle,
+    },
+    Queue {
+        handle: PlayerHandle,
+        source: RetainedHistoryError,
+    },
+}
 
 /// The synchronization layer manages game state, input queues, and rollback operations.
 ///
@@ -1111,6 +1134,94 @@ impl<T: Config> SyncLayer<T> {
         Ok(())
     }
 
+    fn history_queue(
+        &self,
+        handle: PlayerHandle,
+    ) -> Result<&InputQueue<T>, TransactionalHistoryError> {
+        if !handle.is_valid_player_for(self.num_players) {
+            return Err(TransactionalHistoryError::InvalidPlayerHandle {
+                handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        self.input_queues
+            .get(handle.as_usize())
+            .ok_or(TransactionalHistoryError::MissingQueue { handle })
+    }
+
+    /// Returns the exact contiguous confirmed-input interval retained for one
+    /// player queue.
+    #[allow(dead_code)] // D14 session orchestration consumes this substrate next.
+    pub(crate) fn retained_input_range(
+        &self,
+        handle: PlayerHandle,
+    ) -> Result<Option<RetainedInputRange>, TransactionalHistoryError> {
+        self.history_queue(handle)
+            .map(InputQueue::retained_input_range)
+    }
+
+    /// Validates retained overlaps and installs only a sequential missing
+    /// suffix for `handle`, bounded by that queue's fixed capacity.
+    #[allow(dead_code)] // D14 session orchestration consumes this substrate next.
+    pub(crate) fn install_missing_backfill(
+        &mut self,
+        handle: PlayerHandle,
+        inputs: &[PlayerInput<T::Input>],
+    ) -> Result<usize, TransactionalHistoryError> {
+        if !handle.is_valid_player_for(self.num_players) {
+            return Err(TransactionalHistoryError::InvalidPlayerHandle {
+                handle,
+                max_handle: PlayerHandle::new(self.num_players.saturating_sub(1)),
+            });
+        }
+        let reclaim_before = self.rollback_window_floor();
+        let queue = self
+            .input_queues
+            .get_mut(handle.as_usize())
+            .ok_or(TransactionalHistoryError::MissingQueue { handle })?;
+        queue
+            .install_missing_backfill(inputs, reclaim_before)
+            .map_err(|source| TransactionalHistoryError::Queue { handle, source })
+    }
+
+    /// Atomically freezes every named player queue at its retained cut.
+    ///
+    /// All handles, duplicates, and cut inputs are checked before the first
+    /// queue mutation. With the exclusive layer borrow held, the commit pass is
+    /// therefore infallible and cannot leave a multi-handle endpoint partially
+    /// frozen.
+    #[allow(dead_code)] // D14 session orchestration consumes this substrate next.
+    pub(crate) fn freeze_players_at_cuts(
+        &mut self,
+        cuts: &[(PlayerHandle, Frame)],
+    ) -> Result<(), TransactionalHistoryError> {
+        if cuts.len() > self.num_players {
+            return Err(TransactionalHistoryError::TooManyHandles {
+                count: cuts.len(),
+                maximum: self.num_players,
+            });
+        }
+        for (index, &(handle, cut)) in cuts.iter().enumerate() {
+            if cuts
+                .get(..index)
+                .is_some_and(|earlier| earlier.iter().any(|(seen, _cut)| *seen == handle))
+            {
+                return Err(TransactionalHistoryError::DuplicateHandle { handle });
+            }
+            let queue = self.history_queue(handle)?;
+            queue
+                .validate_freeze_at_cut(cut)
+                .map_err(|source| TransactionalHistoryError::Queue { handle, source })?;
+        }
+
+        for &(handle, cut) in cuts {
+            if let Some(queue) = self.input_queues.get_mut(handle.as_usize()) {
+                queue.freeze_at_prevalidated_cut(cut);
+            }
+        }
+        Ok(())
+    }
+
     /// Test-only invariant fault injection for disconnect error-path regressions.
     #[cfg(test)]
     pub(crate) fn truncate_input_queues_for_test(&mut self, len: usize) {
@@ -1728,7 +1839,7 @@ mod sync_layer_tests {
     use std::net::SocketAddr;
 
     #[repr(C)]
-    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
     struct TestInput {
         inp: u8,
     }
@@ -1761,6 +1872,136 @@ mod sync_layer_tests {
             sync_layer.input_queues[0].last_added_frame(),
             Frame::new(0),
             "frozen queue must retain its original high-water"
+        );
+    }
+
+    #[test]
+    fn transactional_freeze_rejects_missing_cut_without_freezing_any_handle() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for frame in 0..=3 {
+            for handle in 0..2 {
+                assert!(sync_layer.add_remote_input(
+                    PlayerHandle::new(handle),
+                    PlayerInput::new(Frame::new(frame), TestInput { inp: frame as u8 }),
+                ));
+            }
+        }
+
+        let cuts = [
+            (PlayerHandle::new(0), Frame::new(2)),
+            (PlayerHandle::new(1), Frame::new(9)),
+        ];
+        assert_eq!(
+            sync_layer.freeze_players_at_cuts(&cuts),
+            Err(TransactionalHistoryError::Queue {
+                handle: PlayerHandle::new(1),
+                source: RetainedHistoryError::MissingRetainedInput {
+                    frame: Frame::new(9),
+                },
+            })
+        );
+        assert!(sync_layer
+            .input_queues
+            .iter()
+            .all(|queue| !queue.is_frozen()));
+    }
+
+    #[test]
+    fn transactional_freeze_commits_all_handles_at_prevalidated_cuts() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for frame in 0..=4 {
+            assert!(sync_layer.add_remote_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(Frame::new(frame), TestInput { inp: frame as u8 }),
+            ));
+            assert!(sync_layer.add_remote_input(
+                PlayerHandle::new(1),
+                PlayerInput::new(
+                    Frame::new(frame),
+                    TestInput {
+                        inp: (frame + 10) as u8,
+                    },
+                ),
+            ));
+        }
+
+        sync_layer
+            .freeze_players_at_cuts(&[
+                (PlayerHandle::new(0), Frame::new(2)),
+                (PlayerHandle::new(1), Frame::new(3)),
+            ])
+            .expect("all cuts are retained");
+
+        assert_eq!(
+            sync_layer.input_queues[0].last_confirmed_input(),
+            Some(TestInput { inp: 2 })
+        );
+        assert_eq!(
+            sync_layer.input_queues[1].last_confirmed_input(),
+            Some(TestInput { inp: 13 })
+        );
+        assert!(sync_layer.input_queues.iter().all(InputQueue::is_frozen));
+    }
+
+    #[test]
+    fn transactional_freeze_rejects_duplicate_handle_without_mutation() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        assert!(sync_layer.add_remote_input(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(0), TestInput { inp: 7 }),
+        ));
+
+        assert_eq!(
+            sync_layer.freeze_players_at_cuts(&[
+                (PlayerHandle::new(0), Frame::new(0)),
+                (PlayerHandle::new(0), Frame::new(0)),
+            ]),
+            Err(TransactionalHistoryError::DuplicateHandle {
+                handle: PlayerHandle::new(0),
+            })
+        );
+        assert!(sync_layer
+            .input_queues
+            .iter()
+            .all(|queue| !queue.is_frozen()));
+    }
+
+    #[test]
+    fn sync_layer_backfill_surface_reports_range_and_installs_only_suffix() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 8);
+        for frame in 0..=2 {
+            assert!(sync_layer.add_remote_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(Frame::new(frame), TestInput { inp: frame as u8 }),
+            ));
+        }
+        assert_eq!(
+            sync_layer
+                .retained_input_range(PlayerHandle::new(0))
+                .expect("valid handle"),
+            Some(RetainedInputRange {
+                first: Frame::new(0),
+                last: Frame::new(2),
+            })
+        );
+
+        let installed = sync_layer
+            .install_missing_backfill(
+                PlayerHandle::new(0),
+                &[
+                    PlayerInput::new(Frame::new(1), TestInput { inp: 1 }),
+                    PlayerInput::new(Frame::new(2), TestInput { inp: 2 }),
+                    PlayerInput::new(Frame::new(3), TestInput { inp: 30 }),
+                ],
+            )
+            .expect("matching overlap and sequential suffix");
+        assert_eq!(installed, 1);
+        assert_eq!(
+            sync_layer
+                .confirmed_input(PlayerHandle::new(0), Frame::new(3))
+                .unwrap()
+                .input,
+            TestInput { inp: 30 }
         );
     }
 

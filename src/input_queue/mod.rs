@@ -109,6 +109,49 @@ fn frame_distance_usize(from: Frame, to: Frame) -> Option<usize> {
     usize::try_from(from.distance_to(to)?).ok()
 }
 
+/// The exact contiguous interval of confirmed inputs still queryable from an
+/// [`InputQueue`]. Both endpoints are inclusive.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedInputRange {
+    pub(crate) first: Frame,
+    pub(crate) last: Frame,
+}
+
+/// A checked retained-history or backfill operation could not be applied.
+///
+/// Kept internal because the coordinated-drop session layer translates these
+/// storage failures into its public operation failure vocabulary.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RetainedHistoryError {
+    InvalidFrame {
+        frame: Frame,
+    },
+    TooManyInputs {
+        count: usize,
+        maximum: usize,
+    },
+    NonSequential {
+        expected: Frame,
+        actual: Frame,
+    },
+    MissingRetainedInput {
+        frame: Frame,
+    },
+    ConflictingOverlap {
+        frame: Frame,
+    },
+    GapBeforeBackfill {
+        expected: Frame,
+        actual: Frame,
+    },
+    Frozen,
+    CapacityExhausted {
+        oldest: Frame,
+        reclaim_before: Frame,
+    },
+    Invariant,
+}
+
 /// `InputQueue` handles inputs for a single player and saves them in a circular array.
 /// Valid inputs are between `head` and `tail`.
 ///
@@ -519,6 +562,234 @@ impl<T: Config> InputQueue<T> {
             frame: requested_frame,
         }
         .into())
+    }
+
+    /// Returns the maximal contiguous retained interval ending at the queue's
+    /// current confirmed high-water.
+    ///
+    /// The lookup is bounded by the configured queue length. It also recognizes
+    /// the single reclaimed rollback-floor slot when that slot is contiguous
+    /// with the ring. `None` means the queue currently retains no confirmed
+    /// input (a fresh or reset queue).
+    #[must_use]
+    pub(crate) fn retained_input_range(&self) -> Option<RetainedInputRange> {
+        if self.length == 0 || self.length > self.queue_length {
+            return None;
+        }
+        let first_in_ring = self.inputs.get(self.tail)?.frame;
+        let last = self.last_added_frame;
+        if !first_in_ring.is_valid() || !last.is_valid() {
+            return None;
+        }
+        let expected_length = frame_distance_usize(first_in_ring, last)?.checked_add(1)?;
+        if expected_length != self.length {
+            return None;
+        }
+        let first = self
+            .reclaimed_floor_input
+            .filter(|reclaimed| {
+                reclaimed
+                    .frame
+                    .as_i32()
+                    .checked_add(1)
+                    .is_some_and(|next| Frame::new(next) == first_in_ring)
+            })
+            .map_or(first_in_ring, |reclaimed| reclaimed.frame);
+        Some(RetainedInputRange { first, last })
+    }
+
+    fn retained_confirmed_input(
+        &self,
+        frame: Frame,
+    ) -> Result<PlayerInput<T::Input>, RetainedHistoryError> {
+        let retained = self
+            .retained_input_range()
+            .ok_or(RetainedHistoryError::MissingRetainedInput { frame })?;
+        if frame < retained.first || frame > retained.last {
+            return Err(RetainedHistoryError::MissingRetainedInput { frame });
+        }
+        self.confirmed_input(frame)
+            .map_err(|_error| RetainedHistoryError::MissingRetainedInput { frame })
+    }
+
+    /// Validates an overlap-plus-suffix backfill without mutating the queue.
+    /// Returns the index at which the missing suffix begins.
+    fn validate_missing_backfill(
+        &self,
+        inputs: &[PlayerInput<T::Input>],
+        reclaim_before: Frame,
+    ) -> Result<usize, RetainedHistoryError> {
+        if inputs.len() > self.queue_length {
+            return Err(RetainedHistoryError::TooManyInputs {
+                count: inputs.len(),
+                maximum: self.queue_length,
+            });
+        }
+        if !reclaim_before.is_valid() {
+            return Err(RetainedHistoryError::InvalidFrame {
+                frame: reclaim_before,
+            });
+        }
+
+        for pair in inputs.windows(2) {
+            let Some(previous) = pair.first() else {
+                return Err(RetainedHistoryError::Invariant);
+            };
+            let Some(current) = pair.get(1) else {
+                return Err(RetainedHistoryError::Invariant);
+            };
+            if !previous.frame.is_valid() {
+                return Err(RetainedHistoryError::InvalidFrame {
+                    frame: previous.frame,
+                });
+            }
+            let Some(expected) = previous.frame.as_i32().checked_add(1) else {
+                return Err(RetainedHistoryError::InvalidFrame {
+                    frame: previous.frame,
+                });
+            };
+            let expected = Frame::new(expected);
+            if current.frame != expected {
+                return Err(RetainedHistoryError::NonSequential {
+                    expected,
+                    actual: current.frame,
+                });
+            }
+        }
+        if let Some(last) = inputs.last() {
+            if !last.frame.is_valid() {
+                return Err(RetainedHistoryError::InvalidFrame { frame: last.frame });
+            }
+        }
+
+        if self.frozen && !inputs.is_empty() {
+            return Err(RetainedHistoryError::Frozen);
+        }
+        if self.inputs.len() != self.queue_length
+            || self.head >= self.queue_length
+            || self.tail >= self.queue_length
+            || self.length > self.queue_length
+        {
+            return Err(RetainedHistoryError::Invariant);
+        }
+
+        if !self.last_added_frame.is_null() {
+            let previous = if self.head == 0 {
+                self.queue_length.saturating_sub(1)
+            } else {
+                self.head.saturating_sub(1)
+            };
+            if self
+                .inputs
+                .get(previous)
+                .is_none_or(|input| input.frame != self.last_added_frame)
+            {
+                return Err(RetainedHistoryError::Invariant);
+            }
+        }
+
+        let mut missing_from = inputs.len();
+        for (index, incoming) in inputs.iter().enumerate() {
+            if incoming.frame > self.last_added_frame {
+                missing_from = index;
+                break;
+            }
+            let retained = self.retained_confirmed_input(incoming.frame)?;
+            if retained.input != incoming.input {
+                return Err(RetainedHistoryError::ConflictingOverlap {
+                    frame: incoming.frame,
+                });
+            }
+        }
+
+        if let Some(first_missing) = inputs.get(missing_from) {
+            let expected = if self.last_added_frame.is_null() {
+                Frame::new(0)
+            } else {
+                let Some(next) = self.last_added_frame.as_i32().checked_add(1) else {
+                    return Err(RetainedHistoryError::InvalidFrame {
+                        frame: self.last_added_frame,
+                    });
+                };
+                Frame::new(next)
+            };
+            if first_missing.frame != expected {
+                return Err(RetainedHistoryError::GapBeforeBackfill {
+                    expected,
+                    actual: first_missing.frame,
+                });
+            }
+        }
+
+        let missing = inputs.len().saturating_sub(missing_from);
+        let evictions = self
+            .length
+            .saturating_add(missing)
+            .saturating_sub(self.queue_length);
+        for offset in 0..evictions {
+            let Some(index) = circular_index_add(self.tail, offset, self.queue_length) else {
+                return Err(RetainedHistoryError::Invariant);
+            };
+            let Some(oldest) = self.inputs.get(index) else {
+                return Err(RetainedHistoryError::Invariant);
+            };
+            if oldest.frame > reclaim_before {
+                return Err(RetainedHistoryError::CapacityExhausted {
+                    oldest: oldest.frame,
+                    reclaim_before,
+                });
+            }
+        }
+
+        Ok(missing_from)
+    }
+
+    /// Installs only the missing sequential suffix of `inputs` after validating
+    /// every retained overlap and every required eviction.
+    ///
+    /// Validation completes before the first mutation, so a conflict, gap,
+    /// bounds failure, or missing overlap leaves the queue byte-for-byte
+    /// unchanged. The returned count is the number of newly installed frames.
+    pub(crate) fn install_missing_backfill(
+        &mut self,
+        inputs: &[PlayerInput<T::Input>],
+        reclaim_before: Frame,
+    ) -> Result<usize, RetainedHistoryError> {
+        let missing_from = self.validate_missing_backfill(inputs, reclaim_before)?;
+        let missing = inputs.len().saturating_sub(missing_from);
+        for input in inputs.iter().skip(missing_from).copied() {
+            // All fallible structural/capacity conditions in `add_input_by_frame`
+            // were checked above while holding the exclusive queue borrow.
+            if !self.add_input_by_frame(input, input.frame, Some(reclaim_before)) {
+                return Err(RetainedHistoryError::Invariant);
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Checks that `cut` names an input retained by a live queue and can
+    /// therefore be used by a later transactional freeze.
+    pub(crate) fn validate_freeze_at_cut(&self, cut: Frame) -> Result<(), RetainedHistoryError> {
+        if !cut.is_valid() {
+            return Err(RetainedHistoryError::InvalidFrame { frame: cut });
+        }
+        if self.frozen {
+            return Err(RetainedHistoryError::Frozen);
+        }
+        self.retained_confirmed_input(cut)
+            .map(|_input| ())
+            .map_err(|_error| RetainedHistoryError::MissingRetainedInput { frame: cut })
+    }
+
+    /// Applies a freeze whose cut was successfully checked by
+    /// [`Self::validate_freeze_at_cut`] without introducing a second fallible
+    /// phase.
+    pub(crate) fn freeze_at_prevalidated_cut(&mut self, cut: Frame) {
+        debug_assert_eq!(self.validate_freeze_at_cut(cut), Ok(()));
+        if let Ok(input) = self.retained_confirmed_input(cut) {
+            self.last_confirmed_input = Some(input.input);
+            self.frozen = true;
+        }
     }
 
     /// Discards confirmed frames **before** the given `frame` from the queue.
@@ -3378,6 +3649,221 @@ mod input_queue_tests {
             ));
             assert_eq!(added, Frame::new(f), "input {f} should be accepted");
         }
+    }
+
+    #[test]
+    fn retained_input_range_tracks_exact_contiguous_history_after_discard() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 7);
+        queue.discard_confirmed_frames(Frame::new(4));
+
+        assert_eq!(
+            queue.retained_input_range(),
+            Some(RetainedInputRange {
+                first: Frame::new(4),
+                last: Frame::new(7),
+            })
+        );
+    }
+
+    #[test]
+    fn matching_overlap_and_missing_suffix_install_transactionally() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 3);
+        let backfill = [
+            PlayerInput::new(Frame::new(2), TestInput { inp: 2 }),
+            PlayerInput::new(Frame::new(3), TestInput { inp: 3 }),
+            PlayerInput::new(Frame::new(4), TestInput { inp: 40 }),
+            PlayerInput::new(Frame::new(5), TestInput { inp: 50 }),
+        ];
+
+        assert_eq!(
+            queue
+                .install_missing_backfill(&backfill, Frame::new(0))
+                .expect("matching overlap plus suffix is valid"),
+            2
+        );
+        assert_eq!(queue.last_added_frame(), Frame::new(5));
+        assert_eq!(
+            queue.confirmed_input(Frame::new(2)).unwrap().input,
+            TestInput { inp: 2 },
+            "overlap must remain byte-identical"
+        );
+        assert_eq!(
+            queue.confirmed_input(Frame::new(5)).unwrap().input,
+            TestInput { inp: 50 }
+        );
+    }
+
+    #[test]
+    fn conflicting_overlap_rejects_without_mutating_queue() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 3);
+        let before = queue.clone();
+        let backfill = [
+            PlayerInput::new(Frame::new(2), TestInput { inp: 99 }),
+            PlayerInput::new(Frame::new(4), TestInput { inp: 40 }),
+        ];
+
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::NonSequential {
+                expected: Frame::new(3),
+                actual: Frame::new(4),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+
+        let conflict = [PlayerInput::new(Frame::new(2), TestInput { inp: 99 })];
+        assert_eq!(
+            queue.install_missing_backfill(&conflict, Frame::new(0)),
+            Err(RetainedHistoryError::ConflictingOverlap {
+                frame: Frame::new(2),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn gapped_backfill_rejects_without_mutating_queue() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 2);
+        let before = queue.clone();
+        let backfill = [PlayerInput::new(Frame::new(4), TestInput { inp: 40 })];
+
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::GapBeforeBackfill {
+                expected: Frame::new(3),
+                actual: Frame::new(4),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn backfill_capacity_failure_is_prevalidated_before_any_append() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid test queue");
+        fill_sequential(&mut queue, 3);
+        let before = queue.clone();
+        let backfill = [
+            PlayerInput::new(Frame::new(4), TestInput { inp: 40 }),
+            PlayerInput::new(Frame::new(5), TestInput { inp: 50 }),
+        ];
+
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::CapacityExhausted {
+                oldest: Frame::new(1),
+                reclaim_before: Frame::new(0),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn backfill_wrap_preserves_contiguous_reclaim_floor_range() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid test queue");
+        fill_sequential(&mut queue, 3);
+
+        assert_eq!(
+            queue
+                .install_missing_backfill(
+                    &[PlayerInput::new(Frame::new(4), TestInput { inp: 40 },)],
+                    Frame::new(0),
+                )
+                .expect("rollback floor may move into the bounded side slot"),
+            1
+        );
+        assert_eq!(
+            queue.retained_input_range(),
+            Some(RetainedInputRange {
+                first: Frame::new(0),
+                last: Frame::new(4),
+            })
+        );
+        assert_eq!(
+            queue.confirmed_input(Frame::new(0)).unwrap().input,
+            TestInput { inp: 0 }
+        );
+        assert_eq!(
+            queue.confirmed_input(Frame::new(4)).unwrap().input,
+            TestInput { inp: 40 }
+        );
+    }
+
+    #[test]
+    fn physically_stale_but_discarded_overlap_is_rejected_transactionally() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 7);
+        queue.discard_confirmed_frames(Frame::new(4));
+        let before = queue.clone();
+
+        assert_eq!(
+            queue.install_missing_backfill(
+                &[PlayerInput::new(Frame::new(2), TestInput { inp: 2 })],
+                Frame::new(4),
+            ),
+            Err(RetainedHistoryError::MissingRetainedInput {
+                frame: Frame::new(2),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn backfill_larger_than_fixed_queue_bound_is_rejected() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid test queue");
+        let before = queue.clone();
+        let backfill = (0..5)
+            .map(|frame| {
+                PlayerInput::new(
+                    Frame::new(frame),
+                    TestInput {
+                        inp: u8::try_from(frame).expect("small test frame"),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::TooManyInputs {
+                count: 5,
+                maximum: 4,
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn freeze_at_cut_requires_retained_input_before_mutation() {
+        let mut queue = test_queue(0);
+        fill_sequential(&mut queue, 5);
+        let before = queue.clone();
+
+        assert_eq!(
+            queue.validate_freeze_at_cut(Frame::new(10)),
+            Err(RetainedHistoryError::MissingRetainedInput {
+                frame: Frame::new(10),
+            })
+        );
+        assert_queue_unchanged(&queue, &before);
+
+        queue
+            .validate_freeze_at_cut(Frame::new(3))
+            .expect("cut is retained");
+        queue.freeze_at_prevalidated_cut(Frame::new(3));
+        assert!(queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input(), Some(TestInput { inp: 3 }));
     }
 
     #[test]

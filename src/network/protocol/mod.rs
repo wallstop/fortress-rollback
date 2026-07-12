@@ -13,12 +13,14 @@ pub use state::ProtocolState;
 
 use crate::error::{allocation_failed, SerializationErrorKind};
 use crate::frame_info::PlayerInput;
+use crate::hash::DeterministicHasher;
 use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
 use crate::network::compression::{decode_with_max_len, try_encode};
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+    ChecksumReport, ConnectionStatus, DropAbort, DropBackfill, DropCommit, DropPrepare, DropReport,
+    FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader,
+    QualityReply, QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -32,14 +34,15 @@ use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::{TimeSync, TimeSyncConfig};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
 use crate::{
-    Config, DesyncDetection, FortressError, Frame, InvalidRequestKind, NonBlockingSocket,
-    PlayerHandle,
+    Config, DesyncDetection, FortressError, Frame, IncompatibleSessionReason, InvalidRequestKind,
+    NonBlockingSocket, PlayerHandle,
 };
 use tracing::trace;
 
 use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
+use std::hash::Hasher;
 use std::ops::Add;
 use std::sync::Arc;
 use web_time::{Duration, Instant};
@@ -47,6 +50,188 @@ use web_time::{Duration, Instant};
 use super::network_stats::NetworkStats;
 
 const UDP_HEADER_SIZE: usize = 28; // Size of IP + UDP headers
+/// Conservative payload budget shared by common datagram transports.
+const PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD: usize = 1200;
+/// Common IPv4/UDP payload ceiling under a 1500-byte path MTU.
+const IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD: usize = 1472;
+const CONFIG_DIGEST_DOMAIN: &[u8; 8] = b"FRv1-cfg";
+const HOT_JOIN_FEATURE: u32 = 1 << 0;
+/// Per-endpoint D14 carrier mailbox bound, aligned with the raw receive-poll cap.
+const MAX_RECEIVED_DROP_MESSAGES: usize = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+
+/// One coordinated graceful-drop control message carried by a running endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DropControlMessage {
+    Prepare(DropPrepare),
+    Report(DropReport),
+    Backfill(DropBackfill),
+    Commit(DropCommit),
+    Abort(DropAbort),
+}
+
+impl DropControlMessage {
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    fn into_body(self) -> MessageBody {
+        match self {
+            Self::Prepare(body) => MessageBody::DropPrepare(body),
+            Self::Report(body) => MessageBody::DropReport(body),
+            Self::Backfill(body) => MessageBody::DropBackfill(body),
+            Self::Commit(body) => MessageBody::DropCommit(body),
+            Self::Abort(body) => MessageBody::DropAbort(body),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HandshakeConfig {
+    min_compat_version: u8,
+    features: u32,
+    config: SessionConfigBlock,
+    config_digest: u64,
+}
+
+impl HandshakeConfig {
+    fn new(config: SessionConfigBlock) -> Self {
+        let features = if cfg!(feature = "hot-join") {
+            HOT_JOIN_FEATURE
+        } else {
+            0
+        };
+        let config_digest = config_digest(config, features);
+        Self {
+            min_compat_version: super::MIN_SUPPORTED_PROTOCOL_VERSION,
+            features,
+            config,
+            config_digest,
+        }
+    }
+
+    const fn from_request(request: SyncRequest) -> Self {
+        Self {
+            min_compat_version: request.min_compat_version,
+            features: request.features,
+            config: request.config,
+            config_digest: request.config_digest,
+        }
+    }
+
+    const fn from_reply(reply: SyncReply) -> Self {
+        Self {
+            min_compat_version: reply.min_compat_version,
+            features: reply.features,
+            config: reply.config,
+            config_digest: reply.config_digest,
+        }
+    }
+
+    const fn request(self, random_request: u32) -> SyncRequest {
+        SyncRequest {
+            random_request,
+            min_compat_version: self.min_compat_version,
+            features: self.features,
+            config: self.config,
+            config_digest: self.config_digest,
+        }
+    }
+
+    const fn reply(self, random_reply: u32) -> SyncReply {
+        SyncReply {
+            random_reply,
+            min_compat_version: self.min_compat_version,
+            features: self.features,
+            config: self.config,
+            config_digest: self.config_digest,
+        }
+    }
+
+    const fn first_mismatch(self, theirs: Self) -> Option<IncompatibleSessionReason> {
+        if self.min_compat_version != theirs.min_compat_version {
+            return Some(IncompatibleSessionReason::ProtocolVersion {
+                ours: self.min_compat_version,
+                theirs: theirs.min_compat_version,
+            });
+        }
+        if self.config.num_players != theirs.config.num_players {
+            return Some(IncompatibleSessionReason::NumPlayers {
+                ours: self.config.num_players,
+                theirs: theirs.config.num_players,
+            });
+        }
+        if self.config.input_bytes_per_player != theirs.config.input_bytes_per_player {
+            return Some(IncompatibleSessionReason::InputWidth {
+                ours: self.config.input_bytes_per_player,
+                theirs: theirs.config.input_bytes_per_player,
+            });
+        }
+        if self.config.fps != theirs.config.fps {
+            return Some(IncompatibleSessionReason::Fps {
+                ours: self.config.fps,
+                theirs: theirs.config.fps,
+            });
+        }
+        if self.config.max_prediction != theirs.config.max_prediction {
+            return Some(IncompatibleSessionReason::MaxPrediction {
+                ours: self.config.max_prediction,
+                theirs: theirs.config.max_prediction,
+            });
+        }
+        if self.config.desync_interval != theirs.config.desync_interval {
+            return Some(IncompatibleSessionReason::DesyncInterval {
+                ours: self.config.desync_interval,
+                theirs: theirs.config.desync_interval,
+            });
+        }
+        if self.features != theirs.features {
+            return Some(IncompatibleSessionReason::Features {
+                ours: self.features,
+                theirs: theirs.features,
+            });
+        }
+        if self.config_digest != theirs.config_digest {
+            return Some(IncompatibleSessionReason::ConfigDigest {
+                ours: self.config_digest,
+                theirs: theirs.config_digest,
+            });
+        }
+        None
+    }
+}
+
+fn config_digest(config: SessionConfigBlock, features: u32) -> u64 {
+    let mut hasher = DeterministicHasher::new();
+    hasher.write(CONFIG_DIGEST_DOMAIN);
+    hasher.write(&config.num_players.to_le_bytes());
+    hasher.write(&config.input_bytes_per_player.to_le_bytes());
+    hasher.write(&config.fps.to_le_bytes());
+    hasher.write(&config.max_prediction.to_le_bytes());
+    hasher.write(&config.desync_interval.to_le_bytes());
+    hasher.write(&features.to_le_bytes());
+    hasher.finish()
+}
+
+fn narrow_u16(field: &'static str, value: usize) -> Result<u16, FortressError> {
+    u16::try_from(value).map_err(|_err| {
+        InvalidRequestKind::ConfigValueOutOfRange {
+            field,
+            min: 0,
+            max: u64::from(u16::MAX),
+            actual: u64::try_from(value).unwrap_or(u64::MAX),
+        }
+        .into()
+    })
+}
+
+fn narrow_u32(field: &'static str, value: usize) -> Result<u32, FortressError> {
+    u32::try_from(value).map_err(|_err| {
+        InvalidRequestKind::ConfigValueOutOfRange {
+            field,
+            min: 0,
+            max: u64::from(u32::MAX),
+            actual: u64::try_from(value).unwrap_or(u64::MAX),
+        }
+        .into()
+    })
+}
 
 /// UDP protocol handler for peer-to-peer communication.
 ///
@@ -69,6 +254,10 @@ where
     handles: Arc<[PlayerHandle]>,
     send_queue: VecDeque<Message>,
     event_queue: VecDeque<Event<T>>,
+    /// Bounded running-state mailbox drained by session-level D14 orchestration.
+    received_drop_messages: VecDeque<DropControlMessage>,
+    /// Rate-limits a full-mailbox diagnostic to once per endpoint era.
+    drop_mailbox_warning_sent: bool,
 
     // state
     state: ProtocolState,
@@ -92,17 +281,19 @@ where
     disconnect_notify_start: Duration,
     shutdown_timeout: Instant,
     fps: usize,
-    magic: u16,
+    conn_id: u32,
 
     // sync configuration
     sync_config: SyncConfig,
+    local_handshake: HandshakeConfig,
+    handshake_failed: Option<IncompatibleSessionReason>,
 
     // protocol configuration
     protocol_config: ProtocolConfig,
 
     // the other client
     peer_addr: T::Address,
-    remote_magic: u16,
+    remote_conn_id: u32,
     peer_connect_status: Vec<ConnectionStatus>,
 
     // ---- floor-round (double-failure-relay connected-relay reorder fix, S55) ----
@@ -139,7 +330,7 @@ where
     /// practice: the round only re-issues inside the relay topology, at most once
     /// per keepalive interval, so a wrap needs ~2³² re-issues (years of continuous
     /// post-drop traffic) — the same astronomically-rare framing as the protocol
-    /// packet-filter `magic` era counter and the connect-status `epoch`.
+    /// packet-filter `conn_id` era counter and the connect-status `epoch`.
     floor_request_seq: u32,
     /// The `round_seq` of the latest ACCEPTED [`FloorReply`] (`0` = none yet).
     /// `round_floor` always holds the floors of this reply.
@@ -240,6 +431,13 @@ where
     // batched into `Input` packets, for realized-compression accounting.
     input_bytes_pre_compression: u64,
     input_bytes_post_compression: u64,
+    // Logical messages at or above the conservative 1200-byte cross-transport
+    // budget and the 1472-byte IPv4 fragmentation boundary. Count every
+    // occurrence but diagnose each threshold once per endpoint era.
+    portability_risk_messages_sent: u64,
+    portability_warning_sent: bool,
+    fragmentation_risk_messages_sent: u64,
+    fragmentation_alarm_sent: bool,
     round_trip_time: u128,
     /// Origin instant for quality-report `ping` timestamps, captured from the
     /// protocol clock at endpoint construction. The peer echoes `ping` back
@@ -278,7 +476,7 @@ where
     /// Optional deterministic RNG for protocol randomness.
     ///
     /// When set (via `ProtocolConfig::protocol_rng_seed`), this RNG is used for
-    /// generating magic numbers and sync request IDs, enabling fully reproducible
+    /// generating connection IDs and sync request IDs, enabling fully reproducible
     /// protocol behavior. When `None`, the thread-local RNG is used instead.
     protocol_rng: Option<Pcg32>,
 
@@ -358,6 +556,15 @@ where
 impl<T: Config> PartialEq for UdpProtocol<T> {
     fn eq(&self, other: &Self) -> bool {
         self.peer_addr == other.peer_addr
+    }
+}
+
+fn draw_valid_conn_id(mut draw: impl FnMut() -> u32) -> u32 {
+    loop {
+        let conn_id = draw();
+        if super::is_valid_conn_id(conn_id) {
+            return conn_id;
+        }
     }
 }
 
@@ -451,7 +658,6 @@ pub fn fuzz_protocol_input_packet(
 
     let body = Input {
         peer_connect_status: status,
-        disconnect_requested: false,
         start_frame: Frame::new(start_frame),
         ack_frame: Frame::new(ack_frame),
         bytes: packet_bytes,
@@ -572,11 +778,11 @@ fn validate_input_frame_wire_size(
 fn validate_protocol_input_wire_sizes<T: Config>(
     recv_player_num: usize,
     local_players: usize,
-) -> Result<(), FortressError> {
+) -> Result<usize, FortressError> {
     let input_size = validate_default_input_wire_size::<T>()?;
     validate_input_frame_wire_size(input_size, recv_player_num)?;
     validate_input_frame_wire_size(input_size, local_players)?;
-    Ok(())
+    Ok(input_size)
 }
 
 impl<T: Config> UdpProtocol<T> {
@@ -610,22 +816,36 @@ impl<T: Config> UdpProtocol<T> {
 
         handles.sort_unstable();
         let recv_player_num = handles.len();
-        validate_protocol_input_wire_sizes::<T>(recv_player_num, local_players)?;
+        let input_size = validate_protocol_input_wire_sizes::<T>(recv_player_num, local_players)?;
+        let desync_interval = match desync_detection {
+            DesyncDetection::Off => 0,
+            DesyncDetection::On { interval: 0 } => {
+                return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    max: u64::from(u32::MAX),
+                    actual: 0,
+                }
+                .into());
+            },
+            DesyncDetection::On { interval } => interval,
+        };
+        let local_handshake = HandshakeConfig::new(SessionConfigBlock {
+            num_players: narrow_u16("num_players", num_players)?,
+            input_bytes_per_player: narrow_u16("input_bytes_per_player", input_size)?,
+            fps: narrow_u32("fps", fps)?,
+            max_prediction: narrow_u16("max_prediction", max_prediction)?,
+            desync_interval,
+        });
 
         // Initialize protocol RNG if a deterministic seed is provided
         let mut protocol_rng = protocol_config.protocol_rng_seed.map(Pcg32::seed_from_u64);
 
-        // Generate magic number using either deterministic or thread-local RNG
-        let mut magic: u16 = match &mut protocol_rng {
+        // Generate a v1 connection ID using either deterministic or thread-local RNG.
+        let conn_id = draw_valid_conn_id(|| match &mut protocol_rng {
             Some(rng) => rng.gen(),
             None => random(),
-        };
-        while magic == 0 {
-            magic = match &mut protocol_rng {
-                Some(rng) => rng.gen(),
-                None => random(),
-            };
-        }
+        });
 
         // Convert Vec to Arc<[PlayerHandle]> for cheap cloning in hot path
         let handles: Arc<[PlayerHandle]> = handles.into();
@@ -673,6 +893,8 @@ impl<T: Config> UdpProtocol<T> {
             handles,
             send_queue: VecDeque::new(),
             event_queue: VecDeque::new(),
+            received_drop_messages: VecDeque::new(),
+            drop_mailbox_warning_sent: false,
 
             // state
             state: ProtocolState::Initializing,
@@ -692,17 +914,19 @@ impl<T: Config> UdpProtocol<T> {
             disconnect_notify_start,
             shutdown_timeout: now,
             fps,
-            magic,
+            conn_id,
 
             // sync configuration
             sync_config,
+            local_handshake,
+            handshake_failed: None,
 
             // protocol configuration
             protocol_config,
 
             // the other client
             peer_addr,
-            remote_magic: 0,
+            remote_conn_id: 0,
             peer_connect_status,
 
             // floor-round (double-failure-relay connected-relay reorder fix)
@@ -743,6 +967,10 @@ impl<T: Config> UdpProtocol<T> {
             messages_received_by_kind: MessageKindCounts::default(),
             input_bytes_pre_compression: 0,
             input_bytes_post_compression: 0,
+            portability_risk_messages_sent: 0,
+            portability_warning_sent: false,
+            fragmentation_risk_messages_sent: 0,
+            fragmentation_alarm_sent: false,
             round_trip_time: 0,
             ping_epoch_base: now,
             last_send_time: now,
@@ -893,6 +1121,8 @@ impl<T: Config> UdpProtocol<T> {
             messages_received_by_kind: self.messages_received_by_kind,
             input_bytes_pre_compression: self.input_bytes_pre_compression,
             input_bytes_post_compression: self.input_bytes_post_compression,
+            portability_risk_messages_sent: self.portability_risk_messages_sent,
+            fragmentation_risk_messages_sent: self.fragmentation_risk_messages_sent,
             pending_output_len: u64::try_from(self.pending_output.len()).unwrap_or(u64::MAX),
             pending_checksums_len: u64::try_from(self.pending_checksums.len()).unwrap_or(u64::MAX),
             ping_ms: self.round_trip_time,
@@ -917,25 +1147,25 @@ impl<T: Config> UdpProtocol<T> {
     #[cfg(test)]
     pub(crate) fn force_running_for_tests(&mut self) {
         self.state = ProtocolState::Running;
-        self.remote_magic = 1;
+        self.remote_conn_id = 1;
     }
 
     /// Test-only: a compact snapshot of the synchronization-relevant endpoint
     /// state — `(state name, remaining sync roundtrips, outstanding sync
-    /// randoms, local magic, learned remote magic)` — consumed by harness
+    /// randoms, local conn_id, learned remote conn_id)` — consumed by harness
     /// stall diagnostics (for example the npeer mesh's `sync_joiner_with`),
     /// so a starved handshake reports WHICH side wedged and on what instead
     /// of a bare budget-exhaustion panic. Gated to the hot-join feature with
     /// its only consumers (the crate denies dead code in default-feature
     /// test builds).
     #[cfg(all(test, feature = "hot-join"))]
-    pub(crate) fn sync_debug_snapshot(&self) -> (&'static str, u32, usize, u16, u16) {
+    pub(crate) fn sync_debug_snapshot(&self) -> (&'static str, u32, usize, u32, u32) {
         (
             self.state.as_str(),
             self.sync_remaining_roundtrips,
             self.sync_random_requests.len(),
-            self.magic,
-            self.remote_magic,
+            self.conn_id,
+            self.remote_conn_id,
         )
     }
 
@@ -1014,14 +1244,61 @@ impl<T: Config> UdpProtocol<T> {
             .unwrap_or_default()
     }
 
-    pub(crate) fn disconnect(&mut self) {
-        if self.state == ProtocolState::Shutdown {
+    /// Applies a local verdict that the remote endpoint is gone.
+    ///
+    /// This path must stay silent: sending Goodbye here would tell a still-live
+    /// remote that *we* left, causing reciprocal drops to cascade through an
+    /// N-peer mesh. User-initiated link closure uses [`Self::disconnect`].
+    pub(crate) fn disconnect_remote(&mut self) {
+        if matches!(
+            self.state,
+            ProtocolState::Disconnected | ProtocolState::Shutdown
+        ) {
             return;
         }
 
         self.state = ProtocolState::Disconnected;
         // schedule the timeout which will lead to shutdown
         self.shutdown_timeout = self.now().add(self.protocol_config.shutdown_delay)
+    }
+
+    /// Closes this side of a live link and sends a best-effort v1 Goodbye.
+    pub(crate) fn disconnect(&mut self) {
+        self.queue_goodbye(0);
+        self.disconnect_remote();
+    }
+
+    /// Queues a best-effort v1 Goodbye without changing protocol state.
+    ///
+    /// Session-level explicit disconnect uses this split operation so it can
+    /// send the closure notices before applying local disconnect bookkeeping.
+    pub(crate) fn queue_goodbye(&mut self, reason: u8) {
+        if matches!(
+            self.state,
+            ProtocolState::Disconnected | ProtocolState::Shutdown
+        ) {
+            return;
+        }
+
+        for _ in 0..3 {
+            self.queue_message(MessageBody::Goodbye(Goodbye { reason }));
+        }
+    }
+
+    /// Sends the three closure notices immediately for an explicit session-level
+    /// disconnect.
+    pub(crate) fn send_goodbye_now(
+        &mut self,
+        socket: &mut Box<dyn NonBlockingSocket<T::Address>>,
+        reason: u8,
+    ) {
+        let queued_before = self.send_queue.len();
+        self.queue_goodbye(reason);
+        while self.send_queue.len() > queued_before {
+            if let Some(message) = self.send_queue.pop_back() {
+                socket.send_to(&message, &self.peer_addr);
+            }
+        }
     }
 
     /// Transitions this protocol from `Initializing` to `Synchronizing` state.
@@ -1066,24 +1343,23 @@ impl<T: Config> UdpProtocol<T> {
     ///
     /// # Era fence (monotonic per-endpoint era counter)
     ///
-    /// The rebuilt endpoint must NEVER reuse a recent era's magic. If a vacating
+    /// The rebuilt endpoint must NEVER reuse a recent era's conn_id. If a vacating
     /// peer is still live when the slot re-arms (a voluntary leave: the session
     /// removed the player while the remote process keeps running briefly), that
-    /// peer still holds the OLD magic as its learned `remote_magic`. With a reused
-    /// magic it would accept and answer the rebuilt endpoint's sync handshake; the
+    /// peer still holds the OLD conn_id as its learned `remote_conn_id`. With a reused
+    /// conn_id it would accept and answer the rebuilt endpoint's sync handshake; the
     /// rebuilt endpoint would then complete synchronization against the doomed peer
-    /// and lock `remote_magic` to it — permanently filtering out the future
+    /// and lock `remote_conn_id` to it — permanently filtering out the future
     /// rejoiner (a silent liveness blackhole).
     ///
-    /// The fence is a **monotonic counter**: the rebuilt era's magic is the
-    /// previous era's magic plus one (wrapping past the reserved `0`). This is
-    /// strictly stronger than re-rolling a fresh random magic and excluding only
-    /// the *immediately-previous* value — it makes the magic distinct from EVERY
-    /// era within a 65535-rearm window, so a ghost from *any* recent era (not just
-    /// the last one) can never match. Recurrence is impossible until 65535 rearms
-    /// of the same slot alias, at no extra state and with no wire-format change
-    /// (the previous fence drove only the *adjacent* collision to zero and left a
-    /// ~1-in-65535 per-double-rearm multi-era residual). The **initial** magic
+    /// The fence is a **monotonic counter**: the rebuilt era's conn_id is the
+    /// previous era's conn_id plus one (wrapping past the reserved `0`). This is
+    /// strictly stronger than re-rolling a fresh random conn_id and excluding only
+    /// the *immediately-previous* value — it makes the conn_id distinct from EVERY
+    /// era while walking the `2^32 - 2^16` valid-ID namespace, so a ghost from
+    /// *any* recent era (not just the last one) can never match. Recurrence is
+    /// impossible until that namespace is exhausted, at no extra state. The
+    /// **initial** connection ID
     /// stays randomly drawn — so two unrelated endpoints do not share a counter
     /// origin and a stale packet from an earlier *connection* to the same address
     /// is still filtered — and only the rearm transition is monotonic. The RNG
@@ -1117,24 +1393,20 @@ impl<T: Config> UdpProtocol<T> {
             self.time_sync_config,
         )?;
 
-        // Era fence (see the rustdoc): advance the magic as a MONOTONIC
-        // per-endpoint counter — the previous era's magic plus one, wrapping past
-        // the reserved `0`. This makes the rebuilt era's magic distinct from EVERY
-        // era within a 65535-rearm window (not merely the immediately-previous
+        // Era fence (see the rustdoc): advance the conn_id as a MONOTONIC
+        // per-endpoint counter — the previous era's conn_id plus one, wrapping past
+        // the reserved `0`. This makes the rebuilt era's conn_id distinct from EVERY
+        // era while walking the valid 32-bit namespace (not merely the immediately-previous
         // one), so a still-live peer from ANY recent era — which holds that era's
-        // magic as its learned `remote_magic` — can never answer, and wedge, the
+        // conn_id as its learned `remote_conn_id` — can never answer, and wedge, the
         // rebuilt endpoint's handshake. The RNG stream is still carried across the
         // rebuild so the unrelated sync-request IDs stay reproducible under a
         // deterministic `protocol_rng_seed` and never reset to the seed origin.
-        let old_magic = self.magic;
+        let old_conn_id = self.conn_id;
         if self.protocol_rng.is_some() {
             rebuilt.protocol_rng = self.protocol_rng.take();
         }
-        rebuilt.magic = match old_magic.wrapping_add(1) {
-            // `wrapping_add(1)` only reaches 0 from u16::MAX; the magic is never 0.
-            0 => 1,
-            next => next,
-        };
+        rebuilt.conn_id = super::next_conn_id(old_conn_id);
 
         *self = rebuilt;
         self.synchronize()
@@ -1152,20 +1424,27 @@ impl<T: Config> UdpProtocol<T> {
         let now = self.now();
         match self.state {
             ProtocolState::Synchronizing => {
-                // Check for sync timeout if configured (emit event only once)
-                if let Some(timeout) = self.sync_config.sync_timeout {
-                    let elapsed = now - self.stats_start_time;
-                    if elapsed > timeout && !self.sync_timeout_event_sent {
-                        self.sync_timeout_event_sent = true;
-                        self.event_queue.push_back(Event::SyncTimeout {
-                            elapsed_ms: elapsed.as_millis(),
-                        });
+                // An incompatible handshake is terminal. Keep the protocol in
+                // Synchronizing so it never counts as connected, but stop all
+                // retries and timeout notifications. Incoming requests remain
+                // answerable through `handle_message` so both peers diagnose
+                // their locally-oriented mismatch.
+                if self.handshake_failed.is_none() {
+                    // Check for sync timeout if configured (emit event only once)
+                    if let Some(timeout) = self.sync_config.sync_timeout {
+                        let elapsed = now - self.stats_start_time;
+                        if elapsed > timeout && !self.sync_timeout_event_sent {
+                            self.sync_timeout_event_sent = true;
+                            self.event_queue.push_back(Event::SyncTimeout {
+                                elapsed_ms: elapsed.as_millis(),
+                            });
+                        }
                     }
-                }
 
-                // some time has passed, let us send another sync request
-                if self.last_send_time + self.sync_config.sync_retry_interval < now {
-                    self.send_sync_request();
+                    // some time has passed, let us send another sync request
+                    if self.last_send_time + self.sync_config.sync_retry_interval < now {
+                        self.send_sync_request();
+                    }
                 }
             },
             ProtocolState::Running => {
@@ -1632,7 +1911,6 @@ impl<T: Config> UdpProtocol<T> {
             );
 
             body.ack_frame = self.last_recv_frame();
-            body.disconnect_requested = self.state == ProtocolState::Disconnected;
             connect_status.clone_into(&mut body.peer_connect_status);
 
             self.queue_message(MessageBody::Input(body));
@@ -1735,9 +2013,7 @@ impl<T: Config> UdpProtocol<T> {
     /// `tests/sessions/peer_drop.rs` and the
     /// `on_input_resets_retry_pacer_only_when_new_frames_staged` unit test.
     ///
-    /// Only called while `Running` (the `poll` gate); `disconnect_requested`
-    /// is therefore always `false` here, matching what `send_pending_output`
-    /// would compute.
+    /// Only called while `Running` (the `poll` gate).
     fn send_connect_status_nudge(&mut self, connect_status: &[ConnectionStatus]) -> bool {
         if !self.last_acked_input.frame.is_valid() {
             return false;
@@ -1759,7 +2035,6 @@ impl<T: Config> UdpProtocol<T> {
         };
         let mut body = Input {
             peer_connect_status: Vec::new(),
-            disconnect_requested: false,
             start_frame: self.last_acked_input.frame,
             ack_frame: self.last_recv_frame(),
             bytes,
@@ -1770,6 +2045,9 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn send_sync_request(&mut self) {
+        if self.handshake_failed.is_some() {
+            return;
+        }
         self.sync_requests_sent += 1;
 
         // Check for excessive retries and emit warning (once)
@@ -1807,9 +2085,7 @@ impl<T: Config> UdpProtocol<T> {
             None => random(),
         };
         self.sync_random_requests.insert(random_number);
-        let body = SyncRequest {
-            random_request: random_number,
-        };
+        let body = self.local_handshake.request(random_number);
         self.queue_message(MessageBody::SyncRequest(body));
     }
 
@@ -1839,8 +2115,43 @@ impl<T: Config> UdpProtocol<T> {
         trace!("Queuing message to {:?}: {:?}", self.peer_addr, body);
 
         // set the header
-        let header = MessageHeader { magic: self.magic };
+        let header = MessageHeader::new(self.conn_id);
         let msg = Message { header, body };
+        let encoded_len = msg.encoded_len();
+
+        if encoded_len >= PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD {
+            self.portability_risk_messages_sent =
+                self.portability_risk_messages_sent.saturating_add(1);
+            if !self.portability_warning_sent {
+                self.portability_warning_sent = true;
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Message queued for {:?} reaches the portable datagram payload budget: kind={}, encoded_bytes={}, threshold={}. Further portability warnings are suppressed for this endpoint era; inspect PeerMetrics::portability_risk_messages_sent for the cumulative count.",
+                    self.peer_addr,
+                    msg.kind(),
+                    encoded_len,
+                    PORTABLE_DATAGRAM_PAYLOAD_THRESHOLD
+                );
+            }
+        }
+
+        if encoded_len >= IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD {
+            self.fragmentation_risk_messages_sent =
+                self.fragmentation_risk_messages_sent.saturating_add(1);
+            if !self.fragmentation_alarm_sent {
+                self.fragmentation_alarm_sent = true;
+                report_violation!(
+                    ViolationSeverity::Error,
+                    ViolationKind::NetworkProtocol,
+                    "Message queued for {:?} reaches the IPv4/UDP fragmentation boundary: kind={}, encoded_bytes={}, threshold={}. Further fragmentation alarms are suppressed for this endpoint era; inspect PeerMetrics::fragmentation_risk_messages_sent for the cumulative count.",
+                    self.peer_addr,
+                    msg.kind(),
+                    encoded_len,
+                    IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD
+                );
+            }
+        }
 
         self.packets_sent = self.packets_sent.saturating_add(1);
         self.last_send_time = self.now();
@@ -1850,7 +2161,7 @@ impl<T: Config> UdpProtocol<T> {
         // matches `codec::encode(&msg).len()` exactly (property-tested).
         // Saturating so the lifetime counter degrades to a ceiling rather than
         // wrapping (or panicking under overflow-checks) on any target.
-        self.bytes_sent = self.bytes_sent.saturating_add(msg.encoded_len() as u64);
+        self.bytes_sent = self.bytes_sent.saturating_add(encoded_len as u64);
         // Per-kind send tally: one bucket per packet keeps
         // `messages_sent_by_kind.total() == packets_sent`.
         self.messages_sent_by_kind.record(msg.kind());
@@ -1882,9 +2193,9 @@ impl<T: Config> UdpProtocol<T> {
             return;
         }
 
-        // filter packets that don't match the magic if we have set it already
-        if self.remote_magic != 0 && msg.header.magic != self.remote_magic {
-            trace!("Received message with wrong magic; ignoring");
+        // filter packets that don't match the conn_id if we have set it already
+        if self.remote_conn_id != 0 && msg.header.conn_id != self.remote_conn_id {
+            trace!("Received message with wrong conn_id; ignoring");
             return;
         }
 
@@ -1894,6 +2205,15 @@ impl<T: Config> UdpProtocol<T> {
                 msg.body,
                 self.state
             );
+            return;
+        }
+
+        // During synchronization, accept a Goodbye only after a valid
+        // random-echo reply has bound this endpoint to the sender's conn_id.
+        // Otherwise a delayed closure from an old era could disconnect a fresh
+        // session while `remote_conn_id == 0` still acts as the sync wildcard.
+        if matches!(msg.body, MessageBody::Goodbye(_)) && self.remote_conn_id == 0 {
+            trace!("Ignoring unbound Goodbye during synchronization");
             return;
         }
 
@@ -1919,6 +2239,22 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::FloorRequest(body) => self.on_floor_request(body),
             MessageBody::FloorReply(body) => self.on_floor_reply(body),
             MessageBody::KeepAlive => (),
+            MessageBody::Goodbye(body) => self.on_goodbye(*body),
+            MessageBody::DropPrepare(body) => {
+                self.on_drop_control_message(DropControlMessage::Prepare(body.clone()));
+            },
+            MessageBody::DropReport(body) => {
+                self.on_drop_control_message(DropControlMessage::Report(body.clone()));
+            },
+            MessageBody::DropBackfill(body) => {
+                self.on_drop_control_message(DropControlMessage::Backfill(body.clone()));
+            },
+            MessageBody::DropCommit(body) => {
+                self.on_drop_control_message(DropControlMessage::Commit(*body));
+            },
+            MessageBody::DropAbort(body) => {
+                self.on_drop_control_message(DropControlMessage::Abort(*body));
+            },
             #[cfg(feature = "hot-join")]
             MessageBody::JoinRequest(body) => self.on_join_request(body),
             #[cfg(feature = "hot-join")]
@@ -1933,6 +2269,14 @@ impl<T: Config> UdpProtocol<T> {
             MessageBody::JoinCommitted(body) => self.on_join_committed(body),
             #[cfg(feature = "hot-join")]
             MessageBody::JoinAborted(body) => self.on_join_aborted(body),
+            #[cfg(not(feature = "hot-join"))]
+            MessageBody::JoinRequest(_)
+            | MessageBody::StateSnapshot(_)
+            | MessageBody::StateSnapshotAck(_)
+            | MessageBody::ReactivateSlot(_)
+            | MessageBody::ReactivateSlotAck(_)
+            | MessageBody::JoinCommitted(_)
+            | MessageBody::JoinAborted(_) => (),
         }
     }
 
@@ -1941,7 +2285,9 @@ impl<T: Config> UdpProtocol<T> {
             ProtocolState::Initializing | ProtocolState::Synchronizing => {
                 matches!(
                     body,
-                    MessageBody::SyncRequest(_) | MessageBody::SyncReply(_)
+                    MessageBody::SyncRequest(_)
+                        | MessageBody::SyncReply(_)
+                        | MessageBody::Goodbye(_)
                 )
             },
             ProtocolState::Running => true,
@@ -1952,21 +2298,64 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `SyncRequest`, answer with a `SyncReply` with the proper data
     fn on_sync_request(&mut self, body: SyncRequest) {
-        let reply_body = SyncReply {
-            random_reply: body.random_request,
-        };
+        // Always answer with our own configuration, including after our local
+        // handshake has failed, so the requester can independently diagnose
+        // the same incompatibility with its own ours/theirs orientation.
+        let reply_body = self.local_handshake.reply(body.random_request);
         self.queue_message(MessageBody::SyncReply(reply_body));
+
+        if self.state == ProtocolState::Synchronizing {
+            self.observe_handshake(HandshakeConfig::from_request(body));
+        }
+    }
+
+    fn on_goodbye(&mut self, _body: Goodbye) {
+        if !self.disconnect_event_sent {
+            self.event_queue.push_back(Event::Disconnected);
+            self.disconnect_event_sent = true;
+        }
+    }
+
+    /// Stages one running-state D14 control message for the session layer.
+    fn on_drop_control_message(&mut self, message: DropControlMessage) {
+        if self.received_drop_messages.len() >= MAX_RECEIVED_DROP_MESSAGES {
+            if !self.drop_mailbox_warning_sent {
+                self.drop_mailbox_warning_sent = true;
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "coordinated graceful-drop mailbox reached its {}-message bound; dropping further control messages until the session drains it",
+                    MAX_RECEIVED_DROP_MESSAGES
+                );
+            }
+            return;
+        }
+        self.received_drop_messages.push_back(message);
     }
 
     /// Upon receiving a `SyncReply`, check validity and either continue the synchronization process or conclude synchronization.
     fn on_sync_reply(&mut self, header: MessageHeader, body: SyncReply) {
         // ignore sync replies when not syncing
-        if self.state != ProtocolState::Synchronizing {
+        if self.state != ProtocolState::Synchronizing || self.handshake_failed.is_some() {
             return;
         }
         // this is not the correct reply
         if !self.sync_random_requests.remove(&body.random_reply) {
             return;
+        }
+        // A reply's peer-controlled configuration is trusted only after its
+        // random echo proves it answers one of this endpoint's live requests.
+        // Otherwise a stale/forged reply could terminally poison a handshake.
+        self.observe_handshake(HandshakeConfig::from_reply(body));
+        if self.handshake_failed.is_some() {
+            return;
+        }
+        // A correct random echo binds the header connection ID. Lock it
+        // on the first successful roundtrip so later synchronized-state
+        // Goodbyes can be accepted without opening the pre-binding
+        // wildcard to delayed closure packets from an old era.
+        if self.remote_conn_id == 0 {
+            self.remote_conn_id = header.conn_id;
         }
         // the sync reply is good, so we send a sync request again until we have finished the required roundtrips. Then, we can conclude the syncing process.
         self.sync_remaining_roundtrips -= 1;
@@ -1987,8 +2376,16 @@ impl<T: Config> UdpProtocol<T> {
             self.state = ProtocolState::Running;
             // register an event
             self.event_queue.push_back(Event::Synchronized);
-            // the remote endpoint is now "authorized"
-            self.remote_magic = header.magic;
+        }
+    }
+
+    fn observe_handshake(&mut self, theirs: HandshakeConfig) {
+        if self.handshake_failed.is_some() {
+            return;
+        }
+        if let Some(reason) = self.local_handshake.first_mismatch(theirs) {
+            self.handshake_failed = Some(reason);
+            self.event_queue.push_back(Event::Incompatible { reason });
         }
     }
 
@@ -2017,12 +2414,7 @@ impl<T: Config> UdpProtocol<T> {
     /// Callers MUST validate `body.peer_connect_status.len() == num_players`
     /// first; a mismatched length is silently ignored here (the zipped iterator
     /// stops at the shorter side) but should already have been rejected upstream.
-    /// The merge is intentionally skipped when the sender itself is disconnecting
-    /// (`body.disconnect_requested`), matching the prior inline behavior.
     fn merge_peer_connect_status(&mut self, body: &Input) {
-        if body.disconnect_requested {
-            return;
-        }
         #[cfg(feature = "hot-join")]
         let floors = &self.reactivation_floor;
         for (slot, (local, remote)) in self
@@ -2240,10 +2632,6 @@ impl<T: Config> UdpProtocol<T> {
                 self.apply_ack_frame(body.ack_frame);
             }
 
-            let should_emit_disconnect = body.disconnect_requested
-                && self.state != ProtocolState::Disconnected
-                && !self.disconnect_event_sent;
-
             // The connect-status merge ran earlier (before the decode-skip paths)
             // via `merge_peer_connect_status`, so disconnect gossip converges even
             // for packets whose inputs we cannot decode.
@@ -2282,11 +2670,6 @@ impl<T: Config> UdpProtocol<T> {
                         peer_connect_status: peer_connect_status.clone(),
                     });
                 }
-            }
-
-            if should_emit_disconnect {
-                self.event_queue.push_back(Event::Disconnected);
-                self.disconnect_event_sent = true;
             }
 
             // send an input ack
@@ -2649,6 +3032,26 @@ impl<T: Config> UdpProtocol<T> {
         self.queue_message(MessageBody::ChecksumReport(body));
     }
 
+    /// Queues one coordinated graceful-drop control message. No-op unless the
+    /// endpoint is running; synchronization and terminal states cannot carry a
+    /// lifecycle operation from an unbound or closed connection era.
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    pub(crate) fn send_drop_control_message(&mut self, message: DropControlMessage) {
+        if self.state != ProtocolState::Running {
+            return;
+        }
+        self.queue_message(message.into_body());
+    }
+
+    /// Drains every coordinated graceful-drop control message staged since the
+    /// previous drain. The endpoint mailbox itself is bounded by
+    /// [`MAX_RECEIVED_DROP_MESSAGES`].
+    #[allow(dead_code)] // consumed by session orchestration in the next D14 layer
+    pub(crate) fn take_received_drop_messages(&mut self) -> Drain<'_, DropControlMessage> {
+        self.drop_mailbox_warning_sent = false;
+        self.received_drop_messages.drain(..)
+    }
+
     /// Queues a `JoinRequest` for the slot `player_handle`. No-op unless `Running`.
     // dead_code: consumed by chunk 5's session orchestration; only the message +
     // protocol layer lands in this chunk.
@@ -2779,7 +3182,7 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Test seam: stage a received `ReactivateSlot` exactly as if one had arrived
-    /// from the peer, without forging the magic-validated wire path. Used by
+    /// from the peer, without forging the conn_id-validated wire path. Used by
     /// session-level survivor fail-closed-validation tests. Mirrors
     /// [`set_pending_join_request_for_test`](Self::set_pending_join_request_for_test).
     #[cfg(all(test, feature = "hot-join"))]
@@ -3128,13 +3531,20 @@ mod tests {
     fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            protocol.on_sync_reply(
-                MessageHeader { magic: 999 },
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let reply = matching_sync_reply(protocol, random);
+            protocol.on_sync_reply(MessageHeader::new(999), reply);
         }
+    }
+
+    fn matching_sync_request<T: Config>(
+        protocol: &UdpProtocol<T>,
+        random_request: u32,
+    ) -> SyncRequest {
+        protocol.local_handshake.request(random_request)
+    }
+
+    fn matching_sync_reply<T: Config>(protocol: &UdpProtocol<T>, random_reply: u32) -> SyncReply {
+        protocol.local_handshake.reply(random_reply)
     }
 
     fn queued_input_body(protocol: &UdpProtocol<TestConfig>) -> &Input {
@@ -3187,9 +3597,7 @@ mod tests {
         protocol.send_queue.clear();
 
         // Simulate receiving a sync request
-        let sync_req = SyncRequest {
-            random_request: 12345,
-        };
+        let sync_req = matching_sync_request(&protocol, 12345);
         protocol.on_sync_request(sync_req);
 
         // Should have queued a reply
@@ -3214,10 +3622,8 @@ mod tests {
             // Get the random request from our sync request
             let random = *protocol.sync_random_requests.iter().next().unwrap();
 
-            let header = MessageHeader { magic: 999 };
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let header = MessageHeader::new(999);
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
         }
 
@@ -3234,10 +3640,8 @@ mod tests {
         let initial_remaining = protocol.sync_remaining_roundtrips;
 
         // Send a reply with the wrong random value
-        let header = MessageHeader { magic: 999 };
-        let reply = SyncReply {
-            random_reply: 99999999, // Wrong value
-        };
+        let header = MessageHeader::new(999);
+        let reply = matching_sync_reply(&protocol, 99_999_999);
         protocol.on_sync_reply(header, reply);
 
         // Should still have same number of remaining roundtrips
@@ -3250,12 +3654,268 @@ mod tests {
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
 
         // Protocol is in Initializing state, not Synchronizing
-        let header = MessageHeader { magic: 999 };
-        let reply = SyncReply { random_reply: 123 };
+        let header = MessageHeader::new(999);
+        let reply = matching_sync_reply(&protocol, 123);
         protocol.on_sync_reply(header, reply);
 
         // Should still be in initializing
         assert!(!protocol.is_synchronized());
+    }
+
+    #[test]
+    fn config_digest_uses_exact_canonical_v1_bytes() {
+        let config = SessionConfigBlock {
+            num_players: 2,
+            input_bytes_per_player: 4,
+            fps: 60,
+            max_prediction: 8,
+            desync_interval: 60,
+        };
+
+        assert_eq!(config_digest(config, 1), 0x5082_C060_858A_E1C8);
+        assert_ne!(config_digest(config, 0), config_digest(config, 1));
+    }
+
+    #[test]
+    fn handshake_mismatch_reports_each_field_in_locked_precedence_order() {
+        let ours = HandshakeConfig::new(SessionConfigBlock {
+            num_players: 2,
+            input_bytes_per_player: 4,
+            fps: 60,
+            max_prediction: 8,
+            desync_interval: 60,
+        });
+
+        let mut theirs = ours;
+        theirs.min_compat_version = ours.min_compat_version.saturating_add(1);
+        theirs.config.num_players = 3;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::ProtocolVersion {
+                ours: ours.min_compat_version,
+                theirs: theirs.min_compat_version,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.num_players = 3;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 })
+        );
+
+        let mut theirs = ours;
+        theirs.config.input_bytes_per_player = 8;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::InputWidth { ours: 4, theirs: 8 })
+        );
+
+        let mut theirs = ours;
+        theirs.config.fps = 120;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::Fps {
+                ours: 60,
+                theirs: 120,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.max_prediction = 12;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::MaxPrediction {
+                ours: 8,
+                theirs: 12,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config.desync_interval = 30;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::DesyncInterval {
+                ours: 60,
+                theirs: 30,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.features ^= HOT_JOIN_FEATURE;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::Features {
+                ours: ours.features,
+                theirs: theirs.features,
+            })
+        );
+
+        let mut theirs = ours;
+        theirs.config_digest ^= 1;
+        assert_eq!(
+            ours.first_mismatch(theirs),
+            Some(IncompatibleSessionReason::ConfigDigest {
+                ours: ours.config_digest,
+                theirs: theirs.config_digest,
+            })
+        );
+        assert_eq!(ours.first_mismatch(ours), None);
+    }
+
+    #[test]
+    fn mismatched_request_replies_with_ours_and_fails_exactly_once() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        protocol.send_queue.clear();
+
+        let mut theirs = protocol.local_handshake;
+        theirs.config.num_players = 3;
+        protocol.on_sync_request(theirs.request(7));
+
+        let expected = IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 };
+        assert_eq!(protocol.handshake_failed, Some(expected));
+        assert_eq!(
+            protocol
+                .event_queue
+                .iter()
+                .filter(|event| matches!(event, Event::Incompatible { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            protocol.send_queue.back().map(|message| &message.body),
+            Some(&MessageBody::SyncReply(protocol.local_handshake.reply(7)))
+        );
+
+        theirs.config.num_players = 4;
+        protocol.on_sync_request(theirs.request(8));
+        assert_eq!(protocol.handshake_failed, Some(expected));
+        assert_eq!(
+            protocol
+                .event_queue
+                .iter()
+                .filter(|event| matches!(event, Event::Incompatible { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(protocol.send_queue.len(), 2, "failed endpoints still reply");
+    }
+
+    #[test]
+    fn reply_validates_echo_before_config_and_mismatch_is_terminal() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        let valid_random = *protocol.sync_random_requests.iter().next().unwrap();
+        let initial_remaining = protocol.sync_remaining_roundtrips;
+        let mut theirs = protocol.local_handshake;
+        theirs.config.fps = 120;
+
+        protocol.on_sync_reply(
+            MessageHeader::new(999),
+            theirs.reply(valid_random ^ u32::MAX),
+        );
+        assert_eq!(protocol.handshake_failed, None);
+        assert_eq!(protocol.sync_remaining_roundtrips, initial_remaining);
+
+        protocol.on_sync_reply(MessageHeader::new(999), theirs.reply(valid_random));
+        assert_eq!(
+            protocol.handshake_failed,
+            Some(IncompatibleSessionReason::Fps {
+                ours: 60,
+                theirs: 120,
+            })
+        );
+        assert_eq!(protocol.remote_conn_id, 0);
+        assert_eq!(protocol.sync_remaining_roundtrips, initial_remaining);
+        assert!(!protocol.is_synchronized());
+    }
+
+    #[test]
+    fn failed_handshake_stops_retries_and_timeout_but_keeps_answering() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let sync_config = SyncConfig {
+            sync_retry_interval: Duration::from_millis(1),
+            sync_timeout: Some(Duration::from_millis(1)),
+            ..SyncConfig::default()
+        };
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            sync_config,
+            protocol_config,
+        );
+        protocol.synchronize().unwrap();
+        let mut theirs = protocol.local_handshake;
+        theirs.config.num_players = 3;
+        protocol.on_sync_request(theirs.request(1));
+        protocol.send_queue.clear();
+        protocol.event_queue.clear();
+
+        advance_test_clock(&clock, Duration::from_secs(1));
+        let events: Vec<_> = protocol.poll(&[]).collect();
+        assert!(events.is_empty());
+        assert!(protocol.send_queue.is_empty());
+
+        protocol.on_sync_request(theirs.request(2));
+        assert_eq!(
+            protocol.send_queue.back().map(|message| &message.body),
+            Some(&MessageBody::SyncReply(protocol.local_handshake.reply(2)))
+        );
+    }
+
+    #[test]
+    fn endpoint_rejects_nonrepresentable_handshake_config() {
+        let make = |num_players, fps, desync_detection| {
+            UdpProtocol::<TestConfig>::new(
+                vec![PlayerHandle::new(0)],
+                test_addr(),
+                num_players,
+                1,
+                8,
+                Duration::from_secs(5),
+                Duration::from_secs(3),
+                fps,
+                desync_detection,
+                SyncConfig::default(),
+                ProtocolConfig::default(),
+                TimeSyncConfig::default(),
+            )
+        };
+
+        assert!(matches!(
+            make(usize::from(u16::MAX) + 1, 60, DesyncDetection::Off),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "num_players",
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            make(2, 60, DesyncDetection::On { interval: 0 }),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    ..
+                }
+            })
+        ));
+        #[cfg(target_pointer_width = "64")]
+        assert!(matches!(
+            make(
+                2,
+                usize::try_from(u64::from(u32::MAX) + 1).unwrap(),
+                DesyncDetection::Off
+            ),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange { field: "fps", .. }
+            })
+        ));
     }
 
     #[test]
@@ -3267,13 +3927,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         assert!(protocol.is_running());
@@ -3308,7 +3963,7 @@ mod tests {
         protocol.state = ProtocolState::Shutdown;
 
         let msg = Message {
-            header: MessageHeader { magic: 123 },
+            header: MessageHeader::new(123),
             body: MessageBody::KeepAlive,
         };
         protocol.handle_message(&msg);
@@ -3318,29 +3973,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_message_filters_wrong_magic_after_sync() {
+    fn handle_message_filters_wrong_conn_id_after_sync() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
         protocol.synchronize().unwrap();
 
-        // Complete sync with magic 999
+        // Complete sync with conn_id 999
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
-        assert_eq!(protocol.remote_magic, 999);
+        assert_eq!(protocol.remote_conn_id, 999);
         protocol.send_queue.clear();
 
-        // Send message with different magic
+        // Send message with different conn_id
         let msg = Message {
-            header: MessageHeader { magic: 123 }, // Wrong magic
+            header: MessageHeader::new(123), // Wrong conn_id
             body: MessageBody::KeepAlive,
         };
         protocol.handle_message(&msg);
@@ -3350,7 +4000,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_message_accepts_correct_magic() {
+    fn handle_message_accepts_correct_conn_id() {
         let (config, clock) = mutable_clock_config();
         let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
@@ -3362,25 +4012,20 @@ mod tests {
         );
         protocol.synchronize().unwrap();
 
-        // Complete sync with magic 999
+        // Complete sync with conn_id 999
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         let initial_recv_time = protocol.last_recv_time;
 
         let accepted_recv_time = advance_test_clock(&clock, Duration::from_millis(1));
 
-        // Send message with correct magic
+        // Send message with correct conn_id
         let msg = Message {
-            header: MessageHeader { magic: 999 },
+            header: MessageHeader::new(999),
             body: MessageBody::KeepAlive,
         };
         protocol.handle_message(&msg);
@@ -3410,7 +4055,7 @@ mod tests {
 
         let messages = [
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::Input(Input {
                     peer_connect_status: vec![
                         ConnectionStatus {
@@ -3420,38 +4065,37 @@ mod tests {
                         };
                         2
                     ],
-                    disconnect_requested: false,
                     start_frame: Frame::new(0),
                     ack_frame: Frame::new(0),
                     bytes: vec![1, 2, 3],
                 }),
             },
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::InputAck(InputAck {
                     ack_frame: Frame::new(0),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::QualityReport(QualityReport {
                     frame_advantage: 7,
                     ping: 123,
                 }),
             },
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::QualityReply(QualityReply { pong: 456 }),
             },
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::ChecksumReport(ChecksumReport {
                     checksum: 0xABCD,
                     frame: Frame::new(1),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::KeepAlive,
             },
         ];
@@ -3478,13 +4122,16 @@ mod tests {
         protocol.send_queue.clear();
 
         protocol.handle_message(&Message {
-            header: MessageHeader { magic: 999 },
-            body: MessageBody::SyncRequest(SyncRequest { random_request: 42 }),
+            header: MessageHeader::new(999),
+            body: MessageBody::SyncRequest(matching_sync_request(&protocol, 42)),
         });
 
         assert!(matches!(
             protocol.send_queue.front().map(|message| &message.body),
-            Some(MessageBody::SyncReply(SyncReply { random_reply: 42 }))
+            Some(MessageBody::SyncReply(SyncReply {
+                random_reply: 42,
+                ..
+            }))
         ));
     }
 
@@ -3497,13 +4144,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Simulate network interrupt notification was sent
@@ -3511,7 +4153,7 @@ mod tests {
 
         // Handle a valid message
         let msg = Message {
-            header: MessageHeader { magic: 999 },
+            header: MessageHeader::new(999),
             body: MessageBody::KeepAlive,
         };
         protocol.handle_message(&msg);
@@ -3535,13 +4177,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Add some pending outputs
@@ -3624,7 +4261,6 @@ mod tests {
             start_frame: Frame::new(0),
             ack_frame: Frame::new(99),
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         });
 
@@ -3642,35 +4278,126 @@ mod tests {
     }
 
     #[test]
-    fn on_input_disconnect_request_emits_inputs_before_disconnect() {
+    fn on_goodbye_emits_exactly_one_disconnect_event() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
         protocol.synchronize().unwrap();
         complete_test_sync(&mut protocol);
         protocol.event_queue.clear();
 
-        let zeroed_bytes = protocol
-            .recv_inputs
-            .get(&Frame::NULL)
-            .unwrap()
-            .bytes
-            .clone();
-        let test_bytes = crate::network::codec::encode(&TestInput { inp: 42 }).unwrap();
-        let encoded =
-            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
-
-        protocol.on_input(&Input {
-            start_frame: Frame::new(0),
-            ack_frame: Frame::NULL,
-            bytes: encoded,
-            disconnect_requested: true,
-            peer_connect_status: vec![ConnectionStatus::default(); 2],
-        });
+        protocol.on_goodbye(Goodbye { reason: 7 });
+        protocol.on_goodbye(Goodbye { reason: 7 });
 
         let events: Vec<_> = protocol.event_queue.drain(..).collect();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events.first(), Some(Event::Input { .. })));
-        assert!(matches!(events.get(1), Some(Event::Disconnected)));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events.first(), Some(Event::Disconnected)));
+    }
+
+    #[test]
+    fn goodbye_during_sync_requires_validated_connection_id_binding() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        protocol.event_queue.clear();
+        let goodbye = Message {
+            header: MessageHeader::new(77),
+            body: MessageBody::Goodbye(Goodbye { reason: 0 }),
+        };
+
+        protocol.handle_message(&goodbye);
+        assert!(protocol.event_queue.is_empty());
+
+        let first_random = protocol
+            .send_queue
+            .iter()
+            .find_map(|message| match message.body {
+                MessageBody::SyncRequest(request) => Some(request.random_request),
+                _ => None,
+            })
+            .expect("synchronize queues a random request");
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(77),
+            body: MessageBody::SyncReply(matching_sync_reply(&protocol, first_random)),
+        });
+        assert_eq!(protocol.state, ProtocolState::Synchronizing);
+        assert_eq!(protocol.remote_conn_id, 77);
+
+        let remaining = protocol.sync_remaining_roundtrips;
+        let second_random = protocol
+            .sync_random_requests
+            .iter()
+            .copied()
+            .next()
+            .expect("the next synchronization round has an outstanding nonce");
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(78),
+            body: MessageBody::SyncReply(matching_sync_reply(&protocol, second_random)),
+        });
+        assert_eq!(protocol.sync_remaining_roundtrips, remaining);
+        assert!(protocol.sync_random_requests.contains(&second_random));
+
+        protocol.handle_message(&goodbye);
+        assert!(protocol
+            .event_queue
+            .iter()
+            .any(|event| matches!(event, Event::Disconnected)));
+    }
+
+    #[test]
+    fn disconnect_queues_three_goodbyes_once() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.force_running_for_tests();
+
+        protocol.disconnect();
+        protocol.disconnect();
+
+        assert_eq!(protocol.state, ProtocolState::Disconnected);
+        assert_eq!(protocol.send_queue.len(), 3);
+        assert!(protocol.send_queue.iter().all(|message| {
+            matches!(message.body, MessageBody::Goodbye(Goodbye { reason: 0 }))
+        }));
+    }
+
+    #[test]
+    fn remote_disconnect_verdict_never_sends_goodbye() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.force_running_for_tests();
+
+        protocol.disconnect_remote();
+
+        assert_eq!(protocol.state, ProtocolState::Disconnected);
+        assert!(protocol.send_queue.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_discards_old_era_queue_before_new_sync_request() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.force_running_for_tests();
+        let old_conn_id = protocol.conn_id;
+        protocol.queue_message(MessageBody::KeepAlive);
+        protocol.disconnect();
+
+        protocol
+            .rearm_for_rejoin()
+            .expect("a disconnected endpoint can be rearmed");
+
+        let new_conn_id = protocol.conn_id;
+        assert_ne!(new_conn_id, old_conn_id);
+        assert_eq!(protocol.send_queue.len(), 1);
+        let sync_request = protocol
+            .send_queue
+            .back()
+            .expect("rearm queues a new-era sync request");
+        assert_eq!(sync_request.header.conn_id, new_conn_id);
+        assert!(matches!(sync_request.body, MessageBody::SyncRequest(_)));
+        assert!(protocol.send_queue.iter().all(|message| !matches!(
+            message.body,
+            MessageBody::KeepAlive | MessageBody::Goodbye(_)
+        )));
     }
 
     // --- F4 regression: connect-status merge convergence ---------------------
@@ -3707,7 +4434,6 @@ mod tests {
             start_frame: Frame::new(0),
             ack_frame: Frame::NULL,
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         });
         protocol.event_queue.clear();
@@ -3735,7 +4461,6 @@ mod tests {
             start_frame: Frame::new(0),
             ack_frame: Frame::NULL,
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![
                 ConnectionStatus::default(),
                 ConnectionStatus {
@@ -4504,7 +5229,6 @@ mod tests {
             start_frame: Frame::new(10),
             ack_frame: Frame::NULL,
             bytes: encode_one_frame(&bytes, 99),
-            disconnect_requested: false,
             peer_connect_status: status_slot2(true, 5),
         });
 
@@ -4564,7 +5288,6 @@ mod tests {
             start_frame: Frame::new(50),
             ack_frame: Frame::new(0),
             bytes: encode_one_frame(&bytes, 1),
-            disconnect_requested: false,
             peer_connect_status: status_slot2(true, 49),
         };
         let keys_before: Vec<Frame> = protocol.recv_inputs.keys().copied().collect();
@@ -4643,7 +5366,6 @@ mod tests {
             start_frame: Frame::new(3),
             ack_frame: Frame::NULL,
             bytes: encode_one_frame(&bytes, 42),
-            disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
         });
 
@@ -4679,7 +5401,6 @@ mod tests {
             start_frame: Frame::new(1),
             ack_frame: Frame::NULL,
             bytes: encode_one_frame(&bytes, 1),
-            disconnect_requested: false,
             peer_connect_status: status_slot2(true, 4),
         });
         assert_eq!(
@@ -4702,7 +5423,6 @@ mod tests {
             start_frame: Frame::new(50),
             ack_frame: Frame::NULL,
             bytes: encode_one_frame(&bytes, 2),
-            disconnect_requested: false,
             peer_connect_status: status_slot2(true, 8),
         });
 
@@ -4746,13 +5466,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
         protocol.send_queue.clear();
 
@@ -4859,13 +5574,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Stats start time is set during synchronize(), so with 0 seconds elapsed
@@ -4879,6 +5589,122 @@ mod tests {
     // ==========================================
     // Peer Metrics Tests (M2 §5.2)
     // ==========================================
+
+    fn input_body_with_message_len<T: Config>(
+        protocol: &UdpProtocol<T>,
+        target_len: usize,
+    ) -> MessageBody {
+        let mut input = Input {
+            peer_connect_status: Vec::new(),
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: Vec::new(),
+        };
+        let base_len = Message {
+            header: MessageHeader::new(protocol.conn_id),
+            body: MessageBody::Input(input.clone()),
+        }
+        .encoded_len();
+        input.bytes = vec![0; target_len.checked_sub(base_len).unwrap()];
+        let body = MessageBody::Input(input);
+        assert_eq!(
+            Message {
+                header: MessageHeader::new(protocol.conn_id),
+                body: body.clone(),
+            }
+            .encoded_len(),
+            target_len
+        );
+        body
+    }
+
+    #[test]
+    fn mtu_guard_counts_inclusive_boundaries_and_diagnoses_once() {
+        use crate::telemetry::{
+            push_violation_observer, CollectingObserver, ViolationKind, ViolationObserver,
+            ViolationSeverity,
+        };
+
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        for len in [1199, 1200, 1471, 1472] {
+            protocol.queue_message(input_body_with_message_len(&protocol, len));
+        }
+
+        let metrics = protocol.peer_metrics();
+        assert_eq!(metrics.portability_risk_messages_sent, 3);
+        assert_eq!(metrics.fragmentation_risk_messages_sent, 1);
+        let diagnostics = observer.violations();
+        let portability: Vec<_> = diagnostics
+            .iter()
+            .filter(|violation| {
+                violation
+                    .message
+                    .contains("portable datagram payload budget")
+            })
+            .collect();
+        let fragmentation: Vec<_> = diagnostics
+            .iter()
+            .filter(|violation| violation.message.contains("fragmentation boundary"))
+            .collect();
+        assert_eq!(portability.len(), 1);
+        assert_eq!(portability[0].severity, ViolationSeverity::Warning);
+        assert_eq!(portability[0].kind, ViolationKind::NetworkProtocol);
+        assert!(portability[0].message.contains("encoded_bytes=1200"));
+        assert!(portability[0].message.contains("threshold=1200"));
+        assert_eq!(fragmentation.len(), 1);
+        assert_eq!(fragmentation[0].severity, ViolationSeverity::Error);
+        assert_eq!(fragmentation[0].kind, ViolationKind::NetworkProtocol);
+        assert!(fragmentation[0].message.contains("encoded_bytes=1472"));
+        assert!(fragmentation[0].message.contains("threshold=1472"));
+    }
+
+    #[test]
+    fn mtu_fragmentation_counter_saturates() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.portability_risk_messages_sent = u64::MAX;
+        protocol.portability_warning_sent = true;
+        protocol.fragmentation_risk_messages_sent = u64::MAX;
+        protocol.fragmentation_alarm_sent = true;
+
+        let oversized =
+            input_body_with_message_len(&protocol, IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD);
+        protocol.queue_message(oversized);
+
+        assert_eq!(
+            protocol.peer_metrics().portability_risk_messages_sent,
+            u64::MAX
+        );
+        assert_eq!(
+            protocol.peer_metrics().fragmentation_risk_messages_sent,
+            u64::MAX
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn oversized_hot_join_snapshot_uses_shared_fragmentation_guard() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let snapshot = StateSnapshot {
+            frame: Frame::new(4),
+            num_players: 2,
+            state_bytes: vec![0; IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+
+        protocol.queue_message(MessageBody::StateSnapshot(snapshot));
+
+        let metrics = protocol.peer_metrics();
+        assert_eq!(metrics.portability_risk_messages_sent, 1);
+        assert_eq!(metrics.fragmentation_risk_messages_sent, 1);
+    }
 
     #[test]
     fn peer_metrics_send_accounting_matches_wire_bytes_and_kinds() {
@@ -4897,12 +5723,10 @@ mod tests {
         ];
         let mut expected_bytes = 0u64;
         for body in &bodies {
-            // `queue_message` stamps the header magic itself; recompute the same
-            // wire size independently (magic does not affect `encoded_len`).
+            // `queue_message` stamps the header conn_id itself; recompute the same
+            // wire size independently (conn_id does not affect `encoded_len`).
             let msg = Message {
-                header: MessageHeader {
-                    magic: protocol.magic,
-                },
+                header: MessageHeader::new(protocol.conn_id),
                 body: body.clone(),
             };
             expected_bytes += msg.encoded_len() as u64;
@@ -4929,10 +5753,10 @@ mod tests {
 
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
-        // A magic mismatch (and, below, the Shutdown state) drops the message for
+        // A conn_id mismatch (and, below, the Shutdown state) drops the message for
         // handling — but receive accounting is counted first, so the byte/packet
-        // counters still advance. Pin the remote magic so the filter is active.
-        protocol.remote_magic = 999;
+        // counters still advance. Pin the remote conn_id so the filter is active.
+        protocol.remote_conn_id = 999;
 
         let bodies = [
             MessageBody::KeepAlive,
@@ -4945,7 +5769,7 @@ mod tests {
         let mut expected_bytes = 0u64;
         for body in &bodies {
             let msg = Message {
-                header: MessageHeader { magic: 123 }, // wrong magic: filtered after counting
+                header: MessageHeader::new(123), // wrong conn_id: filtered after counting
                 body: body.clone(),
             };
             expected_bytes += msg.encoded_len() as u64;
@@ -4967,7 +5791,7 @@ mod tests {
         // protocol-state filter.
         protocol.state = ProtocolState::Shutdown;
         protocol.handle_message(&Message {
-            header: MessageHeader { magic: 999 },
+            header: MessageHeader::new(999),
             body: MessageBody::KeepAlive,
         });
         assert_eq!(
@@ -5044,13 +5868,8 @@ mod tests {
         // Complete sync to generate Synchronizing and Synchronized events
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         let connect_status = vec![ConnectionStatus::default(); 2];
@@ -5084,11 +5903,7 @@ mod tests {
     fn sync_timeout_event_emitted_only_once() {
         let (protocol_config, clock) = mutable_clock_config();
 
-        // Create a protocol with a very short sync timeout
-        let sync_config = SyncConfig {
-            sync_timeout: Some(Duration::from_millis(1)),
-            ..SyncConfig::default()
-        };
+        let sync_config = SyncConfig::default();
 
         let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
             vec![PlayerHandle::new(0)],
@@ -5107,7 +5922,7 @@ mod tests {
         .expect("Failed to create test protocol");
         protocol.synchronize().unwrap();
 
-        advance_test_clock(&clock, Duration::from_millis(2));
+        advance_test_clock(&clock, Duration::from_secs(20) + Duration::from_millis(1));
 
         let connect_status = vec![ConnectionStatus::default(); 2];
 
@@ -5245,7 +6060,6 @@ mod tests {
                 nudge.peer_connect_status, status_first,
                 "the nudge carries the CURRENT connect status"
             );
-            assert!(!nudge.disconnect_requested);
         }
         assert!(
             !queue_has_keep_alive(&protocol),
@@ -5589,7 +6403,6 @@ mod tests {
         let dup_reference = vec![0u8; width];
         let dup_body = Input {
             peer_connect_status: connect_status.clone(),
-            disconnect_requested: false,
             start_frame: Frame::new(3),
             ack_frame: Frame::NULL,
             bytes: try_encode(&dup_reference, std::iter::once(&dup_reference))
@@ -5613,7 +6426,6 @@ mod tests {
         let fresh_bytes = vec![7u8; width];
         let fresh_body = Input {
             peer_connect_status: connect_status,
-            disconnect_requested: false,
             start_frame: Frame::new(6),
             ack_frame: Frame::NULL,
             bytes: try_encode(&fresh_reference, std::iter::once(&fresh_bytes))
@@ -5870,13 +6682,8 @@ mod tests {
         // Complete sync to get to Running state
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
         assert!(protocol.is_running());
 
@@ -5895,7 +6702,6 @@ mod tests {
             start_frame: Frame::new(5), // Gap of 5 when max is 1
             ack_frame: Frame::NULL,
             bytes: vec![1, 2, 3, 4],
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
 
@@ -5935,13 +6741,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up initial state: we have frame 0
@@ -5963,7 +6764,6 @@ mod tests {
             start_frame: Frame::new(1), // Consecutive - gap of 1 is ok
             ack_frame: Frame::NULL,
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
 
@@ -5987,13 +6787,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // The protocol constructor inserts Frame::NULL entry for decoding first input.
@@ -6035,7 +6830,6 @@ mod tests {
             start_frame: Frame::new(0),
             ack_frame: Frame::NULL,
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
 
@@ -6059,13 +6853,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up: we have frame 5
@@ -6087,7 +6876,6 @@ mod tests {
             start_frame: Frame::new(6), // last_recv_frame() + 1 = 6, so 6 >= 6 is ok
             ack_frame: Frame::NULL,
             bytes: encoded,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
 
@@ -6121,10 +6909,8 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             protocol.on_sync_reply(
-                MessageHeader { magic: 999 },
-                SyncReply {
-                    random_reply: random,
-                },
+                MessageHeader::new(999),
+                matching_sync_reply(&protocol, random),
             );
         }
 
@@ -6141,7 +6927,6 @@ mod tests {
             start_frame: Frame::new(1),
             ack_frame: Frame::NULL,
             bytes: vec![1, 2, 3],
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
         let inputs_before = protocol.recv_inputs.len();
@@ -6189,7 +6974,6 @@ mod tests {
             start_frame: Frame::new(1),
             ack_frame: Frame::NULL,
             bytes: bomb,
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
         let inputs_before = protocol.recv_inputs.len();
@@ -6216,7 +7000,6 @@ mod tests {
             start_frame: Frame::new(0),
             ack_frame: Frame::new(0),
             bytes: vec![0],
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default()],
         };
         let inputs_before = protocol.recv_inputs.len();
@@ -6253,10 +7036,8 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
             protocol.on_sync_reply(
-                MessageHeader { magic: 999 },
-                SyncReply {
-                    random_reply: random,
-                },
+                MessageHeader::new(999),
+                matching_sync_reply(&protocol, random),
             );
         }
         protocol.event_queue.clear();
@@ -6279,7 +7060,6 @@ mod tests {
                 &reference,
                 std::iter::once(&malformed_frame),
             ),
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
         let inputs_before = protocol.recv_inputs.len();
@@ -6303,13 +7083,8 @@ mod tests {
         // Complete sync
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            protocol.on_sync_reply(
-                header,
-                SyncReply {
-                    random_reply: random,
-                },
-            );
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
         }
 
         // Set up: we have frame 5
@@ -6326,7 +7101,6 @@ mod tests {
             start_frame: Frame::new(7), // last_recv_frame() + 1 = 6, but we have 7 < 6 is false
             ack_frame: Frame::NULL,
             bytes: vec![1, 2, 3, 4], // Won't be decoded anyway
-            disconnect_requested: false,
             peer_connect_status: vec![ConnectionStatus::default(); 2],
         };
 
@@ -6476,7 +7250,7 @@ mod tests {
         let config = SyncConfig::default();
         assert_eq!(config.num_sync_packets, 5);
         assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
-        assert_eq!(config.sync_timeout, None);
+        assert_eq!(config.sync_timeout, Some(Duration::from_secs(20)));
         assert_eq!(config.running_retry_interval, Duration::from_millis(200));
         assert_eq!(config.keepalive_interval, Duration::from_millis(200));
     }
@@ -6535,10 +7309,8 @@ mod tests {
             };
 
             let reply = Message {
-                header: MessageHeader { magic: 42 },
-                body: MessageBody::SyncReply(SyncReply {
-                    random_reply: random,
-                }),
+                header: MessageHeader::new(42),
+                body: MessageBody::SyncReply(matching_sync_reply(&protocol, random)),
             };
             protocol.handle_message(&reply);
 
@@ -6762,7 +7534,17 @@ mod tests {
     // ==========================================
 
     #[test]
-    fn protocol_with_same_seed_produces_same_magic_number() {
+    fn connection_id_generation_rejects_every_forbidden_shape() {
+        let mut candidates = std::collections::VecDeque::from([0, 0x1234_0000, 0xABCD_1234]);
+
+        let conn_id = draw_valid_conn_id(|| candidates.pop_front().unwrap());
+
+        assert_eq!(conn_id, 0xABCD_1234);
+        assert!(candidates.is_empty(), "all candidates should be consumed");
+    }
+
+    #[test]
+    fn protocol_with_same_seed_produces_same_conn_id() {
         let seed = 12345u64;
         let config = ProtocolConfig::deterministic(seed);
 
@@ -6785,13 +7567,13 @@ mod tests {
         );
 
         assert_eq!(
-            protocol1.magic, protocol2.magic,
-            "Same seed should produce same magic number"
+            protocol1.conn_id, protocol2.conn_id,
+            "Same seed should produce same conn_id number"
         );
     }
 
     #[test]
-    fn protocol_with_different_seeds_produces_different_magic_numbers() {
+    fn protocol_with_different_seeds_produces_different_conn_ids() {
         let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
             2,
@@ -6811,8 +7593,8 @@ mod tests {
         );
 
         assert_ne!(
-            protocol1.magic, protocol2.magic,
-            "Different seeds should produce different magic numbers (with very high probability)"
+            protocol1.conn_id, protocol2.conn_id,
+            "Different seeds should produce different conn_id numbers (with very high probability)"
         );
     }
 
@@ -6828,23 +7610,31 @@ mod tests {
             ProtocolConfig::default(), // No seed
         );
 
-        // Magic should be non-zero
-        assert_ne!(protocol.magic, 0, "Magic number should never be zero");
+        // Connection ID should be non-zero
+        assert_ne!(
+            protocol.conn_id, 0,
+            "Connection ID number should never be zero"
+        );
+        assert_ne!(
+            protocol.conn_id & 0xFFFF,
+            0,
+            "Connection ID low 16 bits must never be zero"
+        );
     }
 
     /// Session-33 round-6 era-fence pin (adjacent-era case): a deterministic
     /// (seeded) endpoint that re-arms for a hot-join rejoin must NOT reuse the
-    /// previous era's magic. A naive rebuild re-seeds identically and reuses it — a
-    /// still-live vacating peer (which holds the old magic as its learned
-    /// `remote_magic`) then answers the rearmed handshake, the endpoint locks onto
+    /// previous era's conn_id. A naive rebuild re-seeds identically and reuses it — a
+    /// still-live vacating peer (which holds the old conn_id as its learned
+    /// `remote_conn_id`) then answers the rearmed handshake, the endpoint locks onto
     /// the doomed peer, and the real rejoiner is filtered out forever. The fence
     /// must also stay deterministic: identical seed + identical history must yield
-    /// the identical rebuilt magic. (The monotonic counter that now backs the fence
+    /// the identical rebuilt conn_id. (The monotonic counter that now backs the fence
     /// also closes the *non-adjacent* multi-era case — see
-    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`.)
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_conn_id`.)
     #[test]
     #[cfg(feature = "hot-join")]
-    fn rearm_for_rejoin_era_fence_never_reuses_previous_magic_and_stays_deterministic() {
+    fn rearm_for_rejoin_era_fence_never_reuses_previous_conn_id_and_stays_deterministic() {
         let seed = 12345u64;
         let mut protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
@@ -6862,10 +7652,10 @@ mod tests {
             SyncConfig::default(),
             ProtocolConfig::deterministic(seed),
         );
-        let old_magic = protocol1.magic;
+        let old_conn_id = protocol1.conn_id;
         assert_eq!(
-            protocol1.magic, protocol2.magic,
-            "precondition: seeded twins start with the identical magic"
+            protocol1.conn_id, protocol2.conn_id,
+            "precondition: seeded twins start with the identical conn_id"
         );
 
         protocol1
@@ -6876,13 +7666,16 @@ mod tests {
             .expect("rearm rebuilds the endpoint");
 
         assert_ne!(
-            protocol1.magic, old_magic,
-            "era fence: the rebuilt endpoint must never reuse the previous era's magic"
+            protocol1.conn_id, old_conn_id,
+            "era fence: the rebuilt endpoint must never reuse the previous era's conn_id"
         );
-        assert_ne!(protocol1.magic, 0, "magic stays non-zero across the rearm");
+        assert_ne!(
+            protocol1.conn_id, 0,
+            "conn_id stays non-zero across the rearm"
+        );
         assert_eq!(
-            protocol1.magic, protocol2.magic,
-            "the era fence preserves determinism: identical seed + history => identical rebuilt magic"
+            protocol1.conn_id, protocol2.conn_id,
+            "the era fence preserves determinism: identical seed + history => identical rebuilt conn_id"
         );
         assert_eq!(
             protocol1.state,
@@ -6891,21 +7684,20 @@ mod tests {
         );
     }
 
-    /// Multi-era magic-recurrence hardening (`N-PLAYER-DESYNC-AUDIT.md`): the era
+    /// Multi-era conn_id-recurrence hardening (`N-PLAYER-DESYNC-AUDIT.md`): the era
     /// fence is a **monotonic** per-endpoint counter, so across many rejoins the
-    /// rebuilt magic never recurs within a 65535-rearm window — not merely
+    /// rebuilt conn_id never recurs while walking the valid 32-bit namespace — not merely
     /// differing from the *immediately-previous* era. The pre-fix fence re-rolled
-    /// a fresh random magic and excluded **only the single previous era's value**,
-    /// so a non-adjacent era could reuse an earlier era's magic; a still-live ghost
-    /// peer from that earlier era (holding it as its learned `remote_magic`) would
+    /// a fresh random conn_id and excluded **only the single previous era's value**,
+    /// so a non-adjacent era could reuse an earlier era's conn_id; a still-live ghost
+    /// peer from that earlier era (holding it as its learned `remote_conn_id`) would
     /// then answer the rebuilt handshake and wedge the rejoin. This test drives far
-    /// more rejoins than the u16 birthday bound (~300), so the pre-fix random fence
-    /// reuses an earlier era's magic with overwhelming probability (**RED**), while
-    /// the monotonic fence is collision-free by construction (**GREEN**). This is
-    /// the red-green security-invariant pin for the fix.
+    /// enough rejoins to exercise the deterministic fence while keeping the test
+    /// bounded. The successor is collision-free across all `2^32 - 2^16` valid
+    /// connection IDs by construction.
     #[test]
     #[cfg(feature = "hot-join")]
-    fn rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic() {
+    fn rearm_for_rejoin_era_fence_never_reuses_any_recent_era_conn_id() {
         let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
             2,
@@ -6915,41 +7707,42 @@ mod tests {
             ProtocolConfig::deterministic(0x00C0_FFEE),
         );
 
-        // Well above the u16 birthday threshold (~300): the pre-fix random re-roll
-        // collides with an earlier era with > 99.9% probability over this many
-        // rejoins (P(no collision) ~ e^-8), while the monotonic counter never does
-        // (it walks 65535 distinct non-zero values before any repeat).
+        // A bounded but meaningful sample of the 32-bit successor sequence.
         const REJOINS: usize = 1024;
 
         let mut seen = std::collections::HashSet::with_capacity(REJOINS + 1);
-        seen.insert(protocol.magic);
-        let mut prev = protocol.magic;
+        seen.insert(protocol.conn_id);
+        let mut prev = protocol.conn_id;
         for i in 0..REJOINS {
             protocol
                 .rearm_for_rejoin()
                 .expect("rearm rebuilds the endpoint");
-            let magic = protocol.magic;
-            assert_ne!(magic, 0, "magic stays non-zero at rejoin {i}");
+            let conn_id = protocol.conn_id;
+            assert!(
+                super::super::is_valid_conn_id(conn_id),
+                "conn_id stays v1-valid at rejoin {i}"
+            );
             assert_ne!(
-                magic, prev,
-                "magic differs from the immediately-previous era at rejoin {i}"
+                conn_id, prev,
+                "conn_id differs from the immediately-previous era at rejoin {i}"
             );
             assert!(
-                seen.insert(magic),
-                "era fence breached: magic {magic} recurred within {REJOINS} rejoins \
+                seen.insert(conn_id),
+                "era fence breached: conn_id {conn_id} recurred within {REJOINS} rejoins \
                  (a still-live ghost from that earlier era could answer it) at rejoin {i}"
             );
-            prev = magic;
+            prev = conn_id;
         }
     }
 
-    /// The monotonic era fence advances the magic by exactly one (wrapping past the
+    /// The monotonic era fence advances the conn_id by exactly one (wrapping past the
     /// reserved `0`) on every rejoin — a deterministic, self-evidently
     /// collision-free step that stays reproducible under a seed. RED on the pre-fix
-    /// random re-roll (which equals `old + 1` only by a 1-in-65535 fluke).
+    /// random re-roll (which equals the valid successor only with probability
+    /// `1 / (2^32 - 2^16)`).
     #[test]
     #[cfg(feature = "hot-join")]
-    fn rearm_for_rejoin_era_magic_advances_by_monotonic_step() {
+    fn rearm_for_rejoin_era_conn_id_advances_by_monotonic_step() {
         let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
             2,
@@ -6959,31 +7752,28 @@ mod tests {
             ProtocolConfig::deterministic(7),
         );
         for i in 0..8 {
-            let old = protocol.magic;
+            let old = protocol.conn_id;
             protocol
                 .rearm_for_rejoin()
                 .expect("rearm rebuilds the endpoint");
-            let expected = match old.wrapping_add(1) {
-                0 => 1,
-                next => next,
-            };
+            let expected = super::super::next_conn_id(old);
             assert_eq!(
-                protocol.magic, expected,
-                "rejoin {i}: magic advances by a monotonic step (old {old} -> {expected})"
+                protocol.conn_id, expected,
+                "rejoin {i}: conn_id advances by a monotonic step (old {old} -> {expected})"
             );
         }
     }
 
-    /// Wrap-around pin for the monotonic era fence: when the previous era's magic
-    /// is `u16::MAX`, the next era must skip the reserved `0` and land on `1` — a
-    /// `0` would violate the never-zero magic invariant and, on the wire, collide
-    /// with the "magic not yet learned" sentinel (`remote_magic == 0` accepts any
-    /// packet). The boundary is forced directly (walking 65535 real rejoins would
+    /// Wrap-around pin for the monotonic era fence: when the previous era's conn_id
+    /// is `u32::MAX`, the next era must skip the reserved `0` and land on `1` — a
+    /// `0` would violate the never-zero conn_id invariant and, on the wire, collide
+    /// with the "conn_id not yet learned" sentinel (`remote_conn_id == 0` accepts
+    /// only synchronization traffic). The boundary is forced directly (walking the full namespace would
     /// be far too slow). This pins the `0 => 1` arm: mutating it to `0 => 0` turns
     /// this test RED.
     #[test]
     #[cfg(feature = "hot-join")]
-    fn rearm_for_rejoin_era_magic_wraps_past_zero_to_one() {
+    fn rearm_for_rejoin_era_conn_id_wraps_past_zero_to_one() {
         let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
             2,
@@ -6992,27 +7782,48 @@ mod tests {
             SyncConfig::default(),
             ProtocolConfig::deterministic(1),
         );
-        protocol.magic = u16::MAX;
+        protocol.conn_id = u32::MAX;
         protocol
             .rearm_for_rejoin()
             .expect("rearm rebuilds the endpoint");
         assert_eq!(
-            protocol.magic, 1,
-            "u16::MAX + 1 must skip the reserved 0 and land on 1"
+            protocol.conn_id, 1,
+            "u32::MAX + 1 must skip the reserved 0 and land on 1"
         );
-        assert_ne!(protocol.magic, 0, "the wrapped era magic is never zero");
+        assert_ne!(protocol.conn_id, 0, "the wrapped era conn_id is never zero");
 
         // The counter keeps stepping monotonically from there.
         protocol
             .rearm_for_rejoin()
             .expect("rearm rebuilds the endpoint");
         assert_eq!(
-            protocol.magic, 2,
+            protocol.conn_id, 2,
             "the counter continues monotonically after the wrap"
         );
     }
 
-    /// The monotonic magic no longer consults the protocol RNG, so the RNG carry
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn rearm_for_rejoin_era_conn_id_skips_forbidden_low_bits() {
+        let mut protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            ProtocolConfig::deterministic(1),
+        );
+        protocol.conn_id = 0x0000_FFFF;
+
+        protocol
+            .rearm_for_rejoin()
+            .expect("rearm rebuilds the endpoint");
+
+        assert_eq!(protocol.conn_id, 0x0001_0001);
+        assert!(super::super::is_valid_conn_id(protocol.conn_id));
+    }
+
+    /// The monotonic conn_id no longer consults the protocol RNG, so the RNG carry
     /// across the rebuild (`rebuilt.protocol_rng = self.protocol_rng.take()`) now
     /// exists solely to keep the unrelated sync-request IDs reproducible and
     /// flowing: a rearmed seeded endpoint CONTINUES its stream rather than
@@ -7077,19 +7888,19 @@ mod tests {
     /// End-to-end consequence of the monotonic era fence (the audit's "the
     /// stale-era packet is still filtered AND a live packet is not"): a still-live
     /// ghost peer that synchronized against an EARLY era of our endpoint (and so
-    /// holds that era's magic as its learned `remote_magic`) filters out every
-    /// packet the rebuilt endpoint now sends under its current-era magic — so it
-    /// can never answer and wedge the rejoin — while a packet carrying the magic it
+    /// holds that era's conn_id as its learned `remote_conn_id`) filters out every
+    /// packet the rebuilt endpoint now sends under its current-era conn_id — so it
+    /// can never answer and wedge the rejoin — while a packet carrying the conn_id it
     /// actually learned is still accepted (the filter discriminates, it does not
     /// blanket-drop). The red-green proof that the current era is distinct from
     /// every recent era lives in
-    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_magic`; this test
+    /// `rearm_for_rejoin_era_fence_never_reuses_any_recent_era_conn_id`; this test
     /// pins the wire-level behaviour that distinctness buys. (It passes on both
     /// pre- and post-fix code — the filter logic is unchanged; only the upstream
     /// era distinctness the fix guarantees is what this behaviour relies on.)
     #[test]
     #[cfg(feature = "hot-join")]
-    fn rearm_for_rejoin_ghost_from_early_era_filters_rebuilt_endpoints_current_magic() {
+    fn rearm_for_rejoin_ghost_from_early_era_filters_rebuilt_endpoints_current_conn_id() {
         // Our endpoint walks through several eras of rejoin.
         let mut ours: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
@@ -7099,23 +7910,23 @@ mod tests {
             SyncConfig::default(),
             ProtocolConfig::deterministic(99),
         );
-        let early_era_magic = ours.magic;
-        let mut prior = vec![early_era_magic];
+        let early_era_conn_id = ours.conn_id;
+        let mut prior = vec![early_era_conn_id];
         for _ in 0..5 {
             ours.rearm_for_rejoin()
                 .expect("rearm rebuilds the endpoint");
-            prior.push(ours.magic);
+            prior.push(ours.conn_id);
         }
-        let current_magic = ours.magic;
+        let current_conn_id = ours.conn_id;
         // The current era is distinct from EVERY prior era (the fence's guarantee).
         let priors_before_current = &prior[..prior.len() - 1];
         assert!(
-            !priors_before_current.contains(&current_magic),
-            "current era magic {current_magic} must differ from all prior eras {priors_before_current:?}"
+            !priors_before_current.contains(&current_conn_id),
+            "current era conn_id {current_conn_id} must differ from all prior eras {priors_before_current:?}"
         );
 
         // A ghost peer that synchronized against our EARLIEST era, so it holds that
-        // era's magic as its learned `remote_magic`.
+        // era's conn_id as its learned `remote_conn_id`.
         let (ghost_config, ghost_clock) = mutable_clock_config();
         let mut ghost: UdpProtocol<TestConfig> = create_protocol_with_config(
             vec![PlayerHandle::new(0)],
@@ -7129,29 +7940,23 @@ mod tests {
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *ghost.sync_random_requests.iter().next().unwrap();
             ghost.on_sync_reply(
-                MessageHeader {
-                    magic: early_era_magic,
-                },
-                SyncReply {
-                    random_reply: random,
-                },
+                MessageHeader::new(early_era_conn_id),
+                matching_sync_reply(&ghost, random),
             );
         }
-        assert_eq!(ghost.remote_magic, early_era_magic);
+        assert_eq!(ghost.remote_conn_id, early_era_conn_id);
 
         // The rebuilt endpoint's current-era packet is FILTERED by the ghost: no
         // observable state change (the ghost cannot answer it -> cannot wedge us).
         ghost.send_queue.clear();
         let last_recv_before = ghost.last_recv_time;
         ghost.handle_message(&Message {
-            header: MessageHeader {
-                magic: current_magic,
-            },
+            header: MessageHeader::new(current_conn_id),
             body: MessageBody::KeepAlive,
         });
         assert!(
             ghost.send_queue.is_empty(),
-            "ghost must filter the rebuilt endpoint's current-era magic"
+            "ghost must filter the rebuilt endpoint's current-era conn_id"
         );
         assert_eq!(
             ghost.last_recv_time, last_recv_before,
@@ -7159,12 +7964,10 @@ mod tests {
         );
 
         // The filter discriminates rather than blanket-dropping: a packet carrying
-        // the magic the ghost actually learned is still accepted.
+        // the conn_id the ghost actually learned is still accepted.
         let accepted_recv_time = advance_test_clock(&ghost_clock, Duration::from_millis(1));
         ghost.handle_message(&Message {
-            header: MessageHeader {
-                magic: early_era_magic,
-            },
+            header: MessageHeader::new(early_era_conn_id),
             body: MessageBody::KeepAlive,
         });
         assert_eq!(
@@ -7173,7 +7976,7 @@ mod tests {
         );
         assert!(
             ghost.last_recv_time > last_recv_before,
-            "ghost still accepts a packet carrying its learned magic"
+            "ghost still accepts a packet carrying its learned conn_id"
         );
     }
 
@@ -7256,9 +8059,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_magic_is_never_zero() {
-        // Test that the magic number generation loop correctly handles
-        // the case where the first random value might be zero
+    fn protocol_conn_id_is_always_v1_valid() {
         for seed in 0..100 {
             let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
                 vec![PlayerHandle::new(0)],
@@ -7268,10 +8069,9 @@ mod tests {
                 SyncConfig::default(),
                 ProtocolConfig::deterministic(seed),
             );
-            assert_ne!(
-                protocol.magic, 0,
-                "Magic number should never be zero (seed={})",
-                seed
+            assert!(
+                super::super::is_valid_conn_id(protocol.conn_id),
+                "connection ID should satisfy every v1 constraint (seed={seed})"
             );
         }
     }
@@ -7346,10 +8146,8 @@ mod tests {
         protocol.synchronize().unwrap();
         for _ in 0..TEST_NUM_SYNC_PACKETS {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let header = MessageHeader::new(999);
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
         }
         assert!(protocol.is_running());
@@ -7643,15 +8441,152 @@ mod tests {
         assert!(protocol.send_queue.is_empty());
     }
 
+    fn drop_control_messages() -> [DropControlMessage; 5] {
+        use crate::network::messages::{
+            DropAbortReason, DropOperationId, DropReceipt, DropReportStage, DropTarget,
+        };
+
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 3,
+            sequence: 4,
+            target_set_digest: 5,
+        };
+        [
+            DropControlMessage::Prepare(DropPrepare {
+                operation,
+                targets: vec![DropTarget {
+                    handle: 1,
+                    generation: 2,
+                }],
+                participants: vec![0, 2],
+            }),
+            DropControlMessage::Report(DropReport {
+                operation,
+                participant: 2,
+                stage: DropReportStage::Inventory,
+                exposed_confirmed: Frame::new(10),
+                cut: Frame::NULL,
+                cut_digest: 0,
+                receipts: vec![DropReceipt {
+                    target: 1,
+                    available_from: Frame::new(3),
+                    contiguous_through: Frame::new(11),
+                }],
+            }),
+            DropControlMessage::Backfill(DropBackfill {
+                operation,
+                chunk_index: 0,
+                chunk_count: 1,
+                start_frame: Frame::new(11),
+                frame_count: 1,
+                bytes: vec![7],
+            }),
+            DropControlMessage::Commit(DropCommit {
+                operation,
+                cut: Frame::new(11),
+                cut_digest: 9,
+            }),
+            DropControlMessage::Abort(DropAbort {
+                operation,
+                reason: DropAbortReason::Superseded,
+            }),
+        ]
+    }
+
+    #[test]
+    fn drop_control_carrier_is_running_only_and_fifo() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        for message in drop_control_messages() {
+            protocol.send_drop_control_message(message);
+        }
+        assert!(protocol.send_queue.is_empty());
+
+        protocol.force_running_for_tests();
+        let messages = drop_control_messages();
+        for message in messages.iter().cloned() {
+            protocol.send_drop_control_message(message);
+        }
+        assert_eq!(protocol.send_queue.len(), messages.len());
+        for kind in [
+            crate::MessageKind::DropPrepare,
+            crate::MessageKind::DropReport,
+            crate::MessageKind::DropBackfill,
+            crate::MessageKind::DropCommit,
+            crate::MessageKind::DropAbort,
+        ] {
+            assert_eq!(protocol.messages_sent_by_kind.get(kind), 1);
+        }
+
+        for message in messages.iter().cloned() {
+            protocol.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: message.into_body(),
+            });
+        }
+        let received: Vec<_> = protocol.take_received_drop_messages().collect();
+        assert_eq!(received, messages);
+        for kind in [
+            crate::MessageKind::DropPrepare,
+            crate::MessageKind::DropReport,
+            crate::MessageKind::DropBackfill,
+            crate::MessageKind::DropCommit,
+            crate::MessageKind::DropAbort,
+        ] {
+            assert_eq!(protocol.messages_received_by_kind.get(kind), 1);
+        }
+        assert_eq!(protocol.take_received_drop_messages().count(), 0);
+    }
+
+    #[test]
+    fn drop_control_mailbox_stays_within_receive_poll_bound() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        protocol.force_running_for_tests();
+        let message = drop_control_messages()
+            .into_iter()
+            .nth(3)
+            .expect("drop control fixture has a commit");
+
+        for _ in 0..=MAX_RECEIVED_DROP_MESSAGES {
+            protocol.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: message.clone().into_body(),
+            });
+        }
+
+        assert_eq!(
+            protocol.take_received_drop_messages().count(),
+            MAX_RECEIVED_DROP_MESSAGES
+        );
+        assert!(!protocol.drop_mailbox_warning_sent);
+    }
+
+    #[test]
+    fn drop_control_receive_is_ignored_while_synchronizing() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 3, 1, 8);
+        protocol.synchronize().unwrap();
+
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(1),
+            body: drop_control_messages()
+                .into_iter()
+                .next()
+                .expect("drop control fixture is non-empty")
+                .into_body(),
+        });
+
+        assert_eq!(protocol.take_received_drop_messages().count(), 0);
+    }
+
     // ==========================================
     // Hot-Join Message Handling Tests
     // ==========================================
 
     /// Drives a protocol through synchronization into the `Running` state. After
-    /// `complete_test_sync` the `remote_magic` is the SyncReply header magic (999),
-    /// so messages delivered with that magic pass `handle_message`'s magic filter.
+    /// `complete_test_sync` the `remote_conn_id` is the SyncReply header conn_id (999),
+    /// so messages delivered with that conn_id pass `handle_message`'s conn_id filter.
     #[cfg(feature = "hot-join")]
-    const HOT_JOIN_REMOTE_MAGIC: u16 = 999;
+    const HOT_JOIN_REMOTE_CONN_ID: u32 = 999;
 
     #[cfg(feature = "hot-join")]
     fn running_protocol() -> UdpProtocol<TestConfig> {
@@ -7666,9 +8601,7 @@ mod tests {
     #[cfg(feature = "hot-join")]
     fn deliver(protocol: &mut UdpProtocol<TestConfig>, body: MessageBody) {
         protocol.handle_message(&Message {
-            header: MessageHeader {
-                magic: HOT_JOIN_REMOTE_MAGIC,
-            },
+            header: MessageHeader::new(HOT_JOIN_REMOTE_CONN_ID),
             body,
         });
     }
@@ -8057,7 +8990,7 @@ mod tests {
 // - INV-PROTO-1: State transitions are valid (follow state diagram)
 // - INV-PROTO-2: sync_remaining_roundtrips never exceeds num_sync_packets
 // - INV-PROTO-3: sync_remaining_roundtrips is non-negative (decrements correctly)
-// - INV-PROTO-4: Magic number is never zero
+// - INV-PROTO-4: Connection ID number is never zero
 // - INV-PROTO-5: State predicates are consistent (is_running, is_synchronized)
 // - INV-PROTO-6: Input frame sequence is monotonic
 // - INV-PROTO-7: Checksum history is bounded
@@ -8135,14 +9068,16 @@ mod property_tests {
         .expect("Failed to create test protocol")
     }
 
+    fn matching_sync_reply(protocol: &UdpProtocol<TestConfig>, random_reply: u32) -> SyncReply {
+        protocol.local_handshake.reply(random_reply)
+    }
+
     /// Completes the sync process by simulating all required sync roundtrips.
     fn complete_sync(protocol: &mut UdpProtocol<TestConfig>, num_packets: u32) {
         for _ in 0..num_packets {
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            let reply = SyncReply {
-                random_reply: random,
-            };
+            let header = MessageHeader::new(999);
+            let reply = matching_sync_reply(protocol, random);
             protocol.on_sync_reply(header, reply);
         }
     }
@@ -8380,8 +9315,8 @@ mod property_tests {
 
             // Complete one roundtrip
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            let reply = SyncReply { random_reply: random };
+            let header = MessageHeader::new(999);
+            let reply = matching_sync_reply(&protocol, random);
             protocol.on_sync_reply(header, reply);
 
             prop_assert_eq!(
@@ -8417,8 +9352,8 @@ mod property_tests {
             // Send reply with random value that doesn't match any request
             // (unless by coincidence, which is astronomically unlikely)
             if !protocol.sync_random_requests.contains(&invalid_random) {
-                let header = MessageHeader { magic: 999 };
-                let reply = SyncReply { random_reply: invalid_random };
+                let header = MessageHeader::new(999);
+                let reply = matching_sync_reply(&protocol, invalid_random);
                 protocol.on_sync_reply(header, reply);
 
                 prop_assert_eq!(
@@ -8431,7 +9366,7 @@ mod property_tests {
     }
 
     // ========================================================================
-    // INV-PROTO-4: Magic number invariants
+    // INV-PROTO-4: Connection ID number invariants
     // ========================================================================
 
     proptest! {
@@ -8440,9 +9375,9 @@ mod property_tests {
             ..ProptestConfig::default()
         })]
 
-        /// INV-PROTO-4: Magic number is never zero regardless of seed
+        /// INV-PROTO-4: connection IDs satisfy every v1 header constraint.
         #[test]
-        fn prop_magic_never_zero(seed in seed_strategy()) {
+        fn prop_conn_id_is_valid(seed in seed_strategy()) {
             let protocol: UdpProtocol<TestConfig> = create_protocol_with_config(
                 vec![PlayerHandle::new(0)],
                 2,
@@ -8452,12 +9387,15 @@ mod property_tests {
                 ProtocolConfig::deterministic(seed),
             );
 
-            prop_assert_ne!(protocol.magic, 0, "Magic number must never be zero");
+            prop_assert!(
+                super::super::is_valid_conn_id(protocol.conn_id),
+                "connection ID must be nonzero with nonzero low 16 bits"
+            );
         }
 
-        /// INV-PROTO-4: Same seed produces same magic (determinism)
+        /// INV-PROTO-4: Same seed produces same conn_id (determinism)
         #[test]
-        fn prop_magic_deterministic(seed in seed_strategy()) {
+        fn prop_conn_id_deterministic(seed in seed_strategy()) {
             let protocol1: UdpProtocol<TestConfig> = create_protocol_with_config(
                 vec![PlayerHandle::new(0)],
                 2,
@@ -8477,9 +9415,9 @@ mod property_tests {
             );
 
             prop_assert_eq!(
-                protocol1.magic,
-                protocol2.magic,
-                "Same seed must produce same magic"
+                protocol1.conn_id,
+                protocol2.conn_id,
+                "Same seed must produce same conn_id"
             );
         }
     }
@@ -8796,8 +9734,8 @@ mod property_tests {
 
             // Get a valid random value
             let random = *protocol.sync_random_requests.iter().next().unwrap();
-            let header = MessageHeader { magic: 999 };
-            let reply = SyncReply { random_reply: random };
+            let header = MessageHeader::new(999);
+            let reply = matching_sync_reply(&protocol, random);
 
             // First reply decrements
             protocol.on_sync_reply(header, reply);
@@ -8838,7 +9776,7 @@ mod property_tests {
 
             // Try to handle a checksum report
             let msg = Message {
-                header: MessageHeader { magic: 123 },
+                header: MessageHeader::new(123),
                 body: MessageBody::ChecksumReport(ChecksumReport {
                     frame: Frame::new(frame),
                     checksum,
@@ -9103,7 +10041,6 @@ mod property_tests {
                 start_frame: Frame::new(0),
                 ack_frame: Frame::NULL,
                 bytes: encoded,
-                disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
             };
 
@@ -9326,7 +10263,6 @@ mod property_tests {
                 start_frame: Frame::new(0),
                 ack_frame: Frame::NULL,
                 bytes: encoded,
-                disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); num_players],
             };
 
@@ -9417,7 +10353,6 @@ mod property_tests {
                 start_frame: Frame::new(gap_frame),
                 ack_frame: Frame::NULL,
                 bytes: vec![1, 2, 3, 4], // Won't be decoded
-                disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
             };
 
@@ -9503,7 +10438,6 @@ mod property_tests {
                 start_frame: Frame::new(next_frame),
                 ack_frame: Frame::NULL,
                 bytes: encoded,
-                disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
             };
 
@@ -9575,7 +10509,6 @@ mod property_tests {
                 start_frame: Frame::new(start_frame),
                 ack_frame: Frame::NULL,
                 bytes: encoded,
-                disconnect_requested: false,
                 peer_connect_status: vec![ConnectionStatus::default(); 2],
             };
 

@@ -2183,6 +2183,9 @@ impl<T: Config> SpectatorSession<T> {
             Event::SyncTimeout { elapsed_ms } => {
                 self.enqueue_event(FortressEvent::SyncTimeout { addr, elapsed_ms });
             },
+            Event::Incompatible { reason } => {
+                self.enqueue_event(FortressEvent::IncompatibleSession { addr, reason });
+            },
             // add the input and all associated information
             Event::Input {
                 input,
@@ -2446,7 +2449,7 @@ mod tests {
     use super::*;
     use crate::network::{
         compression,
-        messages::{Input, MessageBody, MessageHeader},
+        messages::{Goodbye, Input, MessageBody, MessageHeader},
     };
     use crate::{Config, Message, NonBlockingSocket, SessionBuilder};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2557,23 +2560,13 @@ mod tests {
         player_inputs: [u8; 2],
         peer_connect_status: Vec<ConnectionStatus>,
     ) -> Message {
-        spectator_input_message_with_disconnect(frame, player_inputs, peer_connect_status, false)
-    }
-
-    fn spectator_input_message_with_disconnect(
-        frame: Frame,
-        player_inputs: [u8; 2],
-        peer_connect_status: Vec<ConnectionStatus>,
-        disconnect_requested: bool,
-    ) -> Message {
         let input_bytes = vec![player_inputs[0], player_inputs[1]];
         let encoded = compression::encode(&[0_u8; 2], std::iter::once(&input_bytes));
 
         Message {
-            header: MessageHeader { magic: 1 },
+            header: MessageHeader::new(1),
             body: MessageBody::Input(Input {
                 peer_connect_status,
-                disconnect_requested,
                 start_frame: frame,
                 ack_frame: Frame::NULL,
                 bytes: encoded,
@@ -2600,14 +2593,13 @@ mod tests {
         player_inputs: [u8; 2],
         peer_connect_status: Vec<ConnectionStatus>,
     ) {
-        let msg = spectator_input_message_with_disconnect(
-            frame,
-            player_inputs,
-            peer_connect_status,
-            true,
-        );
+        let msg = spectator_input_message(frame, player_inputs, peer_connect_status);
         session.hosts[host_index].force_running_for_tests();
         session.hosts[host_index].handle_message(&msg);
+        session.hosts[host_index].handle_message(&Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::Goodbye(Goodbye { reason: 0 }),
+        });
     }
 
     // Helper function to create a spectator session for testing

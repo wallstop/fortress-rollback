@@ -14,16 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-12
+
 ### Added
 
 - `SessionMetrics::unknown_source_packets` counts decoded protocol messages received from addresses that are not configured endpoints for a P2P or spectator session. The first such message also emits a `NetworkProtocol` warning with its source address; later warnings are suppressed for the session while the cumulative counter continues rising. This makes stale traffic, source spoofing, and NAT rebinding distinguishable from pure peer silence. Malformed datagrams rejected by a socket before decoding remain outside this session-level counter.
+- `network::codec::{encode_framed, FrameDecoder}` provide bounded u32-little-endian message framing for TCP and other raw byte streams. The incremental decoder accepts partial and concatenated reads, yields at most one message per call with exact consumption accounting, rejects zero or over-64-MiB declarations before allocation, and remains poisoned after malformed input until reset for a new connection. Datagram wire bytes are unchanged.
 
 ### Changed
 
+- **Breaking:** network packets now use protocol-v1 framing: sentinel bytes `F5 52`, an exact version byte, reserved flags, and a validated 32-bit connection ID precede the fixed body discriminant. Version 1 rejects legacy 0.9 unversioned packets in both directions; built-in UDP adapters classify rejected legacy/version/flag/sentinel/malformed datagrams and report at most one warning per rejection family per receive poll. Custom raw-byte transports should use `network::codec::decode_message` and `classify_wire_bytes`. The sync request and reply now carry a fixed-width session configuration block and canonical digest; peers with different player counts, serialized input widths, frame rates, prediction windows, checksum intervals, protocol feature sets, or compatibility floors stop synchronizing and emit the new `FortressEvent::IncompatibleSession` with an `IncompatibleSessionReason`. The exhaustive `FortressEvent` and `EventKind` enums both gain `IncompatibleSession` variants and require new match arms. Network startup rejects handshake fields that cannot fit their fixed wire widths and rejects `DesyncDetection::On { interval: 0 }`, because zero encodes disabled detection. `DisconnectBehavior` remains local policy and is intentionally excluded. The internal wire vocabulary and public `MessageKind` categories now retain hot-join tags 10–16 in every build so discriminants are feature-independent; builds without `hot-join` recognize and reject those bodies rather than treating their tags as unknown. The dead `Input.disconnect_requested` wire byte is removed and tag 17 is a best-effort sender-leaving `Goodbye`, sent three times by explicit `disconnect_player` so the remote `Disconnected` event no longer waits for silence timeout. Graceful-drop tags 18–22 add bounded prepare, inventory/ready/committed reports, retained-input backfill, commit, and abort messages. `remove_player` and automatic `ContinueWithout` removal now start an asynchronous all-survivor certificate instead of freezing locally from connection-status gossip; applications must poll until `PeerDropped` proves commit, while participant loss, unavailable/conflicting history, resource refusal, or timeout fails closed without emitting the event.
+- **Breaking:** `SyncConfig::default().sync_timeout` is now `Some(Duration::from_secs(20))` instead of `None`. Sessions using the default configuration emit `FortressEvent::SyncTimeout` after 20 seconds of unsuccessful synchronization while continuing to retry. Set `sync_timeout: None` explicitly to retain unlimited retries without the diagnostic event.
 - **Breaking:** `ChaosSocket::with_clock()` callbacks now return `web_time::Instant` instead of `std::time::Instant`, allowing the default clock to run on browser `wasm32-unknown-unknown` without panicking. Browser callers with an injected clock must return `web_time::Instant`; native and Emscripten callers require no change because `web_time` re-exports `std::time::Instant` on those targets.
 
 ### Fixed
 
+- **Pre-existing:** coordinated graceful drop no longer rewrites a frame another survivor already exposed as confirmed. Survivors hold confirmation, exchange exact retained target-input ranges, backfill missing suffixes, and atomically freeze at a non-retracting certified cut. Commits are generation-fenced, idempotent, retransmitted/relayed, and concurrent operations serialize deterministically. The minimized lossy N=5 corpus and the one-way minority-partition census now pass without confirmed-input, state, checksum, or desync divergence; an isolated minority fails closed.
+- **Pre-existing:** the bounded network-message decoder now rejects negative non-`NULL` connection-status and floor-gossip frames, plus every negative checksum-report frame, before they can reach protocol or session state. `Frame::NULL` remains valid only where it represents an absent advisory gossip value; valid non-negative frame encodings and interoperability are unchanged.
 - **Pre-existing:** input recovery at the configured redundancy limit no longer overwrites rollback history when a full retransmission batch arrives before the normal confirmed-frame discard pass. Full input rings now reclaim only history outside the global rollback window and retain a displaced floor input in one bounded side slot, so an exact 128-entry default batch can recover without queue corruption or divergence; the next entry still fails closed at `ProtocolConfig::pending_output_limit`. Rollback and synctest construction, plus runtime input-delay increases, now reject configurations where `max_prediction + input_delay >= queue_length`. A recovery overlap that cannot reclaim a frame at or below the global floor is rejected without mutation and halts the session fail-closed; the refusal no longer advances receipt state for an input the queue did not retain.
 - **Pre-existing:** a stale input retransmission whose delta reference had already aged out now re-acknowledges the receiver's contiguous input high-water and applies the packet's independent piggyback acknowledgement. Previously that packet still merged connection-status gossip but emitted no acknowledgement; if the earlier cumulative ACK was lost, the sender retained an already-received pending frame forever, both sides could exhaust their prediction windows, and an otherwise healthy N-peer session remained `Running` while confirmation stayed pinned even after the network healed.
 - **Pre-existing:** `DisconnectBehavior::Halt` now freezes each `P2PSession::confirmed_frame()` at its safe pre-disconnect local bound, preserving the already-confirmed shared prefix. Previously, removing dropped slots from the confirmation fold could expose up to `max_prediction` speculative frames with fabricated default inputs as confirmed, producing different replay/checksum history on opposite sides of a partition even though every session halted. Halt remains terminal until the application rebuilds the session; `ContinueWithout` behavior is unchanged.
@@ -87,10 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     that loses its snapshot or ack fails cleanly (retryable) rather than desyncing. A reserved-slot
     endpoint whose synchronized-but-never-joined peer dies is re-armed on its disconnect timeout, so a
     fresh joiner session from the same address can always be served (a dead joiner cannot permanently
-    poison its slot's endpoint). Each such re-arm advances the endpoint's packet-filter `magic` as a
-    monotonic per-endpoint era counter, so a still-live peer from *any* recent era can never answer (and
-    wedge) the rebuilt handshake — collision is impossible across a 65535-rejoin window, not merely with
-    the immediately-previous era. Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
+    poison its slot's endpoint). Each such re-arm advances the endpoint's packet-filter connection ID as
+    a monotonic per-endpoint era counter, so a still-live peer from *any* recent era can never answer (and
+    wedge) the rebuilt handshake — collision is impossible across the `2^32 - 2^16` valid-ID namespace,
+    not merely with the immediately-previous era. Requires `max_prediction >= 1` (lockstep hot-join is rejected at build
     time).
   - **N-peer meshes (3 or more machines) are supported end-to-end**, for both first-time joins of
     build-time reserved slots and re-joins/reconnections of gracefully-dropped slots: the serving host
@@ -152,7 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packets_sent` / `packets_received`, a per-`MessageKind` breakdown of each direction
   (`messages_sent_by_kind` / `messages_received_by_kind`, both `MessageKindCounts` serializing as a
   self-describing label map, with `total()` equal to the matching packet counter), input
-  `input_bytes_pre_compression` / `input_bytes_post_compression` totals, and the instantaneous
+  `input_bytes_pre_compression` / `input_bytes_post_compression` totals; the saturating
+  `portability_risk_messages_sent` / `fragmentation_risk_messages_sent` counters record messages
+  at or above the 1,200-byte cross-transport budget and 1,472-byte IPv4/UDP fragmentation boundary,
+  respectively, with one warning/alarm per endpoint era; and the instantaneous
   `pending_output_len`, `pending_checksums_len`, `ping_ms`, and `remote_frame_advantage` gauges. `MessageKind`
   is a payload-free mirror of the protocol's wire messages (`as_str()`, `ALL`, `COUNT`); `PeerMetrics` is
   `#[non_exhaustive]` and offers `to_json()` / `to_json_pretty()` under the `json` feature. Byte counts are
@@ -742,7 +752,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.9"
+fortress-rollback = "0.10"
 ```
 
 ### Import Path Change
@@ -802,7 +812,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/wallstop/fortress-rollback/compare/v0.7.0...v0.8.0

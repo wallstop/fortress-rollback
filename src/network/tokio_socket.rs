@@ -100,7 +100,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! fortress-rollback = { version = "0.9", features = ["tokio"] }
+//! fortress-rollback = { version = "0.10", features = ["tokio"] }
 //! ```
 //!
 //! [`UdpNonBlockingSocket`]: crate::UdpNonBlockingSocket
@@ -110,7 +110,7 @@ use std::net::SocketAddr;
 
 use tokio::net::UdpSocket;
 
-use crate::network::buffer::zeroed_buffer;
+use crate::network::buffer::{report_send_buffer_too_small, zeroed_buffer};
 use crate::network::codec;
 use crate::network::socket_receive;
 use crate::report_violation;
@@ -400,7 +400,7 @@ impl TokioUdpSocket {
     /// let mut socket = TokioUdpSocket::bind_to_port(7000).await?;
     /// let target: SocketAddr = "192.168.1.2:7000".parse()?;
     /// let msg = Message {
-    ///     header: MessageHeader { magic: 0x1234 },
+    ///     header: MessageHeader::new(0x1234),
     ///     body: MessageBody::KeepAlive,
     /// };
     ///
@@ -455,12 +455,7 @@ impl TokioUdpSocket {
                 buf
             },
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::NetworkProtocol,
-                    "Message too large for send buffer ({} bytes), falling back to allocation.",
-                    provided
-                );
+                report_send_buffer_too_small(msg, provided);
                 match codec::encode(msg) {
                     Ok(buf) => {
                         self.send_encoded_packet_async(&buf, addr).await;
@@ -567,12 +562,7 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
         let len = match codec::encode_into(msg, &mut self.send_buffer) {
             Ok(len) => len,
             Err(codec::CodecError::BufferTooSmall { provided, .. }) => {
-                report_violation!(
-                    ViolationSeverity::Warning,
-                    ViolationKind::NetworkProtocol,
-                    "Message too large for send buffer ({} bytes), falling back to allocation. Consider reducing input struct size.",
-                    provided
-                );
+                report_send_buffer_too_small(msg, provided);
                 // Fall back to allocating encode
                 match codec::encode(msg) {
                     Ok(buf) => {
@@ -799,7 +789,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
 
@@ -830,11 +820,11 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg1 = Message {
-            header: MessageHeader { magic: 0x1111 },
+            header: MessageHeader::new(0x1111),
             body: MessageBody::KeepAlive,
         };
         let msg2 = Message {
-            header: MessageHeader { magic: 0x2222 },
+            header: MessageHeader::new(0x2222),
             body: MessageBody::KeepAlive,
         };
 
@@ -866,7 +856,7 @@ mod tests {
         // Sending to an unreachable address should not panic
         let invalid_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         // This should log an error but not panic
@@ -896,7 +886,7 @@ mod tests {
         let addr2 = to_loopback_addr(&socket2);
 
         let msg = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::KeepAlive,
         };
 

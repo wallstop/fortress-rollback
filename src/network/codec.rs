@@ -42,8 +42,10 @@ use std::fmt;
 use std::io::{self, Write};
 
 use crate::network::messages::{
-    ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
-    MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+    ChecksumReport, ConnectionStatus, DropAbort, DropAbortReason, DropBackfill, DropCommit,
+    DropOperationId, DropPrepare, DropReceipt, DropReport, DropReportStage, DropTarget, FloorReply,
+    FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader, QualityReply,
+    QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -51,6 +53,98 @@ use crate::network::messages::{
     StateSnapshotAck,
 };
 use crate::Frame;
+
+/// Best-effort classification of a rejected protocol datagram.
+///
+/// Variants carrying a value are rate-limited by variant family at socket
+/// boundaries: multiple unsupported versions in one poll count as one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WireRejectKind {
+    /// The bytes resemble the legacy, unversioned protocol header.
+    LegacyUnversionedSuspected,
+    /// The packet declares a protocol version this build does not accept.
+    UnsupportedVersion {
+        /// Version byte observed on the wire.
+        seen: u8,
+    },
+    /// The packet sets header flags this protocol version does not define.
+    UnknownFlags {
+        /// Flags byte observed on the wire.
+        seen: u8,
+    },
+    /// The two-byte protocol sentinel does not match.
+    BadSentinel,
+    /// The packet is truncated or otherwise malformed.
+    Malformed,
+}
+
+impl WireRejectKind {
+    pub(super) const fn rate_limit_bit(self) -> u8 {
+        match self {
+            Self::LegacyUnversionedSuspected => 1 << 0,
+            Self::UnsupportedVersion { .. } => 1 << 1,
+            Self::UnknownFlags { .. } => 1 << 2,
+            Self::BadSentinel => 1 << 3,
+            Self::Malformed => 1 << 4,
+        }
+    }
+}
+
+impl fmt::Display for WireRejectKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyUnversionedSuspected => f.write_str("suspected legacy unversioned packet"),
+            Self::UnsupportedVersion { seen } => {
+                write!(f, "unsupported protocol version {seen}")
+            },
+            Self::UnknownFlags { seen } => write!(f, "unknown protocol flags 0x{seen:02x}"),
+            Self::BadSentinel => f.write_str("bad protocol sentinel"),
+            Self::Malformed => f.write_str("malformed protocol packet"),
+        }
+    }
+}
+
+/// Classifies bytes that [`decode_message`] rejected.
+///
+/// This is a diagnostic helper, not a validator: because [`WireRejectKind`] has
+/// no accepted variant, valid v1 bytes also fall through to
+/// [`WireRejectKind::Malformed`]. The legacy test is intentionally heuristic and
+/// may classify a malformed v1 packet as legacy; valid v1 connection IDs make
+/// the layouts unambiguous.
+#[must_use]
+pub fn classify_wire_bytes(bytes: &[u8]) -> WireRejectKind {
+    let legacy_discriminant = bytes.get(2).copied();
+    let legacy_tail = bytes.get(3..6);
+    if bytes.len() >= 6
+        && legacy_discriminant.is_some_and(|variant| variant <= 16)
+        && legacy_tail == Some(&[0, 0, 0])
+    {
+        return WireRejectKind::LegacyUnversionedSuspected;
+    }
+
+    let Some(sentinel) = bytes.get(..2) else {
+        return WireRejectKind::Malformed;
+    };
+    if sentinel != super::WIRE_SENTINEL {
+        return WireRejectKind::BadSentinel;
+    }
+
+    let Some(version) = bytes.get(2).copied() else {
+        return WireRejectKind::Malformed;
+    };
+    if version != crate::PROTOCOL_VERSION {
+        return WireRejectKind::UnsupportedVersion { seen: version };
+    }
+
+    let Some(flags) = bytes.get(3).copied() else {
+        return WireRejectKind::Malformed;
+    };
+    if flags != 0 {
+        return WireRejectKind::UnknownFlags { seen: flags };
+    }
+
+    WireRejectKind::Malformed
+}
 
 // The bincode configuration used throughout Fortress Rollback.
 //
@@ -243,6 +337,14 @@ impl std::error::Error for CodecError {}
 /// Result type for codec operations.
 pub type CodecResult<T> = Result<T, CodecError>;
 
+/// Hard payload-byte ceiling for one length-prefixed stream frame.
+///
+/// A stream frame is a four-byte little-endian payload length followed by one
+/// encoded [`Message`]. The prefix itself is not included in this limit. The
+/// ceiling matches the crate's existing 64 MiB hostile-decode ceiling, keeping
+/// a peer-controlled stream length from driving an unbounded allocation.
+pub const DEFAULT_MAX_FRAME_LEN: usize = crate::rle::DEFAULT_MAX_DECODED_LEN;
+
 fn decode_message_error(message: impl Into<String>) -> CodecError {
     CodecError::decode(message, CodecOperation::DecodeMessage)
 }
@@ -282,12 +384,31 @@ fn read_u32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResul
     Ok(u32::from_le_bytes(read_array(bytes, cursor, field)?))
 }
 
+fn read_u64(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u64> {
+    Ok(u64::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
 fn read_i16(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<i16> {
     Ok(i16::from_le_bytes(read_array(bytes, cursor, field)?))
 }
 
 fn read_i32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<i32> {
     Ok(i32::from_le_bytes(read_array(bytes, cursor, field)?))
+}
+
+fn read_frame(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+    allow_null: bool,
+) -> CodecResult<Frame> {
+    let value = read_i32(bytes, cursor, field)?;
+    if value < 0 && !(allow_null && value == Frame::NULL.as_i32()) {
+        return Err(decode_message_error(format!(
+            "invalid negative frame {value} for {field}"
+        )));
+    }
+    Ok(Frame::new(value))
 }
 
 fn read_u128(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResult<u128> {
@@ -318,7 +439,7 @@ fn decode_connection_status(bytes: &[u8], cursor: &mut usize) -> CodecResult<Con
     // `last_frame`, then `epoch`.
     Ok(ConnectionStatus {
         disconnected: read_bool(bytes, cursor, "connection_status.disconnected")?,
-        last_frame: Frame::new(read_i32(bytes, cursor, "connection_status.last_frame")?),
+        last_frame: read_frame(bytes, cursor, "connection_status.last_frame", true)?,
         epoch: read_u16(bytes, cursor, "connection_status.epoch")?,
     })
 }
@@ -368,6 +489,62 @@ pub(crate) fn ensure_length_within_remaining(
     Ok(())
 }
 
+fn decode_session_config(
+    bytes: &[u8],
+    cursor: &mut usize,
+    fields: [&'static str; 5],
+) -> CodecResult<SessionConfigBlock> {
+    let [num_players, input_bytes_per_player, fps, max_prediction, desync_interval] = fields;
+
+    Ok(SessionConfigBlock {
+        num_players: read_u16(bytes, cursor, num_players)?,
+        input_bytes_per_player: read_u16(bytes, cursor, input_bytes_per_player)?,
+        fps: read_u32(bytes, cursor, fps)?,
+        max_prediction: read_u16(bytes, cursor, max_prediction)?,
+        desync_interval: read_u32(bytes, cursor, desync_interval)?,
+    })
+}
+
+fn decode_sync_request(bytes: &[u8], cursor: &mut usize) -> CodecResult<SyncRequest> {
+    Ok(SyncRequest {
+        random_request: read_u32(bytes, cursor, "sync_request.random_request")?,
+        min_compat_version: read_array::<1>(bytes, cursor, "sync_request.min_compat_version")?[0],
+        features: read_u32(bytes, cursor, "sync_request.features")?,
+        config: decode_session_config(
+            bytes,
+            cursor,
+            [
+                "sync_request.config.num_players",
+                "sync_request.config.input_bytes_per_player",
+                "sync_request.config.fps",
+                "sync_request.config.max_prediction",
+                "sync_request.config.desync_interval",
+            ],
+        )?,
+        config_digest: read_u64(bytes, cursor, "sync_request.config_digest")?,
+    })
+}
+
+fn decode_sync_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<SyncReply> {
+    Ok(SyncReply {
+        random_reply: read_u32(bytes, cursor, "sync_reply.random_reply")?,
+        min_compat_version: read_array::<1>(bytes, cursor, "sync_reply.min_compat_version")?[0],
+        features: read_u32(bytes, cursor, "sync_reply.features")?,
+        config: decode_session_config(
+            bytes,
+            cursor,
+            [
+                "sync_reply.config.num_players",
+                "sync_reply.config.input_bytes_per_player",
+                "sync_reply.config.fps",
+                "sync_reply.config.max_prediction",
+                "sync_reply.config.desync_interval",
+            ],
+        )?,
+        config_digest: read_u64(bytes, cursor, "sync_reply.config_digest")?,
+    })
+}
+
 fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
     let status_len = read_usize(bytes, cursor, "input.peer_connect_status.len")?;
     ensure_length_within_remaining(
@@ -391,7 +568,6 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
         peer_connect_status.push(decode_connection_status(bytes, cursor)?);
     }
 
-    let disconnect_requested = read_bool(bytes, cursor, "input.disconnect_requested")?;
     let start_frame = Frame::new(read_i32(bytes, cursor, "input.start_frame")?);
     let ack_frame = Frame::new(read_i32(bytes, cursor, "input.ack_frame")?);
 
@@ -405,7 +581,6 @@ fn decode_input(bytes: &[u8], cursor: &mut usize) -> CodecResult<Input> {
 
     Ok(Input {
         peer_connect_status,
-        disconnect_requested,
         start_frame,
         ack_frame,
         bytes: input_bytes,
@@ -439,9 +614,185 @@ fn decode_floor_reply(bytes: &[u8], cursor: &mut usize) -> CodecResult<FloorRepl
         ))
     })?;
     for _ in 0..floor_len {
-        floors.push(Frame::new(read_i32(bytes, cursor, "floor_reply.floors")?));
+        floors.push(read_frame(bytes, cursor, "floor_reply.floors", true)?);
     }
     Ok(FloorReply { round_seq, floors })
+}
+
+fn decode_drop_operation_id(
+    bytes: &[u8],
+    cursor: &mut usize,
+    prefix: &'static str,
+) -> CodecResult<DropOperationId> {
+    let coordinator = match prefix {
+        "drop_prepare" => "drop_prepare.operation.coordinator",
+        "drop_report" => "drop_report.operation.coordinator",
+        "drop_backfill" => "drop_backfill.operation.coordinator",
+        "drop_commit" => "drop_commit.operation.coordinator",
+        "drop_abort" => "drop_abort.operation.coordinator",
+        _ => "drop.operation.coordinator",
+    };
+    let coordinator_generation = match prefix {
+        "drop_prepare" => "drop_prepare.operation.coordinator_generation",
+        "drop_report" => "drop_report.operation.coordinator_generation",
+        "drop_backfill" => "drop_backfill.operation.coordinator_generation",
+        "drop_commit" => "drop_commit.operation.coordinator_generation",
+        "drop_abort" => "drop_abort.operation.coordinator_generation",
+        _ => "drop.operation.coordinator_generation",
+    };
+    let sequence = match prefix {
+        "drop_prepare" => "drop_prepare.operation.sequence",
+        "drop_report" => "drop_report.operation.sequence",
+        "drop_backfill" => "drop_backfill.operation.sequence",
+        "drop_commit" => "drop_commit.operation.sequence",
+        "drop_abort" => "drop_abort.operation.sequence",
+        _ => "drop.operation.sequence",
+    };
+    let target_set_digest = match prefix {
+        "drop_prepare" => "drop_prepare.operation.target_set_digest",
+        "drop_report" => "drop_report.operation.target_set_digest",
+        "drop_backfill" => "drop_backfill.operation.target_set_digest",
+        "drop_commit" => "drop_commit.operation.target_set_digest",
+        "drop_abort" => "drop_abort.operation.target_set_digest",
+        _ => "drop.operation.target_set_digest",
+    };
+    Ok(DropOperationId {
+        coordinator: read_u16(bytes, cursor, coordinator)?,
+        coordinator_generation: read_u16(bytes, cursor, coordinator_generation)?,
+        sequence: read_u32(bytes, cursor, sequence)?,
+        target_set_digest: read_u64(bytes, cursor, target_set_digest)?,
+    })
+}
+
+fn decode_drop_prepare(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropPrepare> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_prepare")?;
+    let target_len = read_usize(bytes, cursor, "drop_prepare.targets.len")?;
+    ensure_length_within_remaining(bytes, *cursor, target_len, 4, "drop_prepare.targets")?;
+    // alloc-bound: the peer-controlled count must fit as fixed 4-byte records
+    // in this already-bounded packet before any reservation is attempted.
+    let mut targets = Vec::new();
+    targets.try_reserve_exact(target_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {target_len} drop targets"))
+    })?;
+    for _ in 0..target_len {
+        targets.push(DropTarget {
+            handle: read_u16(bytes, cursor, "drop_prepare.targets.handle")?,
+            generation: read_u16(bytes, cursor, "drop_prepare.targets.generation")?,
+        });
+    }
+
+    let participant_len = read_usize(bytes, cursor, "drop_prepare.participants.len")?;
+    ensure_length_within_remaining(
+        bytes,
+        *cursor,
+        participant_len,
+        2,
+        "drop_prepare.participants",
+    )?;
+    // alloc-bound: the count is bounded by fixed u16 records remaining in the packet.
+    let mut participants = Vec::new();
+    participants
+        .try_reserve_exact(participant_len)
+        .map_err(|_err| {
+            decode_message_error(format!(
+                "failed to reserve {participant_len} drop participants"
+            ))
+        })?;
+    for _ in 0..participant_len {
+        participants.push(read_u16(bytes, cursor, "drop_prepare.participants.handle")?);
+    }
+    Ok(DropPrepare {
+        operation,
+        targets,
+        participants,
+    })
+}
+
+fn decode_drop_report_stage(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropReportStage> {
+    match read_u32(bytes, cursor, "drop_report.stage")? {
+        0 => Ok(DropReportStage::Inventory),
+        1 => Ok(DropReportStage::Ready),
+        2 => Ok(DropReportStage::Committed),
+        other => Err(decode_message_error(format!(
+            "invalid drop report stage {other}"
+        ))),
+    }
+}
+
+fn decode_drop_report(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropReport> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_report")?;
+    let participant = read_u16(bytes, cursor, "drop_report.participant")?;
+    let stage = decode_drop_report_stage(bytes, cursor)?;
+    let exposed_confirmed = read_frame(bytes, cursor, "drop_report.exposed_confirmed", true)?;
+    let cut = read_frame(bytes, cursor, "drop_report.cut", true)?;
+    let cut_digest = read_u64(bytes, cursor, "drop_report.cut_digest")?;
+    let receipt_len = read_usize(bytes, cursor, "drop_report.receipts.len")?;
+    ensure_length_within_remaining(bytes, *cursor, receipt_len, 10, "drop_report.receipts")?;
+    // alloc-bound: each peer-controlled entry has a checked fixed 10-byte footprint.
+    let mut receipts = Vec::new();
+    receipts.try_reserve_exact(receipt_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {receipt_len} drop receipts"))
+    })?;
+    for _ in 0..receipt_len {
+        receipts.push(DropReceipt {
+            target: read_u16(bytes, cursor, "drop_report.receipts.target")?,
+            available_from: read_frame(bytes, cursor, "drop_report.receipts.available_from", true)?,
+            contiguous_through: read_frame(
+                bytes,
+                cursor,
+                "drop_report.receipts.contiguous_through",
+                true,
+            )?,
+        });
+    }
+    Ok(DropReport {
+        operation,
+        participant,
+        stage,
+        exposed_confirmed,
+        cut,
+        cut_digest,
+        receipts,
+    })
+}
+
+fn decode_drop_backfill(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropBackfill> {
+    let operation = decode_drop_operation_id(bytes, cursor, "drop_backfill")?;
+    let chunk_index = read_u16(bytes, cursor, "drop_backfill.chunk_index")?;
+    let chunk_count = read_u16(bytes, cursor, "drop_backfill.chunk_count")?;
+    let start_frame = read_frame(bytes, cursor, "drop_backfill.start_frame", true)?;
+    let frame_count = read_u16(bytes, cursor, "drop_backfill.frame_count")?;
+    let byte_len = read_usize(bytes, cursor, "drop_backfill.bytes.len")?;
+    let source = take_bytes(bytes, cursor, byte_len, "drop_backfill.bytes")?;
+    // alloc-bound: `byte_len` has already been proven to fit in the unread packet.
+    let mut payload = Vec::new();
+    payload.try_reserve_exact(byte_len).map_err(|_err| {
+        decode_message_error(format!("failed to reserve {byte_len} drop backfill bytes"))
+    })?;
+    payload.extend_from_slice(source);
+    Ok(DropBackfill {
+        operation,
+        chunk_index,
+        chunk_count,
+        start_frame,
+        frame_count,
+        bytes: payload,
+    })
+}
+
+fn decode_drop_abort_reason(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropAbortReason> {
+    match read_u32(bytes, cursor, "drop_abort.reason")? {
+        0 => Ok(DropAbortReason::Superseded),
+        1 => Ok(DropAbortReason::MissingHistory),
+        2 => Ok(DropAbortReason::ConflictingHistory),
+        3 => Ok(DropAbortReason::ParticipantLost),
+        4 => Ok(DropAbortReason::Timeout),
+        5 => Ok(DropAbortReason::GenerationChanged),
+        6 => Ok(DropAbortReason::ResourceLimit),
+        other => Err(decode_message_error(format!(
+            "invalid drop abort reason {other}"
+        ))),
+    }
 }
 
 /// Reads a bincode `Option<u128>` encoded under fixed-int config: a one-byte
@@ -573,6 +924,336 @@ pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
     Ok(buffer)
 }
 
+/// Encodes one network [`Message`] for a byte-stream transport.
+///
+/// The returned bytes contain a four-byte little-endian `u32` payload length,
+/// followed by exactly the bytes produced by [`encode`] for `message`. The
+/// length excludes the four-byte prefix. Datagram and message-oriented
+/// transports should continue to use [`encode`] directly.
+///
+/// # Errors
+///
+/// Returns [`CodecError::EncodeError`] if the message cannot be encoded, its
+/// payload exceeds [`DEFAULT_MAX_FRAME_LEN`], its length cannot fit in `u32`,
+/// framed-length arithmetic overflows, or the output allocation cannot be
+/// reserved.
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::{network::codec::encode_framed, Message};
+///
+/// fn write_frame(message: &Message) -> Result<Vec<u8>, fortress_rollback::network::codec::CodecError> {
+///     encode_framed(message)
+/// }
+/// # let _ = write_frame;
+/// ```
+pub fn encode_framed(message: &Message) -> CodecResult<Vec<u8>> {
+    encode_framed_with_max_len(message, DEFAULT_MAX_FRAME_LEN)
+}
+
+fn encode_framed_with_max_len(message: &Message, max_frame_len: usize) -> CodecResult<Vec<u8>> {
+    const PREFIX_LEN: usize = std::mem::size_of::<u32>();
+
+    let payload_len = encoded_len(message)?;
+    if payload_len > max_frame_len {
+        return Err(CodecError::encode(
+            format!("frame payload length {payload_len} exceeds maximum {max_frame_len}"),
+            CodecOperation::EncodeMessage,
+        ));
+    }
+    let wire_payload_len = u32::try_from(payload_len).map_err(|_err| {
+        CodecError::encode(
+            format!("frame payload length {payload_len} does not fit in u32"),
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    let framed_len = PREFIX_LEN.checked_add(payload_len).ok_or_else(|| {
+        CodecError::encode(
+            "framed message length overflow",
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    let mut framed = Vec::new();
+    framed.try_reserve_exact(framed_len).map_err(|_err| {
+        CodecError::encode(
+            format!("failed to reserve {framed_len} framed message bytes"),
+            CodecOperation::EncodeMessage,
+        )
+    })?;
+    framed.extend_from_slice(&wire_payload_len.to_le_bytes());
+    let written = encode_append(message, &mut framed)?;
+    if written != payload_len {
+        return Err(CodecError::encode(
+            format!(
+                "framed message length changed while encoding: counted {payload_len}, wrote {written}"
+            ),
+            CodecOperation::EncodeMessage,
+        ));
+    }
+    Ok(framed)
+}
+
+/// Incremental decoder for length-prefixed network messages on byte streams.
+///
+/// Each frame starts with a four-byte little-endian `u32` payload length that
+/// excludes the prefix, followed by one encoded [`Message`]. A decoder buffers
+/// only an incomplete prefix or payload and yields at most one message from each
+/// [`push`](Self::push) call. The returned consumed-byte count lets callers feed
+/// the unconsumed suffix back immediately without an unbounded internal message
+/// queue.
+///
+/// A malformed frame poisons the decoder because a corrupt length may make later
+/// byte boundaries untrustworthy. Call [`reset`](Self::reset) only after the
+/// underlying stream has been discarded or re-established; it is not a safe way
+/// to resynchronize within a corrupt stream.
+///
+/// # Examples
+///
+/// ```
+/// use fortress_rollback::{network::codec::FrameDecoder, Message};
+/// # use fortress_rollback::network::codec::CodecError;
+///
+/// fn read_chunk<'a>(
+///     decoder: &mut FrameDecoder,
+///     mut bytes: &'a [u8],
+///     mut on_message: impl FnMut(Message),
+/// ) -> Result<&'a [u8], fortress_rollback::network::codec::CodecError> {
+///     while !bytes.is_empty() {
+///         let (message, consumed) = decoder.push(bytes)?;
+///         bytes = bytes.get(consumed..).unwrap_or_default();
+///         if let Some(message) = message {
+///             on_message(message);
+///         }
+///         if consumed == 0 {
+///             break;
+///         }
+///     }
+///     Ok(bytes)
+/// }
+/// # fn main() -> Result<(), CodecError> {
+/// # let mut decoder = FrameDecoder::new();
+/// # let _suffix = read_chunk(&mut decoder, &[], |_message| {})?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct FrameDecoder {
+    max_frame_len: usize,
+    prefix: [u8; std::mem::size_of::<u32>()],
+    prefix_len: usize,
+    expected_payload_len: Option<usize>,
+    payload: Vec<u8>,
+    poisoned: bool,
+}
+
+impl FrameDecoder {
+    const PREFIX_LEN: usize = std::mem::size_of::<u32>();
+
+    /// Creates a decoder with the [`DEFAULT_MAX_FRAME_LEN`] payload ceiling.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            prefix: [0; Self::PREFIX_LEN],
+            prefix_len: 0,
+            expected_payload_len: None,
+            payload: Vec::new(),
+            poisoned: false,
+        }
+    }
+
+    /// Creates a decoder with a smaller, caller-selected payload ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] when `max_frame_len` is zero or
+    /// exceeds the hard [`DEFAULT_MAX_FRAME_LEN`] ceiling.
+    pub fn try_with_max_frame_len(max_frame_len: usize) -> CodecResult<Self> {
+        if max_frame_len == 0 || max_frame_len > DEFAULT_MAX_FRAME_LEN {
+            return Err(CodecError::decode(
+                format!(
+                    "frame decoder maximum must be in 1..={DEFAULT_MAX_FRAME_LEN}, got {max_frame_len}"
+                ),
+                CodecOperation::DecodeMessage,
+            ));
+        }
+        Ok(Self {
+            max_frame_len,
+            ..Self::new()
+        })
+    }
+
+    /// Feeds stream bytes into the decoder and yields at most one message.
+    ///
+    /// The returned `usize` is the exact number of bytes consumed from `input`.
+    /// When `input` contains more than one frame, this method stops after the
+    /// first and leaves the suffix to the caller. Partial prefixes and payloads
+    /// are buffered and return `Ok((None, input.len()))`. Empty input is inert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] if a declared payload is zero or
+    /// exceeds this decoder's limit, allocation fails, the completed payload is
+    /// not exactly one valid [`Message`], or the decoder was already poisoned by
+    /// an earlier error. Every error poisons the decoder until [`reset`](Self::reset).
+    pub fn push(&mut self, input: &[u8]) -> CodecResult<(Option<Message>, usize)> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
+        }
+        if input.is_empty() {
+            return Ok((None, 0));
+        }
+
+        let mut consumed = 0;
+        if self.expected_payload_len.is_none() {
+            let prefix_needed = Self::PREFIX_LEN.saturating_sub(self.prefix_len);
+            let take = prefix_needed.min(input.len());
+            let Some(source) = input.get(..take) else {
+                return self.poison("frame prefix slice out of bounds");
+            };
+            let Some(prefix_end) = self.prefix_len.checked_add(take) else {
+                return self.poison("frame prefix offset overflow");
+            };
+            let Some(destination) = self.prefix.get_mut(self.prefix_len..prefix_end) else {
+                return self.poison("frame prefix destination out of bounds");
+            };
+            destination.copy_from_slice(source);
+            self.prefix_len = prefix_end;
+            consumed = take;
+
+            if self.prefix_len < Self::PREFIX_LEN {
+                return Ok((None, consumed));
+            }
+
+            let declared = usize::try_from(u32::from_le_bytes(self.prefix)).map_err(|_err| {
+                self.poisoned = true;
+                CodecError::decode(
+                    "frame payload length does not fit in usize",
+                    CodecOperation::DecodeMessage,
+                )
+            })?;
+            if declared == 0 {
+                return self.poison("frame payload length must be non-zero");
+            }
+            if declared > self.max_frame_len {
+                return self.poison(format!(
+                    "frame payload length {declared} exceeds maximum {}",
+                    self.max_frame_len
+                ));
+            }
+            if let Err(_err) = self.payload.try_reserve_exact(declared) {
+                return self.poison(format!("failed to reserve {declared} frame payload bytes"));
+            }
+            self.expected_payload_len = Some(declared);
+        }
+
+        let Some(expected) = self.expected_payload_len else {
+            return self.poison("frame decoder lost its expected payload length");
+        };
+        let payload_needed = expected.saturating_sub(self.payload.len());
+        let available = input.len().saturating_sub(consumed);
+        let take = payload_needed.min(available);
+        let Some(input_end) = consumed.checked_add(take) else {
+            return self.poison("frame input offset overflow");
+        };
+        let Some(source) = input.get(consumed..input_end) else {
+            return self.poison("frame payload slice out of bounds");
+        };
+        // alloc-bound: the full peer-declared payload length was bounded by
+        // `max_frame_len` and reserved fallibly before any payload byte is copied.
+        self.payload.extend_from_slice(source);
+        consumed = input_end;
+
+        if self.payload.len() < expected {
+            return Ok((None, consumed));
+        }
+
+        match decode_message(&self.payload) {
+            Ok((message, decoded_len)) if decoded_len == expected => {
+                self.prefix_len = 0;
+                self.expected_payload_len = None;
+                self.payload.clear();
+                Ok((Some(message), consumed))
+            },
+            Ok((_message, decoded_len)) => self.poison(format!(
+                "decoded frame consumed {decoded_len} bytes, expected {expected}"
+            )),
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            },
+        }
+    }
+
+    /// Verifies that the stream ended exactly between frames.
+    /// # Errors
+    ///
+    /// Returns [`CodecError::DecodeError`] if the decoder is poisoned or holds an
+    /// incomplete length prefix or payload. An incomplete end poisons the decoder.
+    pub fn finish(&mut self) -> CodecResult<()> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
+        }
+        if self.prefix_len == 0 && self.expected_payload_len.is_none() {
+            return Ok(());
+        }
+        if let Some(expected) = self.expected_payload_len {
+            return self.poison(format!(
+                "incomplete frame payload: buffered {} of {expected} bytes",
+                self.payload.len()
+            ));
+        }
+        self.poison(format!(
+            "incomplete length prefix: buffered {} of {} bytes",
+            self.prefix_len,
+            Self::PREFIX_LEN
+        ))
+    }
+
+    /// Clears all buffered state and releases its payload allocation.
+    ///
+    /// Use this only for a new or otherwise independently re-established stream;
+    /// reset cannot locate a trustworthy boundary in the stream that failed.
+    pub fn reset(&mut self) {
+        self.prefix = [0; Self::PREFIX_LEN];
+        self.prefix_len = 0;
+        self.expected_payload_len = None;
+        self.payload = Vec::new();
+        self.poisoned = false;
+    }
+
+    /// Returns the configured maximum payload size, excluding the prefix.
+    #[must_use]
+    pub const fn max_frame_len(&self) -> usize {
+        self.max_frame_len
+    }
+
+    /// Returns the number of prefix and payload bytes currently buffered.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.prefix_len.saturating_add(self.payload.len())
+    }
+
+    fn poison<T>(&mut self, message: impl Into<String>) -> CodecResult<T> {
+        self.poisoned = true;
+        Err(CodecError::decode(message, CodecOperation::DecodeMessage))
+    }
+
+    fn poisoned_error() -> CodecError {
+        CodecError::decode(
+            "frame decoder is poisoned; reset it only for a new stream",
+            CodecOperation::DecodeMessage,
+        )
+    }
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Encodes a value into an existing byte slice.
 ///
 /// Returns the number of bytes written. This is more efficient than [`encode`]
@@ -681,21 +1362,46 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<(T, usize)> {
 /// # Errors
 ///
 /// Returns [`CodecError::DecodeError`] when the message is truncated, contains an
-/// invalid variant or boolean, has trailing bytes, or declares a length that
-/// cannot fit in the remaining packet.
+/// invalid variant or boolean, contains an invalid connection-status,
+/// floor-gossip, or checksum-report frame value, has trailing bytes, or declares
+/// a length that cannot fit in the remaining packet.
 pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
     let mut cursor = 0;
+    let sentinel = read_array(bytes, &mut cursor, "message.header.sentinel")?;
+    if sentinel != super::WIRE_SENTINEL {
+        return Err(decode_message_error("invalid message header sentinel"));
+    }
+    let protocol_version =
+        read_array::<1>(bytes, &mut cursor, "message.header.protocol_version")?[0];
+    if protocol_version < super::MIN_SUPPORTED_PROTOCOL_VERSION
+        || protocol_version > crate::PROTOCOL_VERSION
+    {
+        return Err(decode_message_error(format!(
+            "unsupported protocol version {protocol_version}"
+        )));
+    }
+    let flags = read_array::<1>(bytes, &mut cursor, "message.header.flags")?[0];
+    if flags != 0 {
+        return Err(decode_message_error(format!(
+            "unknown protocol flags 0x{flags:02x}"
+        )));
+    }
+    let conn_id = read_u32(bytes, &mut cursor, "message.header.conn_id")?;
+    if !super::is_valid_conn_id(conn_id) {
+        return Err(decode_message_error(format!(
+            "invalid connection ID 0x{conn_id:08x}"
+        )));
+    }
     let header = MessageHeader {
-        magic: read_u16(bytes, &mut cursor, "message.header.magic")?,
+        sentinel,
+        protocol_version,
+        flags,
+        conn_id,
     };
     let variant = read_u32(bytes, &mut cursor, "message.body.variant")?;
     let body = match variant {
-        0 => MessageBody::SyncRequest(SyncRequest {
-            random_request: read_u32(bytes, &mut cursor, "sync_request.random_request")?,
-        }),
-        1 => MessageBody::SyncReply(SyncReply {
-            random_reply: read_u32(bytes, &mut cursor, "sync_reply.random_reply")?,
-        }),
+        0 => MessageBody::SyncRequest(decode_sync_request(bytes, &mut cursor)?),
+        1 => MessageBody::SyncReply(decode_sync_reply(bytes, &mut cursor)?),
         2 => MessageBody::Input(decode_input(bytes, &mut cursor)?),
         3 => MessageBody::InputAck(InputAck {
             ack_frame: Frame::new(read_i32(bytes, &mut cursor, "input_ack.ack_frame")?),
@@ -709,13 +1415,13 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         }),
         6 => MessageBody::ChecksumReport(ChecksumReport {
             checksum: read_u128(bytes, &mut cursor, "checksum_report.checksum")?,
-            frame: Frame::new(read_i32(bytes, &mut cursor, "checksum_report.frame")?),
+            frame: read_frame(bytes, &mut cursor, "checksum_report.frame", false)?,
         }),
         7 => MessageBody::KeepAlive,
         // Floor-round variants (double-failure-relay connected-relay reorder fix,
         // S55), appended after the original core block — see the `MessageBody`
-        // enum comment. The `#[cfg(feature = "hot-join")]` variants below them are
-        // therefore at discriminants 10..=16 (each shifted +2 from the original).
+        // enum comment. Hot-join variants occupy discriminants 10..=16 in every
+        // build; builds without the feature recognize and reject them below.
         8 => MessageBody::FloorRequest(FloorRequest {
             round_seq: read_u32(bytes, &mut cursor, "floor_request.round_seq")?,
         }),
@@ -749,6 +1455,27 @@ pub fn decode_message(bytes: &[u8]) -> CodecResult<(Message, usize)> {
         16 => MessageBody::JoinAborted(JoinAborted {
             handle: read_usize(bytes, &mut cursor, "join_aborted.handle")?,
             frame: Frame::new(read_i32(bytes, &mut cursor, "join_aborted.frame")?),
+        }),
+        #[cfg(not(feature = "hot-join"))]
+        10..=16 => {
+            return Err(decode_message_error(format!(
+                "message body variant {variant} requires the disabled hot-join feature"
+            )))
+        },
+        17 => MessageBody::Goodbye(Goodbye {
+            reason: read_array::<1>(bytes, &mut cursor, "goodbye.reason")?[0],
+        }),
+        18 => MessageBody::DropPrepare(decode_drop_prepare(bytes, &mut cursor)?),
+        19 => MessageBody::DropReport(decode_drop_report(bytes, &mut cursor)?),
+        20 => MessageBody::DropBackfill(decode_drop_backfill(bytes, &mut cursor)?),
+        21 => MessageBody::DropCommit(DropCommit {
+            operation: decode_drop_operation_id(bytes, &mut cursor, "drop_commit")?,
+            cut: read_frame(bytes, &mut cursor, "drop_commit.cut", true)?,
+            cut_digest: read_u64(bytes, &mut cursor, "drop_commit.cut_digest")?,
+        }),
+        22 => MessageBody::DropAbort(DropAbort {
+            operation: decode_drop_operation_id(bytes, &mut cursor, "drop_abort")?,
+            reason: decode_drop_abort_reason(bytes, &mut cursor)?,
         }),
         other => {
             return Err(decode_message_error(format!(
@@ -935,8 +1662,224 @@ mod tests {
     use super::*;
     use crate::network::messages::{
         ChecksumReport, ConnectionStatus, FloorReply, FloorRequest, Input, InputAck, Message,
-        MessageBody, MessageHeader, QualityReply, QualityReport, SyncReply, SyncRequest,
+        MessageBody, MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply,
+        SyncRequest,
     };
+
+    fn wire_prefix(conn_id: u32, variant: u32) -> Vec<u8> {
+        let mut bytes = encode(&MessageHeader::new(conn_id)).unwrap();
+        bytes.extend_from_slice(&variant.to_le_bytes());
+        bytes
+    }
+
+    fn keep_alive(conn_id: u32) -> Message {
+        Message {
+            header: MessageHeader::new(conn_id),
+            body: MessageBody::KeepAlive,
+        }
+    }
+
+    fn drain_framed(decoder: &mut FrameDecoder, mut bytes: &[u8]) -> CodecResult<Vec<Message>> {
+        let mut messages = Vec::new();
+        while !bytes.is_empty() {
+            let (message, consumed) = decoder.push(bytes)?;
+            assert!(consumed > 0, "non-empty input must make progress");
+            bytes = bytes
+                .get(consumed..)
+                .expect("decoder consumption is in bounds");
+            if let Some(message) = message {
+                messages.push(message);
+            }
+        }
+        Ok(messages)
+    }
+
+    #[test]
+    fn encode_framed_prefixes_exact_payload_length_in_little_endian() {
+        let message = keep_alive(0xABCD);
+        let payload = encode(&message).unwrap();
+
+        let framed = encode_framed(&message).unwrap();
+
+        assert_eq!(
+            framed.get(..4),
+            Some((payload.len() as u32).to_le_bytes().as_slice())
+        );
+        assert_eq!(framed.get(4..), Some(payload.as_slice()));
+        assert_eq!(framed.len(), payload.len() + 4);
+    }
+
+    #[test]
+    fn frame_decoder_accepts_every_single_split_of_prefix_and_payload() {
+        let message = keep_alive(0xABCD);
+        let framed = encode_framed(&message).unwrap();
+
+        for split in 0..=framed.len() {
+            let mut decoder = FrameDecoder::new();
+            let (first, consumed) = decoder.push(&framed[..split]).unwrap();
+            assert_eq!(consumed, split, "split {split}");
+            assert_eq!(first, (split == framed.len()).then(|| message.clone()));
+            let (second, consumed) = decoder.push(&framed[split..]).unwrap();
+            assert_eq!(consumed, framed.len() - split, "split {split}");
+            assert_eq!(second, (split != framed.len()).then(|| message.clone()));
+            assert_eq!(decoder.buffered_len(), 0);
+            assert_eq!(decoder.finish(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn frame_decoder_accepts_one_byte_chunks() {
+        let message = keep_alive(0xABCD);
+        let framed = encode_framed(&message).unwrap();
+        let mut decoder = FrameDecoder::new();
+        let mut decoded = None;
+
+        for byte in &framed {
+            let (next, consumed) = decoder.push(std::slice::from_ref(byte)).unwrap();
+            assert_eq!(consumed, 1);
+            assert!(decoded.is_none());
+            if next.is_some() {
+                decoded = next;
+            }
+        }
+
+        assert_eq!(decoded, Some(message));
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn frame_decoder_consumes_only_one_of_multiple_frames_per_call() {
+        let messages = [keep_alive(1), keep_alive(2), keep_alive(3)];
+        let mut stream = Vec::new();
+        for message in &messages {
+            stream.extend_from_slice(&encode_framed(message).unwrap());
+        }
+        let first_len = encode_framed(&messages[0]).unwrap().len();
+        let mut decoder = FrameDecoder::new();
+
+        let (first, consumed) = decoder.push(&stream).unwrap();
+
+        assert_eq!(first, Some(messages[0].clone()));
+        assert_eq!(consumed, first_len);
+        assert_eq!(
+            drain_framed(&mut decoder, &stream[consumed..]).unwrap(),
+            messages[1..]
+        );
+    }
+
+    #[test]
+    fn frame_decoder_empty_input_is_inert() {
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(decoder.push(&[]), Ok((None, 0)));
+        assert_eq!(decoder.buffered_len(), 0);
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn frame_decoder_limit_validation_is_fail_closed() {
+        assert!(FrameDecoder::try_with_max_frame_len(0).is_err());
+        assert!(FrameDecoder::try_with_max_frame_len(DEFAULT_MAX_FRAME_LEN + 1).is_err());
+        assert!(FrameDecoder::try_with_max_frame_len(usize::MAX).is_err());
+
+        let decoder = FrameDecoder::try_with_max_frame_len(DEFAULT_MAX_FRAME_LEN).unwrap();
+        assert_eq!(decoder.max_frame_len(), DEFAULT_MAX_FRAME_LEN);
+        assert_eq!(FrameDecoder::new().max_frame_len(), DEFAULT_MAX_FRAME_LEN);
+    }
+
+    #[test]
+    fn frame_decoder_accepts_exact_limit_and_rejects_one_byte_over_before_payload() {
+        let message = keep_alive(1);
+        let payload = encode(&message).unwrap();
+        let mut exact = FrameDecoder::try_with_max_frame_len(payload.len()).unwrap();
+        assert_eq!(
+            exact.push(&encode_framed(&message).unwrap()).unwrap(),
+            (Some(message), payload.len() + 4)
+        );
+
+        let mut over = FrameDecoder::try_with_max_frame_len(payload.len() - 1).unwrap();
+        let prefix = u32::try_from(payload.len()).unwrap().to_le_bytes();
+        let error = over.push(&prefix).expect_err("over-limit prefix must fail");
+        assert!(error.to_string().contains("exceeds maximum"));
+        assert!(over.push(&[]).unwrap_err().to_string().contains("poisoned"));
+    }
+
+    #[test]
+    fn frame_decoder_rejects_zero_length_and_remains_poisoned_until_reset() {
+        let mut decoder = FrameDecoder::new();
+        let error = decoder.push(&0_u32.to_le_bytes()).unwrap_err();
+        assert!(error.to_string().contains("must be non-zero"));
+        assert!(decoder
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("poisoned"));
+        assert!(decoder
+            .push(&encode_framed(&keep_alive(1)).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("poisoned"));
+
+        decoder.reset();
+
+        assert_eq!(
+            drain_framed(&mut decoder, &encode_framed(&keep_alive(1)).unwrap()).unwrap(),
+            vec![keep_alive(1)]
+        );
+    }
+
+    #[test]
+    fn frame_decoder_malformed_or_trailing_payload_poison_decoder() {
+        let valid_payload = encode(&keep_alive(1)).unwrap();
+        let cases = [vec![0xFF], {
+            let mut trailing = valid_payload;
+            trailing.push(0);
+            trailing
+        }];
+
+        for payload in cases {
+            let mut framed = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+            framed.extend_from_slice(&payload);
+            let mut decoder = FrameDecoder::new();
+
+            assert!(decoder.push(&framed).is_err());
+            assert!(decoder
+                .push(&[])
+                .unwrap_err()
+                .to_string()
+                .contains("poisoned"));
+        }
+    }
+
+    #[test]
+    fn frame_decoder_finish_distinguishes_partial_prefix_and_payload() {
+        let framed = encode_framed(&keep_alive(1)).unwrap();
+        for prefix_len in 1..4 {
+            let mut decoder = FrameDecoder::new();
+            assert_eq!(decoder.push(&framed[..prefix_len]), Ok((None, prefix_len)));
+            let error = decoder.finish().unwrap_err();
+            assert!(error.to_string().contains("incomplete length prefix"));
+        }
+
+        let mut decoder = FrameDecoder::new();
+        let partial_len = framed.len() - 1;
+        assert_eq!(
+            decoder.push(&framed[..partial_len]),
+            Ok((None, partial_len))
+        );
+        let error = decoder.finish().unwrap_err();
+        assert!(error.to_string().contains("incomplete frame payload"));
+        assert!(error.to_string().contains("11 of 12"));
+    }
+
+    #[test]
+    fn encode_framed_limit_helper_accepts_exact_and_rejects_over_limit() {
+        let message = keep_alive(1);
+        let payload_len = encode(&message).unwrap().len();
+
+        assert!(encode_framed_with_max_len(&message, payload_len).is_ok());
+        let error = encode_framed_with_max_len(&message, payload_len - 1).unwrap_err();
+        assert!(error.to_string().contains("exceeds maximum"));
+    }
 
     #[test]
     fn test_encode_decode_roundtrip_primitive() {
@@ -950,9 +1893,10 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_message() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::SyncRequest(SyncRequest {
                 random_request: 999,
+                ..SyncRequest::default()
             }),
         };
         let bytes = encode(&original).unwrap();
@@ -962,32 +1906,74 @@ mod tests {
 
     #[test]
     fn codec_wire_format_uses_fixed_little_endian_bytes() {
+        assert_eq!(
+            crate::PROTOCOL_VERSION,
+            1,
+            "wire bytes changed without a version bump"
+        );
         let cases = [
             (
                 "sync_request",
                 Message {
-                    header: MessageHeader { magic: 0xABCD },
+                    header: MessageHeader::new(0xABCD),
                     body: MessageBody::SyncRequest(SyncRequest {
                         random_request: 999,
+                        min_compat_version: 1,
+                        features: 1,
+                        config: SessionConfigBlock {
+                            num_players: 2,
+                            input_bytes_per_player: 4,
+                            fps: 60,
+                            max_prediction: 8,
+                            desync_interval: 60,
+                        },
+                        config_digest: 0x5082_C060_858A_E1C8,
                     }),
                 },
-                vec![0xCD, 0xAB, 0x00, 0x00, 0x00, 0x00, 0xE7, 0x03, 0x00, 0x00],
+                vec![
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0xCD, 0xAB, 0x00, 0x00, // conn_id
+                    0x00, 0x00, 0x00, 0x00, // MessageBody::SyncRequest tag
+                    0xE7, 0x03, 0x00, 0x00, // random_request
+                    0x01, // min_compat_version
+                    0x01, 0x00, 0x00, 0x00, // features
+                    0x02, 0x00, // config.num_players
+                    0x04, 0x00, // config.input_bytes_per_player
+                    0x3C, 0x00, 0x00, 0x00, // config.fps
+                    0x08, 0x00, // config.max_prediction
+                    0x3C, 0x00, 0x00, 0x00, // config.desync_interval
+                    0xC8, 0xE1, 0x8A, 0x85, 0x60, 0xC0, 0x82, 0x50, // config_digest
+                ],
             ),
             (
                 "quality_report",
                 Message {
-                    header: MessageHeader { magic: 0x1234 },
+                    header: MessageHeader::new(0x1234),
                     body: MessageBody::QualityReport(QualityReport {
                         frame_advantage: -2,
                         ping: 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10,
                     }),
                 },
                 vec![
-                    0x34, 0x12, // MessageHeader::magic
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
                     0xFE, 0xFF, // frame_advantage: i16 -2
                     0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04,
                     0x03, 0x02, 0x01, // ping: u128
+                ],
+            ),
+            (
+                "goodbye",
+                Message {
+                    header: MessageHeader::new(0x1234),
+                    body: MessageBody::Goodbye(Goodbye { reason: 7 }),
+                },
+                vec![
+                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
+                    0x11, 0x00, 0x00, 0x00, // MessageBody::Goodbye tag 17
+                    0x07, // reason
                 ],
             ),
         ];
@@ -1005,20 +1991,158 @@ mod tests {
     }
 
     #[test]
+    fn decode_message_rejects_every_truncated_handshake_field() {
+        let message = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::SyncRequest(SyncRequest {
+                random_request: 7,
+                min_compat_version: 1,
+                features: 1,
+                config: SessionConfigBlock {
+                    num_players: 2,
+                    input_bytes_per_player: 4,
+                    fps: 60,
+                    max_prediction: 8,
+                    desync_interval: 60,
+                },
+                config_digest: 0x5082_C060_858A_E1C8,
+            }),
+        };
+        let bytes = encode(&message).unwrap();
+        assert_eq!(bytes.len(), 43);
+
+        for len in 0..bytes.len() {
+            assert!(
+                decode_message(&bytes[..len]).is_err(),
+                "truncated handshake prefix of {len} bytes must be rejected"
+            );
+        }
+        assert_eq!(decode_message(&bytes).unwrap(), (message, bytes.len()));
+    }
+
+    #[test]
+    fn classify_wire_bytes_uses_stable_reject_precedence() {
+        let legacy = [0x34, 0x12, 16, 0, 0, 0];
+        let mut bad_sentinel = wire_prefix(1, 7);
+        bad_sentinel[0] = 0;
+        let mut unsupported = wire_prefix(1, 7);
+        unsupported[2] = crate::PROTOCOL_VERSION.saturating_add(1);
+        let mut unknown_flags = wire_prefix(1, 7);
+        unknown_flags[3] = 0x80;
+        let valid = wire_prefix(1, 7);
+
+        let cases = [
+            (
+                legacy.as_slice(),
+                WireRejectKind::LegacyUnversionedSuspected,
+            ),
+            (bad_sentinel.as_slice(), WireRejectKind::BadSentinel),
+            (
+                unsupported.as_slice(),
+                WireRejectKind::UnsupportedVersion {
+                    seen: crate::PROTOCOL_VERSION.saturating_add(1),
+                },
+            ),
+            (
+                unknown_flags.as_slice(),
+                WireRejectKind::UnknownFlags { seen: 0x80 },
+            ),
+            (&[0xF5][..], WireRejectKind::Malformed),
+            (valid.as_slice(), WireRejectKind::Malformed),
+        ];
+
+        for (bytes, expected) in cases {
+            assert_eq!(classify_wire_bytes(bytes), expected, "bytes={bytes:02x?}");
+        }
+
+        let sentinel_collision_legacy = [0xF5, 0x52, 1, 0, 0, 0];
+        assert_eq!(
+            classify_wire_bytes(&sentinel_collision_legacy),
+            WireRejectKind::LegacyUnversionedSuspected,
+            "the documented best-effort legacy heuristic takes precedence"
+        );
+    }
+
+    #[test]
+    fn decode_message_rejects_every_invalid_v1_header_before_body_decode() {
+        let valid = wire_prefix(1, 7);
+        for len in 0..valid.len() {
+            assert!(
+                decode_message(&valid[..len]).is_err(),
+                "truncated prefix of {len} bytes must be rejected"
+            );
+        }
+
+        let mut invalid_headers = Vec::new();
+        let mut bad_sentinel = valid.clone();
+        bad_sentinel[1] ^= 1;
+        invalid_headers.push(bad_sentinel);
+        let mut unsupported = valid.clone();
+        unsupported[2] = crate::PROTOCOL_VERSION.saturating_add(1);
+        invalid_headers.push(unsupported);
+        let mut flags = valid;
+        flags[3] = 1;
+        invalid_headers.push(flags);
+        invalid_headers.push(wire_prefix(0, 7));
+        invalid_headers.push(wire_prefix(0x1234_0000, 7));
+
+        for bytes in invalid_headers {
+            assert!(
+                decode_message(&bytes).is_err(),
+                "invalid header must be rejected: {bytes:02x?}"
+            );
+        }
+
+        for conn_id in [1, u32::MAX] {
+            let bytes = wire_prefix(conn_id, 7);
+            assert_eq!(
+                decode_message(&bytes),
+                Ok((
+                    Message {
+                        header: MessageHeader::new(conn_id),
+                        body: MessageBody::KeepAlive,
+                    },
+                    bytes.len(),
+                ))
+            );
+        }
+    }
+
+    #[cfg(not(feature = "hot-join"))]
+    #[test]
+    fn decode_message_recognizes_disabled_hot_join_discriminants() {
+        for variant in 10..=16 {
+            let bytes = wire_prefix(1, variant);
+            let error = decode_message(&bytes).expect_err("disabled body must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires the disabled hot-join feature"),
+                "variant {variant} should be recognized, not reported as unknown: {error}"
+            );
+            assert_eq!(classify_wire_bytes(&bytes), WireRejectKind::Malformed);
+        }
+    }
+
+    #[test]
     fn decode_message_roundtrips_every_body_variant() {
         let messages = [
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::SyncRequest(SyncRequest {
                     random_request: 999,
+                    ..SyncRequest::default()
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
-                body: MessageBody::SyncReply(SyncReply { random_reply: 123 }),
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::SyncReply(SyncReply {
+                    random_reply: 123,
+                    ..SyncReply::default()
+                }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::Input(Input {
                     peer_connect_status: vec![
                         ConnectionStatus {
@@ -1034,50 +2158,53 @@ mod tests {
                             epoch: 7,
                         },
                     ],
-                    disconnect_requested: false,
                     start_frame: Frame::new(100),
                     ack_frame: Frame::new(50),
                     bytes: vec![1, 2, 3, 4, 5],
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::InputAck(InputAck {
                     ack_frame: Frame::new(77),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::QualityReport(QualityReport {
                     frame_advantage: -2,
                     ping: 1_000,
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::QualityReply(QualityReply { pong: 2_000 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::ChecksumReport(ChecksumReport {
                     checksum: 0xDEAD_BEEF,
                     frame: Frame::new(88),
                 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::KeepAlive,
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::FloorRequest(FloorRequest { round_seq: 42 }),
             },
             Message {
-                header: MessageHeader { magic: 0xABCD },
+                header: MessageHeader::new(0xABCD),
                 body: MessageBody::FloorReply(FloorReply {
                     round_seq: 42,
                     floors: vec![Frame::new(4), Frame::new(-1), Frame::new(10)],
                 }),
+            },
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::Goodbye(Goodbye { reason: 3 }),
             },
         ];
 
@@ -1090,6 +2217,236 @@ mod tests {
             assert_eq!(manual, original);
             assert_eq!(consumed, bytes.len());
         }
+    }
+
+    fn drop_operation() -> DropOperationId {
+        DropOperationId {
+            coordinator: 2,
+            coordinator_generation: 7,
+            sequence: 0x1020_3040,
+            target_set_digest: 0x0102_0304_0506_0708,
+        }
+    }
+
+    fn drop_bodies() -> Vec<(u32, MessageBody)> {
+        vec![
+            (
+                18,
+                MessageBody::DropPrepare(DropPrepare {
+                    operation: drop_operation(),
+                    targets: vec![
+                        DropTarget {
+                            handle: 4,
+                            generation: 9,
+                        },
+                        DropTarget {
+                            handle: 5,
+                            generation: 9,
+                        },
+                    ],
+                    participants: vec![0, 1, 2, 3],
+                }),
+            ),
+            (
+                19,
+                MessageBody::DropReport(DropReport {
+                    operation: drop_operation(),
+                    participant: 1,
+                    stage: DropReportStage::Inventory,
+                    exposed_confirmed: Frame::new(30),
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                    receipts: vec![
+                        DropReceipt {
+                            target: 4,
+                            available_from: Frame::new(10),
+                            contiguous_through: Frame::new(31),
+                        },
+                        DropReceipt {
+                            target: 5,
+                            available_from: Frame::new(11),
+                            contiguous_through: Frame::new(31),
+                        },
+                    ],
+                }),
+            ),
+            (
+                20,
+                MessageBody::DropBackfill(DropBackfill {
+                    operation: drop_operation(),
+                    chunk_index: 1,
+                    chunk_count: 3,
+                    start_frame: Frame::new(24),
+                    frame_count: 2,
+                    bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+                }),
+            ),
+            (
+                21,
+                MessageBody::DropCommit(DropCommit {
+                    operation: drop_operation(),
+                    cut: Frame::new(31),
+                    cut_digest: 0x1112_1314_1516_1718,
+                }),
+            ),
+            (
+                22,
+                MessageBody::DropAbort(DropAbort {
+                    operation: drop_operation(),
+                    reason: DropAbortReason::ConflictingHistory,
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn coordinated_drop_v1_goldens_roundtrip_with_manual_generic_parity() {
+        for (tag, body) in drop_bodies() {
+            let original = Message {
+                header: MessageHeader::new(0x1234),
+                body,
+            };
+            let bytes = encode(&original).unwrap();
+            let expected: &[u8] = match tag {
+                18 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x09,
+                    0x00, 0x05, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
+                ],
+                19 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x1F,
+                    0x00, 0x00, 0x00, 0x05, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
+                ],
+                20 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x01, 0x00, 0x03, 0x00, 0x18, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD,
+                ],
+                21 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x1F, 0x00, 0x00, 0x00, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
+                    0x11,
+                ],
+                22 => &[
+                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+                    0x02, 0x01, 0x02, 0x00, 0x00, 0x00,
+                ],
+                other => panic!("missing coordinated-drop golden for tag {other}"),
+            };
+            assert_eq!(
+                bytes, expected,
+                "immutable protocol-v1 golden for tag {tag}"
+            );
+            assert_eq!(bytes.get(8..12), Some(tag.to_le_bytes().as_slice()));
+            assert_eq!(original.encoded_len(), bytes.len());
+
+            let generic: Message = decode_value(&bytes).unwrap();
+            let (manual, consumed) = decode_message(&bytes).unwrap();
+            assert_eq!(generic, original, "generic decode for drop tag {tag}");
+            assert_eq!(manual, original, "manual decode for drop tag {tag}");
+            assert_eq!(consumed, bytes.len());
+        }
+    }
+
+    #[test]
+    fn coordinated_drop_decoder_rejects_invalid_typed_discriminants() {
+        let report = Message {
+            header: MessageHeader::new(1),
+            body: drop_bodies().remove(1).1,
+        };
+        let mut report_bytes = encode(&report).unwrap();
+        report_bytes[30..34].copy_from_slice(&3_u32.to_le_bytes());
+        let report_error = decode_message(&report_bytes).unwrap_err();
+        assert!(report_error
+            .to_string()
+            .contains("invalid drop report stage 3"));
+
+        let abort = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::DropAbort(DropAbort {
+                operation: drop_operation(),
+                reason: DropAbortReason::Superseded,
+            }),
+        };
+        let mut abort_bytes = encode(&abort).unwrap();
+        abort_bytes[28..32].copy_from_slice(&7_u32.to_le_bytes());
+        let abort_error = decode_message(&abort_bytes).unwrap_err();
+        assert!(abort_error
+            .to_string()
+            .contains("invalid drop abort reason 7"));
+    }
+
+    #[test]
+    fn coordinated_drop_report_stages_and_abort_reasons_roundtrip_exhaustively() {
+        for stage in [
+            DropReportStage::Inventory,
+            DropReportStage::Ready,
+            DropReportStage::Committed,
+        ] {
+            let message = Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::DropReport(DropReport {
+                    operation: drop_operation(),
+                    participant: 1,
+                    stage,
+                    exposed_confirmed: Frame::new(2),
+                    cut: Frame::new(3),
+                    cut_digest: 4,
+                    receipts: Vec::new(),
+                }),
+            };
+            let bytes = encode(&message).unwrap();
+            assert_eq!(decode_message(&bytes).unwrap().0, message);
+        }
+
+        for reason in [
+            DropAbortReason::Superseded,
+            DropAbortReason::MissingHistory,
+            DropAbortReason::ConflictingHistory,
+            DropAbortReason::ParticipantLost,
+            DropAbortReason::Timeout,
+            DropAbortReason::GenerationChanged,
+            DropAbortReason::ResourceLimit,
+        ] {
+            let message = Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::DropAbort(DropAbort {
+                    operation: drop_operation(),
+                    reason,
+                }),
+            };
+            let bytes = encode(&message).unwrap();
+            assert_eq!(decode_message(&bytes).unwrap().0, message);
+        }
+    }
+
+    #[test]
+    fn coordinated_drop_decoder_rejects_unrepresentable_vector_lengths_before_allocating() {
+        let prepare = Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::DropPrepare(DropPrepare {
+                operation: drop_operation(),
+                targets: Vec::new(),
+                participants: Vec::new(),
+            }),
+        };
+        let mut bytes = encode(&prepare).unwrap();
+        bytes[28..36].copy_from_slice(&u64::MAX.to_le_bytes());
+        let error = decode_message(&bytes).unwrap_err();
+        assert!(error.to_string().contains("drop_prepare.targets"));
+        assert!(
+            error.to_string().contains("exceeds") || error.to_string().contains("overflows"),
+            "unexpected length-bound error: {error}"
+        );
     }
 
     /// A `ConnectionStatus` with arbitrary field values (used by the wire-size
@@ -1117,30 +2474,98 @@ mod tests {
         // `vec!` literal is the complete set.
         #[cfg_attr(not(feature = "hot-join"), allow(unused_mut))]
         let mut bodies: Vec<BoxedStrategy<MessageBody>> = vec![
-            any::<u32>()
-                .prop_map(|random_request| MessageBody::SyncRequest(SyncRequest { random_request }))
+            (
+                any::<u32>(),
+                any::<u8>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        random_request,
+                        min_compat_version,
+                        features,
+                        num_players,
+                        input_bytes_per_player,
+                        fps,
+                        max_prediction,
+                        desync_interval,
+                        config_digest,
+                    )| {
+                        MessageBody::SyncRequest(SyncRequest {
+                            random_request,
+                            min_compat_version,
+                            features,
+                            config: SessionConfigBlock {
+                                num_players,
+                                input_bytes_per_player,
+                                fps,
+                                max_prediction,
+                                desync_interval,
+                            },
+                            config_digest,
+                        })
+                    },
+                )
                 .boxed(),
-            any::<u32>()
-                .prop_map(|random_reply| MessageBody::SyncReply(SyncReply { random_reply }))
+            (
+                any::<u32>(),
+                any::<u8>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u16>(),
+                any::<u32>(),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        random_reply,
+                        min_compat_version,
+                        features,
+                        num_players,
+                        input_bytes_per_player,
+                        fps,
+                        max_prediction,
+                        desync_interval,
+                        config_digest,
+                    )| {
+                        MessageBody::SyncReply(SyncReply {
+                            random_reply,
+                            min_compat_version,
+                            features,
+                            config: SessionConfigBlock {
+                                num_players,
+                                input_bytes_per_player,
+                                fps,
+                                max_prediction,
+                                desync_interval,
+                            },
+                            config_digest,
+                        })
+                    },
+                )
                 .boxed(),
             (
                 pvec(arb_connection_status(), 0..8),
-                any::<bool>(),
                 any::<i32>(),
                 any::<i32>(),
                 pvec(any::<u8>(), 0..64),
             )
-                .prop_map(
-                    |(peer_connect_status, disconnect_requested, start, ack, bytes)| {
-                        MessageBody::Input(Input {
-                            peer_connect_status,
-                            disconnect_requested,
-                            start_frame: Frame::new(start),
-                            ack_frame: Frame::new(ack),
-                            bytes,
-                        })
-                    },
-                )
+                .prop_map(|(peer_connect_status, start, ack, bytes)| {
+                    MessageBody::Input(Input {
+                        peer_connect_status,
+                        start_frame: Frame::new(start),
+                        ack_frame: Frame::new(ack),
+                        bytes,
+                    })
+                })
                 .boxed(),
             any::<i32>()
                 .prop_map(|f| {
@@ -1175,6 +2600,103 @@ mod tests {
             (any::<u32>(), pvec(any::<i32>().prop_map(Frame::new), 0..8))
                 .prop_map(|(round_seq, floors)| {
                     MessageBody::FloorReply(FloorReply { round_seq, floors })
+                })
+                .boxed(),
+            any::<u8>()
+                .prop_map(|reason| MessageBody::Goodbye(Goodbye { reason }))
+                .boxed(),
+            (
+                pvec(
+                    (any::<u16>(), any::<u16>())
+                        .prop_map(|(handle, generation)| DropTarget { handle, generation }),
+                    0..4,
+                ),
+                pvec(any::<u16>(), 0..4),
+            )
+                .prop_map(|(targets, participants)| {
+                    MessageBody::DropPrepare(DropPrepare {
+                        operation: drop_operation(),
+                        targets,
+                        participants,
+                    })
+                })
+                .boxed(),
+            (
+                any::<u16>(),
+                0_u8..3,
+                any::<i32>(),
+                any::<i32>(),
+                any::<u64>(),
+                pvec(
+                    (any::<u16>(), any::<i32>(), any::<i32>()).prop_map(
+                        |(target, available, through)| DropReceipt {
+                            target,
+                            available_from: Frame::new(available),
+                            contiguous_through: Frame::new(through),
+                        },
+                    ),
+                    0..4,
+                ),
+            )
+                .prop_map(|(participant, stage, exposed, cut, cut_digest, receipts)| {
+                    let stage = match stage {
+                        0 => DropReportStage::Inventory,
+                        1 => DropReportStage::Ready,
+                        _ => DropReportStage::Committed,
+                    };
+                    MessageBody::DropReport(DropReport {
+                        operation: drop_operation(),
+                        participant,
+                        stage,
+                        exposed_confirmed: Frame::new(exposed),
+                        cut: Frame::new(cut),
+                        cut_digest,
+                        receipts,
+                    })
+                })
+                .boxed(),
+            (
+                any::<u16>(),
+                any::<u16>(),
+                any::<i32>(),
+                any::<u16>(),
+                pvec(any::<u8>(), 0..64),
+            )
+                .prop_map(|(chunk_index, chunk_count, start, frame_count, bytes)| {
+                    MessageBody::DropBackfill(DropBackfill {
+                        operation: drop_operation(),
+                        chunk_index,
+                        chunk_count,
+                        start_frame: Frame::new(start),
+                        frame_count,
+                        bytes,
+                    })
+                })
+                .boxed(),
+            (any::<i32>(), any::<u64>())
+                .prop_map(|(cut, cut_digest)| {
+                    MessageBody::DropCommit(DropCommit {
+                        operation: drop_operation(),
+                        cut: Frame::new(cut),
+                        cut_digest,
+                    })
+                })
+                .boxed(),
+            (0_u8..7)
+                .prop_map(|reason| {
+                    let reason = match reason {
+                        0 => DropAbortReason::Superseded,
+                        1 => DropAbortReason::MissingHistory,
+                        2 => DropAbortReason::ConflictingHistory,
+                        3 => DropAbortReason::ParticipantLost,
+                        4 => DropAbortReason::Timeout,
+                        5 => DropAbortReason::GenerationChanged,
+                        _ => DropAbortReason::ResourceLimit,
+                    };
+                    MessageBody::DropAbort(DropAbort {
+                        operation: drop_operation(),
+                        reason,
+                    })
                 })
                 .boxed(),
         ];
@@ -1273,10 +2795,16 @@ mod tests {
             );
         }
 
-        (any::<u16>(), Union::new(bodies)).prop_map(|(magic, body)| Message {
-            header: MessageHeader { magic },
-            body,
-        })
+        (
+            any::<u32>().prop_filter("valid connection ID", |id| {
+                super::super::is_valid_conn_id(*id)
+            }),
+            Union::new(bodies),
+        )
+            .prop_map(|(conn_id, body)| Message {
+                header: MessageHeader::new(conn_id),
+                body,
+            })
     }
 
     proptest::proptest! {
@@ -1295,6 +2823,71 @@ mod tests {
                 msg
             );
         }
+
+        /// Stream framing is an envelope only: it must preserve the exact
+        /// protocol-v1 bytes for every body variant.
+        #[cfg_attr(miri, ignore)] // arbitrary-message proptest takes ~8 minutes on Windows Miri
+        #[test]
+        fn encode_framed_wraps_exact_arbitrary_message_bytes(msg in arb_message()) {
+            let payload = encode(&msg).expect("arbitrary message must encode");
+            let framed = encode_framed(&msg).expect("bounded arbitrary message must frame");
+            let prefix = u32::try_from(payload.len())
+                .expect("property payload is tiny")
+                .to_le_bytes();
+
+            proptest::prop_assert_eq!(framed.get(..4), Some(prefix.as_slice()));
+            proptest::prop_assert_eq!(framed.get(4..), Some(payload.as_slice()));
+        }
+
+        /// Arbitrary fragmentation of both the length prefix and payload cannot
+        /// change the decoded message or byte-consumption accounting.
+        #[cfg_attr(miri, ignore)] // proptest takes ~2 minutes on Windows Miri; every split is unit-tested
+        #[test]
+        fn frame_decoder_roundtrips_keep_alive_at_arbitrary_split(
+            conn_low in 1_u32..=u32::from(u16::MAX),
+            split_seed in proptest::prelude::any::<usize>(),
+        ) {
+            let message = keep_alive(conn_low);
+            let framed = encode_framed(&message).expect("keep-alive must frame");
+            let split = split_seed % (framed.len() + 1);
+            let mut decoder = FrameDecoder::new();
+
+            let (first, first_consumed) = decoder
+                .push(&framed[..split])
+                .expect("first fragment must decode or buffer");
+            let (second, second_consumed) = decoder
+                .push(&framed[split..])
+                .expect("second fragment must complete or be empty");
+
+            proptest::prop_assert_eq!(first_consumed, split);
+            proptest::prop_assert_eq!(second_consumed, framed.len() - split);
+            proptest::prop_assert_eq!(first.or(second), Some(message));
+            proptest::prop_assert_eq!(decoder.finish(), Ok(()));
+        }
+
+        /// A single read may contain many complete frames, but each `push`
+        /// yields exactly one and reports the suffix boundary without buffering
+        /// an unbounded decoded-message queue.
+        #[cfg_attr(miri, ignore)] // proptest takes ~4 minutes on Windows Miri; deterministic coverage remains
+        #[test]
+        fn frame_decoder_preserves_arbitrary_concatenated_frame_order(
+            conn_lows in proptest::collection::vec(1_u32..=u32::from(u16::MAX), 0..32),
+        ) {
+            let messages: Vec<_> = conn_lows.into_iter().map(keep_alive).collect();
+            let mut stream = Vec::new();
+            for message in &messages {
+                stream.extend_from_slice(
+                    &encode_framed(message).expect("keep-alive must frame")
+                );
+            }
+            let mut decoder = FrameDecoder::new();
+
+            let decoded = drain_framed(&mut decoder, &stream)
+                .expect("concatenated valid frames must decode");
+
+            proptest::prop_assert_eq!(decoded, messages);
+            proptest::prop_assert_eq!(decoder.finish(), Ok(()));
+        }
     }
 
     /// Documents why D1 was a real defect: the old accounting charged
@@ -1305,14 +2898,13 @@ mod tests {
     #[test]
     fn size_of_val_is_constant_while_wire_size_is_not_d1() {
         let tiny = Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::KeepAlive,
         };
         let heavy = Message {
-            header: MessageHeader { magic: 0 },
+            header: MessageHeader::new(0),
             body: MessageBody::Input(Input {
                 peer_connect_status: vec![ConnectionStatus::default(); 16],
-                disconnect_requested: false,
                 start_frame: Frame::new(10_000),
                 ack_frame: Frame::new(9_999),
                 bytes: vec![0xAB; 128],
@@ -1341,7 +2933,7 @@ mod tests {
     #[test]
     fn decode_message_roundtrips_input_without_generic_vec_decode() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::Input(Input {
                 peer_connect_status: vec![
                     ConnectionStatus {
@@ -1355,7 +2947,6 @@ mod tests {
                         epoch: 0,
                     },
                 ],
-                disconnect_requested: false,
                 start_frame: Frame::new(100),
                 ack_frame: Frame::new(50),
                 bytes: vec![1, 2, 3, 4, 5],
@@ -1371,9 +2962,7 @@ mod tests {
 
     #[test]
     fn decode_message_rejects_vec_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
-        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        let mut bytes = wire_prefix(0xABCD, 2);
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // peer_connect_status len
 
         let result = decode_message(&bytes);
@@ -1383,11 +2972,8 @@ mod tests {
 
     #[test]
     fn decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes());
-        bytes.extend_from_slice(&2_u32.to_le_bytes()); // MessageBody::Input
+        let mut bytes = wire_prefix(0xABCD, 2);
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // peer_connect_status len
-        bytes.push(0); // disconnect_requested
         bytes.extend_from_slice(&100_i32.to_le_bytes()); // start_frame
         bytes.extend_from_slice(&50_i32.to_le_bytes()); // ack_frame
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // input.bytes len
@@ -1395,6 +2981,83 @@ mod tests {
         let result = decode_message(&bytes);
 
         assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_connection_status_frame() {
+        let message = Message {
+            header: MessageHeader::new(0xABCD),
+            body: MessageBody::Input(Input {
+                peer_connect_status: vec![ConnectionStatus::default()],
+                ..Input::default()
+            }),
+        };
+        let mut bytes = encode(&message).unwrap();
+        // header (8) + variant (4) + status length (8) + disconnected (1)
+        bytes[21..25].copy_from_slice(&(-2_i32).to_le_bytes());
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_allows_null_connection_status_and_floor_frames() {
+        let messages = [
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::Input(Input {
+                    peer_connect_status: vec![ConnectionStatus::default()],
+                    ..Input::default()
+                }),
+            },
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::FloorReply(FloorReply {
+                    round_seq: 1,
+                    floors: vec![Frame::NULL],
+                }),
+            },
+        ];
+
+        for message in messages {
+            let bytes = encode(&message).unwrap();
+            let result = decode_message(&bytes);
+            assert_eq!(result, Ok((message, bytes.len())));
+        }
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_floor_reply_frame() {
+        let message = Message {
+            header: MessageHeader::new(0xABCD),
+            body: MessageBody::FloorReply(FloorReply {
+                round_seq: 1,
+                floors: vec![Frame::new(5)],
+            }),
+        };
+        let mut bytes = encode(&message).unwrap();
+        // header (8) + variant (4) + round sequence (4) + floors length (8)
+        bytes[24..28].copy_from_slice(&(-2_i32).to_le_bytes());
+
+        let result = decode_message(&bytes);
+
+        assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+    }
+
+    #[test]
+    fn decode_message_rejects_negative_checksum_frame() {
+        for frame in [Frame::NULL, Frame::new(-2)] {
+            let message = Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::ChecksumReport(ChecksumReport { checksum: 7, frame }),
+            };
+            let bytes = encode(&message).unwrap();
+
+            let result = decode_message(&bytes);
+
+            assert!(matches!(result, Err(CodecError::DecodeError { .. })));
+        }
     }
 
     #[test]
@@ -1411,7 +3074,7 @@ mod tests {
     #[test]
     fn decode_message_rejects_trailing_bytes() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::KeepAlive,
         };
         let mut bytes = encode(&original).unwrap();
@@ -1536,7 +3199,7 @@ mod tests {
     #[test]
     fn test_encoding_is_deterministic() {
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         let bytes1 = encode(&msg).unwrap();
@@ -1550,7 +3213,7 @@ mod tests {
     #[test]
     fn test_encode_into_message() {
         let msg = Message {
-            header: MessageHeader { magic: 0x1234 },
+            header: MessageHeader::new(0x1234),
             body: MessageBody::KeepAlive,
         };
         let mut buffer = [0u8; 256];
@@ -1575,6 +3238,12 @@ mod hot_join_tests {
         ReactivateSlot, ReactivateSlotAck, StateSnapshot, StateSnapshotAck,
     };
 
+    fn wire_prefix(conn_id: u32, variant: u32) -> Vec<u8> {
+        let mut bytes = encode(&MessageHeader::new(conn_id)).unwrap();
+        bytes.extend_from_slice(&variant.to_le_bytes());
+        bytes
+    }
+
     fn roundtrip(original: Message) {
         let bytes = encode(&original).unwrap();
         // The generic bincode decode is the authority for the wire format; the manual
@@ -1594,7 +3263,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_request() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinRequest(JoinRequest { player_handle: 3 }),
         });
     }
@@ -1602,7 +3271,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_with_checksum() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(42),
                 num_players: 4,
@@ -1621,7 +3290,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_with_bridge_inputs() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(42),
                 num_players: 3,
@@ -1652,7 +3321,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_without_checksum() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(7),
                 num_players: 2,
@@ -1667,7 +3336,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_empty_state_bytes() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(0),
                 num_players: 1,
@@ -1682,7 +3351,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_state_snapshot_ack() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshotAck(StateSnapshotAck {
                 frame: Frame::new(99),
             }),
@@ -1696,9 +3365,7 @@ mod hot_join_tests {
     /// `decode_message_rejects_input_bytes_length_that_exceeds_packet_bytes`.
     #[test]
     fn decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // state_bytes len (absurd)
@@ -1712,9 +3379,7 @@ mod hot_join_tests {
     /// (claims 100 bytes when only a few remain) must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_state_bytes_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&100_u64.to_le_bytes()); // state_bytes len
@@ -1728,9 +3393,7 @@ mod hot_join_tests {
     /// A `checksum` option tag other than 0/1 is invalid under bincode's encoding.
     #[test]
     fn decode_message_rejects_invalid_checksum_option_tag() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1750,9 +3413,7 @@ mod hot_join_tests {
     /// `decode_message_rejects_state_bytes_length_that_exceeds_packet_bytes`.
     #[test]
     fn decode_message_rejects_bridge_inputs_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1768,9 +3429,7 @@ mod hot_join_tests {
     /// before reserve.
     #[test]
     fn decode_message_rejects_bridge_inputs_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1786,9 +3445,7 @@ mod hot_join_tests {
     /// prefix itself missing) must be rejected, never read out of bounds.
     #[test]
     fn decode_message_rejects_snapshot_truncated_before_bridge_inputs() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1806,9 +3463,7 @@ mod hot_join_tests {
     /// reserving — mirrors the `bridge_inputs` battery.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_that_exceeds_packet_bytes() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1825,9 +3480,7 @@ mod hot_join_tests {
     /// remaining bytes must also be rejected before reserve.
     #[test]
     fn decode_message_rejects_bridge_statuses_length_larger_than_remaining() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1844,9 +3497,7 @@ mod hot_join_tests {
     /// must be rejected, never read out of bounds.
     #[test]
     fn decode_message_rejects_snapshot_truncated_before_bridge_statuses() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1865,9 +3516,7 @@ mod hot_join_tests {
     /// length bound (`1 * 7 > remaining`), before any element is decoded.
     #[test]
     fn decode_message_rejects_snapshot_truncated_inside_bridge_statuses() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&11_u32.to_le_bytes()); // MessageBody::StateSnapshot
+        let mut bytes = wire_prefix(0xABCD, 11);
         bytes.extend_from_slice(&0_i32.to_le_bytes()); // frame
         bytes.extend_from_slice(&2_u64.to_le_bytes()); // num_players
         bytes.extend_from_slice(&0_u64.to_le_bytes()); // state_bytes len = 0
@@ -1884,7 +3533,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_snapshot() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::StateSnapshot(StateSnapshot {
                 frame: Frame::new(5),
                 num_players: 2,
@@ -1905,7 +3554,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_reactivate_slot() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlot(ReactivateSlot {
                 handle: 2,
                 frame: Frame::new(42),
@@ -1916,7 +3565,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_reactivate_slot_ack() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
                 handle: 2,
                 frame: Frame::new(42),
@@ -1929,9 +3578,7 @@ mod hot_join_tests {
     /// out of bounds.
     #[test]
     fn decode_message_rejects_truncated_reactivate_slot() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&13_u32.to_le_bytes()); // MessageBody::ReactivateSlot
+        let mut bytes = wire_prefix(0xABCD, 13);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -1943,9 +3590,7 @@ mod hot_join_tests {
     /// A `ReactivateSlotAck` buffer truncated mid-`frame` must likewise be rejected.
     #[test]
     fn decode_message_rejects_truncated_reactivate_slot_ack() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&14_u32.to_le_bytes()); // MessageBody::ReactivateSlotAck
+        let mut bytes = wire_prefix(0xABCD, 14);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -1959,7 +3604,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_reactivate_slot() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlot(ReactivateSlot {
                 handle: 1,
                 frame: Frame::new(7),
@@ -1978,7 +3623,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_reactivate_slot_ack() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::ReactivateSlotAck(ReactivateSlotAck {
                 handle: 1,
                 frame: Frame::new(7),
@@ -1995,7 +3640,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_committed() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinCommitted(JoinCommitted {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2006,7 +3651,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_roundtrips_join_aborted() {
         roundtrip(Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinAborted(JoinAborted {
                 handle: 2,
                 frame: Frame::new(42),
@@ -2019,9 +3664,7 @@ mod hot_join_tests {
     /// out of bounds. Mirrors `decode_message_rejects_truncated_reactivate_slot`.
     #[test]
     fn decode_message_rejects_truncated_join_committed() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&15_u32.to_le_bytes()); // MessageBody::JoinCommitted
+        let mut bytes = wire_prefix(0xABCD, 15);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2033,9 +3676,7 @@ mod hot_join_tests {
     /// A `JoinAborted` buffer truncated mid-`frame` must likewise be rejected.
     #[test]
     fn decode_message_rejects_truncated_join_aborted() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // header.magic
-        bytes.extend_from_slice(&16_u32.to_le_bytes()); // MessageBody::JoinAborted
+        let mut bytes = wire_prefix(0xABCD, 16);
         bytes.extend_from_slice(&3_u64.to_le_bytes()); // handle
                                                        // frame (i32) omitted entirely.
 
@@ -2049,7 +3690,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_join_committed() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinCommitted(JoinCommitted {
                 handle: 1,
                 frame: Frame::new(7),
@@ -2068,7 +3709,7 @@ mod hot_join_tests {
     #[test]
     fn decode_message_rejects_trailing_bytes_after_join_aborted() {
         let original = Message {
-            header: MessageHeader { magic: 0xABCD },
+            header: MessageHeader::new(0xABCD),
             body: MessageBody::JoinAborted(JoinAborted {
                 handle: 1,
                 frame: Frame::new(7),

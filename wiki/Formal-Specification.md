@@ -478,26 +478,47 @@ stateDiagram-v2
 -- State
 sync_remaining: ℕ = NUM_SYNC_PACKETS = 5
 sync_requests: Set<u32>
+handshake_failed: Option<IncompatibleSessionReason> = None
+local_handshake: HandshakeConfig
 
 -- Initiator
-SEND: SyncRequest { random: rand() }
+SEND: SyncRequest { random: rand(), handshake: local_handshake }
       sync_requests := sync_requests ∪ {random}
 
 -- Responder (on SyncRequest)
-SEND: SyncReply { random: request.random }
+SEND: SyncReply { random: request.random, handshake: local_handshake }
+first_mismatch(local_handshake, request.handshake) != None →
+    handshake_failed := first_mismatch(local_handshake, request.handshake)
 
 -- Initiator (on SyncReply where reply.random ∈ sync_requests)
-sync_remaining := sync_remaining - 1
+first_mismatch(local_handshake, reply.handshake) != None →
+    handshake_failed := first_mismatch(local_handshake, reply.handshake)
+first_mismatch(local_handshake, reply.handshake) = None → sync_remaining := sync_remaining - 1
 sync_remaining = 0 → state := Running
+
+handshake_failed != None →
+    state = Synchronizing
+    ∧ no further SyncRequest retries
+    ∧ no SyncTimeout event
+    ∧ exactly one IncompatibleSession event
+    ∧ every received SyncRequest still receives local_handshake
 ```
+
+`SessionConfigBlock` contains fixed-width player count, serialized input width,
+FPS, maximum prediction, and desync interval fields. Compatibility floor and
+feature bits are compared before the canonical digest. Mismatch precedence is
+protocol floor, player count, input width, FPS, maximum prediction, desync
+interval, feature bits, then digest.
 
 ### Message Types
 
 ```
 MessageBody =
-    | SyncRequest { random_request: u32 }
-    | SyncReply { random_reply: u32 }
-    | Input { peer_connect_status: Vec<ConnectionStatus>, disconnect_requested: bool, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
+    | SyncRequest { random_request: u32, min_compat_version: u8, features: u32,
+                    config: SessionConfigBlock, config_digest: u64 }
+    | SyncReply { random_reply: u32, min_compat_version: u8, features: u32,
+                  config: SessionConfigBlock, config_digest: u64 }
+    | Input { peer_connect_status: Vec<ConnectionStatus>, start_frame: Frame, ack_frame: Frame, bytes: Vec<u8> }
     | InputAck { ack_frame: Frame }
     | QualityReport { frame_advantage: i16, ping: u128 }
     | QualityReply { pong: u128 }
@@ -505,7 +526,8 @@ MessageBody =
     | KeepAlive
     | FloorRequest { round_seq: u32 }                    -- floor-round protocol (N>=4 double-failure-relay convergence)
     | FloorReply { round_seq: u32, floors: Vec<Frame> }  -- relay's per-slot pessimistic floors
-    -- The following are only present with cfg(feature = "hot-join"):
+    -- Tags 10-16 are reserved in every build; their bodies are handled only with
+    -- cfg(feature = "hot-join"):
     | JoinRequest { player_handle: usize }
     | StateSnapshot { ... }
     | StateSnapshotAck { ... }
@@ -513,6 +535,7 @@ MessageBody =
     | ReactivateSlotAck { ... }
     | JoinCommitted { ... }
     | JoinAborted { frame: Frame }
+    | Goodbye { reason: u8 }                            -- fixed wire tag 17
 ```
 
 ---
@@ -540,6 +563,27 @@ MessageBody =
     raw_receive_attempt_count(poll) ≤ MAX_RECEIVE_MESSAGES_PER_POLL
     ∧ decoded_message_count(poll) ≤ MAX_RECEIVE_MESSAGES_PER_POLL)
 ```
+
+### SAFE-1c: Stream Frame and Datagram Diagnostic Bounds
+
+```
+□(∀frame ∈ AcceptedStreamFrames:
+    0 < declared_payload_len(frame) ≤ DEFAULT_MAX_FRAME_LEN
+    ∧ decoded_message_bytes(frame) = declared_payload_len(frame))
+□(∀push ∈ StreamDecoderPushes:
+    yielded_message_count(push) ≤ 1
+    ∧ buffered_frame_count(push) ≤ 1)
+□(∀msg ∈ QueuedUdpMessages:
+    encoded_len(msg) ≥ 1200 ⇒ portability_risk_messages_sent' =
+        saturating_increment(portability_risk_messages_sent))
+□(∀msg ∈ QueuedUdpMessages:
+    encoded_len(msg) ≥ 1472 ⇒ fragmentation_risk_messages_sent' =
+        saturating_increment(fragmentation_risk_messages_sent))
+```
+
+The 1,200- and 1,472-byte rules are telemetry, not acceptance bounds: endpoints still queue a
+valid message, while diagnosing each threshold once per endpoint era. The stream prefix is a transport envelope and therefore does
+not alter the deterministic protocol-v1 message format.
 
 ### SAFE-2: No Invalid Frame Access
 
@@ -620,6 +664,54 @@ MessageBody =
     ◇(spectator_behind(m) ∧ m < n))
 ```
 
+### SAFE-12: Coordinated graceful-drop history immutability
+
+The protocol-v1 graceful-removal implementation under review is a distributed
+barrier, not an immediate local freeze. Each survivor first holds its
+exposed-confirmed high-water and reports that value plus every target's receipt
+and retained input range. The certified cut is the maximum over every reported
+exposed frame and every reported target receipt. Bounded, value-bearing
+backfill closes each receipt-to-cut gap before a survivor becomes ready. A
+commit is applied atomically at each survivor and is idempotent, relayed, and
+fenced by the exact target generation and operation ID.
+
+For every survivor `p`, committed cut `C`, and frame `f` already exposed by
+`p`, the public target input remains the canonical input:
+
+```
+committed(p, C) ∧ f ≤ exposed_high_water(p) → reported_input(p, f) = input(f)
+```
+
+`specs/tla/CoordinatedPeerDrop.tla` models two serialized operation IDs over two
+membership/target eras with independent per-survivor commit. The runtime defers
+a prepare received while a prior commit closes, discards its stale participant
+vector after membership changes, and re-derives the intent in the current era;
+the bounded model represents this as `RebaseNextMembershipEra` and rejects
+messages carrying an older era. The base safety model permits reordered
+delivery; explicit handlers cover duplicate backfill/commit and stale-era
+messages. Its receipt witness requires the certified cut to rise strictly above
+every exposed high-water because one reported receipt is higher. Its enforced
+`ImmediateMin` mutation demonstrates D14: choosing the minimum receipt can
+freeze below another survivor's exposed high-water and rewrite confirmed
+history.
+
+The `CoordinatedPeerDrop_Fair.cfg` companion assumes fault-free fair progress
+and proves both operations resolve, including receipt-raised cut selection,
+membership-era rebasing, positive backfill, duplicate handling, and stale-era
+rejection. The
+`CoordinatedPeerDrop_Faults.cfg` companion permits arbitrary message loss and
+models timeout, missing retained history, exhausted backfill budget,
+conflicting overlap, participant loss, and generation drift. Once any survivor
+prepares, explicit fairness of a terminal fault and `Fail` propagation proves
+every survivor eventually fails closed; no success liveness is claimed under
+permanent loss. This fault claim is deliberately pre-commit: after a survivor
+applies a certified commit, timeout only closes its bounded retransmission
+journal and participant loss cannot revert the emitted drop. The model likewise
+excludes `Committed` from timeout, participant-loss, and `Fail` transitions.
+The model covers one target input stream and two fixed survivor identities;
+changing participant cardinality and multi-handle endpoint composition remain
+implementation/test obligations.
+
 ---
 
 ## Constants
@@ -661,6 +753,7 @@ MessageBody =
 | Checksum exchange             | TLA+ | ✅ Implemented (`specs/tla/ChecksumExchange.tla`) |
 | Spectator session             | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
 | Concurrency model             | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`)      |
+| Graceful-drop barrier model | TLA+ | ✅ Implemented (`specs/tla/CoordinatedPeerDrop.tla`) |
 
 ---
 
@@ -668,5 +761,6 @@ MessageBody =
 
 | Version | Date       | Changes                                                      |
 | ------- | ---------- | ------------------------------------------------------------ |
+| 1.1     | 2026-07-12 | Added the coordinated graceful-drop safety model and D14 mutation gate |
 | 1.0     | 2025-12-06 | Complete specification with invariants, components, protocol |
 | 0.1     | 2025-12-06 | Initial draft                                                |

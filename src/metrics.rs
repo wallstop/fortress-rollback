@@ -58,6 +58,8 @@ pub enum EventKind {
     DesyncDetected,
     /// [`FortressEvent::SyncTimeout`](crate::FortressEvent::SyncTimeout).
     SyncTimeout,
+    /// [`FortressEvent::IncompatibleSession`](crate::FortressEvent::IncompatibleSession).
+    IncompatibleSession,
     /// [`FortressEvent::ReplayDesync`](crate::FortressEvent::ReplayDesync).
     ReplayDesync,
     /// [`FortressEvent::SpectatorDivergence`](crate::FortressEvent::SpectatorDivergence).
@@ -80,13 +82,13 @@ impl EventKind {
     /// Varies with enabled features: two additional categories exist when the
     /// `hot-join` feature is on.
     #[cfg(not(feature = "hot-join"))]
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     /// The number of event categories.
     ///
     /// Varies with enabled features: two additional categories exist when the
     /// `hot-join` feature is on.
     #[cfg(feature = "hot-join")]
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
 
     /// Every category, in declaration order. Its length is [`Self::COUNT`].
     #[cfg(not(feature = "hot-join"))]
@@ -99,6 +101,7 @@ impl EventKind {
         Self::WaitRecommendation,
         Self::DesyncDetected,
         Self::SyncTimeout,
+        Self::IncompatibleSession,
         Self::ReplayDesync,
         Self::SpectatorDivergence,
         Self::InputDelayRecommendation,
@@ -115,6 +118,7 @@ impl EventKind {
         Self::WaitRecommendation,
         Self::DesyncDetected,
         Self::SyncTimeout,
+        Self::IncompatibleSession,
         Self::ReplayDesync,
         Self::SpectatorDivergence,
         Self::InputDelayRecommendation,
@@ -136,6 +140,7 @@ impl EventKind {
             Self::WaitRecommendation => "wait_recommendation",
             Self::DesyncDetected => "desync_detected",
             Self::SyncTimeout => "sync_timeout",
+            Self::IncompatibleSession => "incompatible_session",
             Self::ReplayDesync => "replay_desync",
             Self::SpectatorDivergence => "spectator_divergence",
             Self::InputDelayRecommendation => "input_delay_recommendation",
@@ -159,14 +164,15 @@ impl EventKind {
             Self::WaitRecommendation => 5,
             Self::DesyncDetected => 6,
             Self::SyncTimeout => 7,
-            Self::ReplayDesync => 8,
-            Self::SpectatorDivergence => 9,
-            Self::InputDelayRecommendation => 10,
-            Self::PeerDropped => 11,
+            Self::IncompatibleSession => 8,
+            Self::ReplayDesync => 9,
+            Self::SpectatorDivergence => 10,
+            Self::InputDelayRecommendation => 11,
+            Self::PeerDropped => 12,
             #[cfg(feature = "hot-join")]
-            Self::JoinRequested => 12,
+            Self::JoinRequested => 13,
             #[cfg(feature = "hot-join")]
-            Self::PeerJoined => 13,
+            Self::PeerJoined => 14,
         }
     }
 }
@@ -635,9 +641,9 @@ impl HotJoinMetrics {
 /// [`PeerMetrics::messages_received_by_kind`] — without exposing the internal
 /// message types.
 ///
-/// The hot-join categories (`JoinRequest`, `StateSnapshot`, `StateSnapshotAck`,
-/// `ReactivateSlot`, `ReactivateSlotAck`, `JoinCommitted`, `JoinAborted`) exist
-/// only when the `hot-join` feature is enabled.
+/// The hot-join categories remain present when the `hot-join` feature is disabled
+/// because protocol-v1 wire discriminants are feature-independent. Disabled
+/// builds reject those bodies during bounded wire decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -662,60 +668,40 @@ pub enum MessageKind {
     /// A floor-round reply (the double-failure-relay reorder fix).
     FloorReply,
     /// A hot-join slot-occupancy request.
-    #[cfg(feature = "hot-join")]
     JoinRequest,
     /// A hot-join game-state snapshot.
-    #[cfg(feature = "hot-join")]
     StateSnapshot,
     /// A hot-join snapshot acknowledgement.
-    #[cfg(feature = "hot-join")]
     StateSnapshotAck,
     /// A hot-join slot-reactivation request.
-    #[cfg(feature = "hot-join")]
     ReactivateSlot,
     /// A hot-join slot-reactivation acknowledgement.
-    #[cfg(feature = "hot-join")]
     ReactivateSlotAck,
     /// A hot-join commit notification.
-    #[cfg(feature = "hot-join")]
     JoinCommitted,
     /// A hot-join abort notification.
-    #[cfg(feature = "hot-join")]
     JoinAborted,
+    /// A best-effort graceful disconnect notification.
+    Goodbye,
+    /// Opens a coordinated graceful-drop barrier.
+    DropPrepare,
+    /// Participant inventory/readiness/commit acknowledgement for a graceful drop.
+    DropReport,
+    /// A bounded target-input backfill chunk for a graceful drop.
+    DropBackfill,
+    /// An irrevocable coordinated graceful-drop decision.
+    DropCommit,
+    /// A coordinated graceful-drop abort notification.
+    DropAbort,
 }
 
 impl MessageKind {
     /// The number of message categories.
     ///
-    /// Varies with enabled features: seven additional categories exist when the
-    /// `hot-join` feature is on.
-    #[cfg(not(feature = "hot-join"))]
-    pub const COUNT: usize = 10;
-    /// The number of message categories.
-    ///
-    /// Varies with enabled features: seven additional categories exist when the
-    /// `hot-join` feature is on.
-    #[cfg(feature = "hot-join")]
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 23;
 
     /// Every category, in declaration (wire-discriminant) order. Its length is
     /// [`Self::COUNT`].
-    #[cfg(not(feature = "hot-join"))]
-    pub const ALL: [Self; Self::COUNT] = [
-        Self::SyncRequest,
-        Self::SyncReply,
-        Self::Input,
-        Self::InputAck,
-        Self::QualityReport,
-        Self::QualityReply,
-        Self::ChecksumReport,
-        Self::KeepAlive,
-        Self::FloorRequest,
-        Self::FloorReply,
-    ];
-    /// Every category, in declaration (wire-discriminant) order. Its length is
-    /// [`Self::COUNT`].
-    #[cfg(feature = "hot-join")]
     pub const ALL: [Self; Self::COUNT] = [
         Self::SyncRequest,
         Self::SyncReply,
@@ -734,6 +720,12 @@ impl MessageKind {
         Self::ReactivateSlotAck,
         Self::JoinCommitted,
         Self::JoinAborted,
+        Self::Goodbye,
+        Self::DropPrepare,
+        Self::DropReport,
+        Self::DropBackfill,
+        Self::DropCommit,
+        Self::DropAbort,
     ];
 
     /// A stable snake_case label for this category, suitable for logging or as a
@@ -751,20 +743,19 @@ impl MessageKind {
             Self::KeepAlive => "keep_alive",
             Self::FloorRequest => "floor_request",
             Self::FloorReply => "floor_reply",
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest => "join_request",
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot => "state_snapshot",
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshotAck => "state_snapshot_ack",
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlot => "reactivate_slot",
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlotAck => "reactivate_slot_ack",
-            #[cfg(feature = "hot-join")]
             Self::JoinCommitted => "join_committed",
-            #[cfg(feature = "hot-join")]
             Self::JoinAborted => "join_aborted",
+            Self::Goodbye => "goodbye",
+            Self::DropPrepare => "drop_prepare",
+            Self::DropReport => "drop_report",
+            Self::DropBackfill => "drop_backfill",
+            Self::DropCommit => "drop_commit",
+            Self::DropAbort => "drop_abort",
         }
     }
 
@@ -782,20 +773,19 @@ impl MessageKind {
             Self::KeepAlive => 7,
             Self::FloorRequest => 8,
             Self::FloorReply => 9,
-            #[cfg(feature = "hot-join")]
             Self::JoinRequest => 10,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshot => 11,
-            #[cfg(feature = "hot-join")]
             Self::StateSnapshotAck => 12,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlot => 13,
-            #[cfg(feature = "hot-join")]
             Self::ReactivateSlotAck => 14,
-            #[cfg(feature = "hot-join")]
             Self::JoinCommitted => 15,
-            #[cfg(feature = "hot-join")]
             Self::JoinAborted => 16,
+            Self::Goodbye => 17,
+            Self::DropPrepare => 18,
+            Self::DropReport => 19,
+            Self::DropBackfill => 20,
+            Self::DropCommit => 21,
+            Self::DropAbort => 22,
         }
     }
 }
@@ -946,6 +936,19 @@ pub struct PeerMetrics {
     /// **after** delta/RLE compression.
     pub input_bytes_post_compression: u64,
 
+    /// Cumulative logical messages whose complete Fortress wire payload was at
+    /// least 1200 bytes when queued for this endpoint. This conservative budget
+    /// is portable across common UDP, WebRTC, QUIC-datagram, and tunneled paths;
+    /// it is advisory and is not path-MTU discovery.
+    pub portability_risk_messages_sent: u64,
+
+    /// Cumulative logical messages whose complete Fortress wire payload
+    /// was at least 1472 bytes when queued for this endpoint. That is the common
+    /// IPv4/UDP payload ceiling for a 1500-byte path MTU (20-byte IPv4 header +
+    /// 8-byte UDP header); IPv6, tunnels, VPNs, or IPv4 options can fragment at
+    /// smaller sizes. This counter is diagnostic, not path-MTU discovery.
+    pub fragmentation_risk_messages_sent: u64,
+
     /// **Gauge.** The number of input frames queued for (re)transmission that the
     /// peer has not yet acknowledged — the connection-backpressure signal also
     /// reported as
@@ -1089,7 +1092,7 @@ mod tests {
     #[test]
     fn fortress_event_kind_maps_every_variant() {
         let a = addr();
-        let cases: [(FortressEvent<TestConfig>, EventKind); 12] = [
+        let cases: [(FortressEvent<TestConfig>, EventKind); 13] = [
             (
                 FortressEvent::Synchronizing {
                     addr: a,
@@ -1138,6 +1141,13 @@ mod tests {
                     elapsed_ms: 0,
                 },
                 EventKind::SyncTimeout,
+            ),
+            (
+                FortressEvent::IncompatibleSession {
+                    addr: a,
+                    reason: crate::IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 },
+                },
+                EventKind::IncompatibleSession,
             ),
             (
                 FortressEvent::ReplayDesync {
@@ -1372,6 +1382,8 @@ mod tests {
         assert_eq!(m.messages_received_by_kind.total(), 0);
         assert_eq!(m.input_bytes_pre_compression, 0);
         assert_eq!(m.input_bytes_post_compression, 0);
+        assert_eq!(m.portability_risk_messages_sent, 0);
+        assert_eq!(m.fragmentation_risk_messages_sent, 0);
         assert_eq!(m.pending_output_len, 0);
         assert_eq!(m.pending_checksums_len, 0);
         assert_eq!(m.ping_ms, 0);
@@ -1383,11 +1395,21 @@ mod tests {
     fn peer_metrics_serializes_kind_breakdown_as_labeled_map() {
         let mut m = PeerMetrics {
             packets_sent: 1,
+            portability_risk_messages_sent: 3,
+            fragmentation_risk_messages_sent: 2,
             ..Default::default()
         };
         m.messages_sent_by_kind.record(MessageKind::Input);
         let json = m.to_json().expect("json serialization succeeds");
         assert!(json.contains(r#""packets_sent":1"#), "{json}");
+        assert!(
+            json.contains(r#""portability_risk_messages_sent":3"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""fragmentation_risk_messages_sent":2"#),
+            "{json}"
+        );
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""input":1"#), "{json}");
         assert!(json.contains(r#""keep_alive":0"#), "{json}");

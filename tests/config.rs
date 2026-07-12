@@ -123,7 +123,7 @@ fn test_sync_config_default() {
 
     assert_eq!(config.num_sync_packets, 5);
     assert_eq!(config.sync_retry_interval, Duration::from_millis(200));
-    assert_eq!(config.sync_timeout, None);
+    assert_eq!(config.sync_timeout, Some(Duration::from_secs(20)));
     assert_eq!(config.running_retry_interval, Duration::from_millis(200));
     assert_eq!(config.keepalive_interval, Duration::from_millis(200));
 }

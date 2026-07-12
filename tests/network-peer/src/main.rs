@@ -369,6 +369,7 @@ struct EventSummary {
     network_resumed: u32,
     disconnected: u32,
     sync_timeout: u32,
+    incompatible_session: u32,
     wait_recommendation: u32,
     input_delay_recommendation: u32,
     desync_detected: u32,
@@ -396,6 +397,7 @@ impl EventSummary {
             FortressEvent::WaitRecommendation { .. } => self.wait_recommendation += 1,
             FortressEvent::DesyncDetected { .. } => self.desync_detected += 1,
             FortressEvent::SyncTimeout { .. } => self.sync_timeout += 1,
+            FortressEvent::IncompatibleSession { .. } => self.incompatible_session += 1,
             FortressEvent::ReplayDesync { .. } => self.replay_desync += 1,
             FortressEvent::InputDelayRecommendation { .. } => {
                 self.input_delay_recommendation += 1;

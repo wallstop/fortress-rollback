@@ -384,7 +384,8 @@ fn p2p_continue_without_propagated_disconnect_freezes_dropped_peer() -> Result<(
 }
 
 #[test]
-fn p2p_halt_propagated_disconnect_transitions_to_synchronizing() -> Result<(), FortressError> {
+fn p2p_explicit_remove_uses_coordinated_continue_without_under_halt_config(
+) -> Result<(), FortressError> {
     let ThreePlayerSessions {
         mut sess1,
         mut sess2,
@@ -404,58 +405,30 @@ fn p2p_halt_propagated_disconnect_transitions_to_synchronizing() -> Result<(), F
     }
     poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 10);
 
+    // The configured Halt policy governs automatic timeout handling.
+    // Explicit removal is an application-authorized, mesh-certified
+    // ContinueWithout operation on every participant.
     sess2.remove_player(PlayerHandle::new(2))?;
     let _ = drain_events(&mut sess2);
 
-    let mut detected_without_advance = false;
     for i in 0..12_u32 {
         poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
         advance_session(&mut sess2, &mut stub2, PlayerHandle::new(1), i + 100)?;
         poll_three(&mut sess1, &mut sess2, &mut sess3, &clock, 3);
-        let frame_before_detecting_call = sess1.current_frame();
-        let confirmed_before_detecting_call = sess1.confirmed_frame();
-        sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: i + 200 })?;
-        match sess1.advance_frame() {
-            Err(FortressError::NotSynchronized) => {
-                assert_eq!(
-                    sess1.current_frame(),
-                    frame_before_detecting_call,
-                    "detecting a propagated Halt drop must not advance one extra frame"
-                );
-                assert!(
-                    sess1.confirmed_frame() <= confirmed_before_detecting_call,
-                    "detecting a propagated Halt drop must not expose a speculative confirmed tail"
-                );
-                detected_without_advance = true;
-                break;
-            },
-            Ok(requests) => {
-                stub1.handle_requests(requests);
-            },
-            Err(err) => return Err(err),
-        }
+        advance_session(&mut sess1, &mut stub1, PlayerHandle::new(0), i + 200)?;
     }
 
-    assert!(
-        detected_without_advance,
-        "session 1 should detect the propagated Halt drop during advance_frame"
-    );
     assert_eq!(
         sess1.current_state(),
-        SessionState::Synchronizing,
-        "propagated Halt drop must fail closed"
+        SessionState::Running,
+        "an explicit certified removal must override the automatic Halt policy"
     );
     let events = drain_events(&mut sess1);
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event, FortressEvent::PeerDropped { .. })),
-        "Halt propagated drop must not emit PeerDropped; got {events:?}"
-    );
-    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 999 })?;
-    assert!(
-        matches!(sess1.advance_frame(), Err(FortressError::NotSynchronized)),
-        "Halt propagated drop must reject further frame advance"
+            .any(|event| matches!(event, FortressEvent::PeerDropped { handle, .. } if *handle == PlayerHandle::new(2))),
+        "every certified participant must observe PeerDropped; got {events:?}"
     );
 
     Ok(())
@@ -635,7 +608,8 @@ fn p2p_remove_player_rejects_local() -> Result<(), FortressError> {
 }
 
 #[test]
-fn p2p_remove_player_rejects_already_removed() -> Result<(), FortressError> {
+fn p2p_remove_player_local_certificate_commits_then_rejects_removed_slot(
+) -> Result<(), FortressError> {
     let clock = TestClock::new();
     let (s1, s2, a1, a2) = create_channel_pair();
 
@@ -658,13 +632,23 @@ fn p2p_remove_player_rejects_already_removed() -> Result<(), FortressError> {
     drain_sync_events(&mut sess1, &mut sess2);
 
     sess1.remove_player(PlayerHandle::new(1)).unwrap();
+    let events: Vec<_> = sess1.events().collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FortressEvent::PeerDropped { handle, .. } if *handle == PlayerHandle::new(1))),
+        "the one-member survivor certificate must commit without a network round trip: {events:?}"
+    );
     let result = sess1.remove_player(PlayerHandle::new(1));
-    assert!(matches!(
-        result,
-        Err(FortressError::InvalidRequestStructured {
-            kind: fortress_rollback::InvalidRequestKind::PlayerAlreadyRemoved { .. }
-        })
-    ));
+    assert!(
+        matches!(
+            &result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: fortress_rollback::InvalidRequestKind::PlayerAlreadyRemoved { .. }
+            })
+        ),
+        "committed removal must reject a later request: {result:?}"
+    );
 
     Ok(())
 }
@@ -1426,6 +1410,12 @@ fn p2p_continue_without_4p_two_drops_remaining_two_continue() -> Result<(), Fort
         for _ in 0..3 {
             sess1.poll_remote_clients();
             sess2.poll_remote_clients();
+            // The second target is still a declared survivor of the first
+            // serialized operation and must keep carrying its certificate
+            // until that commit closes. It is excluded from the queued second
+            // operation afterward.
+            sess3.poll_remote_clients();
+            sess4.poll_remote_clients();
             clock.advance(POLL_INTERVAL_DETERMINISTIC);
         }
         sess1
@@ -2911,8 +2901,8 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
     blocked.block(a_addr, c_addr);
     blocked.block(c_addr, a_addr);
 
-    // --- Phase 4: every survivor drops D (and A/C drop each other, since their
-    // link is now severed) via explicit `remove_player`. On this direct path each
+    // --- Phase 4: every survivor drops D via explicit `remove_player`. On this
+    // direct path each
     // survivor's INITIAL D freeze frame is its OWN received frame (A high, B
     // middle, C low). Then we pump poll + advance so gossip propagates through
     // `update_player_disconnects`: C (low) -> B lowers B's D freeze to the global
@@ -2929,13 +2919,11 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
     sess_a.remove_player(PlayerHandle::new(3)).unwrap();
     sess_b.remove_player(PlayerHandle::new(3)).unwrap();
     sess_c.remove_player(PlayerHandle::new(3)).unwrap();
-    sess_a.remove_player(PlayerHandle::new(2)).unwrap();
-    sess_c.remove_player(PlayerHandle::new(0)).unwrap();
 
     let mut a_dropped = false;
     let mut b_dropped = false;
     let mut c_dropped = false;
-    for _ in 0..120 {
+    for _ in 0..20 {
         sess_a.poll_remote_clients();
         sess_b.poll_remote_clients();
         sess_c.poll_remote_clients();
@@ -2981,6 +2969,42 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
         {
             c_dropped = true;
         }
+        if a_dropped && b_dropped && c_dropped {
+            break;
+        }
+    }
+
+    // The D certificate itself traversed A<->B<->C. Restore the unrelated
+    // A<->C data path before its ordinary disconnect timeout can start a new,
+    // incompatible membership operation.
+    blocked.unblock(a_addr, c_addr);
+    blocked.unblock(c_addr, a_addr);
+    for _ in 0..100 {
+        sess_a.poll_remote_clients();
+        sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        try_advance_recording(
+            &mut sess_a,
+            &mut stub_a,
+            PlayerHandle::new(0),
+            500,
+            &mut states_a,
+        )?;
+        try_advance_recording(
+            &mut sess_b,
+            &mut stub_b,
+            PlayerHandle::new(1),
+            1500,
+            &mut states_b,
+        )?;
+        try_advance_recording(
+            &mut sess_c,
+            &mut stub_c,
+            PlayerHandle::new(2),
+            2500,
+            &mut states_c,
+        )?;
     }
 
     // All three survivors must have actually dropped D and advanced past the drop.
@@ -3389,34 +3413,11 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // detector (BLIND to the pre-fix state divergence) now agrees with the converged
 // state. The assertions pin the post-fix convergence as a CI-safe guard.
 
-/// Double-failure-relay arbitration (VERDICT: REAL, S41) — now a positive
-/// CONVERGENCE guard after the Session-55 production fix (the sequence-numbered
-/// `FloorRequest`/`FloorReply` round, verified-sound mode `AsyncAckSoundRoundSeq`)
-/// closed the residual. While A's direct link to C is severed, A's CACHE of C's
-/// D-term is stale-`{connected, M}` — the **connected-relay** shape — so A cannot
-/// see C's freeze `F` from its own fold; the round solicits C's CURRENT pessimistic
-/// floor `F` over a reorder-immune reply channel instead. Builds a D-receipt
-/// gradient (B low = `F`, A/C high = `M`), then prunes the origin B from A's fold
-/// via `A.remove_player(B)` while A's direct link to C is severed and B has already
-/// relayed its low freeze to C. Pre-fix, A would record D's slot above `F` with
-/// real inputs and DISCARD those frames before C's relayed `{disconnected, F}`
-/// reached A, leaving A and C with divergent confirmed state.
-///
-/// The fix: with B pruned and ≥2 remotes still running, A is in the relay topology,
-/// so it issues `FloorRequest`s to its folded relays. While the round to C is
-/// incomplete (C unreachable during the sever — `slot_round_incomplete`), A HOLDS
-/// its confirmed bound for D at the current confirmed frame and never discards the
-/// contested window. When the C->A link re-opens, C answers the round with its
-/// CURRENT floor `F` (the `min` over its own freeze and its folded sources, carried
-/// on the reorder-immune reply channel — a stale gossip packet can never corrupt
-/// it); A folds `F`, re-simulates the still-in-window frames with D frozen at `F`,
-/// and converges; D then mesh-excludes and confirmation advances. This test pins
-/// that the full double-failure choreography still runs (A learns D's drop only via
-/// the late relay, A stays live via the S20 clamp) yet A's and C's recorded
-/// confirmed state is now byte-identical, and D's confirmed inputs match too.
+/// A graceful drop whose declared survivors are split into disconnected
+/// components cannot form an all-participant certificate. The frontier must
+/// remain held and the attempt must fail closed without emitting `PeerDropped`.
 #[test]
-fn p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors() -> Result<(), FortressError>
-{
+fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), FortressError> {
     // LONG symmetric timeouts so NO auto-timeout fires: every endpoint pruning
     // here is driven by an explicit `remove_player`, so the choreography fully
     // controls fold membership (a blocked LINK never collapses an endpoint to
@@ -3699,79 +3700,35 @@ fn p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors() -> Resu
          the double-failure-relay choreography did not produce overlapping confirmed history"
     );
 
-    // A must have actually LEARNED D's disconnect (emitted PeerDropped for D),
-    // and via the LATE relay (p5), not before it confirmed past F (p4). Otherwise
-    // a divergence would be the trivial "A never converged the drop" rather than
-    // the documented "A converged the disconnect FLAG but the freeze frame relayed
-    // below A's already-discarded confirmed window, so the S20 clamp could not
-    // re-simulate the diverged frames".
     assert!(
-        a_dropped_d_p5 && !a_dropped_d_p4,
-        "expected A to learn D's disconnect ONLY via the late relay (p4={a_dropped_d_p4}, \
-         p5={a_dropped_d_p5}); the documented double-failure ordering did not hold \
-         (bound={confirmed_bound}, a_dropped_b={a_dropped_b})"
+        !a_dropped_d && !a_dropped_b,
+        "an uncertified partitioned operation must not emit a drop: \
+         d_p4={a_dropped_d_p4}, d_p5={a_dropped_d_p5}, b={a_dropped_b}"
     );
-
-    // A must have stayed LIVE through the late relay: the documented mechanism is
-    // the S20 out-of-window CLAMP (Ok, no stall), not a hard error. A stall/error
-    // would be a different (more benign) failure mode.
+    assert_eq!(
+        sess_a.current_state(),
+        SessionState::Synchronizing,
+        "A must fail closed when its certificate participants are unreachable"
+    );
     assert!(
-        a_stall_error.is_none(),
-        "expected A to stay live via the S20 clamp, but advance_frame errored: \
-         {a_stall_error:?} (bound={confirmed_bound})"
+        confirmed_bound <= warmup_frames as i32,
+        "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
+         advance_error={a_stall_error:?}"
     );
-
-    // POSITIVE CONVERGENCE GUARD (Session 55) — the "double-failure relay"
-    // residual (documented REAL in `remote_slot_confirmed_bound`'s rustdoc, the
-    // genuine N>=4 instance of the discard-before-convergence residual the S32
-    // barrier narrowed but did not close) is now FIXED by the sequence-numbered
-    // floor-round. Across the SAME double-failure choreography the asserts above
-    // pin (A learns D's drop ONLY via the late relay, A stays live via the S20
-    // clamp), A's and C's recorded confirmed StateStub is now byte-identical:
-    // while the round to C is incomplete during the sever, A held its confirmed
-    // bound for D at the current confirmed frame and never discarded the contested
-    // window — on re-open, C answered the round with its current floor `F` (over a
-    // reorder-immune reply channel), so A re-simulated the still-in-window frames
-    // with D frozen at `F` and converged.
-    //
-    // This is the converse of the pre-fix characterization guard: an EMPTY
-    // `divergences` is now the GREEN signal. A regression (the fix reverted /
-    // the round hold or fold neutralized) would re-populate `divergences` and flip
-    // this assert RED.
     assert!(
         divergences.is_empty(),
-        "double-failure-relay REGRESSED: confirmed state diverged across survivors \
-         (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
-         a_stall_error={a_stall_error:?}, divergences={divergences:?}). The \
-         pessimistic-floor barrier should hold A's confirmed bound at F so the \
-         contested window is never discarded before the relay converges it."
-    );
-
-    // The decisive signature of THIS corner (vs a plain input split): D's
-    // confirmed INPUTS also converge across A and C (both frozen at `F`), so the
-    // library's own input-checksum desync detector — which was BLIND to the
-    // pre-fix state divergence — agrees with the now-converged state. Rests on
-    // GENUINELY-QUERYABLE frames: at least one frame queryable on both peers
-    // (else the "match" is a vacuous `None == None` on discarded history), and no
-    // queryable mismatch.
-    assert!(
-        queryable_matches > 0,
-        "input probe was vacuous: no sampled frame was queryable on BOTH A and C \
-         (all discarded from the input ring) — pick frames in the queryable window; \
-         got {input_probe:?} (bound={confirmed_bound})"
+        "the held frontier must not expose divergent confirmed state: {divergences:?}"
     );
     assert!(
         !queryable_mismatch,
-        "expected D's confirmed inputs to MATCH across A and C on every queryable \
-         frame (the freeze frame converged); got {input_probe:?}"
+        "the held prefix must remain identical: {input_probe:?}; matches={queryable_matches}"
     );
 
     Ok(())
 }
 
 #[test]
-fn p2p_n5_double_failure_relay_two_relays_dropped_slot_converges_across_survivors(
-) -> Result<(), FortressError> {
+fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), FortressError> {
     // LONG symmetric timeouts so NO auto-timeout fires; every prune is an
     // explicit `remove_player`. SMALL prediction window (4) so A can burn its
     // whole window and (absent the HOLD) DISCARD frames below `F` before the
@@ -4025,35 +3982,27 @@ fn p2p_n5_double_failure_relay_two_relays_dropped_slot_converges_across_survivor
          the N=5 double-failure-relay choreography did not produce overlapping confirmed history"
     );
     assert!(
-        a_dropped_d_p5 && !a_dropped_d_p4,
-        "expected A to learn D's disconnect ONLY via the late relay (p4={a_dropped_d_p4}, \
-         p5={a_dropped_d_p5}); the double-failure ordering did not hold \
-         (bound={confirmed_bound}, a_dropped_b={a_dropped_b})"
+        !a_dropped_d && !a_dropped_b,
+        "an uncertified partitioned operation must not emit a drop: \
+         d_p4={a_dropped_d_p4}, d_p5={a_dropped_d_p5}, b={a_dropped_b}"
+    );
+    assert_eq!(
+        sess_a.current_state(),
+        SessionState::Synchronizing,
+        "A must fail closed when both certificate relays are unreachable"
     );
     assert!(
-        a_stall_error.is_none(),
-        "expected A to stay live via the S20 clamp, but advance_frame errored: \
-         {a_stall_error:?} (bound={confirmed_bound})"
+        confirmed_bound <= warmup_frames as i32,
+        "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
+         advance_error={a_stall_error:?}"
     );
-    // POSITIVE CONVERGENCE GUARD (the S55 fix at N=5, two relays): an EMPTY
-    // `divergences` is GREEN; a regression repopulates it and flips this RED.
     assert!(
         divergences.is_empty(),
-        "N=5 double-failure-relay REGRESSED: confirmed state diverged across survivors \
-         (bound={confirmed_bound}, compared={compared}, a_dropped_d={a_dropped_d}, \
-         a_stall_error={a_stall_error:?}, divergences={divergences:?}). The multi-relay \
-         floor-round HOLD should keep A's confirmed bound at F until BOTH relays' rounds \
-         are fresh, so the contested window is never discarded."
-    );
-    assert!(
-        queryable_matches > 0,
-        "input probe was vacuous: no sampled frame was queryable on all of A, C, C2 \
-         (all discarded from the input ring) — got {input_probe:?} (bound={confirmed_bound})"
+        "the held frontier must not expose divergent confirmed state: {divergences:?}"
     );
     assert!(
         !queryable_mismatch,
-        "expected D's confirmed inputs to MATCH across A, C, C2 on every queryable \
-         frame (the freeze frame converged); got {input_probe:?}"
+        "the held prefix must remain identical: {input_probe:?}; matches={queryable_matches}"
     );
 
     Ok(())
@@ -5117,12 +5066,15 @@ fn p2p_continue_without_spectator_converges_after_gossip_lowered_freeze_frame(
         }
     }
 
-    // --- Phase 4: P1 also drops P2 (its own lower received frame) and gossip
-    // propagates so the host mines its agreed frame DOWN to the global-min `F`
-    // and re-rolls + rolls back the dropped slot's value. Keep pumping the
-    // spectator: a CORRECT implementation must re-send / correct the previously
-    // forwarded frames; a buggy one strands the spectator. ---
-    sess1.remove_player(PlayerHandle::new(2))?;
+    // --- Phase 4: the host's coordinated operation already committed P2 on
+    // P1 at one non-retracting cut. A second application request therefore
+    // observes the committed slot rather than opening a lower gossip freeze. ---
+    assert!(matches!(
+        sess1.remove_player(PlayerHandle::new(2)),
+        Err(FortressError::InvalidRequestStructured {
+            kind: fortress_rollback::InvalidRequestKind::PlayerAlreadyRemoved { .. }
+        })
+    ));
     for i in 0..40_u32 {
         host.poll_remote_clients();
         sess1.poll_remote_clients();
@@ -5455,6 +5407,11 @@ fn staggered_two_drops_opposite_order_survivors_converge_no_desync() -> Result<(
     for i in 0..80_u32 {
         sess_a.poll_remote_clients();
         sess_b.poll_remote_clients();
+        // C and D are each excluded from their own operation but remain a
+        // declared participant in the other serialized removal until its
+        // certificate commits.
+        sess_c.poll_remote_clients();
+        sess_d.poll_remote_clients();
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
 
         // Re-assert the drops in case gossip ordering surfaced a fresh endpoint;
@@ -5483,6 +5440,8 @@ fn staggered_two_drops_opposite_order_survivors_converge_no_desync() -> Result<(
     for _ in 0..20 {
         sess_a.poll_remote_clients();
         sess_b.poll_remote_clients();
+        sess_c.poll_remote_clients();
+        sess_d.poll_remote_clients();
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
         desyncs_a.extend(collect_desyncs(&mut sess_a));
         desyncs_b.extend(collect_desyncs(&mut sess_b));
@@ -5727,8 +5686,8 @@ fn p2p_n0_detect_first_remove_player_under_asymmetric_loss_converges() -> Result
     assert!(
         events1
             .iter()
-            .any(|e| matches!(e, FortressEvent::PeerDropped { .. })),
-        "A must emit PeerDropped on explicit remove_player; got {events1:?}"
+            .all(|e| !matches!(e, FortressEvent::PeerDropped { .. })),
+        "prepare must not emit PeerDropped before the survivor certificate; got {events1:?}"
     );
     for _ in 0..24 {
         sess1.poll_remote_clients();
@@ -5742,6 +5701,12 @@ fn p2p_n0_detect_first_remove_player_under_asymmetric_loss_converges() -> Result
             &mut states1,
         )?;
     }
+    assert!(
+        sess1
+            .events()
+            .any(|event| matches!(event, FortressEvent::PeerDropped { .. })),
+        "A must emit PeerDropped after the coordinated certificate commits"
+    );
 
     // --- Phase 3b: release B. Its first advances apply the propagated drop
     // (PeerDropped via gossip, frozen at its OWN low receipt = the global min

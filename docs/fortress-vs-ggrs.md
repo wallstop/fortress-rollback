@@ -235,7 +235,7 @@ pub fn add_spectator(
 ```toml
 # Fortress - just works
 [dependencies]
-fortress-rollback = "0.9"
+fortress-rollback = "0.10"
 ```
 
 **How this works:**
@@ -276,7 +276,7 @@ let range_value: u32 = rng.gen_range(1..100);
 - **Less browser feature wiring** - GGRS 0.11 browser consumers enable `ggrs = { version = "0.11", features = ["wasm-bindgen"] }`; that feature is browser-only, while GGRS's direct `js-sys` target selection still applies across `wasm32` and does not make it Emscripten-compatible
 - **Explicit deterministic seeds** - Fortress's PCG supplies protocol nonces and ChaosSocket simulation; game simulation should use it only with a fixed seed shared by every peer
 
-**Important:** Fortress also uses this RNG for seeded protocol values such as synchronization magic. Game state should not consume an independently seeded stream; use a fixed, synchronized game RNG and verify it with cross-target checksums.
+**Important:** Fortress also uses this RNG for seeded protocol values such as synchronization connection ID. Game state should not consume an independently seeded stream; use a fixed, synchronized game RNG and verify it with cross-target checksums.
 
 ### Deterministic Hashing Module
 
@@ -474,7 +474,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Formal Verification
 
-- **15 TLA+ specifications** covering core protocols (Rollback, InputQueue, NetworkProtocol, TimeSync, ChecksumExchange, SpectatorSession, Concurrency) as well as N-peer/freeze/failover protocols (DoubleFailureRelay, FrameAdvantageAggregation, FreezeConvergence, NPeerReactivation, NPeerServeFreezeConvergence, PeerDrop, SpectatorFailover, SpectatorReactivationEpoch)
+- **19 TLA+ specifications** covering core protocols (Rollback, InputQueue, NetworkProtocol, TimeSync, ChecksumExchange, SpectatorSession, Concurrency) as well as N-peer/freeze/failover protocols (CoordinatedPeerDrop, DoubleFailureRelay, FrameAdvantageAggregation, FreezeConvergence, NPeerReactivation, NPeerServeFreezeConvergence, PeerDrop, SpectatorFailover, SpectatorReactivationEpoch, and the protocol-v1 handshake companions)
 - **130 Kani proofs** for bounded model checking
 - **65 Z3 SMT proofs** for algorithmic correctness
 
@@ -508,7 +508,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ## Migration Checklist
 
-- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.9"`
+- [ ] Update `Cargo.toml`: `ggrs = "0.11"` -> `fortress-rollback = "0.10"`
 - [ ] Update imports: `use ggrs::*` -> `use fortress_rollback::*`
 - [ ] Rename types: `GgrsError` -> `FortressError`, etc.
 - [ ] Add `Ord` + `PartialOrd` to your `Config::Address` type

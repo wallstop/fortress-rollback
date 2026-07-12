@@ -1882,21 +1882,17 @@ fn sparse_save_mode_survives_graceful_drop_rollback() {
     );
 }
 
-/// M3 §6.4 census: two peers can drop in the same poll window after asymmetric
-/// survivor receipt loss, and the live mesh still converges. This pins the
-/// whole-mesh counterpart to the lower-level multi-drop guard: the schedule
-/// proves both intended blocked links dropped traffic, both survivors loaded
-/// prior state after the drops, and both survivors learned both graceful drops.
+/// Two simultaneous drops whose survivor certificates cross incompatible
+/// asymmetric cuts cannot be serialized safely. The observers must hold their
+/// exposed prefixes and fail closed without emitting either uncertified drop.
 #[test]
-fn same_step_multi_drop_after_asymmetric_block_converges() {
+fn same_step_multi_drop_after_asymmetric_block_fails_closed() {
     const SURVIVORS: [usize; 2] = [0, 1];
     const DROPPED: [usize; 2] = [2, 3];
 
     let schedule = same_step_multi_drop_schedule();
 
     let report = run(&schedule, &RunOptions::default());
-    report.expect_pass(&schedule);
-
     for (from, to) in [(2, 1), (3, 0)] {
         assert!(
             blocked_drop_count(&report, from, to) > 0,
@@ -1904,59 +1900,39 @@ fn same_step_multi_drop_after_asymmetric_block_converges() {
             report.blocked_drops_by_link
         );
     }
-    let survivor_post_drop_loads: Vec<_> = report
-        .load_game_state_observations
-        .iter()
-        .filter(|load| load.step >= MULTI_DROP_AT && SURVIVORS.contains(&load.peer))
-        .collect();
-    for survivor in SURVIVORS {
-        assert!(
-            survivor_post_drop_loads
-                .iter()
-                .any(|load| load.peer == survivor && load.frame < MULTI_DROP_AT as i32),
-            "survivor {survivor} must load pre-drop state after same-step drops: {:?}",
-            report.load_game_state_observations
-        );
-    }
-    let rollbacks: u64 = report
-        .metrics
-        .iter()
-        .map(|metrics| metrics.rollback_count)
-        .sum();
-    let resimulated: u64 = report
-        .metrics
-        .iter()
-        .map(|metrics| metrics.resimulated_frames)
-        .sum();
-    assert!(
-        rollbacks > 0 && resimulated > 0,
-        "same-step multi-drop row must exercise disconnect rollback: \
-         rollbacks={rollbacks}, resimulated={resimulated}"
-    );
     assert_eq!(
         report.recovered_within_b,
-        Some(true),
-        "same-step multi-drop row must run and pass bounded post-heal liveness"
+        Some(false),
+        "fail-closed sessions deliberately do not resume after heal"
     );
     for observer in SURVIVORS {
         for dropped in DROPPED {
-            assert!(
-                peer_event_payload_count(&report, observer, peer_dropped_key(dropped)) > 0,
-                "survivor {observer} must observe PeerDropped for removed peer {dropped}: {:?}",
+            assert_eq!(
+                peer_event_payload_count(&report, observer, peer_dropped_key(dropped)),
+                0,
+                "observer {observer} must not emit an uncertified drop for {dropped}: {:?}",
                 report.peer_event_payload_counts_by_peer
             );
         }
     }
-    for survivor in SURVIVORS {
-        let confirmed = report
-            .final_confirmed
-            .get(survivor)
-            .copied()
-            .unwrap_or(i32::MIN);
-        assert!(
-            confirmed > 400,
-            "survivor {survivor} must keep confirming after same-step drops: {:?}",
-            report.final_confirmed
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+        )),
+        "the held prefixes must remain divergence-free: {:?}",
+        report.verdict.failures
+    );
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for observer in SURVIVORS {
+        assert_eq!(
+            final_snapshot.session_states.get(observer),
+            Some(&TraceSessionState::Synchronizing),
+            "observer {observer} must fail closed: {:?}",
+            final_snapshot.session_states
         );
     }
 
@@ -1967,17 +1943,12 @@ fn same_step_multi_drop_after_asymmetric_block_converges() {
     );
 }
 
-/// M3 §28.3 known-red census: a one-way partition lasts beyond the disconnect
-/// timeout, so peer 0 drops peer 4 even though the reverse network direction
-/// is never blocked.
-/// This reproduces D14 at whole-mesh scale: the unilateral graceful freeze
-/// rewrites already-confirmed history. The four-peer majority and one-peer
-/// island both keep advancing, but their confirmed histories fork permanently.
-/// Flip this to a green convergence regression when M5's coordinated
-/// prepare/backfill/commit barrier lands.
+/// D14 asymmetric-partition regression: the four reachable survivors commit
+/// one non-retracting drop of peer 4, while the isolated peer cannot gather the
+/// declared participant certificate and fails closed. No confirmed input may
+/// be rewritten on either side of the partition.
 #[test]
-#[ignore = "known D14 confirmed-history rewrite under asymmetric partition"]
-fn one_way_minority_partition_rewrites_confirmed_history_known_defect() {
+fn one_way_minority_partition_commits_majority_and_fails_minority_closed_d14() {
     let schedule = asymmetric_partition_schedule();
 
     let report = run(&schedule, &RunOptions::default());
@@ -2061,133 +2032,95 @@ fn one_way_minority_partition_rewrites_confirmed_history_known_defect() {
             );
         }
     }
-    for dropped in 0..=3 {
-        assert!(
-            peer_event_payload_count(&report, 4, peer_dropped_key(dropped)) > 0,
-            "minority peer 4 must eventually drop majority peer {dropped}: {:?}",
+    for survivor in 0..=3 {
+        assert_eq!(
+            peer_event_payload_count(&report, 4, peer_dropped_key(survivor)),
+            0,
+            "minority peer 4 must not commit without a survivor certificate: {:?}",
             report.peer_event_payload_counts_by_peer
         );
         assert!(
             peer_event_payload_count(
                 &report,
                 4,
-                addr_event_key(EventKind::NetworkInterrupted, dropped)
+                addr_event_key(EventKind::NetworkInterrupted, survivor)
             ) > 0,
-            "minority peer 4 must observe majority peer {dropped}'s silence: {:?}",
+            "minority peer 4 must observe majority peer {survivor}'s silence: {:?}",
             report.peer_event_payload_counts_by_peer
         );
-        assert!(
-            peer_event_payload_count(&report, 4, addr_event_key(EventKind::Disconnected, dropped))
-                > 0,
-            "minority peer 4 must surface majority peer {dropped}'s disconnect: {:?}",
+        assert_eq!(
+            peer_event_payload_count(
+                &report,
+                4,
+                addr_event_key(EventKind::Disconnected, survivor)
+            ),
+            0,
+            "a failed certificate must not emit a committed disconnect: {:?}",
             report.peer_event_payload_counts_by_peer
         );
     }
-    assert_eq!(
-        report.recovered_within_b,
-        Some(true),
-        "both sides of the intentional ContinueWithout fork must keep advancing"
-    );
-    let confirmed_rewrites: Vec<_> = report
-        .verdict
-        .failures
-        .iter()
-        .filter_map(|failure| match failure {
-            OracleFailure::ConfirmedInputDivergence {
-                peer,
-                first_author,
-                expected,
-                actual,
-                ..
-            } => Some((*peer, *first_author, expected, actual)),
-            _ => None,
-        })
-        .collect();
     assert!(
-        !confirmed_rewrites.is_empty()
-            && confirmed_rewrites.iter().all(
-                |(peer, first_author, expected, actual)| {
-                    *peer < 4
-                        && *first_author == 4
-                        && expected.len() == 5
-                        && actual.len() == 5
-                        && expected.get(..4) == actual.get(..4)
-                        && expected.get(4) != actual.get(4)
-                }
-            ),
-        "every confirmed divergence must be D14 rewriting only peer 4's input at the majority: {:?}",
-        report.verdict.failures
-    );
-    assert!(
-        report
-            .final_confirmed
-            .iter()
-            .all(|confirmed| *confirmed > 200),
-        "the majority and minority island must remain available after the fork: {:?}",
-        report.final_confirmed
-    );
-    let final_snapshot = report
-        .trace_tail
-        .last()
-        .expect("a non-empty run must retain a final trace snapshot");
-    assert!(
-        final_snapshot
-            .session_states
-            .iter()
-            .all(|state| *state == TraceSessionState::Running),
-        "both sides must finish Running rather than wedged: {:?}",
-        final_snapshot.session_states
-    );
-    let majority_state = final_snapshot
-        .game_states
-        .get(1)
-        .expect("five-player trace must contain peer 1 state");
-    assert!(
-        final_snapshot
-            .game_states
-            .iter()
-            .skip(1)
-            .take(3)
-            .all(|state| state == majority_state),
-        "gossip-driven majority peers 1..=3 must converge on one final state: {:?}",
-        final_snapshot.game_states
-    );
-    assert!(
-        report.verdict.failures.iter().all(|failure| matches!(
+        !report.verdict.failures.iter().any(|failure| matches!(
             failure,
             OracleFailure::ConfirmedInputDivergence { .. }
                 | OracleFailure::StateDivergence { .. }
                 | OracleFailure::InbandDesyncDetected { .. }
                 | OracleFailure::ChecksumMismatchMetric { .. }
         )),
-        "known D14 divergence must be the complete failure surface: {:?}",
+        "the coordinated barrier must eliminate every D14 divergence: {:?}",
         report.verdict.failures
     );
+    let final_snapshot = report
+        .trace_tail
+        .last()
+        .expect("a non-empty run must retain a final trace snapshot");
+    assert_eq!(
+        final_snapshot.session_states.get(..4),
+        Some(
+            &[
+                TraceSessionState::Running,
+                TraceSessionState::Running,
+                TraceSessionState::Running,
+                TraceSessionState::Running,
+            ][..]
+        ),
+        "the certified majority must stay available: {:?}",
+        final_snapshot.session_states
+    );
+    assert_eq!(
+        final_snapshot.session_states.get(4),
+        Some(&TraceSessionState::Synchronizing),
+        "the uncertified minority must fail closed: {:?}",
+        final_snapshot.session_states
+    );
+    let majority_state = final_snapshot
+        .game_states
+        .first()
+        .expect("five-player trace must contain peer 0 state");
     assert!(
-        report.verdict.failures.iter().any(|failure| matches!(
-            failure,
-            OracleFailure::StateDivergence {
+        final_snapshot
+            .game_states
+            .iter()
+            .take(4)
+            .all(|state| state == majority_state),
+        "the certified majority must converge on one final state: {:?}",
+        final_snapshot.game_states
+    );
+    assert!(
+        report.verdict.failures.iter().all(|failure| match failure {
+            OracleFailure::Violation { violation, .. } => {
+                violation.contains("coordinated graceful drop")
+                    && violation.contains("failed closed: Timeout")
+            },
+            OracleFailure::EndProgress {
                 peer: 4,
-                first_author: 0,
+                state: fortress_rollback::SessionState::Synchronizing,
                 ..
             }
-        )),
-        "minority peer 4 must diverge in state from canonical majority peer 0: {:?}",
-        report.verdict.failures
-    );
-    assert!(
-        report
-            .verdict
-            .failures
-            .iter()
-            .filter_map(|failure| match failure {
-                OracleFailure::StateDivergence {
-                    peer, first_author, ..
-                } => Some((*peer, *first_author)),
-                _ => None,
-            })
-            .all(|pair| pair == (4, 0)),
-        "all state divergence must be minority peer 4 versus canonical majority peer 0: {:?}",
+            | OracleFailure::PostHealLiveness { peer: 4, .. } => true,
+            _ => false,
+        }),
+        "only the expected minority fail-closed diagnostics may remain: {:?}",
         report.verdict.failures
     );
 
