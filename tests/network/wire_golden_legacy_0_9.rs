@@ -1,0 +1,5 @@
+//! Shared recorded v0.9.0 handshake fixture.
+
+/// Exact legacy SyncRequest datagram for token `0x10203040`.
+pub const LEGACY_SYNC_REQUEST: &[u8] =
+    &[0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x40, 0x30, 0x20, 0x10];

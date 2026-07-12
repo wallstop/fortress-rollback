@@ -66,6 +66,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "scripts/docs/**",
     "scripts/tests/**",
     "scripts/ci/check-doc-claims.sh",
+    "scripts/hooks/check-wire-golden-immutable.py",
     "scripts/ci/check-derive-bounds.sh",
     ".markdownlint.json",
     ".markdown-link-check.json",
@@ -97,6 +98,7 @@ VERSION_SYNC_REQUIRED_PATH_GLOBS = {
 }
 VERSION_SYNC_REQUIRED_PATHS = {
     "scripts/sync-version.sh",
+    "scripts/hooks/check-wire-golden-immutable.py",
     ".github/workflows/ci-version-sync.yml",
 }
 
@@ -168,6 +170,18 @@ def test_pre_push_hooks_are_explicitly_allowlisted(pre_commit_config: dict) -> N
     }
 
     assert pre_push_hooks <= PRE_PUSH_ALLOWLIST
+
+
+def test_wire_golden_hook_checks_the_staged_diff_every_commit(
+    pre_commit_config: dict,
+) -> None:
+    """Deletion, rename, and partial staging must not bypass wire immutability."""
+    hook = _hook_by_id(pre_commit_config, "wire-golden-immutable")
+    assert hook["entry"] == (
+        "python scripts/hooks/check-wire-golden-immutable.py --cached"
+    )
+    assert hook["pass_filenames"] is False
+    assert hook["always_run"] is True
 
 
 @pytest.mark.parametrize("path", [DOCS_CONTRIBUTING, WIKI_CONTRIBUTING])
@@ -326,3 +340,16 @@ def test_version_sync_workflow_handles_broad_version_globs() -> None:
         paths = _workflow_paths(workflow, event)
         assert VERSION_SYNC_REQUIRED_PATH_GLOBS <= paths
         assert VERSION_SYNC_REQUIRED_PATHS <= paths
+
+
+def test_version_sync_workflow_enforces_committed_wire_golden_diff() -> None:
+    """PR CI must compare immutable fixtures against the actual base commit."""
+    content = CI_VERSION_SYNC_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "fetch-depth: 0" in content
+    assert "if: github.event_name == 'pull_request'" in content
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in content
+    assert (
+        'python3 scripts/hooks/check-wire-golden-immutable.py --base-ref "$BASE_SHA"'
+        in content
+    )

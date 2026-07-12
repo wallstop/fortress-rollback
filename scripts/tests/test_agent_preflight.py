@@ -36,6 +36,8 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("skills-index-check", ".llm/skills/workflows/dev-pipeline.md"),
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
+    ("wire-golden-immutable", "src/network/wire_golden_v1.rs"),
+    ("wire-golden-immutable", "tests/network/wire_golden_legacy_0_9.rs"),
     ("vale-advisory", "docs/index.md"),
     ("link-check", "README.md"),
     ("doc-claims", "tests/common/channel_socket.rs"),
@@ -232,6 +234,16 @@ def test_plan_checks_runs_changelog_rule_when_changelog_changed() -> None:
     assert rule_check.fix_command is None
     assert rule_check.fix_hint is not None
     assert "Breaking" in rule_check.fix_hint
+
+
+def test_plan_checks_wire_golden_rule_checks_worktree_and_index() -> None:
+    checks = plan_checks({"src/network/wire_golden_v1.rs"})
+    rule = next(check for check in checks if check.check_id == "wire-golden-immutable")
+    assert rule.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-wire-golden-immutable.py",
+        "--local",
+    ]
 
 
 def test_plan_checks_skips_changelog_rule_for_unrelated_files() -> None:

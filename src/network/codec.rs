@@ -1652,6 +1652,72 @@ fn bounded_decode_config() -> impl bincode::config::Config {
 }
 
 #[cfg(test)]
+fn assert_wire_golden_suite(
+    wire_version: u8,
+    fixtures: Vec<(&'static str, Message)>,
+    expected: fn(&MessageBody) -> &'static [u8],
+) {
+    use crate::metrics::MessageKind;
+
+    assert_eq!(wire_version, crate::PROTOCOL_VERSION);
+    assert_eq!(fixtures.len(), MessageKind::COUNT);
+    let mut seen_kinds = [false; MessageKind::COUNT];
+    for (variant, message) in fixtures {
+        let kind = message.kind();
+        let kind_index = MessageKind::ALL
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .expect("message kind must belong to MessageKind::ALL");
+        let seen = seen_kinds
+            .get_mut(kind_index)
+            .expect("message kind index must be in bounds");
+        assert!(!*seen, "duplicate fixture for {kind:?}");
+        *seen = true;
+
+        let expected_bytes = expected(&message.body);
+        let encoded = encode(&message).expect("fixture must encode");
+        assert_eq!(encoded, expected_bytes, "encoded bytes for {variant}");
+        assert_eq!(
+            message.encoded_len(),
+            expected_bytes.len(),
+            "encoded length for {variant}"
+        );
+        let generic: Message =
+            decode_value(expected_bytes).expect("fixture must generically decode");
+        assert_eq!(generic, message, "generic decode for {variant}");
+        if !matches!(
+            &message.body,
+            MessageBody::JoinRequest(_)
+                | MessageBody::StateSnapshot(_)
+                | MessageBody::StateSnapshotAck(_)
+                | MessageBody::ReactivateSlot(_)
+                | MessageBody::ReactivateSlotAck(_)
+                | MessageBody::JoinCommitted(_)
+                | MessageBody::JoinAborted(_)
+        ) || cfg!(feature = "hot-join")
+        {
+            let (manual, consumed) =
+                decode_message(expected_bytes).expect("enabled fixture must manually decode");
+            assert_eq!(manual, message, "manual decode for {variant}");
+            assert_eq!(
+                consumed,
+                expected_bytes.len(),
+                "consumed bytes for {variant}"
+            );
+        }
+    }
+    assert!(seen_kinds.into_iter().all(std::convert::identity));
+}
+
+#[cfg(test)]
+#[path = "wire_golden_v1.rs"]
+mod wire_golden_v1;
+
+#[cfg(test)]
+#[path = "wire_golden_legacy_0_9.rs"]
+mod wire_golden_legacy_0_9;
+
+#[cfg(test)]
 #[allow(
     clippy::panic,
     clippy::unwrap_used,
@@ -1677,6 +1743,15 @@ mod tests {
             header: MessageHeader::new(conn_id),
             body: MessageBody::KeepAlive,
         }
+    }
+
+    #[test]
+    fn shared_wire_golden_harness_accepts_current_v1_suite() {
+        assert_wire_golden_suite(
+            super::wire_golden_v1::WIRE_GOLDEN_VERSION,
+            super::wire_golden_v1::fixtures(),
+            super::wire_golden_v1::expected,
+        );
     }
 
     fn drain_framed(decoder: &mut FrameDecoder, mut bytes: &[u8]) -> CodecResult<Vec<Message>> {
