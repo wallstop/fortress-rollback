@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783899288882,
+  "lastUpdate": 1783902903590,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "123fa9ed3270ca99ca713877d327a8167dc99fed",
-          "message": "Spectator tech (#164)\n\n## Description\n\nThis PR upgrades spectator capabilities with failover, stream delay, and\nrewind support.\n\n- Adds failover spectator startup via\n`SessionBuilder::start_spectator_session_multi(&[T::Address], socket)`.\n- Spectators can connect to multiple hosts at once and continue while at\nleast one host stays connected.\n- Adds `SpectatorConfig::stream_delay` to hold playback behind the live\nedge.\n- Adds `SpectatorConfig::enable_rewind` with seek support through\n`SpectatorSession::seek_to_frame(Frame)`.\n- Adds spectator config validation (`buffer_size > 0` and `stream_delay\n< buffer_size`) and applies it to spectator startup.\n- Improves duplicate frame/input handling and host disconnect behavior\nin multi-host scenarios.\n- Updates user-facing docs and API contracts to document the new\nbehavior and edge cases.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n\t- No `unwrap()` in production code\n\t- No `expect()` in production code\n\t- No `panic!()` or `todo!()`\n\t- All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --all-targets --features\ntokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Updated spectator session coverage in `tests/sessions/spectator.rs`\n- Added/updated spectator config coverage in `src/sessions/config.rs`\n\n**Manual testing performed:**\n\n- (None)\n\n## Related Issues\n\n- (None)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Breaking public API (spectator config fields, new error/event/reason\nvariants), security-sensitive network decode limits, and broad CI\nworkflow changes that alter release gates and test timing.\n> \n> **Overview**\n> This PR **releases 0.9.0** and documents a large user-facing surface:\n**multi-host spectator failover** (`start_spectator_session_multi`),\n**stream delay** and **rewind/seek**, and **fail-closed handling** when\nredundant hosts disagree (`FortressEvent` /\n`FortressError::SpectatorDivergence`). It also documents **network\nhardening**—fixed-width `Config::Input`, capped RLE/delta/replay\ndecoding, bounded socket receive batches, configurable UDP buffer sizes,\nand clearer endpoint-creation errors.\n> \n> **CI and tooling** change heavily: a shared **`setup-rust-cache`**\ncomposite action (best-effort sccache + `actions/cache`),\n**`--workspace`** for clippy/build aliases, a **`ci-network-nightly`**\nnextest profile and scheduled workflow for ignored real-UDP tests,\n**serial `network-multi-process`** nextest group (180s PR / 720s\nnightly), **enforced semver** on PRs with a failure summary, Docker\nnetem as **continue-on-error** with image pre-pull retries, job\n**timeouts** and **`continue-on-error`** on caches, and a **wiki/\ndry-run sync check**. New **fuzz targets** (protocol input packet,\nreplay decode) and hooks (**`advance_frame` error handling**,\n**`alloc-bound` / `reserve-in-loop`**) tighten safety gates; docs,\nexamples, and LLM guidance are aligned with the new APIs and policies.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na1952be117d3ecfccd52702b0016c9a6b61fd12d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-04T13:29:30-07:00",
-          "tree_id": "28e3c653a7941012372bf546a910da4d08e1b8c9",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/123fa9ed3270ca99ca713877d327a8167dc99fed"
-        },
-        "date": 1780605271660,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 163,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 446,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 727,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1040,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 133290,
-            "range": "± 4926",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44813,
-            "range": "± 305",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 84",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6347,6 +6221,60 @@ window.BENCHMARK_DATA = {
             "name": "sync_layer_noop",
             "value": 0,
             "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5de83bea40e3a8b32e1d7875d7b3ce997eec6bf7",
+          "message": "Harden frame boundaries and benchmark gating (#232)\n\n## What changed\n\n- pin i32 frame saturation and saved-state integrity at the terminal\nframe\n- document checksum-history size-cap retention and cover\nmissing-checksum pruning\n- saturate extreme checksum cadences and retention arithmetic without\nsigned narrowing overflow\n- hard-gate stable microsecond Criterion benchmarks at a 150% threshold\n- keep nanosecond session, input, compression, metrics, and wire-length\ncases informational\n- replace the SyncLayer no-op benchmark with representative save/advance\nwork\n\n## Why\n\nM6 requires deterministic boundary coverage and a performance gate\nstrict enough to catch material regressions without treating\nshared-runner timer noise as a merge blocker.\n\n## Validation\n\n- cargo fmt --all -- --check\n- cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings\n- cargo nextest run --workspace --features tokio,json --no-capture:\n2,866 passed; 73 skipped\n- cargo nextest list --workspace --all-targets --features tokio,json\n- actionlint .github/workflows/ci-benchmarks.yml\n- agent preflight: all checks passed\n- targeted frame, checksum-retention, and extreme-config tests\n- Cursor and Copilot exact-head reviews: zero remaining issues\n\n## Benchmark gate acceptance drill\n\nDraft PR #233 deliberately added 1 ms to Message\nserialization/round_trip_input_msg. Actions run 29214858594 measured\n1,230,741 ns versus the 134,342 ns baseline (9.16x), emitted the\n1.50-threshold performance alert, and failed Run Benchmarks while the\nsmoke job passed. The drill PR was closed without merge and its branch\ndeleted.\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+          "timestamp": "2026-07-12T17:27:42-07:00",
+          "tree_id": "2109d507ac79456aaaceee75a8390b7e67afa110",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/5de83bea40e3a8b32e1d7875d7b3ce997eec6bf7"
+        },
+        "date": 1783902902030,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 129235,
+            "range": "± 5200",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46979,
+            "range": "± 247",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3146,
+            "range": "± 214",
             "unit": "ns/iter"
           }
         ]
