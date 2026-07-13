@@ -38,6 +38,7 @@ use oracle::{
 };
 use schedule::{
     hot_join_host_for_slot, validate_schedule, AppModel, FrameModel, Schedule, ScheduleEvent,
+    WaitRecommendationPolicy,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -181,10 +182,12 @@ pub struct RunOptions {
     pub pending_output_probe_link: Option<(usize, usize)>,
     /// Preserve a bounded, phase-resolved controller time series instead of
     /// the ordinary twelve-or-fewer progress samples. The denser series is
-    /// intended for focused clock-skew/control-loop experiments and records
-    /// new opportunity-lead high-water marks and obeyed waits plus evenly spaced
-    /// samples carrying the frame-advantage gauge. It is valid only for
-    /// schema-v16-or-newer
+    /// intended for focused clock-skew/control-loop experiments. H-SKEW mode
+    /// records new opportunity-lead high-water marks and obeyed-wait transitions
+    /// plus evenly spaced frame-advantage samples. Schema-v17 H-OSC schedules
+    /// with a non-default wait policy instead take fixed 30-step cuts carrying
+    /// exact per-endpoint rolling averages, capped at 100 retained samples. The
+    /// option is valid only for schema-v16-or-newer
     /// [`FrameModel::SkewGated60Hz`] schedules.
     #[serde(default, skip_serializing_if = "is_false")]
     pub phase_resolved_control_samples: bool,
@@ -197,6 +200,77 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+struct WaitActuator {
+    policy: WaitRecommendationPolicy,
+    active_skip: u32,
+    pending: VecDeque<(u64, u32)>,
+    next_accept: u64,
+    smear_countdown: u32,
+}
+
+impl WaitActuator {
+    fn new(policy: WaitRecommendationPolicy) -> Self {
+        Self {
+            policy,
+            active_skip: 0,
+            pending: VecDeque::new(),
+            next_accept: 0,
+            smear_countdown: 0,
+        }
+    }
+
+    fn accept(&mut self, opportunity: u64, requested: u32) -> Option<u32> {
+        if opportunity < self.next_accept {
+            return None;
+        }
+        let accepted = self
+            .policy
+            .max_skip_frames
+            .map_or(requested, |cap| requested.min(cap));
+        let due = opportunity.saturating_add(u64::from(self.policy.response_delay_frames));
+        if let Some((last_due, last_skip)) = self.pending.back_mut() {
+            if *last_due == due {
+                *last_skip = (*last_skip).max(accepted);
+            } else {
+                self.pending.push_back((due, accepted));
+            }
+        } else {
+            self.pending.push_back((due, accepted));
+        }
+        self.next_accept = opportunity.saturating_add(u64::from(self.policy.cooldown_frames));
+        Some(accepted)
+    }
+
+    fn should_skip(&mut self, opportunity: u64) -> bool {
+        while self
+            .pending
+            .front()
+            .is_some_and(|(due, _)| opportunity >= *due)
+        {
+            if let Some((_, matured_skip)) = self.pending.pop_front() {
+                let had_active_debt = self.active_skip > 0;
+                self.active_skip = self.active_skip.max(matured_skip);
+                if !had_active_debt {
+                    self.smear_countdown = 0;
+                }
+            }
+        }
+        if self.active_skip > 0 && self.smear_countdown == 0 {
+            self.active_skip -= 1;
+            self.smear_countdown = self.policy.smear_interval.saturating_sub(1);
+            true
+        } else {
+            if self.active_skip > 0 {
+                self.smear_countdown = self.smear_countdown.saturating_sub(1);
+            } else {
+                self.smear_countdown = 0;
+            }
+            false
+        }
+    }
 }
 
 /// End-of-step pending-output evidence for one directed protocol link.
@@ -256,10 +330,29 @@ pub struct ProgressSample {
     pub prediction_miss_count: Vec<u64>,
     pub frame_opportunities: Vec<u64>,
     pub wait_frames_obeyed: Vec<u64>,
+    /// Successful production wait-controller evaluations, indexed by peer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_evaluations: Vec<u64>,
+    /// Evaluations whose production aggregate crossed the wait threshold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_trigger_evaluations: Vec<u64>,
+    /// Exact endpoint inputs inspected across successful controller evaluations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_endpoint_evaluations: Vec<u64>,
+    /// Endpoint inputs at or above the wait threshold on those evaluations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_endpoint_trigger_evaluations: Vec<u64>,
+    /// Evaluations where production's cached aggregate differed from the exact
+    /// maximum endpoint input captured immediately before the advance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_input_mismatches: Vec<u64>,
     /// Session-level maximum remote frame advantage, indexed by peer. Present
     /// only for opt-in phase-resolved controller samples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames_ahead: Vec<i32>,
+    /// End-of-step max of each peer's exact per-endpoint rolling averages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub max_endpoint_average_frame_advantage: Vec<i32>,
     /// Per-directed-endpoint control-loop gauges in `(from, to)` order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointControlSample>,
@@ -275,6 +368,8 @@ pub struct EndpointControlSample {
     pub to: usize,
     pub ping_ms: u128,
     pub remote_frame_advantage: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub average_frame_advantage: i32,
     pub pending_output_len: u64,
 }
 
@@ -294,9 +389,15 @@ pub const MAX_PHASE_CONTROL_SAMPLES: usize = 4_096;
 /// sample cap by player count prevents a 16-player artifact from multiplying
 /// the two-player memory budget by eight.
 const MAX_PHASE_CONTROL_SAMPLE_PLAYER_CELLS: usize = 8_192;
+const WAIT_POLICY_CONTROL_SAMPLE_INTERVAL: u32 = 30;
+pub(super) const WAIT_POLICY_CONTROL_SAMPLE_CAPACITY: usize = 100;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
 }
 
 pub(super) fn phase_control_sample_capacity(n_players: usize) -> usize {
@@ -577,6 +678,14 @@ struct TraceFinalSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wait_frames_obeyed: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendation_max: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendation_frames: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendations_accepted: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_frames_accepted: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     receive_stats_by_peer: Vec<crate::common::sim_net::SimReceiveStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     first_running_step: Vec<Option<u32>>,
@@ -626,13 +735,23 @@ pub struct RunReport {
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
-    /// Twelve-or-fewer evenly spaced samples for skew/control-loop analysis.
-    /// Empty for legacy lockstep schedules.
+    /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
+    /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
+    /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
+    /// lockstep schedules.
     pub progress_samples: Vec<ProgressSample>,
     /// Frame opportunities produced by each peer's selected frame model.
     pub frame_opportunities: Vec<u64>,
     /// Opportunities suppressed because the `Obey` app model honored a wait.
     pub wait_frames_obeyed: Vec<u64>,
+    /// Largest `skip_frames` payload observed from each peer's session.
+    pub wait_recommendation_max: Vec<u32>,
+    /// Sum of all observed `skip_frames` payloads, before app policy filtering.
+    pub wait_recommendation_frames: Vec<u64>,
+    /// Recommendation events accepted after the app-policy cooldown.
+    pub wait_recommendations_accepted: Vec<u64>,
+    /// Skip-frame debt accepted after the app-policy cap.
+    pub wait_frames_accepted: Vec<u64>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
@@ -800,6 +919,7 @@ fn collect_peer_wire_by_link<I: SimInput>(
 fn collect_endpoint_control_samples<I: SimInput>(
     peers: &[PeerSlot<I>],
     n_players: usize,
+    include_average: bool,
 ) -> Vec<EndpointControlSample> {
     let mut samples = Vec::with_capacity(n_players.saturating_mul(n_players.saturating_sub(1)));
     for (from, slot) in peers.iter().enumerate() {
@@ -816,6 +936,11 @@ fn collect_endpoint_control_samples<I: SimInput>(
                 to,
                 ping_ms: metrics.ping_ms,
                 remote_frame_advantage: metrics.remote_frame_advantage,
+                average_frame_advantage: if include_average {
+                    metrics.average_frame_advantage
+                } else {
+                    0
+                },
                 pending_output_len: metrics.pending_output_len,
             });
         }
@@ -1845,7 +1970,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // (only accumulates under `AppModel::Obey`). While > 0 the peer polls but
     // does not advance, letting the others catch up — the closed time-sync loop.
     let app_model = schedule.config.app_model;
-    let mut wait_skip: Vec<u32> = vec![0; n];
+    let wait_policy = schedule.config.wait_recommendation_policy;
+    let mut wait_actuators = vec![WaitActuator::new(wait_policy); n];
     let frame_model = schedule.config.frame_model;
     let sample_control_loop = (schedule.schema_version >= 15
         && frame_model == FrameModel::SkewGated60Hz)
@@ -1862,14 +1988,33 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     )
                 })));
     let phase_resolved_control_samples = options.phase_resolved_control_samples;
-    let sample_control_gauges = schedule.schema_version >= 16 && !phase_resolved_control_samples;
+    let fixed_wait_policy_samples = phase_resolved_control_samples
+        && schedule.schema_version >= 17
+        && !wait_policy.is_default();
+    let sample_endpoint_gauges = schedule.schema_version >= 16
+        && (!phase_resolved_control_samples || fixed_wait_policy_samples);
+    let sample_link_queue_gauges = schedule.schema_version >= 16 && !phase_resolved_control_samples;
     let mut frame_opportunities = vec![0_u64; n];
     let mut skew_targets_seen = vec![0_u64; n];
     let mut wait_frames_obeyed = vec![0_u64; n];
+    let mut wait_recommendation_max = vec![0_u32; n];
+    let mut wait_recommendation_frames = vec![0_u64; n];
+    let mut wait_recommendations_accepted = vec![0_u64; n];
+    let mut wait_frames_accepted = vec![0_u64; n];
+    let mut wait_controller_evaluations = vec![0_u64; n];
+    let mut wait_controller_trigger_evaluations = vec![0_u64; n];
+    let mut wait_controller_endpoint_evaluations = vec![0_u64; n];
+    let mut wait_controller_endpoint_trigger_evaluations = vec![0_u64; n];
+    let mut wait_controller_input_mismatches = vec![0_u64; n];
     let mut local_input_ordinals = vec![0_u32; n];
     let phase_sample_capacity = phase_control_sample_capacity(n);
-    let mut progress_samples = VecDeque::with_capacity(if phase_resolved_control_samples {
+    let control_sample_capacity = if fixed_wait_policy_samples {
+        WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+    } else {
         phase_sample_capacity
+    };
+    let mut progress_samples = VecDeque::with_capacity(if phase_resolved_control_samples {
+        control_sample_capacity
     } else {
         12
     });
@@ -1885,7 +2030,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     } else {
         Vec::new()
     };
-    let progress_interval = if phase_resolved_control_samples {
+    let progress_interval = if fixed_wait_policy_samples {
+        WAIT_POLICY_CONTROL_SAMPLE_INTERVAL
+    } else if phase_resolved_control_samples {
         phase_control_progress_interval(schedule.config.steps, n)
     } else {
         schedule.config.steps.div_ceil(12).max(1)
@@ -2198,11 +2345,24 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 );
                             }
                         }
-                        // Closed-loop app model: obey a `WaitRecommendation` by owing
-                        // that many skipped advances (max so a stronger one wins).
-                        if app_model == AppModel::Obey {
-                            if let FortressEvent::WaitRecommendation { skip_frames } = event {
-                                wait_skip[i] = wait_skip[i].max(*skip_frames);
+                        // Closed-loop app model: accept recommendations according to
+                        // the configured application-side cooldown/cap, then stage
+                        // the strongest debt until its response delay expires.
+                        if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                            wait_recommendation_max[i] =
+                                wait_recommendation_max[i].max(*skip_frames);
+                            wait_recommendation_frames[i] = wait_recommendation_frames[i]
+                                .saturating_add(u64::from(*skip_frames));
+                            if app_model == AppModel::Obey {
+                                let opportunity = frame_opportunities[i];
+                                if let Some(accepted) =
+                                    wait_actuators[i].accept(opportunity, *skip_frames)
+                                {
+                                    wait_recommendations_accepted[i] =
+                                        wait_recommendations_accepted[i].saturating_add(1);
+                                    wait_frames_accepted[i] =
+                                        wait_frames_accepted[i].saturating_add(u64::from(accepted));
+                                }
                             }
                         }
                     }
@@ -2212,7 +2372,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     if slot.session.current_state() != SessionState::Running {
                         break;
                     }
-                    if wait_skip[i] > 0 {
+                    if wait_actuators[i].should_skip(frame_opportunities[i]) {
                         // Obeying a WaitRecommendation: poll/receive this step
                         // (done above) but skip the advance so the ahead peer
                         // lets the others catch up. Count down only on steps that
@@ -2220,7 +2380,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         // that briefly leaves `Running` mid-wait (transient
                         // resync) must not silently consume its owed skips, or it
                         // would stop obeying once it resumes.
-                        wait_skip[i] -= 1;
                         wait_frames_obeyed[i] = wait_frames_obeyed[i].saturating_add(1);
                     } else {
                         let input_ordinal = match frame_model {
@@ -2239,8 +2398,53 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 oracle.observe_session_error("add_local_input", i, step, &error);
                             }
                         }
+                        let (exact_controller_input, endpoint_evaluations, endpoint_triggers) =
+                            if fixed_wait_policy_samples {
+                                let mut maximum = i32::MIN;
+                                let mut evaluations = 0_u64;
+                                let mut triggers = 0_u64;
+                                for peer in (0..n).filter(|&peer| peer != i) {
+                                    let Ok(metrics) =
+                                        slot.session.peer_metrics(PlayerHandle::new(peer))
+                                    else {
+                                        continue;
+                                    };
+                                    maximum = maximum.max(metrics.average_frame_advantage);
+                                    evaluations = evaluations.saturating_add(1);
+                                    if metrics.average_frame_advantage >= 3 {
+                                        triggers = triggers.saturating_add(1);
+                                    }
+                                }
+                                (
+                                    if evaluations == 0 { 0 } else { maximum },
+                                    evaluations,
+                                    triggers,
+                                )
+                            } else {
+                                (0, 0, 0)
+                            };
                         match slot.session.advance_frame() {
                             Ok(requests) => {
+                                if fixed_wait_policy_samples {
+                                    let production_input = slot.session.frames_ahead();
+                                    wait_controller_evaluations[i] =
+                                        wait_controller_evaluations[i].saturating_add(1);
+                                    if production_input >= 3 {
+                                        wait_controller_trigger_evaluations[i] =
+                                            wait_controller_trigger_evaluations[i]
+                                                .saturating_add(1);
+                                    }
+                                    wait_controller_endpoint_evaluations[i] =
+                                        wait_controller_endpoint_evaluations[i]
+                                            .saturating_add(endpoint_evaluations);
+                                    wait_controller_endpoint_trigger_evaluations[i] =
+                                        wait_controller_endpoint_trigger_evaluations[i]
+                                            .saturating_add(endpoint_triggers);
+                                    if production_input != exact_controller_input {
+                                        wait_controller_input_mismatches[i] =
+                                            wait_controller_input_mismatches[i].saturating_add(1);
+                                    }
+                                }
                                 if let Some(frame) = SimGameStub::<I>::loaded_frame(&requests) {
                                     load_game_state_observations.push(LoadGameStateObservation {
                                         step,
@@ -2332,7 +2536,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
-        let phase_changed = if phase_resolved_control_samples {
+        let phase_changed = if phase_resolved_control_samples && !fixed_wait_policy_samples {
             let minimum_opportunities = frame_opportunities.iter().copied().min().unwrap_or(0);
             let opportunity_lead_increased = last_phase_opportunity_lead.len() != n
                 || frame_opportunities
@@ -2366,7 +2570,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         let periodic_sample_due = (step + 1) % progress_interval == 0 || step == last_step;
         if sample_control_loop && (periodic_sample_due || phase_changed) {
             let sample_metrics: Vec<_> = peers.iter().map(|slot| slot.session.metrics()).collect();
-            if progress_samples.len() == phase_sample_capacity {
+            let endpoints = if sample_endpoint_gauges {
+                collect_endpoint_control_samples(&peers, n, fixed_wait_policy_samples)
+            } else {
+                Vec::new()
+            };
+            let max_endpoint_average_frame_advantage = if fixed_wait_policy_samples {
+                endpoints
+                    .chunks_exact(n.saturating_sub(1))
+                    .map(|peer_endpoints| {
+                        peer_endpoints
+                            .iter()
+                            .map(|endpoint| endpoint.average_frame_advantage)
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if progress_samples.len() == control_sample_capacity {
                 let _ = progress_samples.pop_front();
             }
             progress_samples.push_back(ProgressSample {
@@ -2398,6 +2621,31 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .collect(),
                 frame_opportunities: frame_opportunities.clone(),
                 wait_frames_obeyed: wait_frames_obeyed.clone(),
+                wait_controller_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_trigger_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_trigger_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_endpoint_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_endpoint_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_endpoint_trigger_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_endpoint_trigger_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_input_mismatches: if fixed_wait_policy_samples {
+                    wait_controller_input_mismatches.clone()
+                } else {
+                    Vec::new()
+                },
                 frames_ahead: if phase_resolved_control_samples {
                     peers
                         .iter()
@@ -2406,12 +2654,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 } else {
                     Vec::new()
                 },
-                endpoints: if sample_control_gauges {
-                    collect_endpoint_control_samples(&peers, n)
-                } else {
-                    Vec::new()
-                },
-                link_queues: if sample_control_gauges {
+                max_endpoint_average_frame_advantage,
+                endpoints,
+                link_queues: if sample_link_queue_gauges {
                     collect_link_queue_samples(&net, &peers, &addrs)
                 } else {
                     Vec::new()
@@ -2713,6 +2958,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         } else {
             Vec::new()
         },
+        wait_recommendation_max: if schedule.schema_version >= 17 {
+            wait_recommendation_max.clone()
+        } else {
+            Vec::new()
+        },
+        wait_recommendation_frames: if schedule.schema_version >= 17 {
+            wait_recommendation_frames.clone()
+        } else {
+            Vec::new()
+        },
+        wait_recommendations_accepted: if schedule.schema_version >= 17 {
+            wait_recommendations_accepted.clone()
+        } else {
+            Vec::new()
+        },
+        wait_frames_accepted: if schedule.schema_version >= 17 {
+            wait_frames_accepted.clone()
+        } else {
+            Vec::new()
+        },
         receive_stats_by_peer: receive_stats_by_peer.clone(),
         first_running_step: reported_first_running_step.clone(),
         first_synchronized_step: reported_first_synchronized_step.clone(),
@@ -2741,6 +3006,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,
+        wait_recommendation_max: if schedule.schema_version >= 17 {
+            wait_recommendation_max
+        } else {
+            Vec::new()
+        },
+        wait_recommendation_frames: if schedule.schema_version >= 17 {
+            wait_recommendation_frames
+        } else {
+            Vec::new()
+        },
+        wait_recommendations_accepted: if schedule.schema_version >= 17 {
+            wait_recommendations_accepted
+        } else {
+            Vec::new()
+        },
+        wait_frames_accepted: if schedule.schema_version >= 17 {
+            wait_frames_accepted
+        } else {
+            Vec::new()
+        },
         peer_wire,
         confirmed_at_heal,
         confirmed_after_recovery,
@@ -2761,6 +3046,50 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn wait_actuator_keeps_overlapping_response_delays_independent() {
+        let mut actuator = WaitActuator::new(WaitRecommendationPolicy {
+            cooldown_frames: 10,
+            response_delay_frames: 30,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(actuator.accept(100, 1), Some(1));
+        assert_eq!(actuator.accept(110, 9), Some(9));
+        for opportunity in 100..130 {
+            assert!(!actuator.should_skip(opportunity));
+        }
+        assert!(actuator.should_skip(130), "the first debt matures at 130");
+        for opportunity in 131..140 {
+            assert!(
+                !actuator.should_skip(opportunity),
+                "the later debt must not borrow the earlier due time"
+            );
+        }
+        assert!(actuator.should_skip(140), "the second debt matures at 140");
+    }
+
+    #[test]
+    fn wait_actuator_applies_cap_cooldown_and_smear_exactly() {
+        let mut capped = WaitActuator::new(WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(capped.accept(100, 12), Some(9));
+        assert_eq!(capped.accept(159, 12), None);
+        assert_eq!(capped.accept(160, 12), Some(9));
+
+        let mut smeared = WaitActuator::new(WaitRecommendationPolicy {
+            smear_interval: 4,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(smeared.accept(0, 3), Some(3));
+        let skipped: Vec<_> = (0..=8)
+            .filter(|&opportunity| smeared.should_skip(opportunity))
+            .collect();
+        assert_eq!(skipped, vec![0, 4, 8]);
+    }
 
     #[test]
     fn skew_gate_counts_exact_fast_slow_and_frozen_clocks() {

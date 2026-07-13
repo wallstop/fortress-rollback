@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `PeerMetrics::average_frame_advantage` exposes the exact per-endpoint rolling frame-advantage
+  gauge that `P2PSession` max-aggregates when deciding whether to emit a wait recommendation.
+
 ### Fixed
 
 - **Pre-existing:** repeated N-player graceful-drop/hot-join generations now retain a canonical connected-era membership generation across committed drops, successful reactivations, and replacement snapshots. Retry-local spectator epochs remain non-decreasing until their documented `u16` wrap but can no longer produce incompatible generation-fenced certificates; fresh N-peer joiners import canonical live and dead slot membership, and the four-player nightly soak now exercises periodic churn through all 40 generations. The semantic snapshot boundary bumps the exact-match wire protocol to v2, which deliberately rejects released v1 peers.

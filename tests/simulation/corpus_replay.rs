@@ -285,6 +285,22 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             "wait_frames_obeyed",
             report.wait_frames_obeyed == artifact.wait_frames_obeyed,
         ),
+        (
+            "wait_recommendation_max",
+            report.wait_recommendation_max == artifact.wait_recommendation_max,
+        ),
+        (
+            "wait_recommendation_frames",
+            report.wait_recommendation_frames == artifact.wait_recommendation_frames,
+        ),
+        (
+            "wait_recommendations_accepted",
+            report.wait_recommendations_accepted == artifact.wait_recommendations_accepted,
+        ),
+        (
+            "wait_frames_accepted",
+            report.wait_frames_accepted == artifact.wait_frames_accepted,
+        ),
     ] {
         if !matches {
             return Err(format!(

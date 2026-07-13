@@ -7,7 +7,7 @@
 
 use super::harness::schedule::{
     generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, FrameModel, ScenarioMix,
-    Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+    Schedule, ScheduleEvent, SimConfig, WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
@@ -2620,6 +2620,408 @@ fn symmetric_delay_does_not_create_mutual_sleep_h_osc() {
             first.progress_samples
         );
     }
+}
+
+const H_OSC_JITTER_START: u32 = 300;
+const H_OSC_JITTER_END: u32 = 1_200;
+const H_OSC_STEPS: u32 = 2_400;
+const H_OSC_JITTER_EPOCH_STEPS: u32 = 30;
+const H_OSC_JITTER_EPOCHS: u32 = (H_OSC_JITTER_END - H_OSC_JITTER_START) / H_OSC_JITTER_EPOCH_STEPS;
+
+fn h_osc_exogenous_delay_ms(epoch: u32, from: usize, to: usize, salt: u64) -> u64 {
+    let low = from.min(to);
+    let high = from.max(to);
+    let phase = u32::try_from(salt % u64::from(H_OSC_JITTER_EPOCHS))
+        .expect("phase is bounded by the epoch count");
+    let balanced_epoch = if from < to {
+        epoch.saturating_add(phase) % H_OSC_JITTER_EPOCHS
+    } else {
+        (H_OSC_JITTER_EPOCHS - 1 - epoch).saturating_add(phase) % H_OSC_JITTER_EPOCHS
+    };
+    let mut value = u64::from(balanced_epoch)
+        ^ u64::try_from(low)
+            .expect("peer index fits u64")
+            .rotate_left(21)
+        ^ u64::try_from(high)
+            .expect("peer index fits u64")
+            .rotate_left(42);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    20 + ((value ^ (value >> 31)) % 1_001)
+}
+
+fn h_osc_jitter_schedule(n: usize, policy: WaitRecommendationPolicy, salt: u64) -> Schedule {
+    let mut schedule = wait_rec_schedule(n, AppModel::Obey);
+    schedule.config.steps = H_OSC_STEPS;
+    schedule.config.frame_model = FrameModel::SkewGated60Hz;
+    schedule.config.wait_recommendation_policy = policy;
+    for (_, _, link) in &mut schedule.initial_links {
+        link.base_delay = Duration::from_millis(20);
+        link.jitter = Duration::ZERO;
+    }
+    let treatment_epochs =
+        usize::try_from(H_OSC_JITTER_EPOCHS).expect("treatment epoch count fits usize");
+    let mut events = Vec::with_capacity(schedule.initial_links.len() * treatment_epochs + 1);
+    for step in (H_OSC_JITTER_START..H_OSC_JITTER_END)
+        .step_by(usize::try_from(H_OSC_JITTER_EPOCH_STEPS).expect("epoch interval fits usize"))
+    {
+        let epoch = (step - H_OSC_JITTER_START) / H_OSC_JITTER_EPOCH_STEPS;
+        for (from, to, clean) in &schedule.initial_links {
+            let mut treatment = clean.clone();
+            treatment.base_delay =
+                Duration::from_millis(h_osc_exogenous_delay_ms(epoch, *from, *to, salt));
+            events.push((
+                step,
+                ScheduleEvent::SetLink {
+                    from: *from,
+                    to: *to,
+                    policy: treatment,
+                },
+            ));
+        }
+    }
+    events.push((H_OSC_JITTER_END, ScheduleEvent::HealAll));
+    events.sort_by_key(|(step, _)| *step);
+    schedule.events = events;
+    schedule.heal_at = H_OSC_JITTER_END;
+    schedule
+}
+
+fn h_osc_run(schedule: &Schedule) -> RunReport {
+    run(
+        schedule,
+        &RunOptions {
+            phase_resolved_control_samples: true,
+            ..RunOptions::default()
+        },
+    )
+}
+
+#[test]
+fn h_osc_balanced_exogenous_delay_policy_matrix_decays() {
+    let policies = [
+        (
+            "60-none",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "60-9",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "240-none",
+            WaitRecommendationPolicy {
+                cooldown_frames: 240,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "240-9",
+            WaitRecommendationPolicy {
+                cooldown_frames: 240,
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "late",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                response_delay_frames: 30,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "smear",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                smear_interval: 4,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+    ];
+    let mut reports = BTreeMap::new();
+    for (label, policy) in policies {
+        let schedule = h_osc_jitter_schedule(2, policy, 0);
+        let report = h_osc_run(&schedule);
+        let replay = h_osc_run(&schedule);
+        report.expect_pass(&schedule);
+        assert_eq!(report.trace_hash, replay.trace_hash, "policy={label}");
+        assert_eq!(
+            report.progress_samples, replay.progress_samples,
+            "policy={label}"
+        );
+        assert_eq!(
+            report.wait_recommendations_accepted, replay.wait_recommendations_accepted,
+            "policy={label}"
+        );
+        assert_eq!(
+            report.wait_frames_accepted, replay.wait_frames_accepted,
+            "policy={label}"
+        );
+        assert!(
+            report
+                .metrics
+                .iter()
+                .all(|metrics| metrics.wait_recommendations > 0),
+            "symmetric jitter must activate both controllers (policy={label})"
+        );
+        assert!(
+            report
+                .wait_recommendations_accepted
+                .iter()
+                .all(|&accepted| accepted > 0),
+            "every peer must accept a recommendation (policy={label})"
+        );
+        assert_eq!(
+            report.wait_frames_accepted, report.wait_frames_obeyed,
+            "all accepted debt must drain before the run ends (policy={label})"
+        );
+        assert_eq!(
+            report.recovered_within_b,
+            Some(true),
+            "the real HealAll must satisfy the bounded recovery oracle (policy={label})"
+        );
+        let settled: Vec<_> = report
+            .progress_samples
+            .iter()
+            .filter(|sample| sample.step >= H_OSC_JITTER_END + 600)
+            .collect();
+        let first = settled.first().expect("post-jitter settled samples");
+        let last = settled.last().expect("post-jitter final sample");
+        assert_eq!(
+            first.wait_recommendations, last.wait_recommendations,
+            "recommendations must stop after clean-link settling (policy={label})"
+        );
+        assert!(
+            settled
+                .iter()
+                .flat_map(|sample| &sample.frames_ahead)
+                .all(|advantage| advantage.abs() < 3),
+            "the clean tail must remain inside the recommendation dead band (policy={label})"
+        );
+        reports.insert(label, report);
+    }
+
+    let fast_uncapped = &reports["60-none"];
+    let fast_capped = &reports["60-9"];
+    let slow_uncapped = &reports["240-none"];
+    assert!(
+        slow_uncapped
+            .wait_recommendations_accepted
+            .iter()
+            .sum::<u64>()
+            < fast_uncapped
+                .wait_recommendations_accepted
+                .iter()
+                .sum::<u64>(),
+        "the 240-frame cooldown must reject corrections accepted at 60 frames"
+    );
+    assert!(
+        fast_capped.wait_recommendation_max.iter().copied().max() > Some(9),
+        "the treatment must produce a recommendation above the nine-frame cap"
+    );
+    assert!(
+        fast_capped.wait_frames_accepted.iter().sum::<u64>()
+            <= fast_capped
+                .wait_recommendations_accepted
+                .iter()
+                .sum::<u64>()
+                * 9,
+        "every accepted payload must obey the nine-frame cap"
+    );
+    assert_eq!(
+        fast_uncapped.wait_frames_accepted, fast_uncapped.wait_recommendation_frames,
+        "the uncapped control must accept every payload frame"
+    );
+    assert_ne!(
+        fast_capped.trace_hash, fast_uncapped.trace_hash,
+        "the exercised nine-frame cap must alter matched execution"
+    );
+    assert_ne!(reports["late"].trace_hash, fast_capped.trace_hash);
+    assert_ne!(reports["smear"].trace_hash, fast_capped.trace_hash);
+}
+
+#[test]
+#[ignore = "nightly H-OSC N=2/8/16 aggregation census"]
+fn h_osc_aggregation_pressure_is_measured_and_decays() {
+    let policy = WaitRecommendationPolicy {
+        cooldown_frames: 60,
+        max_skip_frames: Some(9),
+        smear_interval: 4,
+        ..WaitRecommendationPolicy::default()
+    };
+    let mut trigger_duty = Vec::new();
+    let mut phase_trigger_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut phase_endpoint_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
+    for n in [2usize, 8, 16] {
+        let mut n_aggregate_triggers = 0_u64;
+        let mut n_aggregate_evaluations = 0_u64;
+        for (phase, salt) in [0_u64, 1, 2].into_iter().enumerate() {
+            let schedule = h_osc_jitter_schedule(n, policy, salt);
+            let report = h_osc_run(&schedule);
+            let replay = h_osc_run(&schedule);
+            report.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash, "n={n}, salt={salt}");
+            assert_eq!(
+                report.progress_samples, replay.progress_samples,
+                "n={n}, salt={salt}"
+            );
+            assert_eq!(
+                report.wait_frames_obeyed, replay.wait_frames_obeyed,
+                "n={n}, salt={salt}"
+            );
+            assert_eq!(report.progress_samples.len(), 80, "n={n}, salt={salt}");
+            for sample in &report.progress_samples {
+                assert_eq!(sample.endpoints.len(), n * (n - 1), "n={n}, salt={salt}");
+                assert_eq!(
+                    sample.max_endpoint_average_frame_advantage.len(),
+                    n,
+                    "n={n}, salt={salt}"
+                );
+                assert_eq!(sample.wait_controller_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_trigger_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_endpoint_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_endpoint_trigger_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_input_mismatches, vec![0; n]);
+            }
+            let before_treatment = report
+                .progress_samples
+                .iter()
+                .find(|sample| sample.step == H_OSC_JITTER_START - 1)
+                .expect("fixed cut immediately precedes treatment");
+            let after_treatment = report
+                .progress_samples
+                .iter()
+                .find(|sample| sample.step == H_OSC_JITTER_END - 1)
+                .expect("fixed cut closes treatment");
+            let aggregate_evaluations = after_treatment
+                .wait_controller_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let aggregate_triggers = after_treatment
+                .wait_controller_trigger_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_trigger_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let endpoint_evaluations = after_treatment
+                .wait_controller_endpoint_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_endpoint_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let endpoint_triggers = after_treatment
+                .wait_controller_endpoint_trigger_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_endpoint_trigger_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            assert!(aggregate_evaluations > 0, "n={n}, salt={salt}");
+            assert!(aggregate_triggers > 0, "n={n}, salt={salt}");
+            assert_eq!(
+                endpoint_evaluations,
+                aggregate_evaluations * u64::try_from(n - 1).expect("mesh degree fits u64"),
+                "every production evaluation must inspect every live endpoint (n={n}, salt={salt})"
+            );
+            phase_trigger_duty[phase].push((aggregate_triggers, aggregate_evaluations));
+            phase_endpoint_duty[phase].push((endpoint_triggers, endpoint_evaluations));
+            let treatment: Vec<_> = report
+                .progress_samples
+                .iter()
+                .filter(|sample| (H_OSC_JITTER_START..H_OSC_JITTER_END).contains(&sample.step))
+                .collect();
+            let endpoint_values: Vec<_> = treatment
+                .iter()
+                .flat_map(|sample| &sample.endpoints)
+                .map(|endpoint| endpoint.average_frame_advantage)
+                .collect();
+            let settled: Vec<_> = report
+                .progress_samples
+                .iter()
+                .filter(|sample| sample.step >= H_OSC_JITTER_END + 600)
+                .collect();
+            assert!(!endpoint_values.is_empty(), "n={n}, salt={salt}");
+            assert_eq!(endpoint_values.len(), n * (n - 1) * 30);
+            assert!(
+                report
+                    .metrics
+                    .iter()
+                    .any(|metrics| metrics.wait_recommendations > 0),
+                "each phase must activate the controller census (n={n}, salt={salt}): {:?}",
+                report.metrics
+            );
+            assert!(
+                report.wait_frames_obeyed.iter().any(|&frames| frames > 0),
+                "each phase must apply at least one correction (n={n}, salt={salt})"
+            );
+            assert_eq!(
+                report.wait_frames_accepted, report.wait_frames_obeyed,
+                "all correction debt must drain (n={n}, salt={salt})"
+            );
+            assert_eq!(report.recovered_within_b, Some(true), "n={n}, salt={salt}");
+            let first = settled.first().expect("settled sample");
+            let last = settled.last().expect("final settled sample");
+            assert_eq!(
+                first.wait_recommendations, last.wait_recommendations,
+                "n={n}, salt={salt}"
+            );
+            assert!(
+                settled
+                    .iter()
+                    .flat_map(|sample| &sample.endpoints)
+                    .all(|endpoint| endpoint.average_frame_advantage.abs() < 3),
+                "every exact endpoint average must decay inside the dead band \
+                 (n={n}, salt={salt})"
+            );
+            n_aggregate_triggers = n_aggregate_triggers.saturating_add(aggregate_triggers);
+            n_aggregate_evaluations = n_aggregate_evaluations.saturating_add(aggregate_evaluations);
+        }
+        trigger_duty.push((n_aggregate_triggers, n_aggregate_evaluations));
+    }
+    assert!(
+        trigger_duty[1].0 * trigger_duty[0].1 > trigger_duty[0].0 * trigger_duty[1].1
+            && trigger_duty[2].0 * trigger_duty[1].1 > trigger_duty[1].0 * trigger_duty[2].1,
+        "pooled production trigger duty must rise with N: {trigger_duty:?}"
+    );
+    for (phase, duty) in phase_trigger_duty.iter().enumerate() {
+        assert_eq!(duty.len(), 3, "phase={phase}");
+        assert!(
+            duty[1].0 * duty[0].1 > duty[0].0 * duty[1].1,
+            "N=8 production trigger duty must exceed N=2 in phase {phase}: {duty:?}"
+        );
+        assert!(
+            duty[2].0 * duty[1].1 > duty[1].0 * duty[2].1,
+            "N=16 production trigger duty must exceed N=8 in phase {phase}: {duty:?}"
+        );
+        for n_index in 1..duty.len() {
+            let endpoint = phase_endpoint_duty[phase][n_index];
+            assert!(
+                duty[n_index].0 * endpoint.1 > endpoint.0 * duty[n_index].1,
+                "N=8/16 production max-aggregate duty must exceed matched per-endpoint duty \
+                 in phase {phase}: aggregate={duty:?}, endpoint={:?}",
+                phase_endpoint_duty[phase]
+            );
+        }
+    }
+}
+
+#[test]
+fn nightly_workflow_runs_h_osc_aggregation_census() {
+    let workflow = include_str!("../../.github/workflows/ci-simulation-nightly.yml");
+    assert!(workflow
+        .contains("test(simulation::fleet::h_osc_aggregation_pressure_is_measured_and_decays)"));
 }
 
 /// H-ASYM matched experiment: a 10/200 ms one-way split has the same 210 ms

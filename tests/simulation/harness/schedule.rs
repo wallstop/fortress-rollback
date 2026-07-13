@@ -82,6 +82,41 @@ pub enum AppModel {
     Obey,
 }
 
+/// How an obeying application applies `WaitRecommendation` events.
+///
+/// The defaults preserve the historical harness behavior: accept every event,
+/// apply its full skip count immediately, and consume the debt on consecutive
+/// frame opportunities. Non-default policies are schema-v17 experiment axes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitRecommendationPolicy {
+    /// Minimum application frame opportunities between accepted events.
+    pub cooldown_frames: u32,
+    /// Optional cap applied to an accepted event's `skip_frames` payload.
+    pub max_skip_frames: Option<u32>,
+    /// Opportunities to wait before beginning to consume accepted skip debt.
+    pub response_delay_frames: u32,
+    /// Consume one skip every N otherwise-runnable frame opportunities.
+    pub smear_interval: u32,
+}
+
+impl Default for WaitRecommendationPolicy {
+    fn default() -> Self {
+        Self {
+            cooldown_frames: 0,
+            max_skip_frames: None,
+            response_delay_frames: 0,
+            smear_interval: 1,
+        }
+    }
+}
+
+impl WaitRecommendationPolicy {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// How the harness turns virtual wall-clock time into frame opportunities.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameModel {
@@ -155,7 +190,10 @@ pub enum ScenarioMix {
 ///   control frame-production cadence instead of timestamps alone.
 /// - `16`: adds bounded directed-endpoint and live bandwidth-queue samples to
 ///   control-loop experiments. Schema 15 retains its original trace identity.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 16;
+/// - `17`: adds application-side wait-recommendation cooldown, payload-cap,
+///   response-delay, and smearing policies plus exact rolling-average endpoint
+///   evidence for fixed-cadence H-OSC experiments.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 17;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:
@@ -227,6 +265,11 @@ pub struct SimConfig {
     /// used) keeps pre-existing corpus artifacts replayable without a bump.
     #[serde(default)]
     pub app_model: AppModel,
+    /// Application-side wait actuation policy. Omitted for the historical
+    /// immediate/full-obedience behavior so schema-v16 artifacts remain byte
+    /// stable when decoded and re-encoded.
+    #[serde(default, skip_serializing_if = "WaitRecommendationPolicy::is_default")]
+    pub wait_recommendation_policy: WaitRecommendationPolicy,
     /// Frame-production model. `Lockstep` preserves every schema <=14 run.
     #[serde(default)]
     pub frame_model: FrameModel,
@@ -287,6 +330,7 @@ impl SimConfig {
             disconnect_behavior: DropPolicy::default(),
             save_mode: SavePolicy::default(),
             app_model: AppModel::default(),
+            wait_recommendation_policy: WaitRecommendationPolicy::default(),
             frame_model: FrameModel::default(),
             clock_skew_ppm: Vec::new(),
             starve_events: Vec::new(),
@@ -553,7 +597,9 @@ fn event_required_schema(event: &ScheduleEvent) -> u32 {
 }
 
 fn required_schema_version(schedule: &Schedule) -> u32 {
-    let mut required = if schedule.config.frame_model == FrameModel::SkewGated60Hz {
+    let mut required = if !schedule.config.wait_recommendation_policy.is_default() {
+        17
+    } else if schedule.config.frame_model == FrameModel::SkewGated60Hz {
         15
     } else if schedule.config.noise == BackgroundNoise::ReliableFifo {
         9
@@ -715,6 +761,16 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
     }
     if schedule.config.desync_interval == 0 {
         return Err("desync_interval must be >= 1 when desync detection is enabled".to_owned());
+    }
+    let wait_policy = schedule.config.wait_recommendation_policy;
+    if wait_policy.smear_interval == 0 {
+        return Err("wait_recommendation_policy.smear_interval must be >= 1".to_owned());
+    }
+    if wait_policy.max_skip_frames == Some(0) {
+        return Err("wait_recommendation_policy.max_skip_frames must be >= 1 when set".to_owned());
+    }
+    if schedule.config.app_model == AppModel::Ignore && !wait_policy.is_default() {
+        return Err("non-default wait_recommendation_policy requires app_model Obey".to_owned());
     }
 
     if schedule.events.len() > MAX_SIMULATION_EVENTS {
@@ -2216,6 +2272,35 @@ mod tests {
         zero_desync_interval.config.desync_interval = 0;
         cases.push((zero_desync_interval, "desync_interval must be >= 1"));
 
+        let mut zero_smear = valid.clone();
+        zero_smear.config.app_model = AppModel::Obey;
+        zero_smear.config.wait_recommendation_policy.smear_interval = 0;
+        cases.push((zero_smear, "smear_interval must be >= 1"));
+
+        let mut zero_skip_cap = valid.clone();
+        zero_skip_cap.config.app_model = AppModel::Obey;
+        zero_skip_cap
+            .config
+            .wait_recommendation_policy
+            .max_skip_frames = Some(0);
+        cases.push((zero_skip_cap, "max_skip_frames must be >= 1"));
+
+        let mut ignored_policy = valid.clone();
+        ignored_policy
+            .config
+            .wait_recommendation_policy
+            .cooldown_frames = 60;
+        cases.push((ignored_policy, "requires app_model Obey"));
+
+        let mut under_declared_policy = valid.clone();
+        under_declared_policy.schema_version = 16;
+        under_declared_policy.config.app_model = AppModel::Obey;
+        under_declared_policy
+            .config
+            .wait_recommendation_policy
+            .cooldown_frames = 60;
+        cases.push((under_declared_policy, "under-declares capability"));
+
         let mut unsorted = valid.clone();
         unsorted.events = vec![(10, ScheduleEvent::HealAll), (9, ScheduleEvent::HealAll)];
         cases.push((unsorted, "sorted by nondecreasing step"));
@@ -2908,6 +2993,10 @@ mod tests {
             "config must serialize an `app_model` field for this test to remove"
         );
         assert!(
+            !config.contains_key("wait_recommendation_policy"),
+            "the default wait policy must stay omitted for legacy byte stability"
+        );
+        assert!(
             config.remove("frame_model").is_some(),
             "config must serialize a `frame_model` field for this test to remove"
         );
@@ -2944,6 +3033,11 @@ mod tests {
             "a pre-axis config (no app_model) must default to Ignore"
         );
         assert_eq!(
+            back.config.wait_recommendation_policy,
+            WaitRecommendationPolicy::default(),
+            "a pre-axis config must default to immediate uncapped obedience"
+        );
+        assert_eq!(
             back.config.frame_model,
             FrameModel::Lockstep,
             "a pre-axis config (no frame_model) must default to Lockstep"
@@ -2964,5 +3058,22 @@ mod tests {
             back.config.spectator_hosts.is_empty(),
             "a pre-axis config (no spectator_hosts) must default to no spectator"
         );
+    }
+
+    #[test]
+    fn non_default_wait_recommendation_policy_round_trips_as_schema_v17() {
+        let mut schedule = generate(42, SimConfig::smoke(2));
+        schedule.config.app_model = AppModel::Obey;
+        schedule.config.wait_recommendation_policy = WaitRecommendationPolicy {
+            cooldown_frames: 240,
+            max_skip_frames: Some(9),
+            response_delay_frames: 30,
+            smear_interval: 4,
+        };
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+        let value = serde_json::to_value(&schedule).expect("schedule serializes");
+        assert!(value["config"].get("wait_recommendation_policy").is_some());
+        let decoded: Schedule = serde_json::from_value(value).expect("schedule deserializes");
+        assert_eq!(decoded, schedule);
     }
 }

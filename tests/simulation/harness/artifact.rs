@@ -4,7 +4,7 @@ use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
     phase_control_sample_capacity, ProgressSample, RunReport, TraceSnapshot,
-    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY,
+    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 3 preserves schema-v15 clock/control-loop evidence. Older artifacts
-// cannot diagnose that stronger trace identity and are rejected explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 3;
+// Version 4 preserves schema-v17 wait-policy actuation evidence. Older
+// artifacts cannot diagnose that stronger trace identity and are rejected
+// explicitly.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 4;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -137,6 +138,18 @@ pub struct FailureArtifact {
     /// Final per-peer obeyed-wait totals.
     #[serde(default)]
     pub wait_frames_obeyed: Vec<u64>,
+    /// Largest recommendation payload emitted for each peer.
+    #[serde(default)]
+    pub wait_recommendation_max: Vec<u32>,
+    /// Sum of all recommendation payloads emitted for each peer.
+    #[serde(default)]
+    pub wait_recommendation_frames: Vec<u64>,
+    /// Recommendations accepted by each application-side actuator.
+    #[serde(default)]
+    pub wait_recommendations_accepted: Vec<u64>,
+    /// Recommendation debt accepted by each application-side actuator.
+    #[serde(default)]
+    pub wait_frames_accepted: Vec<u64>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -164,6 +177,10 @@ impl FailureArtifact {
             progress_samples: report.progress_samples.clone(),
             frame_opportunities: report.frame_opportunities.clone(),
             wait_frames_obeyed: report.wait_frames_obeyed.clone(),
+            wait_recommendation_max: report.wait_recommendation_max.clone(),
+            wait_recommendation_frames: report.wait_recommendation_frames.clone(),
+            wait_recommendations_accepted: report.wait_recommendations_accepted.clone(),
+            wait_frames_accepted: report.wait_frames_accepted.clone(),
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -240,7 +257,40 @@ impl FailureArtifact {
                 return Err(format!("artifact has {len} {name} entries for {n} peers"));
             }
         }
-        let maximum_progress_samples = if self.replay_options.phase_resolved_control_samples {
+        let expected_wait_policy_entries = if self.schedule.schema_version >= 17 {
+            n
+        } else {
+            0
+        };
+        for (name, len) in [
+            (
+                "wait_recommendation_max",
+                self.wait_recommendation_max.len(),
+            ),
+            (
+                "wait_recommendation_frames",
+                self.wait_recommendation_frames.len(),
+            ),
+            (
+                "wait_recommendations_accepted",
+                self.wait_recommendations_accepted.len(),
+            ),
+            ("wait_frames_accepted", self.wait_frames_accepted.len()),
+        ] {
+            if len != expected_wait_policy_entries {
+                return Err(format!(
+                    "artifact has {len} {name} entries (expected {expected_wait_policy_entries} \
+                     for schedule schema {})",
+                    self.schedule.schema_version
+                ));
+            }
+        }
+        let wait_policy_samples = self.replay_options.phase_resolved_control_samples
+            && self.schedule.schema_version >= 17
+            && !self.schedule.config.wait_recommendation_policy.is_default();
+        let maximum_progress_samples = if wait_policy_samples {
+            WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+        } else if self.replay_options.phase_resolved_control_samples {
             phase_control_sample_capacity(n)
         } else {
             12
@@ -270,6 +320,37 @@ impl FailureArtifact {
                     ));
                 }
             }
+            let expected_controller_evidence = if wait_policy_samples { n } else { 0 };
+            for (name, len) in [
+                (
+                    "wait_controller_evaluations",
+                    sample.wait_controller_evaluations.len(),
+                ),
+                (
+                    "wait_controller_trigger_evaluations",
+                    sample.wait_controller_trigger_evaluations.len(),
+                ),
+                (
+                    "wait_controller_endpoint_evaluations",
+                    sample.wait_controller_endpoint_evaluations.len(),
+                ),
+                (
+                    "wait_controller_endpoint_trigger_evaluations",
+                    sample.wait_controller_endpoint_trigger_evaluations.len(),
+                ),
+                (
+                    "wait_controller_input_mismatches",
+                    sample.wait_controller_input_mismatches.len(),
+                ),
+            ] {
+                if len != expected_controller_evidence {
+                    return Err(format!(
+                        "artifact progress sample at step {} has {len} {name} entries \
+                         (expected {expected_controller_evidence})",
+                        sample.step
+                    ));
+                }
+            }
             let expected_frames_ahead = if self.replay_options.phase_resolved_control_samples {
                 n
             } else {
@@ -283,6 +364,16 @@ impl FailureArtifact {
                     sample.frames_ahead.len()
                 ));
             }
+            let expected_average_advantage = if wait_policy_samples { n } else { 0 };
+            if sample.max_endpoint_average_frame_advantage.len() != expected_average_advantage {
+                return Err(format!(
+                    "artifact progress sample at step {} has {} \
+                     max_endpoint_average_frame_advantage entries (expected \
+                     {expected_average_advantage})",
+                    sample.step,
+                    sample.max_endpoint_average_frame_advantage.len()
+                ));
+            }
             if sample.step >= self.schedule.config.steps {
                 return Err(format!(
                     "artifact progress sample step {} is outside embedded schedule",
@@ -290,12 +381,13 @@ impl FailureArtifact {
                 ));
             }
             let directed_links = n.saturating_mul(n.saturating_sub(1));
-            for (name, len) in [
-                ("endpoints", sample.endpoints.len()),
-                ("link_queues", sample.link_queues.len()),
+            for (name, len, include_in_wait_policy_samples) in [
+                ("endpoints", sample.endpoints.len(), true),
+                ("link_queues", sample.link_queues.len(), false),
             ] {
                 let expected = if self.schedule.schema_version >= 16
-                    && !self.replay_options.phase_resolved_control_samples
+                    && (!self.replay_options.phase_resolved_control_samples
+                        || (wait_policy_samples && include_in_wait_policy_samples))
                 {
                     directed_links
                 } else {
@@ -323,6 +415,26 @@ impl FailureArtifact {
                          {expected_from}->{expected_to})",
                         endpoint.from, endpoint.to
                     ));
+                }
+            }
+            if wait_policy_samples {
+                for (peer, endpoints) in sample
+                    .endpoints
+                    .chunks_exact(n.saturating_sub(1))
+                    .enumerate()
+                {
+                    let expected_max = endpoints
+                        .iter()
+                        .map(|endpoint| endpoint.average_frame_advantage)
+                        .max()
+                        .unwrap_or(0);
+                    if sample.max_endpoint_average_frame_advantage[peer] != expected_max {
+                        return Err(format!(
+                            "artifact progress sample at step {} has aggregate advantage {} for \
+                             peer {peer} (expected endpoint maximum {expected_max})",
+                            sample.step, sample.max_endpoint_average_frame_advantage[peer]
+                        ));
+                    }
                 }
             }
             for (index, queue) in sample.link_queues.iter().enumerate() {
@@ -630,7 +742,8 @@ mod tests {
     use super::*;
     use crate::common::sim_net::LinkPolicy;
     use crate::simulation::harness::schedule::{
-        BackgroundNoise, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+        AppModel, BackgroundNoise, FrameModel, ScheduleEvent, SimConfig, WaitRecommendationPolicy,
+        SCHEDULE_SCHEMA_VERSION,
     };
     use crate::simulation::harness::{
         run, EndpointControlSample, LinkQueueSample, ProgressSample, RunOptions, TraceGameState,
@@ -667,6 +780,10 @@ mod tests {
             progress_samples: Vec::new(),
             frame_opportunities: vec![600, 600],
             wait_frames_obeyed: vec![0, 0],
+            wait_recommendation_max: vec![0, 0],
+            wait_recommendation_frames: vec![0, 0],
+            wait_recommendations_accepted: vec![0, 0],
+            wait_frames_accepted: vec![0, 0],
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -814,6 +931,10 @@ mod tests {
 
         let mut artifact = sample_artifact();
         artifact.schedule.schema_version = 1;
+        artifact.wait_recommendation_max.clear();
+        artifact.wait_recommendation_frames.clear();
+        artifact.wait_recommendations_accepted.clear();
+        artifact.wait_frames_accepted.clear();
         assert!(
             artifact.validate().is_ok(),
             "artifact envelope must preserve the schedule validator's compatibility window"
@@ -825,28 +946,58 @@ mod tests {
     }
 
     #[test]
-    fn artifact_v2_without_progress_fields_reaches_explicit_schema_rejection() {
+    fn legacy_schedule_failure_builds_a_valid_v4_artifact() {
+        let mut config = SimConfig::smoke(2);
+        config.steps = 60;
+        config.noise = BackgroundNoise::Clean;
+        let mut schedule = crate::simulation::harness::schedule::generate(0x001E_6AC7, config);
+        schedule.schema_version = 16;
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert!(report.wait_recommendation_max.is_empty());
+        assert!(report.wait_recommendation_frames.is_empty());
+        assert!(report.wait_recommendations_accepted.is_empty());
+        assert!(report.wait_frames_accepted.is_empty());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact
+            .validate()
+            .expect("legacy schedule report produces a valid v4 artifact");
+    }
+
+    #[test]
+    fn artifact_v3_without_wait_policy_fields_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(2),
+            serde_json::Value::from(3),
         );
         for field in [
             "progress_samples",
             "frame_opportunities",
             "wait_frames_obeyed",
+            "wait_recommendation_max",
+            "wait_recommendation_frames",
+            "wait_recommendations_accepted",
+            "wait_frames_accepted",
         ] {
             assert!(object.remove(field).is_some(), "fixture contains {field}");
         }
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v2 envelope reaches validation");
-        let error = artifact.validate().expect_err("v2 schema is unsupported");
+            serde_json::from_value(value).expect("v3 envelope reaches validation");
+        let error = artifact.validate().expect_err("v3 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 2"),
+            error.contains("unsupported failure artifact schema 3"),
             "wrong diagnostic: {error}"
         );
     }
@@ -864,13 +1015,20 @@ mod tests {
             prediction_miss_count: vec![0, 0],
             frame_opportunities: vec![1, 1],
             wait_frames_obeyed: vec![0, 0],
+            wait_controller_evaluations: Vec::new(),
+            wait_controller_trigger_evaluations: Vec::new(),
+            wait_controller_endpoint_evaluations: Vec::new(),
+            wait_controller_endpoint_trigger_evaluations: Vec::new(),
+            wait_controller_input_mismatches: Vec::new(),
             frames_ahead: Vec::new(),
+            max_endpoint_average_frame_advantage: Vec::new(),
             endpoints: vec![
                 EndpointControlSample {
                     from: 0,
                     to: 1,
                     ping_ms: 10,
                     remote_frame_advantage: 1,
+                    average_frame_advantage: 0,
                     pending_output_len: 2,
                 },
                 EndpointControlSample {
@@ -878,6 +1036,7 @@ mod tests {
                     to: 0,
                     ping_ms: 10,
                     remote_frame_advantage: -1,
+                    average_frame_advantage: 0,
                     pending_output_len: 2,
                 },
             ],
@@ -948,6 +1107,109 @@ mod tests {
     }
 
     #[test]
+    fn schema_v17_h_osc_artifact_preserves_full_n16_evidence_under_size_cap() {
+        let n = 16;
+        let mut config = SimConfig::smoke(n);
+        config.steps = 3_000;
+        config.noise = BackgroundNoise::Clean;
+        config.app_model = AppModel::Obey;
+        config.frame_model = FrameModel::SkewGated60Hz;
+        config.wait_recommendation_policy = WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            response_delay_frames: 30,
+            smear_interval: 4,
+        };
+        let schedule = crate::simulation::harness::schedule::generate(0xA10, config);
+        let endpoints: Vec<_> = (0..n)
+            .flat_map(|from| {
+                (0..n)
+                    .filter(move |&to| from != to)
+                    .map(move |to| EndpointControlSample {
+                        from,
+                        to,
+                        ping_ms: u128::MAX,
+                        remote_frame_advantage: i32::MAX,
+                        average_frame_advantage: i32::MIN,
+                        pending_output_len: u64::MAX,
+                    })
+            })
+            .collect();
+        let progress_samples: Vec<_> = (0..100_u32)
+            .map(|index| ProgressSample {
+                step: index.saturating_mul(30).saturating_add(29),
+                current_frames: vec![i32::MAX; n],
+                confirmed_frames: vec![i32::MAX; n],
+                confirmation_lag: vec![u64::MAX; n],
+                wait_recommendations: vec![u64::MAX; n],
+                rollback_count: vec![u64::MAX; n],
+                resimulated_frames: vec![u64::MAX; n],
+                prediction_miss_count: vec![u64::MAX; n],
+                frame_opportunities: vec![u64::MAX; n],
+                wait_frames_obeyed: vec![u64::MAX; n],
+                wait_controller_evaluations: vec![u64::MAX; n],
+                wait_controller_trigger_evaluations: vec![u64::MAX; n],
+                wait_controller_endpoint_evaluations: vec![u64::MAX; n],
+                wait_controller_endpoint_trigger_evaluations: vec![u64::MAX; n],
+                wait_controller_input_mismatches: vec![0; n],
+                frames_ahead: vec![i32::MAX; n],
+                max_endpoint_average_frame_advantage: vec![i32::MIN; n],
+                endpoints: endpoints.clone(),
+                link_queues: Vec::new(),
+            })
+            .collect();
+        let mut artifact = sample_artifact();
+        artifact.schedule = schedule;
+        artifact.replay_options.phase_resolved_control_samples = true;
+        artifact.final_confirmed = vec![0; n];
+        artifact.progress_samples = progress_samples;
+        artifact.frame_opportunities = vec![0; n];
+        artifact.wait_frames_obeyed = vec![0; n];
+        artifact.wait_recommendation_max = vec![0; n];
+        artifact.wait_recommendation_frames = vec![0; n];
+        artifact.wait_recommendations_accepted = vec![0; n];
+        artifact.wait_frames_accepted = vec![0; n];
+        for (offset, snapshot) in artifact.trace_tail.iter_mut().enumerate() {
+            snapshot.step = 2_936 + u32::try_from(offset).expect("tail offset fits u32");
+            snapshot.confirmed_frames = vec![0; n];
+            snapshot.session_states = vec![TraceSessionState::Running; n];
+            snapshot.dead = vec![false; n];
+            snapshot.game_states = vec![TraceGameState { frame: 0, value: 0 }; n];
+        }
+        artifact
+            .validate()
+            .expect("schema-v17 H-OSC shape validates");
+        assert_eq!(
+            artifact.progress_samples.len(),
+            WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+        );
+        let mut over_capacity = artifact.clone();
+        over_capacity.progress_samples.push(
+            artifact
+                .progress_samples
+                .last()
+                .expect("maximum shape has samples")
+                .clone(),
+        );
+        assert!(
+            over_capacity.validate().is_err(),
+            "validator must reject an H-OSC artifact above the bounded sample cap"
+        );
+
+        let serialized = serde_json::to_vec_pretty(&artifact).expect("artifact serializes");
+        assert!(
+            serialized.len() <= MAX_FAILURE_ARTIFACT_BYTES,
+            "N=16 H-OSC artifact uses {} bytes (cap {MAX_FAILURE_ARTIFACT_BYTES})",
+            serialized.len()
+        );
+        let root = temp_artifact_root("h-osc-n16");
+        let path = write_artifact(&root, "h-osc-n16", &artifact, ExistingArtifact::Refuse)
+            .expect("bounded H-OSC artifact writes");
+        assert_eq!(read_artifact(&path).expect("artifact reads"), artifact);
+        std::fs::remove_dir_all(root).expect("temporary artifact tree removes");
+    }
+
+    #[test]
     fn artifact_validation_rejects_incomplete_or_inconsistent_envelopes() {
         let mutations: Vec<Box<dyn Fn(&mut FailureArtifact)>> = vec![
             Box::new(|artifact| artifact.failures.clear()),
@@ -959,6 +1221,18 @@ mod tests {
             }),
             Box::new(|artifact| {
                 let _ = artifact.wait_frames_obeyed.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendation_max.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendation_frames.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendations_accepted.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_frames_accepted.pop();
             }),
             Box::new(|artifact| artifact.trace_tail.clear()),
             Box::new(|artifact| artifact.trace_tail[1].step += 1),

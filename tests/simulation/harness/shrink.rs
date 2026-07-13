@@ -652,6 +652,17 @@ where
         }
     }
 
+    // Dense controller samples are diagnostic rather than causal. Remove that
+    // replay option independently so a failure that does not need the H-OSC
+    // evidence surface can subsequently collapse back to lockstep cadence.
+    if current_options.phase_resolved_control_samples {
+        let mut candidate_options = current_options.clone();
+        candidate_options.phase_resolved_control_samples = false;
+        if evaluator.confirm(&current, &candidate_options).is_some() {
+            current_options = candidate_options;
+        }
+    }
+
     // Collapse the frame-production model before simplifying its clock rates;
     // a failure that does not require rate-gated production should replay on
     // the historical lockstep model.
@@ -659,6 +670,37 @@ where
         let mut candidate = current.clone();
         candidate.config.frame_model = super::schedule::FrameModel::Lockstep;
         if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+
+    // Remove each application-side wait-control axis independently. A failure
+    // may need the controller to remain active while only one cooldown, cap,
+    // response-delay, or smearing behavior is material.
+    let wait_policy_simplifications: [fn(&mut Schedule); 4] = [
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.cooldown_frames = 0;
+        },
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.max_skip_frames = None;
+        },
+        |schedule: &mut Schedule| {
+            schedule
+                .config
+                .wait_recommendation_policy
+                .response_delay_frames = 0;
+        },
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.smear_interval = 1;
+        },
+    ];
+    for simplify in wait_policy_simplifications {
+        if !evaluator.has_budget(2) {
+            break;
+        }
+        let mut candidate = current.clone();
+        simplify(&mut candidate);
+        if candidate != current && evaluator.confirm(&candidate, &current_options).is_some() {
             current = candidate;
         }
     }
@@ -771,7 +813,8 @@ mod tests {
     use crate::simulation::harness::oracle::{OracleFailure, Verdict};
     use crate::simulation::harness::run;
     use crate::simulation::harness::schedule::{
-        BackgroundNoise, FrameModel, SimConfig, SCHEDULE_SCHEMA_VERSION,
+        AppModel, BackgroundNoise, FrameModel, SimConfig, WaitRecommendationPolicy,
+        SCHEDULE_SCHEMA_VERSION,
     };
 
     fn clean_schedule(n_players: usize, steps: u32) -> Schedule {
@@ -855,6 +898,10 @@ mod tests {
             progress_samples: Vec::new(),
             frame_opportunities: Vec::new(),
             wait_frames_obeyed: Vec::new(),
+            wait_recommendation_max: Vec::new(),
+            wait_recommendation_frames: Vec::new(),
+            wait_recommendations_accepted: Vec::new(),
+            wait_frames_accepted: Vec::new(),
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
             confirmed_at_heal: Vec::new(),
             confirmed_after_recovery: Vec::new(),
@@ -1602,9 +1649,13 @@ mod tests {
     fn frame_model_shrinking_collapses_or_retains_the_required_gate() {
         let mut collapsible = clean_schedule(2, 2);
         collapsible.config.frame_model = FrameModel::SkewGated60Hz;
+        let phase_options = RunOptions {
+            phase_resolved_control_samples: true,
+            ..RunOptions::default()
+        };
         let collapsed = shrink_failure(
             &collapsible,
-            &RunOptions::default(),
+            &phase_options,
             "StateDivergence",
             ShrinkConfig {
                 max_runs: 40,
@@ -1615,6 +1666,34 @@ mod tests {
         )
         .expect("failure persists without the frame gate");
         assert_eq!(collapsed.schedule.config.frame_model, FrameModel::Lockstep);
+        assert!(!collapsed.options.phase_resolved_control_samples);
+
+        let phase_required = shrink_failure(
+            &collapsible,
+            &phase_options,
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, options| {
+                let failures = if candidate.config.frame_model == FrameModel::SkewGated60Hz
+                    && options.phase_resolved_control_samples
+                {
+                    vec![state_failure(1)]
+                } else {
+                    Vec::new()
+                };
+                synthetic_report(candidate, failures, 0xC011_A95E)
+            },
+            |_, _, _| {},
+        )
+        .expect("failure requires dense phase evidence");
+        assert_eq!(
+            phase_required.schedule.config.frame_model,
+            FrameModel::SkewGated60Hz
+        );
+        assert!(phase_required.options.phase_resolved_control_samples);
 
         let mut required = clean_schedule(2, 2);
         required.config.frame_model = FrameModel::SkewGated60Hz;
@@ -1646,6 +1725,46 @@ mod tests {
             FrameModel::SkewGated60Hz
         );
         assert_eq!(retained.schedule.config.clock_skew_ppm, vec![1_000, 0]);
+    }
+
+    #[test]
+    fn wait_policy_shrinking_removes_irrelevant_axes_and_retains_required_cap() {
+        let mut schedule = clean_schedule(2, 2);
+        schedule.config.app_model = AppModel::Obey;
+        schedule.config.wait_recommendation_policy = WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            response_delay_frames: 30,
+            smear_interval: 4,
+        };
+        let result = shrink_failure(
+            &schedule,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| {
+                let failures =
+                    if candidate.config.wait_recommendation_policy.max_skip_frames == Some(9) {
+                        vec![state_failure(1)]
+                    } else {
+                        Vec::new()
+                    };
+                synthetic_report(candidate, failures, 0x0A10)
+            },
+            |_, _, _| {},
+        )
+        .expect("failure requires only the wait payload cap");
+
+        assert_eq!(
+            result.schedule.config.wait_recommendation_policy,
+            WaitRecommendationPolicy {
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            }
+        );
     }
 
     #[test]

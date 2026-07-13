@@ -1127,6 +1127,7 @@ impl<T: Config> UdpProtocol<T> {
             pending_checksums_len: u64::try_from(self.pending_checksums.len()).unwrap_or(u64::MAX),
             ping_ms: self.round_trip_time,
             remote_frame_advantage: self.remote_frame_advantage,
+            average_frame_advantage: self.average_frame_advantage(),
         }
     }
 
