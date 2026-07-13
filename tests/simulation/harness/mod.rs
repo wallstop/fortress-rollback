@@ -256,7 +256,7 @@ impl WaitActuator {
         {
             if let Some((_, matured_skip)) = self.pending.pop_front() {
                 let had_active_debt = self.active_skip > 0;
-                self.active_skip = self.active_skip.max(matured_skip);
+                self.active_skip = self.active_skip.saturating_add(matured_skip);
                 if !had_active_debt {
                     self.smear_countdown = 0;
                 }
@@ -3058,23 +3058,28 @@ mod tests {
     #[test]
     fn wait_actuator_keeps_overlapping_response_delays_independent() {
         let mut actuator = WaitActuator::new(WaitRecommendationPolicy {
-            cooldown_frames: 10,
+            cooldown_frames: 1,
             response_delay_frames: 30,
+            smear_interval: 4,
             ..WaitRecommendationPolicy::default()
         });
-        assert_eq!(actuator.accept(100, 1), Some(1));
-        assert_eq!(actuator.accept(110, 9), Some(9));
+        assert_eq!(actuator.accept(100, 9), Some(9));
+        assert_eq!(actuator.accept(101, 3), Some(3));
         for opportunity in 100..130 {
             assert!(!actuator.should_skip(opportunity));
         }
         assert!(actuator.should_skip(130), "the first debt matures at 130");
-        for opportunity in 131..140 {
-            assert!(
-                !actuator.should_skip(opportunity),
-                "the later debt must not borrow the earlier due time"
-            );
-        }
-        assert!(actuator.should_skip(140), "the second debt matures at 140");
+        assert!(
+            !actuator.should_skip(131),
+            "the second debt keeps the smear cadence"
+        );
+        let later_skips = (132..180)
+            .filter(|&opportunity| actuator.should_skip(opportunity))
+            .count();
+        assert_eq!(
+            later_skips, 11,
+            "all twelve accepted frames must survive overlapping maturation"
+        );
     }
 
     #[test]
