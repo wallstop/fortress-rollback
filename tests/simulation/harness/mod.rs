@@ -231,17 +231,21 @@ impl WaitActuator {
             .max_skip_frames
             .map_or(requested, |cap| requested.min(cap));
         let due = opportunity.saturating_add(u64::from(self.policy.response_delay_frames));
+        let debt_added;
         if let Some((last_due, last_skip)) = self.pending.back_mut() {
             if *last_due == due {
+                debt_added = accepted.saturating_sub(*last_skip);
                 *last_skip = (*last_skip).max(accepted);
             } else {
+                debt_added = accepted;
                 self.pending.push_back((due, accepted));
             }
         } else {
+            debt_added = accepted;
             self.pending.push_back((due, accepted));
         }
         self.next_accept = opportunity.saturating_add(u64::from(self.policy.cooldown_frames));
-        Some(accepted)
+        Some(debt_added)
     }
 
     fn should_skip(&mut self, opportunity: u64) -> bool {
@@ -2355,13 +2359,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 .saturating_add(u64::from(*skip_frames));
                             if app_model == AppModel::Obey {
                                 let opportunity = frame_opportunities[i];
-                                if let Some(accepted) =
+                                if let Some(debt_added) =
                                     wait_actuators[i].accept(opportunity, *skip_frames)
                                 {
                                     wait_recommendations_accepted[i] =
                                         wait_recommendations_accepted[i].saturating_add(1);
-                                    wait_frames_accepted[i] =
-                                        wait_frames_accepted[i].saturating_add(u64::from(accepted));
+                                    wait_frames_accepted[i] = wait_frames_accepted[i]
+                                        .saturating_add(u64::from(debt_added));
                                 }
                             }
                         }
@@ -3071,6 +3075,25 @@ mod tests {
             );
         }
         assert!(actuator.should_skip(140), "the second debt matures at 140");
+    }
+
+    #[test]
+    fn wait_actuator_counts_only_same_due_debt_increase() {
+        let mut actuator = WaitActuator::new(WaitRecommendationPolicy {
+            response_delay_frames: 30,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(actuator.accept(100, 3), Some(3));
+        assert_eq!(actuator.accept(100, 9), Some(6));
+        assert_eq!(actuator.accept(100, 4), Some(0));
+
+        assert_eq!(
+            (100..140)
+                .filter(|&opportunity| actuator.should_skip(opportunity))
+                .count(),
+            9,
+            "same-due recommendations merge by max, so accepted evidence must total nine"
+        );
     }
 
     #[test]
