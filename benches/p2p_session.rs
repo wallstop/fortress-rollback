@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 /// Simple test input type for benchmarking
 #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
@@ -252,6 +253,9 @@ fn bench_message_serialization(c: &mut Criterion) {
 
     group.bench_function("round_trip_input_msg", |b| {
         b.iter(|| {
+            // Intentional Session 117 gate drill: this temporary delay must
+            // trip the 150% hard regression threshold on the draft drill PR.
+            std::thread::sleep(Duration::from_millis(1));
             for _ in 0..FAST_BENCH_ITERATIONS {
                 // Serialize
                 let bytes = codec::encode(&sample_input_bytes).expect("serialize");
