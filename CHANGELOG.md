@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-13
+
 ### Fixed
 
 - **Pre-existing:** repeated N-player graceful-drop/hot-join generations now retain a canonical connected-era membership generation across committed drops, successful reactivations, and replacement snapshots. Retry-local spectator epochs remain non-decreasing until their documented `u16` wrap but can no longer produce incompatible generation-fenced certificates; fresh N-peer joiners import canonical live and dead slot membership, and the four-player nightly soak now exercises periodic churn through all 40 generations. The semantic snapshot boundary bumps the exact-match wire protocol to v2, which deliberately rejects released v1 peers.
@@ -757,7 +759,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.10"
+fortress-rollback = "0.11"
 ```
 
 ### Import Path Change
@@ -817,7 +819,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/wallstop/fortress-rollback/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/wallstop/fortress-rollback/compare/v0.8.0...v0.8.1
