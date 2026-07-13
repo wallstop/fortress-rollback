@@ -132,14 +132,14 @@ def rewrite_lockfile(content: str, current: str, target: str) -> str:
     ]
     if len(matching_blocks) != 1:
         raise PreparationError(
-            f"Cargo.lock text must contain exactly one {PACKAGE_NAME} package"
+            f"Cargo.lock text must contain exactly one local {PACKAGE_NAME} package"
         )
     block = matching_blocks[0]
     rewritten_block, count = re.subn(
         rf'(?m)^version = "{re.escape(current)}"$', f'version = "{target}"', block.group(0)
     )
     if count != 1:
-        raise PreparationError("Cargo.lock root package version could not be rewritten exactly once")
+        raise PreparationError("Cargo.lock local package version could not be rewritten exactly once")
     return content[: block.start()] + rewritten_block + content[block.end() :]
 
 
