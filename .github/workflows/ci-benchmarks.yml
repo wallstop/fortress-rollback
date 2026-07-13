@@ -92,11 +92,11 @@ jobs:
       - name: Run benchmarks
         run: |
           set -o pipefail
-          cargo bench --bench p2p_session -- 'SyncTestSession|Message serialization' --output-format bencher | tee benchmark-gated-results.txt
+          cargo bench --bench p2p_session -- 'Message serialization' --output-format bencher | tee benchmark-gated-results.txt
           cargo bench --bench sync_layer -- --output-format bencher | tee -a benchmark-gated-results.txt
           cargo bench --bench input_queue -- --output-format bencher | tee benchmark-informational-results.txt
           cargo bench --bench compression -- --output-format bencher | tee -a benchmark-informational-results.txt
-          cargo bench --bench p2p_session -- 'P2PSession|Message/' --output-format bencher | tee -a benchmark-informational-results.txt
+          cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher | tee -a benchmark-informational-results.txt
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -165,6 +165,11 @@ jobs:
           max-items-in-chart: 50
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench-informational
+          # The gated action immediately above already fetched and checked out
+          # gh-pages. Re-fetching into that now-locally-advanced branch fails as
+          # a non-fast-forward on PRs; reuse the same checkout so both datasets
+          # are composed into one eventual main-branch push.
+          skip-fetch-gh-pages: true
 
       - name: Skip benchmark storage (no gh-pages branch yet)
         if: steps.gh-pages-check.outputs.exists == 'false' && github.event_name != 'push'
