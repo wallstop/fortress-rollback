@@ -121,6 +121,8 @@ impl TimeSyncConfig {
 pub struct TimeSync {
     local: Vec<i32>,
     remote: Vec<i32>,
+    local_sum: i128,
+    remote_sum: i128,
     window_size: usize,
 }
 
@@ -153,6 +155,8 @@ impl TimeSync {
                 Self {
                     local: vec![0; 1],
                     remote: vec![0; 1],
+                    local_sum: 0,
+                    remote_sum: 0,
                     window_size: 1,
                 }
             },
@@ -178,6 +182,8 @@ impl TimeSync {
         Ok(Self {
             local,
             remote,
+            local_sum: 0,
+            remote_sum: 0,
             window_size,
         })
     }
@@ -198,9 +204,11 @@ impl TimeSync {
         }
         let index = frame.as_i32() as usize % self.window_size;
         if let Some(local_slot) = self.local.get_mut(index) {
+            self.local_sum += i128::from(local_adv) - i128::from(*local_slot);
             *local_slot = local_adv;
         }
         if let Some(remote_slot) = self.remote.get_mut(index) {
+            self.remote_sum += i128::from(remote_adv) - i128::from(*remote_slot);
             *remote_slot = remote_adv;
         }
     }
@@ -214,14 +222,18 @@ impl TimeSync {
     /// FPU rounding modes, or platform-specific implementations.
     #[must_use]
     pub fn average_frame_advantage(&self) -> i32 {
-        let local_sum: i32 = self.local.iter().sum();
-        let remote_sum: i32 = self.remote.iter().sum();
-        // local and remote have the same length (both initialized with window_size)
-        let count = self.local.len() as i32;
+        // `usize` is at most 64 bits on supported Rust targets, so this conversion
+        // cannot fail. Keep the fallback defensive for hypothetical wider targets.
+        let count = i128::try_from(self.local.len()).unwrap_or(i128::MAX / 2);
 
         // Integer division: (remote_sum - local_sum) / (2 * count)
         // This avoids floating-point non-determinism while producing equivalent results.
-        (remote_sum - local_sum) / (2 * count)
+        let average = (self.remote_sum - self.local_sum) / (2 * count);
+        i32::try_from(average).unwrap_or(if average.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        })
     }
 
     /// Test-only: deterministically seeds the rolling window so that
@@ -241,6 +253,9 @@ impl TimeSync {
         for slot in &mut self.local {
             *slot = 0;
         }
+        let count = i128::try_from(self.remote.len()).unwrap_or(i128::MAX);
+        self.remote_sum = i128::from(doubled) * count;
+        self.local_sum = 0;
     }
 }
 
@@ -350,6 +365,32 @@ mod sync_layer_tests {
         }
         // Should now show remote advantage
         assert_eq!(time_sync.average_frame_advantage(), 10);
+    }
+
+    #[test]
+    fn test_cached_sums_track_rolling_overwrites() {
+        let mut time_sync = TimeSync::with_config(TimeSyncConfig { window_size: 3 });
+        let samples = [(0, 4, -2), (1, -3, 7), (2, 5, 9), (3, -8, 6), (4, 2, -4)];
+
+        for (frame, local, remote) in samples {
+            time_sync.advance_frame(Frame::new(frame), local, remote);
+
+            let expected_local: i128 = time_sync.local.iter().copied().map(i128::from).sum();
+            let expected_remote: i128 = time_sync.remote.iter().copied().map(i128::from).sum();
+            assert_eq!(time_sync.local_sum, expected_local);
+            assert_eq!(time_sync.remote_sum, expected_remote);
+            assert_eq!(
+                time_sync.average_frame_advantage(),
+                i32::try_from((expected_remote - expected_local) / 6).unwrap()
+            );
+        }
+
+        let sums_before_invalid = (time_sync.local_sum, time_sync.remote_sum);
+        time_sync.advance_frame(Frame::NULL, i32::MAX, i32::MIN);
+        assert_eq!(
+            (time_sync.local_sum, time_sync.remote_sum),
+            sums_before_invalid
+        );
     }
 
     #[test]
