@@ -506,7 +506,7 @@ fn rss_growth_within_limit(previous: u64, current: u64, growth_percent: u64) -> 
 #[ignore = "4,000,000-frame deterministic release-mode boundedness soak; nightly CI only"]
 fn four_million_frame_soak_preserves_bounds_replay_and_lifecycle() -> Result<(), FortressError> {
     SoakRun::new(2, 0x50A4_0002, true)?.run_to_target(0x50A4_0002)?;
-    SoakRun::new(4, 0x50A4_0004, false)?.run_to_target(0x50A4_0004)
+    SoakRun::new(4, 0x50A4_0004, true)?.run_to_target(0x50A4_0004)
 }
 
 #[test]

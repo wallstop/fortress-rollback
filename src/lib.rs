@@ -436,8 +436,10 @@ pub mod __internal {
 /// Any change to bytes that a protocol message can produce or accept requires a
 /// version bump. A new tail variant may reuse a version only when it is optional
 /// for correctness and its sender is gated by an explicitly negotiated feature.
-/// Protocol v1 deliberately rejects legacy unversioned packets.
-pub const PROTOCOL_VERSION: u8 = 1;
+/// Protocol v2 deliberately rejects both released v1 packets and legacy
+/// unversioned packets. Membership-generation semantics changed at the v2
+/// boundary, so mixed v1/v2 sessions must fail closed instead of handshaking.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Internally, -1 represents no frame / invalid frame.
 ///

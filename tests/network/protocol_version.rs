@@ -12,7 +12,7 @@ use crate::common::TestClock;
 use fortress_rollback::telemetry::{CollectingObserver, ViolationKind, ViolationSeverity};
 use fortress_rollback::{
     FortressEvent, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SessionState,
-    SyncConfig, UdpNonBlockingSocket, PROTOCOL_VERSION,
+    SyncConfig, UdpNonBlockingSocket,
 };
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ mod legacy;
 
 #[test]
 #[cfg(not(miri))]
-fn unsupported_wire_version_reports_violation_and_never_synchronizes() {
+fn released_v1_wire_version_reports_violation_and_never_synchronizes() {
     let clock = TestClock::new();
     let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     receiver.set_nonblocking(true).unwrap();
@@ -47,20 +47,7 @@ fn unsupported_wire_version_reports_violation_and_never_synchronizes() {
         .start_p2p_session(socket)
         .unwrap();
 
-    let unsupported = [
-        0xF5,
-        0x52,
-        PROTOCOL_VERSION.saturating_add(1),
-        0,
-        1,
-        0,
-        0,
-        0,
-        7,
-        0,
-        0,
-        0,
-    ];
+    let unsupported = [0xF5, 0x52, 1, 0, 1, 0, 0, 0, 7, 0, 0, 0];
     assert_eq!(raw_peer.send_to(&unsupported, receiver_addr).unwrap(), 12);
 
     let mut events = Vec::new();
@@ -82,6 +69,7 @@ fn unsupported_wire_version_reports_violation_and_never_synchronizes() {
     assert_eq!(violation.severity, ViolationSeverity::Warning);
     assert_eq!(violation.kind, ViolationKind::NetworkProtocol);
     assert!(violation.message.contains("unsupported protocol version"));
+    assert!(violation.message.contains("version 1"));
     assert!(violation.message.contains(&raw_peer_addr.to_string()));
 }
 

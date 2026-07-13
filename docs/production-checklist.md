@@ -37,7 +37,7 @@ The [telemetry guide](telemetry.md) explains the counters and the
 ## Network and lifecycle policy
 
 - Configure the same player count, input width, FPS, desync interval, save mode, prediction
-  window, and input delay on every peer. Protocol v1 rejects incompatible peers during sync.
+  window, and input delay on every peer. Protocol v2 rejects incompatible peers during sync.
 - Pick a disconnect policy deliberately. `Halt` ends progress after a drop;
   `ContinueWithout` coordinates a graceful removal and lets survivors continue. Configure the
   same policy on every peer.
