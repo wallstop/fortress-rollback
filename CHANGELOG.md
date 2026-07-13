@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pre-existing:** repeated two-player hot-joins under packet loss no longer strand the joiner one input frame behind. A serving host now defers pre-commit input packets and reliably backfills the activation frame before accepting the new generation's stream; an uncaptured N-player serve whose saved-state frame moves during an honest rollback repair aborts immediately and retries at a fresh frame instead of emitting an Error on every poll until timeout.
+
 ## [0.10.0] - 2026-07-12
 
 ### Added

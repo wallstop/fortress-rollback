@@ -16,4 +16,6 @@ mod network {
     pub mod peer_metrics;
     pub mod protocol_version;
     pub mod resilience;
+    #[cfg(feature = "hot-join")]
+    pub mod soak;
 }

@@ -3238,6 +3238,7 @@ impl<T: Config> P2PSession<T> {
             return false;
         };
         if let Some(endpoint) = self.player_reg.remotes.get_mut(&serve.addr) {
+            endpoint.set_defer_input_processing(false);
             endpoint.clear_pending_output();
         }
         true
@@ -3393,6 +3394,15 @@ impl<T: Config> P2PSession<T> {
             if !self.player_reg.remotes.contains_key(&addr) {
                 continue;
             }
+            // The joiner applies the snapshot before the host consumes its
+            // snapshot ack. Under loss/jitter, a real Input(F) can overtake
+            // that ack. Defer Input processing until Phase 3 reactivates the
+            // session-level slot; otherwise the protocol consumes and acks F
+            // while `local_connect_status` is still disconnected, and the
+            // session then rejects F+1 forever as a sequence gap.
+            if let Some(endpoint) = self.player_reg.remotes.get_mut(&addr) {
+                endpoint.set_defer_input_processing(true);
+            }
             // Cache the serve. The actual send is Phase 2's job — it is the SOLE
             // snapshot-send site, so the serve we open here is transmitted exactly
             // once this poll (Phase 2 runs immediately below) and once per poll
@@ -3532,6 +3542,16 @@ impl<T: Config> P2PSession<T> {
             } else {
                 std::cmp::min(self.disconnect_frame, activation_frame)
             };
+            // A freshly synchronized/rearmed endpoint can open and commit a
+            // serve before an organic `advance_frame` ever queued the host's
+            // input at F. Reuse the N-peer activation-window backfill to make
+            // the reliable stream begin at F in both the empty-queue and
+            // persisted-gap cases. Without this, the joiner consumes F+1
+            // first and rejects the entire stream as out of sequence.
+            self.backfill_joiner_pending_inputs(&addr, activation_frame);
+            if let Some(endpoint) = self.player_reg.remotes.get_mut(&addr) {
+                endpoint.set_defer_input_processing(false);
+            }
             // Join complete: retire the serve and the reservation, resume solo+peer
             // advancing (the host unpauses once `joining` is empty).
             self.hot_join.joining.remove(&handle);
@@ -4026,17 +4046,21 @@ impl<T: Config> P2PSession<T> {
                     },
                 }
             } else {
-                // The pause holds last_saved fixed, so this indicates the serve
-                // opened against a moving frame counter — fail loudly and let
-                // Phase 4 abort rather than serve a wrong F.
+                // A late input can legitimately trigger a rollback repair after
+                // the serve opens but before capture, moving `last_saved` off S.
+                // No snapshot bytes exist yet, so abort immediately and let the
+                // R3 retry choose a fresh later frame. Waiting for Phase 4 only
+                // repeats an Error every poll for an honest loss/reorder race.
                 report_violation!(
-                    ViolationSeverity::Error,
+                    ViolationSeverity::Warning,
                     ViolationKind::FrameSync,
-                    "N-peer hot-join serve for slot {}: last_saved_frame {} moved off the pinned snapshot frame {} while paused",
+                    "N-peer hot-join serve for slot {} aborted before capture: last_saved_frame {} moved off the pinned snapshot frame {} during rollback repair",
                     serve.handle,
                     self.sync_layer.last_saved_frame(),
                     serve.snapshot_frame
                 );
+                self.abort_npeer_serve(serve);
+                return;
             }
         }
 
@@ -7823,6 +7847,15 @@ impl<T: Config> P2PSession<T> {
     /// ```
     pub fn metrics(&self) -> SessionMetrics {
         self.metrics
+    }
+
+    /// Returns current bounded-container lengths for integration diagnostics.
+    pub(crate) fn container_lengths_for_tests(&self) -> (usize, usize, usize) {
+        (
+            self.event_queue.len(),
+            self.max_event_queue_size,
+            self.local_checksum_history.len(),
+        )
     }
 
     /// Returns the confirmed inputs for all players at a specific frame.
@@ -11957,19 +11990,6 @@ impl<T: Config> P2PSession<T> {
                         return;
                     };
 
-                    if let Some(checksum) = cell.checksum() {
-                        for remote in self.player_reg.remotes.values_mut() {
-                            remote.send_checksum_report(frame_to_send, checksum);
-                        }
-                        self.last_sent_checksum_frame = frame_to_send;
-                        // collect locally for later comparison
-                        self.local_checksum_history.insert(frame_to_send, checksum);
-                        // Record the peak history length (the momentary overshoot
-                        // before the size-cap prune below is the true high-water).
-                        self.metrics
-                            .observe_checksum_history_len(self.local_checksum_history.len());
-                    }
-
                     // Retention is deliberately governed by the configured
                     // scheduled-frame window, not peer `last_verified_frame`
                     // cursors. Those cursors advance only on a match, so using
@@ -11979,11 +11999,23 @@ impl<T: Config> P2PSession<T> {
                     // the schedule still advanced and older evidence must remain
                     // bounded, though the history may contain fewer than the cap.
                     let max_history = self.protocol_config.max_checksum_history;
-                    if self.local_checksum_history.len() > max_history {
+                    if self.local_checksum_history.len() >= max_history {
                         let oldest_frame_to_keep =
                             checksum_history_oldest_frame(frame_to_send, max_history, interval);
                         self.local_checksum_history
                             .retain(|&frame, _| frame >= oldest_frame_to_keep);
+                    }
+
+                    if let Some(checksum) = cell.checksum() {
+                        for remote in self.player_reg.remotes.values_mut() {
+                            remote.send_checksum_report(frame_to_send, checksum);
+                        }
+                        self.last_sent_checksum_frame = frame_to_send;
+                        // Pre-pruning above keeps the configured cap as a hard
+                        // allocation bound, including the insertion high-water.
+                        self.local_checksum_history.insert(frame_to_send, checksum);
+                        self.metrics
+                            .observe_checksum_history_len(self.local_checksum_history.len());
                     }
                 }
             },
@@ -14624,6 +14656,37 @@ mod tests {
             vec![Frame::new(2)],
             "scheduled frame 3 with a cap of 2 must prune frames older than 2"
         );
+
+        // Refill the cap and harvest a real checksum. Pruning must happen
+        // before insertion: the configured cap is an allocation bound, not
+        // merely the final length after a one-entry overshoot.
+        session.local_checksum_history.insert(Frame::new(3), 3);
+        let request = session.sync_layer.save_current_state();
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            assert_eq!(frame, Frame::new(4));
+            assert!(cell.save(frame, Some(0u8), Some(4)));
+        }
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(4), session.save_mode);
+        session.last_sent_checksum_frame = Frame::new(3);
+
+        session.check_checksum_send_interval();
+
+        assert_eq!(
+            session.metrics().checksum_history_high_water,
+            2,
+            "checksum insertion must never allocate above max_checksum_history"
+        );
+        assert_eq!(
+            session
+                .local_checksum_history
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Frame::new(3), Frame::new(4)]
+        );
     }
 
     #[test]
@@ -15162,8 +15225,26 @@ mod tests {
             "an endpoint requesting the reserved slot it owns must open a serve"
         );
         assert!(
+            host.player_reg
+                .remotes
+                .get(&addr_b)
+                .expect("addr_b endpoint exists")
+                .defers_input_processing(),
+            "an open serve must defer pre-commit Input packets"
+        );
+        assert!(
             !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
             "the spoofed handle 1 must never be served"
+        );
+        assert!(host.abort_hot_join_serve(PlayerHandle::new(2)));
+        assert!(
+            !host
+                .player_reg
+                .remotes
+                .get(&addr_b)
+                .expect("addr_b endpoint exists")
+                .defers_input_processing(),
+            "serve abort must restore ordinary Input processing"
         );
     }
 
