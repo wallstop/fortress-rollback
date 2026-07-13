@@ -123,7 +123,7 @@ struct SoakRun {
     drop_commit_observers: BTreeSet<usize>,
     high_water: ContainerHighWater,
     last_high_water_change_frame: i32,
-    rss_baseline: Option<(i32, u64)>,
+    rss_baseline: Option<u64>,
     rss_last_hour: Option<(i32, u64)>,
 }
 
@@ -336,15 +336,12 @@ impl SoakRun {
             return;
         };
         if self.rss_baseline.is_none() {
-            self.rss_baseline = Some((confirmed, rss));
+            self.rss_baseline = Some(rss);
             self.rss_last_hour = Some((confirmed, rss));
             return;
         }
-        let Some((_, previous_rss)) = self.rss_last_hour else {
+        let Some((previous_frame, previous_rss)) = self.rss_last_hour else {
             self.rss_last_hour = Some((confirmed, rss));
-            return;
-        };
-        let Some((previous_frame, _)) = self.rss_last_hour else {
             return;
         };
         if confirmed.saturating_sub(previous_frame) < VIRTUAL_HOUR_FRAMES {
@@ -352,14 +349,16 @@ impl SoakRun {
         }
         assert!(
             rss_growth_within_limit(previous_rss, rss, RSS_HOURLY_GROWTH_PERCENT),
-            "RSS grew by at least 5% in one post-warmup virtual hour: {previous_rss} -> {rss} bytes"
+            "RSS grew by at least {RSS_HOURLY_GROWTH_PERCENT}% in one post-warmup virtual hour: \
+             {previous_rss} -> {rss} bytes"
         );
-        let Some((_, baseline_rss)) = self.rss_baseline else {
+        let Some(baseline_rss) = self.rss_baseline else {
             return;
         };
         assert!(
             rss_growth_within_limit(baseline_rss, rss, RSS_TOTAL_GROWTH_PERCENT),
-            "RSS grew by at least 10% from the first post-warmup sample: {baseline_rss} -> {rss} bytes"
+            "RSS grew by at least {RSS_TOTAL_GROWTH_PERCENT}% from the first post-warmup sample: \
+             {baseline_rss} -> {rss} bytes"
         );
         self.rss_last_hour = Some((confirmed, rss));
     }
@@ -521,5 +520,11 @@ fn high_water_tracks_each_bounded_container() {
 #[test]
 fn rss_growth_gate_rejects_large_cumulative_growth() {
     assert!(rss_growth_within_limit(100, 104, RSS_HOURLY_GROWTH_PERCENT));
+    assert!(!rss_growth_within_limit(
+        100,
+        105,
+        RSS_HOURLY_GROWTH_PERCENT
+    ));
+    assert!(rss_growth_within_limit(100, 109, RSS_TOTAL_GROWTH_PERCENT));
     assert!(!rss_growth_within_limit(100, 110, RSS_TOTAL_GROWTH_PERCENT));
 }
