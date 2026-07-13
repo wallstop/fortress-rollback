@@ -164,8 +164,10 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      - name: Run ignored extreme real-UDP network tests (nextest)
-        run: cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(multi_process)' --test network
+      - name: Run ignored extreme real-UDP tests and deterministic soak (nextest)
+        run: |
+          cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(multi_process)' --test network --features hot-join --no-capture
+          cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(network::soak::four_million_frame_soak_preserves_bounds_replay_and_lifecycle)' --test network --features hot-join --no-capture
         env:
           # Nightly tier: stand the per-PR smoke-tier guard down so the ignored
           # loss-bearing real-UDP scenarios are allowed to run (the spawn_peer

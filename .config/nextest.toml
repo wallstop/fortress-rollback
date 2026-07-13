@@ -76,8 +76,9 @@ slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s ma
 
 # Nightly network profile - used ONLY by ci-network-nightly.yml via
 # `--profile ci-network-nightly --run-ignored ignored-only`. The ignored tests
-# are the extreme-chaos scenarios (peer timeouts up to 240s) and the long
-# endurance sessions (peer timeouts up to 600s for the 5000-frame stress test).
+# are the extreme-chaos scenarios (peer timeouts up to 240s), the long
+# endurance sessions (peer timeouts up to 600s for the 5000-frame stress test),
+# and the 4,000,000-frame deterministic soak selected by ci-network-nightly.yml.
 # Their nextest budget MUST exceed those internal timeouts + harness overhead
 # on every matrix OS, otherwise nextest would SIGKILL them before their own
 # timeout fires. 960s (period 60s, terminate-after 16) covers the macOS-scaled
@@ -92,6 +93,13 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
 slow-timeout = { period = "60s", terminate-after = 16 } # 960s: covers the 930s macOS-scaled endurance ceiling
+
+# The deterministic 4,000,000-frame soak measured 203.47s locally in release
+# mode. A 600s ceiling leaves shared-runner/OS headroom while remaining far
+# below the 240-minute workflow bound.
+[[profile.ci-network-nightly.overrides]]
+filter = 'test(network::soak::four_million_frame_soak_preserves_bounds_replay_and_lifecycle)'
+slow-timeout = { period = "60s", terminate-after = 10 }
 
 [profile.ci-network-nightly.junit]
 path = "target/nextest/ci-network-nightly/junit.xml"

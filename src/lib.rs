@@ -413,6 +413,18 @@ pub mod __internal {
     pub fn message_metadata(message: &crate::Message) -> (usize, crate::MessageKind) {
         (message.encoded_len(), message.kind())
     }
+
+    /// Returns `(event_queue_len, event_queue_limit, local_checksum_history_len)`.
+    ///
+    /// This unstable hook exists for long-running integration tests that audit
+    /// the crate's bounded-allocation contracts without exposing mutable
+    /// internals to applications.
+    #[must_use]
+    pub fn p2p_container_lengths<T: crate::Config>(
+        session: &crate::P2PSession<T>,
+    ) -> (usize, usize, usize) {
+        session.container_lengths_for_tests()
+    }
 }
 
 // #############
