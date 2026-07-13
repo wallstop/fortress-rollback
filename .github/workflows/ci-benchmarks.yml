@@ -94,9 +94,11 @@ jobs:
           set -o pipefail
           cargo bench --bench p2p_session -- 'Message serialization' --output-format bencher | tee benchmark-gated-results.txt
           cargo bench --bench sync_layer -- --output-format bencher | tee -a benchmark-gated-results.txt
-          cargo bench --bench input_queue -- --output-format bencher | tee benchmark-informational-results.txt
-          cargo bench --bench compression -- --output-format bencher | tee -a benchmark-informational-results.txt
-          cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher | tee -a benchmark-informational-results.txt
+          # Informational trends trade some precision for bounded CI time; they
+          # never fail the job, while gated measurements keep Criterion defaults.
+          cargo bench --bench input_queue -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee benchmark-informational-results.txt
+          cargo bench --bench compression -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
+          cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
