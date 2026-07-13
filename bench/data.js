@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783958609987,
+  "lastUpdate": 1783963999961,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "90b0f1deee669e9751b295ed48d0536f99b5d3b4",
-          "message": "bugfix: Hot Join Correctness (#176)\n\n## Description\n\nThis PR tightens correctness for `hot-join` and N-player mesh behavior,\nwith a focus on preventing silent desyncs under real network conditions.\n\nMain user-facing outcomes:\n\n- Improves hot-join reliability for multi-peer sessions\n(reserved-slot/rejoin flows, mesh convergence, and handshake edge\ncases).\n- Fixes a pre-existing input-queue prediction-entry bug that could skip\nmisprediction checks and cause silent divergence.\n- Fixes pre-existing graceful-drop convergence issues in 3+ player\nsessions by using mesh-aware confirmed-frame gating and better status\npropagation/retransmit behavior.\n- Adds/updates regression coverage for hot-join and mesh-fix scenarios.\n\nIn short: this branch makes mid-session joins and peer-drop recovery\nsignificantly safer and more deterministic in N-player games.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/hot_join.rs` — expanded integration coverage for\nmulti-peer hot-join/rejoin and handshake edge cases\n\n**Manual testing performed:**\n\n- Not run as part of this PR description draft\n\n## Related Issues\n\n- (None linked in branch commits)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> Changes hot-join session semantics, snapshot wire format, and\nrollback/input presentation for multi-machine meshes; mistakes here\ncause silent desync rather than obvious API breaks.\n> \n> **Overview**\n> **N-peer hot-join (3+ machines)** is no longer rejected at build time.\nServing hosts and mesh joiners are documented and gated with mirrored\nrequirements (`SaveMode::EveryFrame`, zero input delay, local player on\ncoordinator; every-frame saving on N-peer joiners). `StateSnapshot`\ngains **`bridge_inputs`** and **`bridge_statuses`** so the coordinator\ncan ship confirmed inputs and per-slot connection state at snapshot\nframe `S`; empty vs non-empty blobs distinguish 2-peer vs N-peer shapes.\nNew paths **`capture_npeer_snapshot_with_max_wire_bytes`**,\n**`apply_npeer_snapshot`**, and bridge encode/decode simulate the\none-frame bridge to activation `F`, freeze carried-disconnected slots,\nderive bridge `InputStatus` like survivors, and arm a **reactivation\nfloor** on the joining slot so sparse rollbacks replay the original\nbridge presentation.\n> \n> **Wire safety and decoding:** `decode_message` bounds `bridge_inputs`\n/ `bridge_statuses` before reserve; per-player input reconstruction uses\n**`decode_bounded_with_consumed`** instead of unbounded `codec::decode`.\nDocs and CI now steer peer bytes away from generic decode helpers.\n> \n> **Noise / correctness:** `discard_confirmed_frames` on an **empty**\ninput queue (e.g. post hot-join reactivation) is a trace-level no-op\ninstead of an error violation.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n282bf9f388578c5a97256c8d8c1fd8fe63ddd744. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-12T11:09:08-07:00",
-          "tree_id": "71bda66d613259b3b97467c192979bc86139856c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/90b0f1deee669e9751b295ed48d0536f99b5d3b4"
-        },
-        "date": 1781288063661,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 107,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 154,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 437,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 704,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1010,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 136638,
-            "range": "± 2942",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45444,
-            "range": "± 191",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1562,
-            "range": "± 89",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6131,6 +6005,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3145,
             "range": "± 290",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f8f0623acbbaab590244f8c913bf75e8665316b8",
+          "message": "Confirm H-SKEW phase mechanism (#236)\n\n## Summary\n\n- add an opt-in, bounded phase-resolved sampling mode for skew-gated\nsimulation runs\n- preserve the controller's `frames_ahead` signal in deterministic\nfailure artifacts without changing legacy trace identity\n- convert the one-hour H-SKEW cost inference into a phase-resolved\nverdict\n\n## Why\n\nThe existing one-hour experiment retained only 12 samples. Aggregate\nhistograms suggested that the fast peer paid deeper rollbacks while\ntraversing the 0→3-frame wait-recommendation dead band, but they could\nnot prove the temporal relationship.\n\nThe new 2,457-sample skew trace places all 71 recommendations and 213\nobeyed waits at phase 3. Mean fast-peer rollback depth rises\nmonotonically across phases 0→3 (approximately 1.43, 2.37, 3.33, and\n3.94 frames). This confirms the mechanism for the deliberately\nalways-changing stress input without changing production time-sync\npolicy.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- default nextest suite: 2,842 passed, 73 skipped\n- hot-join nextest suite: 3,098 passed, 74 skipped\n- release one-hour H-SKEW probe with exact replay: passed\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation harness telemetry, artifact\nvalidation, and tests; production rollback/time-sync code is untouched\nand legacy 12-sample traces are unchanged by default.\n> \n> **Overview**\n> Adds an **opt-in** `RunOptions::phase_resolved_control_samples` mode\nfor schema-v16+ `SkewGated60Hz` runs. Default fleet behavior stays on\nthe compact ≤12-sample progress trace; when enabled, the harness records\na **bounded** time series (up to ~4k samples for two players, scaled by\npeer count) that includes **`frames_ahead`** on each sample and extra\nsamples on opportunity-lead / obeyed-wait transitions, without the\nschema-16 endpoint/link gauge payload.\n> \n> **Failure artifacts** validate the larger sample cap, require per-peer\n`frames_ahead` when the flag is set, and skip endpoint/link fields for\nphase-resolved replays. Shrinker remapping preserves the new option.\n> \n> **Tests:** a focused bounded/determinism probe; the hour-equivalent\nH-SKEW experiment now runs with phase sampling and asserts\nphase-bucketed lag stability, that waits/recommendations fire only at\nthe three-frame dead band, and monotonic rollback depth across\ncontroller phases 0→3.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nefd080badcacb616fabed2049c087a32c876667b. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-13T10:26:24-07:00",
+          "tree_id": "9febbf4482d925e5feb55202f195fc93c44691f5",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f8f0623acbbaab590244f8c913bf75e8665316b8"
+        },
+        "date": 1783963997130,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 72561,
+            "range": "± 2571",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31420,
+            "range": "± 2610",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 535,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 799,
+            "range": "± 57",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5918,
+            "range": "± 244",
             "unit": "ns/iter"
           }
         ]
