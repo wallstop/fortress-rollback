@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783914776577,
+  "lastUpdate": 1783958609987,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "09b8a0962041b2875fe695e5b9eb08efb487727e",
-          "message": "feat/bug-fix: Hot-Join + Desync Fixes (#172)\n\n## Description\n\nThis PR delivers three major areas of work:\n\n**1. N≥3-player desync audit and fixes.** A comprehensive adversarial\naudit of desync bugs in sessions with 3 or more players, covering 14\nfindings (F1–F14) and 5 completeness-critic scenarios. All confirmed\nbugs were fixed and regression-tested; contested findings were\narbitrated with red tests before being accepted as NOTABUG. Key fixes\ninclude:\n\n- **Input queue prediction-entry bug (pre-existing, from original GGRS\nport):** A rollback re-simulation whose first input request landed above\na remote queue's missing window would re-enter prediction at the wrong\nframe, silently skipping the misprediction check. This caused confirmed\nstate to permanently diverge with no rollback, no error, and no event —\nand raised false-positive `DesyncDetected` events when detection was on.\n- **Graceful peer drop staggered-detection desync (pre-existing):**\nUnder `DisconnectBehavior::ContinueWithout` with 3+ players, asymmetric\npacket loss could let a survivor run past the mesh-agreed freeze frame\nbefore gossip arrived, permanently embedding a dropped peer's\nunconfirmed high-frame inputs. Fixed by implementing the GGPO-faithful\n`PollNPlayers` gossip-minimum fold in `confirmed_frame()`, a\nconnect-status nudge for input-idle endpoints awaiting mesh agreement,\nand progress-sensitive retransmit suppression.\n- **Sparse save bug:** The checkpoint/save machinery could select a\nstale ring slot for the agreed freeze frame, causing the convergence\nre-roll to use a wrong value.\n- **Spectator host slot overwrite:** A redundant-host failover spectator\ncould overwrite a dropped slot's converged freeze frame with a higher\nvalue from a later host, breaking the global-min guarantee.\n\n**2. Hot-join improvements.** Continued correctness and hardening work\non the `hot-join` feature introduced earlier in this branch: protocol\nand session fixes for slot reactivation, handshake edge cases, and\nmulti-peer interaction.\n\n**3. TLA+ formal verification extended to N=3.** `NetworkProtocol.tla`\nand `NPeerReactivation.tla` were bumped to N=3 and pass TLC with\nnon-vacuous state-space growth (2,804→170,168 and 1,240→9,576 distinct\nstates respectively). `ChecksumExchange.tla` and `TimeSync.tla` were\nrigorously characterized as cannot-cleanly-bump and pinned at N=2 with\ndocumented rationale. The `verify-tla.sh` summary line was fixed to\nreport the true final distinct-state count.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/desync_harvest.rs` — desync-checksum harvest\narbitration tests (3-peer, deep-prediction, zero false positives proven\nwith neutralization probes)\n- `tests/sessions/hot_join.rs` — hot-join integration coverage, slot\nreactivation, handshake edge cases\n- `tests/sessions/peer_drop.rs` — graceful peer drop scenarios including\nstaggered detection, freeze-frame convergence under asymmetric loss, and\nN≥3 mesh agreement\n- `tests/network/multi_process.rs` — N=3/N=4 real-UDP multi-process\ndriver (previously 2-peer-only)\n- `tests/common/filter_socket.rs` — new `FilterSocket` test harness for\nN≥4 relay-clobber repro\n- `tests/common/reorder_socket.rs` — new `ReorderSocket` test harness\nfor packet-reordering scenarios\n- `tests/verification/z3.rs` — extended Z3 verification coverage\n\n**Manual testing performed:**\n\n- Not run as part of this PR description draft\n\n## Related Issues\n\n- (None linked in branch commits)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> Changes core rollback prediction, freeze-frame convergence, and\nmulti-peer disconnect semantics where silent desync was possible;\nhot-join wire additions and changelog-only spectator notes add\nintegration surface area.\n> \n> **Overview**\n> This PR tightens **changelog policy** for `[Unreleased]`: fixes to\nbehavior that already shipped may live under `### Fixed` only when\nprefixed with **`**Pre-existing:**`**, with the hook emitting reviewer\nnotes and tests covering mixed marked/unmarked entries.\n> \n> **Rollback / input-queue correctness** changes how prediction episodes\nstart: they always begin at the queue’s **first missing frame** (not the\nrequested frame), with a Kani proof and regression tests for the F17\n“swallowed window” shape; frame/prediction mismatches now **fail toward\nrollback** instead of skipping comparison. For graceful drop, queues\ngain **`freeze_at`**, **`set_frozen_value_at`** (converge frozen value\nto global-min `F`), and hot-join **`refreeze_with_value`** after abort.\n> \n> **Hot-join wire protocol** adds **`ReactivateSlot`**,\n**`ReactivateSlotAck`**, **`JoinCommitted`**, and **`JoinAborted`**\nmessage types with bounded codec roundtrip/truncation tests.\n**`CHANGELOG.md`** documents large **pre-existing N≥3 desync fixes**\n(prediction entry, `ContinueWithout` gossip-min / nudge), hot-join\nlimits, and expanded spectator failover semantics.\n> \n> **Formal verification**: `ChecksumExchange` is re-modeled for\n**per-(local,remote) pair** verdicts at **N=3** with symmetry and\nin-flight caps; new **`NPeerReactivation`** TLA+ (two-attempt retry /\nabort-restore); `NetworkProtocol` cfg bumped to three peers; CI lists\nupdated.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6ec2ee8a008d1be581ee5394e786d5de7df12b4b. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-11T17:40:28-07:00",
-          "tree_id": "eda0e3d4bdcc6dada8f6748b5c9ef921eddb41ee",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/09b8a0962041b2875fe695e5b9eb08efb487727e"
-        },
-        "date": 1781225108469,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 109,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 156,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 435,
-            "range": "± 28",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 678,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1016,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 140301,
-            "range": "± 2530",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44742,
-            "range": "± 239",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 91",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -6203,6 +6077,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3010,
             "range": "± 256",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9bccc10b88e195e645be64a7a990d7fc72683f25",
+          "message": "Converge hot-join membership generations (#235)\n\n## What changed\n\n- Separate D14's canonical membership generation from retry-local\nspectator epochs.\n- Carry canonical live/dead membership through N-player replacement\nsnapshots and protect committed cuts across skewed retries.\n- Close unheard reactivation lifecycles before installing a later D14\nfence, with regressions for delayed lifecycle messages and former\njoiners.\n- Add local epoch diagnostics and enable all 40 periodic churn\ngenerations in the N=4 nightly soak.\n- Establish protocol v2 as the exact-match semantic boundary, retain\nreleased-v1 fixtures as rejection coverage, and document the upgrade\nrequirement.\n\n## Why\n\nThe deterministic N=4 soak completed 20 drop/rejoin cycles, then failed\nclosed on generation 21 because survivors derived different D14\ncertificate identities from locally skewed connection-status epochs. A\nreplacement session also lacked the canonical history needed for later\ndrops.\n\n## Impact\n\nRepeated N-player drop/rejoin cycles now converge on one certificate\ngeneration without regressing spectator epochs. Mixed v1/v2 sessions\nintentionally fail closed during raw packet decoding because v1\nsnapshots do not carry the required canonical semantics.\n\n## Validation\n\n- Full hot-join nextest matrix: 3,096 passed, 74 skipped\n- Workspace/all-target cargo tests: passed\n- Historical release soak: N=2 and N=4 through 2,200,000 confirmed\nframes, including generation 21\n- Strict clippy: workspace/all-targets with `tokio,json,hot-join`\n- Strict rustdoc: workspace/all-features\n- Agent preflight, changelog policy, immutable wire-golden hook,\nformatting, and diff checks\n- Six adversarial review/fix passes converged to zero issues\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: YES\n- CHANGELOG reviewed: YES\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Breaking wire-protocol bump plus changes to graceful-drop\ncertificates, hot-join snapshots, and reactivation/drop interaction—core\nmultiplayer correctness paths that require coordinated fleet upgrades.\n> \n> **Overview**\n> **Protocol v2** is now the active exact-match wire version\n(`PROTOCOL_VERSION` 2); released v1 goldens are kept only as rejection\ntests, and docs/migration call out that **all peers must upgrade\ntogether** because v1 snapshots lack the new membership semantics.\n> \n> **D14 coordinated drops** no longer key certificate generations off\nretry-local `ConnectionStatus::epoch`. A per-slot\n**`membership_generations`** map (updated on commit/reactivation) drives\nprepare/accept/commit checks via `local_coordinated_drop_generation`,\nwhile spectator epochs can still diverge across survivors.\n> \n> **N-player hot-join** normalizes snapshot **`bridge_statuses`** epochs\nto canonical connected-era membership (documented on `StateSnapshot`),\nbuilds snapshots through `snapshot_connect_statuses()`, seeds joiners\nfrom carried statuses, and **closes unheard reopened reactivations**\nbefore installing a later drop fence so delayed `JoinCommitted` cannot\nundo a new fence. Committed-cut shielding no longer requires matching\nspectator epoch.\n> \n> Also: Miri job timeout **30m**, four-player soak churn **enabled** for\nnightly coverage, and expanded regressions around generation-21 churn\nand D17 skew.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n27e370a368cc1fd7970eef070a4e6f9b410a2eb6. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-13T08:55:42-07:00",
+          "tree_id": "3a19c1acff4329c8ca9f4dcd39d904c22937a83a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9bccc10b88e195e645be64a7a990d7fc72683f25"
+        },
+        "date": 1783958608182,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 124707,
+            "range": "± 735",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46007,
+            "range": "± 432",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3145,
+            "range": "± 290",
             "unit": "ns/iter"
           }
         ]
