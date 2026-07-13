@@ -7926,6 +7926,18 @@ impl<T: Config> P2PSession<T> {
         out
     }
 
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): reports whether this session's local connection-status gate admits
+    /// `handle`. This is the exact per-handle gate used by the production
+    /// frame-advantage controller.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_connected(&self, handle: PlayerHandle) -> Option<bool> {
+        self.local_connect_status
+            .get(handle.as_usize())
+            .map(|status| !status.disconnected)
+    }
+
     /// Returns the maximum prediction window of a session.
     #[must_use]
     pub fn max_prediction(&self) -> usize {
@@ -18584,6 +18596,14 @@ mod tests {
 
         let advantage_when_disconnected = session.max_frame_advantage();
         assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(1)),
+            Some(false)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(2)),
+            Some(false)
+        );
+        assert_eq!(
             advantage_when_disconnected, 0,
             "a fully-disconnected multi-handle endpoint must contribute nothing \
              (max_frame_advantage falls back to 0 when no connected remote is folded)"
@@ -18613,6 +18633,18 @@ mod tests {
         };
 
         let advantage_when_connected = session.max_frame_advantage();
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(1)),
+            Some(true)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(2)),
+            Some(true)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(3)),
+            None
+        );
         assert_eq!(
             advantage_when_connected, 42,
             "a connected+running endpoint's seeded average must be counted"

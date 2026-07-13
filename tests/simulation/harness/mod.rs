@@ -2404,9 +2404,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 let mut evaluations = 0_u64;
                                 let mut triggers = 0_u64;
                                 for peer in (0..n).filter(|&peer| peer != i) {
-                                    let Ok(metrics) =
-                                        slot.session.peer_metrics(PlayerHandle::new(peer))
-                                    else {
+                                    let handle = PlayerHandle::new(peer);
+                                    if slot.session.diagnostic_player_connected(handle)
+                                        != Some(true)
+                                    {
+                                        continue;
+                                    }
+                                    let Ok(metrics) = slot.session.peer_metrics(handle) else {
                                         continue;
                                     };
                                     maximum = maximum.max(metrics.average_frame_advantage);
