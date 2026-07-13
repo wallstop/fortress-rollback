@@ -17,6 +17,11 @@ def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
         assert f"- {bump}" in text
     assert "actions/create-github-app-token@" in text
     assert "scripts/release/prepare_release.py" in text
+    assert "--print-standalone-manifests" in text
+    assert 'done < "${manifest_list}"' in text
+    assert 'cargo metadata --manifest-path "${manifest}" --locked' in text
+    assert "run: git --no-pager diff -- ." in text
+    assert "Cargo.toml Cargo.lock CHANGELOG.md README.md" not in text
     assert 'refs/heads/${DEFAULT_BRANCH}' in text
     assert 'branch="release/v${VERSION}"' in text
     assert "credential.helper" in text

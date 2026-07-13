@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import fnmatch
+import os
 import re
+import stat
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -89,18 +94,27 @@ def rewrite_manifest(path: Path, content: str, target: str) -> tuple[str, str]:
 
 
 def rewrite_lockfile(content: str, current: str, target: str) -> str:
-    """Rewrite exactly the root package entry in Cargo.lock."""
+    """Rewrite exactly one local package entry in a Cargo lockfile."""
     try:
         lockfile = tomllib.loads(content)
     except tomllib.TOMLDecodeError as error:
         raise PreparationError(f"invalid Cargo.lock: {error}") from error
     packages = lockfile.get("package")
-    matches = [
-        package
-        for package in packages if isinstance(package, dict) and package.get("name") == PACKAGE_NAME
-    ] if isinstance(packages, list) else []
+    matches = (
+        [
+            package
+            for package in packages
+            if isinstance(package, dict)
+            and package.get("name") == PACKAGE_NAME
+            and "source" not in package
+        ]
+        if isinstance(packages, list)
+        else []
+    )
     if len(matches) != 1:
-        raise PreparationError(f"Cargo.lock must contain exactly one {PACKAGE_NAME} package")
+        raise PreparationError(
+            f"Cargo.lock must contain exactly one local {PACKAGE_NAME} package"
+        )
     lock_version = matches[0].get("version")
     if lock_version != current:
         raise PreparationError(
@@ -108,9 +122,18 @@ def rewrite_lockfile(content: str, current: str, target: str) -> str:
         )
 
     blocks = list(re.finditer(r"(?ms)^\[\[package\]\]\s*$.*?(?=^\[\[package\]\]|\Z)", content))
-    matching_blocks = [block for block in blocks if re.search(rf'(?m)^name = "{re.escape(PACKAGE_NAME)}"$', block.group(0))]
+    matching_blocks = [
+        block
+        for block in blocks
+        if re.search(
+            rf'(?m)^name = "{re.escape(PACKAGE_NAME)}"$', block.group(0)
+        )
+        and not re.search(r"(?m)^source = ", block.group(0))
+    ]
     if len(matching_blocks) != 1:
-        raise PreparationError(f"Cargo.lock text must contain exactly one {PACKAGE_NAME} package")
+        raise PreparationError(
+            f"Cargo.lock text must contain exactly one {PACKAGE_NAME} package"
+        )
     block = matching_blocks[0]
     rewritten_block, count = re.subn(
         rf'(?m)^version = "{re.escape(current)}"$', f'version = "{target}"', block.group(0)
@@ -118,6 +141,95 @@ def rewrite_lockfile(content: str, current: str, target: str) -> str:
     if count != 1:
         raise PreparationError("Cargo.lock root package version could not be rewritten exactly once")
     return content[: block.start()] + rewritten_block + content[block.end() :]
+
+
+def _tracked_paths(repo_root: Path) -> set[Path]:
+    """Return repository-relative paths from Git's tracked-file index."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise PreparationError(f"cannot enumerate tracked files: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise PreparationError(f"cannot enumerate tracked files: {detail}")
+    try:
+        names = result.stdout.decode("utf-8").split("\0")
+    except UnicodeError as error:
+        raise PreparationError(f"tracked file path is not UTF-8: {error}") from error
+    return {Path(name) for name in names if name}
+
+
+def standalone_manifests(repo_root: Path) -> list[Path]:
+    """Return tracked standalone-workspace manifests with tracked lockfiles."""
+    tracked = _tracked_paths(repo_root)
+    root_manifest_path = repo_root / "Cargo.toml"
+    try:
+        root_manifest = tomllib.loads(load_text(root_manifest_path))
+    except tomllib.TOMLDecodeError as error:
+        raise PreparationError(f"invalid Cargo.toml: {error}") from error
+    workspace = root_manifest.get("workspace")
+    members = workspace.get("members", []) if isinstance(workspace, dict) else []
+    excludes = workspace.get("exclude", []) if isinstance(workspace, dict) else []
+    member_patterns = [member.rstrip("/") for member in members if isinstance(member, str)]
+    exclude_patterns = [item.rstrip("/") for item in excludes if isinstance(item, str)]
+
+    manifests = []
+    for relative in sorted(tracked):
+        if relative.name != "Cargo.toml" or relative == Path("Cargo.toml"):
+            continue
+        parent = relative.parent.as_posix()
+        is_member = any(fnmatch.fnmatchcase(parent, pattern) for pattern in member_patterns)
+        is_excluded = any(fnmatch.fnmatchcase(parent, pattern) for pattern in exclude_patterns)
+        if is_member and not is_excluded:
+            continue
+        if relative.with_name("Cargo.lock") not in tracked:
+            continue
+        manifest_path = repo_root / relative
+        try:
+            manifest = tomllib.loads(load_text(manifest_path))
+        except tomllib.TOMLDecodeError as error:
+            raise PreparationError(f"invalid {relative}: {error}") from error
+        if "workspace" in manifest:
+            manifests.append(manifest_path)
+    return manifests
+
+
+def rewrite_nested_lockfile(content: str, target: str) -> str | None:
+    """Rewrite a standalone lockfile's local package, or skip unrelated locks."""
+    try:
+        lockfile = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as error:
+        raise PreparationError(f"invalid Cargo.lock: {error}") from error
+    packages = lockfile.get("package")
+    matches = (
+        [
+            package
+            for package in packages
+            if isinstance(package, dict)
+            and package.get("name") == PACKAGE_NAME
+            and "source" not in package
+        ]
+        if isinstance(packages, list)
+        else []
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PreparationError(
+            f"Cargo.lock must contain at most one local {PACKAGE_NAME} package"
+        )
+    current = matches[0].get("version")
+    if not isinstance(current, str):
+        raise PreparationError(
+            f"Cargo.lock local {PACKAGE_NAME} package version is missing"
+        )
+    parse_version(current)
+    return rewrite_lockfile(content, current, target)
 
 
 def rewrite_changelog(content: str, current: str, target: str, release_date: str) -> str:
@@ -176,31 +288,129 @@ def prepare(repo_root: Path, bump: str, release_date: str) -> tuple[str, list[Pr
     changelog_after = rewrite_changelog(
         changelog_before, validated_current, target, release_date
     )
-    return target, [
+    prepared_files = [
         PreparedFile(manifest_path, manifest_before, manifest_after),
         PreparedFile(lockfile_path, lockfile_before, lockfile_after),
         PreparedFile(changelog_path, changelog_before, changelog_after),
     ]
+    for nested_manifest in standalone_manifests(repo_root):
+        nested_lockfile = nested_manifest.with_name("Cargo.lock")
+        nested_before = load_text(nested_lockfile)
+        try:
+            nested_after = rewrite_nested_lockfile(nested_before, target)
+        except PreparationError as error:
+            relative = nested_lockfile.relative_to(repo_root)
+            raise PreparationError(f"{relative}: {error}") from error
+        if nested_after is not None and nested_after != nested_before:
+            prepared_files.append(
+                PreparedFile(nested_lockfile, nested_before, nested_after)
+            )
+    return target, prepared_files
+
+
+def _stage_content(path: Path, content: str, label: str) -> Path:
+    """Write and sync sibling temporary content without changing its destination."""
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.{label}.", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        return temporary
+    except OSError as error:
+        if "temporary" in locals():
+            _discard_temporary(temporary)
+        raise PreparationError(f"cannot stage {path}: {error}") from error
+
+
+def _discard_temporary(path: Path) -> None:
+    """Best-effort cleanup that never masks a preparation or rollback result."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_prepared_files(prepared_files: list[PreparedFile]) -> None:
+    """Stage all rewrites, replace atomically, and restore originals on failure."""
+    staged: list[tuple[PreparedFile, Path, Path]] = []
+    try:
+        for prepared in prepared_files:
+            replacement = _stage_content(prepared.path, prepared.after, "new")
+            try:
+                rollback = _stage_content(prepared.path, prepared.before, "rollback")
+            except PreparationError:
+                _discard_temporary(replacement)
+                raise
+            staged.append((prepared, replacement, rollback))
+    except PreparationError:
+        for _, replacement, rollback in staged:
+            _discard_temporary(replacement)
+            _discard_temporary(rollback)
+        raise
+
+    replaced: list[tuple[PreparedFile, Path]] = []
+    preserved_rollbacks: set[Path] = set()
+    try:
+        for prepared, replacement, rollback in staged:
+            os.replace(replacement, prepared.path)
+            replaced.append((prepared, rollback))
+    except OSError as error:
+        rollback_errors = []
+        for prepared, rollback in reversed(replaced):
+            try:
+                os.replace(rollback, prepared.path)
+            except OSError as rollback_error:
+                preserved_rollbacks.add(rollback)
+                rollback_errors.append(f"{prepared.path}: {rollback_error}")
+        detail = f"cannot replace {prepared.path}: {error}"
+        if rollback_errors:
+            detail += "; rollback failed for " + ", ".join(rollback_errors)
+        raise PreparationError(detail) from error
+    finally:
+        for _, replacement, rollback in staged:
+            _discard_temporary(replacement)
+            if rollback not in preserved_rollbacks:
+                _discard_temporary(rollback)
 
 
 def main() -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--bump", choices=("major", "minor", "patch"), required=True)
+    parser.add_argument("--bump", choices=("major", "minor", "patch"))
     parser.add_argument("--date", default=datetime.now(timezone.utc).date().isoformat())
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--print-standalone-manifests", action="store_true")
     args = parser.parse_args()
 
+    repo_root = args.repo_root.resolve()
+    if args.print_standalone_manifests:
+        if args.bump is not None or args.dry_run:
+            parser.error("--print-standalone-manifests cannot be combined with release options")
+        try:
+            for manifest in standalone_manifests(repo_root):
+                print(manifest.relative_to(repo_root))
+        except PreparationError as error:
+            print(f"prepare-release: error: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.bump is None:
+        parser.error("--bump is required unless --print-standalone-manifests is used")
+
     try:
-        target, prepared_files = prepare(args.repo_root.resolve(), args.bump, args.date)
+        target, prepared_files = prepare(repo_root, args.bump, args.date)
     except (PreparationError, tomllib.TOMLDecodeError) as error:
         print(f"prepare-release: error: {error}", file=sys.stderr)
         return 1
 
     if args.dry_run:
         for prepared in prepared_files:
-            relative = prepared.path.relative_to(args.repo_root.resolve())
+            relative = prepared.path.relative_to(repo_root)
             print(
                 "".join(
                     difflib.unified_diff(
@@ -213,8 +423,11 @@ def main() -> int:
                 end="",
             )
     else:
-        for prepared in prepared_files:
-            prepared.path.write_text(prepared.after, encoding="utf-8")
+        try:
+            write_prepared_files(prepared_files)
+        except PreparationError as error:
+            print(f"prepare-release: error: {error}", file=sys.stderr)
+            return 1
     print(f"prepared_version={target}")
     return 0
 

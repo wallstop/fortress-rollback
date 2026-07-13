@@ -97,6 +97,12 @@ jobs:
           set -euo pipefail
           pip install pytest --quiet
           cargo metadata --locked --no-deps --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          manifest_list="${RUNNER_TEMP}/standalone-manifests.txt"
+          python3 scripts/release/prepare_release.py --print-standalone-manifests > "${manifest_list}"
+          while IFS= read -r manifest; do
+            cargo metadata --manifest-path "${manifest}" --locked --no-deps --format-version 1 \
+              > "${RUNNER_TEMP}/$(dirname "${manifest}" | tr '/' '-')-metadata.json"
+          done < "${manifest_list}"
           bash scripts/sync-version.sh --check
           python3 scripts/hooks/check-changelog-unreleased.py
           python3 -m pytest scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
@@ -104,7 +110,7 @@ jobs:
 
       - name: Show dry-run diff
         if: ${{ inputs.dry_run }}
-        run: git --no-pager diff -- Cargo.toml Cargo.lock CHANGELOG.md README.md docs examples src
+        run: git --no-pager diff -- .
 
       - name: Push release branch and open PR
         if: ${{ !inputs.dry_run }}
