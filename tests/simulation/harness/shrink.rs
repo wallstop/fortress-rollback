@@ -157,6 +157,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
         pending_output_probe_link,
+        phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
     }
@@ -1007,6 +1008,7 @@ mod tests {
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
             pending_output_probe_link: Some((3, 0)),
+            phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
         };

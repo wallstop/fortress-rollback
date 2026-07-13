@@ -179,6 +179,15 @@ pub struct RunOptions {
     /// for one directed `(from, to)` link after every simulation step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_output_probe_link: Option<(usize, usize)>,
+    /// Preserve a bounded, phase-resolved controller time series instead of
+    /// the ordinary twelve-or-fewer progress samples. The denser series is
+    /// intended for focused clock-skew/control-loop experiments and records
+    /// new opportunity-lead high-water marks and obeyed waits plus evenly spaced
+    /// samples carrying the frame-advantage gauge. It is valid only for
+    /// schema-v16-or-newer
+    /// [`FrameModel::SkewGated60Hz`] schedules.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub phase_resolved_control_samples: bool,
     /// Corrupt the configured spectator's first input fingerprint in each
     /// displayed frame at or after this frame. Negative controls only need one
     /// planted spectator-only mismatch to prove the §6.2(d) oracle compares
@@ -247,6 +256,10 @@ pub struct ProgressSample {
     pub prediction_miss_count: Vec<u64>,
     pub frame_opportunities: Vec<u64>,
     pub wait_frames_obeyed: Vec<u64>,
+    /// Session-level maximum remote frame advantage, indexed by peer. Present
+    /// only for opt-in phase-resolved controller samples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames_ahead: Vec<i32>,
     /// Per-directed-endpoint control-loop gauges in `(from, to)` order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointControlSample>,
@@ -273,6 +286,33 @@ pub struct LinkQueueSample {
     pub queued_bytes: u64,
     pub queued_datagrams: u64,
     pub drain_delay_ns: u64,
+}
+
+/// Maximum number of phase-resolved samples retained for a two-player run.
+pub const MAX_PHASE_CONTROL_SAMPLES: usize = 4_096;
+/// Total peer-vector cells available to a phase-resolved series. Scaling the
+/// sample cap by player count prevents a 16-player artifact from multiplying
+/// the two-player memory budget by eight.
+const MAX_PHASE_CONTROL_SAMPLE_PLAYER_CELLS: usize = 8_192;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+pub(super) fn phase_control_sample_capacity(n_players: usize) -> usize {
+    MAX_PHASE_CONTROL_SAMPLES.min(
+        MAX_PHASE_CONTROL_SAMPLE_PLAYER_CELLS
+            .checked_div(n_players.max(1))
+            .unwrap_or(1)
+            .max(1),
+    )
+}
+
+pub(super) fn phase_control_progress_interval(steps: u32, n_players: usize) -> u32 {
+    let sample_target = u32::try_from(phase_control_sample_capacity(n_players) / 2)
+        .unwrap_or(u32::MAX)
+        .max(1);
+    steps.div_ceil(sample_target).max(1)
 }
 
 /// Maximum number of final simulation steps retained in a failure artifact.
@@ -1568,6 +1608,15 @@ pub(super) fn validate_run_options(
             schedule.config.steps
         ));
     }
+    if options.phase_resolved_control_samples
+        && (schedule.schema_version < 16
+            || schedule.config.frame_model != FrameModel::SkewGated60Hz)
+    {
+        return Err(
+            "phase_resolved_control_samples requires a schema-v16-or-newer SkewGated60Hz schedule"
+                .to_owned(),
+        );
+    }
     let Some((from, to)) = options.pending_output_probe_link else {
         return Ok(());
     };
@@ -1812,12 +1861,20 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         ScheduleEvent::SetLink { policy, .. } if policy.bandwidth.is_some()
                     )
                 })));
-    let sample_control_gauges = schedule.schema_version >= 16;
+    let phase_resolved_control_samples = options.phase_resolved_control_samples;
+    let sample_control_gauges = schedule.schema_version >= 16 && !phase_resolved_control_samples;
     let mut frame_opportunities = vec![0_u64; n];
     let mut skew_targets_seen = vec![0_u64; n];
     let mut wait_frames_obeyed = vec![0_u64; n];
     let mut local_input_ordinals = vec![0_u32; n];
-    let mut progress_samples = Vec::new();
+    let phase_sample_capacity = phase_control_sample_capacity(n);
+    let mut progress_samples = VecDeque::with_capacity(if phase_resolved_control_samples {
+        phase_sample_capacity
+    } else {
+        12
+    });
+    let mut last_phase_opportunity_lead = Vec::new();
+    let mut last_phase_wait_frames_obeyed = Vec::new();
     let mut first_running_step = if collect_receive_timing {
         vec![None; n]
     } else {
@@ -1828,7 +1885,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     } else {
         Vec::new()
     };
-    let progress_interval = schedule.config.steps.div_ceil(12).max(1);
+    let progress_interval = if phase_resolved_control_samples {
+        phase_control_progress_interval(schedule.config.steps, n)
+    } else {
+        schedule.config.steps.div_ceil(12).max(1)
+    };
     // Peers whose app model never drains the session event queue (models a
     // wedged event consumer). Their bounded `event_queue` fills and the session
     // trims oldest events, firing the D9 `events_discarded_*` telemetry. Because
@@ -2271,9 +2332,44 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
-        if sample_control_loop && ((step + 1) % progress_interval == 0 || step == last_step) {
+        let phase_changed = if phase_resolved_control_samples {
+            let minimum_opportunities = frame_opportunities.iter().copied().min().unwrap_or(0);
+            let opportunity_lead_increased = last_phase_opportunity_lead.len() != n
+                || frame_opportunities
+                    .iter()
+                    .enumerate()
+                    .any(|(peer, &value)| {
+                        last_phase_opportunity_lead
+                            .get(peer)
+                            .is_none_or(|previous| {
+                                value.saturating_sub(minimum_opportunities) > *previous
+                            })
+                    });
+            let waits_changed = last_phase_wait_frames_obeyed != wait_frames_obeyed;
+            let changed = opportunity_lead_increased || waits_changed;
+            if changed {
+                if last_phase_opportunity_lead.len() != n {
+                    last_phase_opportunity_lead.resize(n, 0);
+                }
+                for (high_water, value) in last_phase_opportunity_lead
+                    .iter_mut()
+                    .zip(&frame_opportunities)
+                {
+                    *high_water = (*high_water).max(value.saturating_sub(minimum_opportunities));
+                }
+                last_phase_wait_frames_obeyed.clone_from(&wait_frames_obeyed);
+            }
+            changed
+        } else {
+            false
+        };
+        let periodic_sample_due = (step + 1) % progress_interval == 0 || step == last_step;
+        if sample_control_loop && (periodic_sample_due || phase_changed) {
             let sample_metrics: Vec<_> = peers.iter().map(|slot| slot.session.metrics()).collect();
-            progress_samples.push(ProgressSample {
+            if progress_samples.len() == phase_sample_capacity {
+                let _ = progress_samples.pop_front();
+            }
+            progress_samples.push_back(ProgressSample {
                 step,
                 current_frames: peers
                     .iter()
@@ -2302,6 +2398,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .collect(),
                 frame_opportunities: frame_opportunities.clone(),
                 wait_frames_obeyed: wait_frames_obeyed.clone(),
+                frames_ahead: if phase_resolved_control_samples {
+                    peers
+                        .iter()
+                        .map(|slot| slot.session.frames_ahead())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 endpoints: if sample_control_gauges {
                     collect_endpoint_control_samples(&peers, n)
                 } else {
@@ -2569,6 +2673,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let reported_first_synchronized_step = options
         .receive_message_limit
         .map_or_else(Vec::new, |_| first_synchronized_step);
+    let progress_samples: Vec<_> = progress_samples.into();
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -3305,6 +3410,24 @@ mod tests {
             .push((120, schedule::ScheduleEvent::PeerKill { peer: 1 }));
         retiring.events.sort_by_key(|(step, _)| *step);
         assert!(validate_run_options(&retiring, &options).is_err());
+    }
+
+    #[test]
+    fn phase_resolved_control_samples_require_current_skew_schedule() {
+        let mut schedule = schedule::generate(7, schedule::SimConfig::smoke(2));
+        let options = RunOptions {
+            phase_resolved_control_samples: true,
+            ..RunOptions::default()
+        };
+        assert!(validate_run_options(&schedule, &options).is_err());
+
+        schedule.config.frame_model = schedule::FrameModel::SkewGated60Hz;
+        assert!(validate_run_options(&schedule, &options).is_ok());
+        assert_eq!(phase_control_sample_capacity(2), 4_096);
+        assert_eq!(phase_control_sample_capacity(16), 512);
+
+        schedule.schema_version = 15;
+        assert!(validate_run_options(&schedule, &options).is_err());
     }
 
     #[test]

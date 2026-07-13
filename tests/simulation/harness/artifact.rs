@@ -3,7 +3,8 @@
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
-    ProgressSample, RunReport, TraceSnapshot, TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY,
+    phase_control_sample_capacity, ProgressSample, RunReport, TraceSnapshot,
+    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -239,10 +240,15 @@ impl FailureArtifact {
                 return Err(format!("artifact has {len} {name} entries for {n} peers"));
             }
         }
-        if self.progress_samples.len() > 12 {
+        let maximum_progress_samples = if self.replay_options.phase_resolved_control_samples {
+            phase_control_sample_capacity(n)
+        } else {
+            12
+        };
+        if self.progress_samples.len() > maximum_progress_samples {
             return Err(format!(
-                "artifact has {} progress samples (maximum 12)",
-                self.progress_samples.len()
+                "artifact has {} progress samples (maximum {maximum_progress_samples})",
+                self.progress_samples.len(),
             ));
         }
         for sample in &self.progress_samples {
@@ -264,6 +270,19 @@ impl FailureArtifact {
                     ));
                 }
             }
+            let expected_frames_ahead = if self.replay_options.phase_resolved_control_samples {
+                n
+            } else {
+                0
+            };
+            if sample.frames_ahead.len() != expected_frames_ahead {
+                return Err(format!(
+                    "artifact progress sample at step {} has {} frames_ahead entries \
+                     (expected {expected_frames_ahead})",
+                    sample.step,
+                    sample.frames_ahead.len()
+                ));
+            }
             if sample.step >= self.schedule.config.steps {
                 return Err(format!(
                     "artifact progress sample step {} is outside embedded schedule",
@@ -275,7 +294,9 @@ impl FailureArtifact {
                 ("endpoints", sample.endpoints.len()),
                 ("link_queues", sample.link_queues.len()),
             ] {
-                let expected = if self.schedule.schema_version >= 16 {
+                let expected = if self.schedule.schema_version >= 16
+                    && !self.replay_options.phase_resolved_control_samples
+                {
                     directed_links
                 } else {
                     0
@@ -843,6 +864,7 @@ mod tests {
             prediction_miss_count: vec![0, 0],
             frame_opportunities: vec![1, 1],
             wait_frames_obeyed: vec![0, 0],
+            frames_ahead: Vec::new(),
             endpoints: vec![
                 EndpointControlSample {
                     from: 0,
@@ -892,6 +914,26 @@ mod tests {
         let mut misordered = artifact.clone();
         misordered.progress_samples[0].link_queues.swap(0, 1);
         assert!(misordered.validate().is_err());
+
+        let mut phase_resolved = artifact.clone();
+        phase_resolved.replay_options.phase_resolved_control_samples = true;
+        phase_resolved.schedule.config.frame_model =
+            super::super::schedule::FrameModel::SkewGated60Hz;
+        phase_resolved.progress_samples[0].frames_ahead = vec![2, -2];
+        phase_resolved.progress_samples[0].endpoints.clear();
+        phase_resolved.progress_samples[0].link_queues.clear();
+        assert!(phase_resolved.validate().is_ok());
+        let mut over_capacity = phase_resolved.clone();
+        over_capacity.progress_samples.resize(
+            phase_control_sample_capacity(2) + 1,
+            phase_resolved.progress_samples[0].clone(),
+        );
+        assert!(over_capacity.validate().is_err());
+        let mut missing_phase_signal = phase_resolved;
+        missing_phase_signal.progress_samples[0]
+            .frames_ahead
+            .clear();
+        assert!(missing_phase_signal.validate().is_err());
 
         let mut value = serde_json::to_value(sample).expect("progress sample serializes");
         let object = value

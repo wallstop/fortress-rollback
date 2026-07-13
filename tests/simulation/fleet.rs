@@ -11,11 +11,15 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
-    run, RunOptions, RunReport, TraceSessionState,
+    phase_control_progress_interval, phase_control_sample_capacity, run, RunOptions, RunReport,
+    TraceSessionState,
 };
 use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 /// Fixed PR-smoke seed set. Nightly fleets derive disjoint seeds from the CI
 /// run id; the PR set stays fixed so PR failures reproduce verbatim.
@@ -3127,6 +3131,33 @@ fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
     assert_ne!(exact_report.trace_hash, skewed_report.trace_hash);
 }
 
+/// Phase-resolved control sampling is opt-in: ordinary fleet runs retain the
+/// compact 12-sample trace, while a focused H-SKEW probe can preserve the
+/// intermediate frame-advantage transitions that explain a correction cycle.
+#[test]
+fn phase_resolved_skew_samples_are_bounded_and_deterministic() {
+    let mut schedule = skew_gated_schedule(1_200, 1_000_000, AppModel::Obey);
+    schedule.config.step_dt_ms = 8;
+    let options = RunOptions {
+        phase_resolved_control_samples: true,
+        ..RunOptions::default()
+    };
+
+    let first = run(&schedule, &options);
+    first.expect_pass(&schedule);
+    let replay = run(&schedule, &options);
+
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.progress_samples, replay.progress_samples);
+    assert!(first.progress_samples.len() > 12);
+    assert!(first.progress_samples.len() <= phase_control_sample_capacity(2));
+    assert!(first.progress_samples.iter().all(|sample| {
+        sample.frames_ahead.len() == 2
+            && sample.endpoints.is_empty()
+            && sample.link_queues.is_empty()
+    }));
+}
+
 #[test]
 fn schema_v15_skew_progress_preserves_legacy_trace_shape() {
     let mut schedule = skew_gated_schedule(1_200, 1_000, AppModel::Obey);
@@ -3160,16 +3191,23 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
     let mut skewed = skew_gated_schedule(240_001, 1_000, AppModel::Obey);
     skewed.config.step_dt_ms = 15;
 
-    let exact_report = run(&exact, &RunOptions::default());
+    let phase_options = RunOptions {
+        phase_resolved_control_samples: true,
+        ..RunOptions::default()
+    };
+    let exact_report = run(&exact, &phase_options);
     exact_report.expect_pass(&exact);
-    let skewed_report = run(&skewed, &RunOptions::default());
+    let skewed_report = run(&skewed, &phase_options);
     skewed_report.expect_pass(&skewed);
-    let replay = run(&skewed, &RunOptions::default());
+    let replay = run(&skewed, &phase_options);
 
     assert_eq!(exact_report.frame_opportunities, vec![216_000, 216_000]);
     assert_eq!(skewed_report.frame_opportunities, vec![216_216, 216_000]);
     assert_eq!(skewed_report.trace_hash, replay.trace_hash);
     assert_eq!(skewed_report.progress_samples, replay.progress_samples);
+    assert!(exact_report.progress_samples.len() > 2_000);
+    assert!(skewed_report.progress_samples.len() > exact_report.progress_samples.len());
+    assert!(skewed_report.progress_samples.len() < phase_control_sample_capacity(2));
     let exact_total_work = exact_report
         .metrics
         .iter()
@@ -3194,7 +3232,7 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
         "H-SKEW exact_opportunities={:?} exact_metrics={:?} \
          skewed_opportunities={:?} wait_frames_obeyed={:?} \
          skewed_metrics={:?} exact_total_work={} skewed_total_work={} \
-         exact_resimulation={} skewed_resimulation={} samples={:?}",
+         exact_resimulation={} skewed_resimulation={} sample_counts=({}, {})",
         exact_report.frame_opportunities,
         exact_report.metrics,
         skewed_report.frame_opportunities,
@@ -3204,7 +3242,8 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
         skewed_total_work,
         exact_resimulation,
         skewed_resimulation,
-        skewed_report.progress_samples
+        exact_report.progress_samples.len(),
+        skewed_report.progress_samples.len()
     );
     assert!(
         skewed_total_work.saturating_mul(100) <= exact_total_work.saturating_mul(120),
@@ -3264,24 +3303,147 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
         "steady-state confirmation lag must remain inside max_prediction: {:?}",
         final_sample.confirmation_lag
     );
-    let steady_samples = &skewed_report.progress_samples[6..];
     for peer in 0..2 {
-        let min = steady_samples
-            .iter()
-            .map(|sample| sample.confirmation_lag[peer])
-            .min()
-            .expect("steady-state sample set is non-empty");
-        let max = steady_samples
-            .iter()
-            .map(|sample| sample.confirmation_lag[peer])
-            .max()
-            .expect("steady-state sample set is non-empty");
+        let lag_range = |start: u32, end: u32| {
+            let samples = skewed_report
+                .progress_samples
+                .iter()
+                .filter(|sample| (start..end).contains(&sample.step));
+            let minimum = samples
+                .clone()
+                .map(|sample| sample.confirmation_lag[peer])
+                .min()
+                .expect("steady-state phase has samples");
+            let maximum = samples
+                .map(|sample| sample.confirmation_lag[peer])
+                .max()
+                .expect("steady-state phase has samples");
+            (minimum, maximum)
+        };
+        let third_quarter = lag_range(
+            skewed.config.steps / 2,
+            skewed.config.steps.saturating_mul(3) / 4,
+        );
+        let fourth_quarter = lag_range(
+            skewed.config.steps.saturating_mul(3) / 4,
+            skewed.config.steps,
+        );
+        assert_eq!(
+            third_quarter, fourth_quarter,
+            "phase-resolved lag range must repeat rather than creep (peer={peer})"
+        );
         assert!(
-            max.saturating_sub(min) <= 1,
-            "steady-state lag must stay flat rather than creep (peer={peer}, \
-             samples={steady_samples:?})"
+            fourth_quarter.1 <= skewed.config.max_prediction as u64,
+            "steady-state lag must stay within max_prediction (peer={peer}, \
+             range={fourth_quarter:?})"
         );
     }
+
+    let progress_interval = phase_control_progress_interval(skewed.config.steps, 2);
+    let exact_periodic: BTreeMap<_, _> = exact_report
+        .progress_samples
+        .iter()
+        .filter(|sample| (sample.step + 1) % progress_interval == 0)
+        .map(|sample| (sample.step, sample))
+        .collect();
+    let skewed_periodic: Vec<_> = skewed_report
+        .progress_samples
+        .iter()
+        .filter(|sample| (sample.step + 1) % progress_interval == 0)
+        .collect();
+    let mut interval_counts = [0_u64; 4];
+    let mut exact_resimulation_by_phase = [0_u64; 4];
+    let mut skewed_resimulation_by_phase = [0_u64; 4];
+    let mut skewed_rollbacks_by_phase = [0_u64; 4];
+    let mut wait_transitions_by_phase = [0_u64; 4];
+    let mut recommendation_transitions_by_phase = [0_u64; 4];
+    let fast_phase_range = skewed_report
+        .progress_samples
+        .iter()
+        .map(|sample| sample.frames_ahead[0])
+        .fold((i32::MAX, i32::MIN), |(minimum, maximum), value| {
+            (minimum.min(value), maximum.max(value))
+        });
+    for pair in skewed_report.progress_samples.windows(2) {
+        let previous = &pair[0];
+        let current = &pair[1];
+        let phase = usize::try_from(current.frames_ahead[0].clamp(0, 3)).unwrap_or(0);
+        wait_transitions_by_phase[phase] = wait_transitions_by_phase[phase].saturating_add(
+            current.wait_frames_obeyed[0].saturating_sub(previous.wait_frames_obeyed[0]),
+        );
+        recommendation_transitions_by_phase[phase] = recommendation_transitions_by_phase[phase]
+            .saturating_add(
+                current.wait_recommendations[0].saturating_sub(previous.wait_recommendations[0]),
+            );
+    }
+    for pair in skewed_periodic.windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        let Some(exact_previous) = exact_periodic.get(&previous.step) else {
+            continue;
+        };
+        let Some(exact_current) = exact_periodic.get(&current.step) else {
+            continue;
+        };
+        let phase = usize::try_from(current.frames_ahead[0].clamp(0, 3)).unwrap_or(0);
+        interval_counts[phase] = interval_counts[phase].saturating_add(1);
+        exact_resimulation_by_phase[phase] = exact_resimulation_by_phase[phase].saturating_add(
+            exact_current.resimulated_frames[0]
+                .saturating_sub(exact_previous.resimulated_frames[0]),
+        );
+        skewed_resimulation_by_phase[phase] = skewed_resimulation_by_phase[phase].saturating_add(
+            current.resimulated_frames[0].saturating_sub(previous.resimulated_frames[0]),
+        );
+        skewed_rollbacks_by_phase[phase] = skewed_rollbacks_by_phase[phase]
+            .saturating_add(current.rollback_count[0].saturating_sub(previous.rollback_count[0]));
+    }
+    println!(
+        "H-SKEW-PHASE intervals={interval_counts:?} \
+         exact_fast_resim={exact_resimulation_by_phase:?} \
+         skewed_fast_resim={skewed_resimulation_by_phase:?} \
+         skewed_fast_rollbacks={skewed_rollbacks_by_phase:?} \
+         wait_transitions={wait_transitions_by_phase:?} \
+         recommendation_transitions={recommendation_transitions_by_phase:?}"
+    );
+    assert!(
+        interval_counts.iter().all(|count| *count > 0),
+        "every 0→3 controller phase must be observed: {interval_counts:?}"
+    );
+    assert_eq!(
+        fast_phase_range,
+        (0, 3),
+        "phase bucketing must not clamp an unobserved controller value"
+    );
+    assert_eq!(
+        wait_transitions_by_phase,
+        [0, 0, 0, 213],
+        "all obeyed waits must occur at the three-frame dead-band boundary"
+    );
+    assert_eq!(
+        recommendation_transitions_by_phase,
+        [0, 0, 0, 71],
+        "all recommendations must fire at the three-frame dead-band boundary"
+    );
+    for phase in 1..4 {
+        assert!(
+            skewed_resimulation_by_phase[phase]
+                .saturating_mul(skewed_rollbacks_by_phase[phase - 1])
+                > skewed_resimulation_by_phase[phase - 1]
+                    .saturating_mul(skewed_rollbacks_by_phase[phase]),
+            "fast-peer rollback depth must rise monotonically through the 0→3 \
+             controller phases: resimulation={skewed_resimulation_by_phase:?}, \
+             rollbacks={skewed_rollbacks_by_phase:?}"
+        );
+    }
+    assert!(
+        skewed_resimulation_by_phase[0].saturating_mul(100)
+            <= exact_resimulation_by_phase[0].saturating_mul(160),
+        "phase zero should stay near the exact-clock baseline"
+    );
+    assert!(
+        skewed_resimulation_by_phase[2] >= exact_resimulation_by_phase[2].saturating_mul(3),
+        "the pre-correction phase must carry the measured rollback amplification"
+    );
 }
 
 /// H-SKEW cost-amplification diagnostic: repeat a ten-minute-equivalent matched
