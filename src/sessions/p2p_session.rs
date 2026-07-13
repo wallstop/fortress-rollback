@@ -95,6 +95,28 @@ const DEFAULT_MAX_EVENT_QUEUE_SIZE: usize = 100;
 /// persists across this many confirmed frames has demonstrably not self-corrected.
 pub(crate) const CHECKSUM_MISMATCH_TRUST_DOWNGRADE_THRESHOLD: u32 = 10;
 
+/// Converts the public `u32` checksum cadence into the signed delta used by
+/// [`Frame`]. Cadences beyond the representable frame range mean "at the
+/// terminal frame" rather than wrapping into a negative frame.
+fn checksum_interval_frame_delta(interval: u32) -> i32 {
+    i32::try_from(interval).unwrap_or(i32::MAX)
+}
+
+/// Returns the oldest scheduled checksum frame retained by the configured
+/// history window without narrowing or multiplying in signed frame arithmetic.
+fn checksum_history_oldest_frame(frame_to_send: Frame, max_history: usize, interval: u32) -> Frame {
+    let non_negative_frame = frame_to_send.as_i32().max(0);
+    let non_negative_frame = u32::try_from(non_negative_frame).unwrap_or_default();
+    let frame = u128::from(non_negative_frame);
+    let retained_intervals = u128::try_from(max_history.saturating_sub(1)).unwrap_or(u128::MAX);
+    let history_span = retained_intervals.saturating_mul(u128::from(interval));
+    let oldest = frame.saturating_sub(history_span);
+    // `oldest <= frame <= i32::MAX`; keep the defensive fallback so a future
+    // type change cannot turn retention arithmetic into a panic.
+    let oldest = i32::try_from(oldest).unwrap_or(i32::MAX);
+    Frame::new(oldest)
+}
+
 /// Default for the hot-join serve timeout: the maximum number of
 /// [`poll_remote_clients`](P2PSession::poll_remote_clients) calls a host will
 /// keep a single hot-join serve open (re-sending the cached snapshot each poll)
@@ -6183,7 +6205,7 @@ impl<T: Config> P2PSession<T> {
         if let DesyncDetection::On { interval } = self.desync_detection {
             if interval >= 1 {
                 let f = activation_frame.as_i32().max(0);
-                let iv = (interval as i32).max(1);
+                let iv = checksum_interval_frame_delta(interval).max(1);
                 // Smallest multiple of `iv` that is >= `f` (ceil division;
                 // i32::div_ceil is unstable, so compute it directly). All terms are
                 // non-negative and `saturating_*` keeps it overflow-safe even for an
@@ -11885,10 +11907,15 @@ impl<T: Config> P2PSession<T> {
     fn check_checksum_send_interval(&mut self) {
         match self.desync_detection {
             DesyncDetection::On { interval } => {
+                let interval_frames = checksum_interval_frame_delta(interval);
                 let frame_to_send = if self.last_sent_checksum_frame.is_null() {
-                    Frame::new(interval as i32)
+                    Frame::new(interval_frames)
                 } else {
-                    self.last_sent_checksum_frame + interval as i32
+                    safe_frame_add!(
+                        self.last_sent_checksum_frame,
+                        interval_frames,
+                        "P2PSession::check_checksum_send_interval"
+                    )
                 };
 
                 if frame_to_send <= self.sync_layer.last_confirmed_frame()
@@ -11943,10 +11970,18 @@ impl<T: Config> P2PSession<T> {
                             .observe_checksum_history_len(self.local_checksum_history.len());
                     }
 
+                    // Retention is deliberately governed by the configured
+                    // scheduled-frame window, not peer `last_verified_frame`
+                    // cursors. Those cursors advance only on a match, so using
+                    // their minimum as a prune floor would let a mismatching or
+                    // silent peer retain history without a deterministic bound.
+                    // Run this even when the exact saved cell has no checksum:
+                    // the schedule still advanced and older evidence must remain
+                    // bounded, though the history may contain fewer than the cap.
                     let max_history = self.protocol_config.max_checksum_history;
                     if self.local_checksum_history.len() > max_history {
                         let oldest_frame_to_keep =
-                            frame_to_send - (max_history as i32 - 1) * interval as i32;
+                            checksum_history_oldest_frame(frame_to_send, max_history, interval);
                         self.local_checksum_history
                             .retain(|&frame, _| frame >= oldest_frame_to_keep);
                     }
@@ -14525,6 +14560,109 @@ mod tests {
         assert!(
             session.last_sent_checksum_frame.is_null(),
             "send cursor must not advance on an exact-match miss"
+        );
+    }
+
+    /// A saved cell can legitimately have no checksum when the application did
+    /// not provide one. The send cursor must then remain stationary so the frame
+    /// can be retried, but checksum-history retention must still run against the
+    /// scheduled frame. This pins the size-cap contract independently of peer
+    /// verification cursors and covers the skipped-insert/stale-prune arm.
+    #[test]
+    fn missing_local_checksum_still_prunes_history_by_scheduled_frame() {
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .with_desync_detection_mode(DesyncDetection::On { interval: 1 })
+            .with_protocol_config(ProtocolConfig {
+                max_checksum_history: 2,
+                ..ProtocolConfig::default()
+            })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("remote player B")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .expect("remote player D")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+
+        for f in 0..=3 {
+            let request = session.sync_layer.save_current_state();
+            if let FortressRequest::SaveGameState { cell, frame } = request {
+                assert_eq!(frame, Frame::new(f));
+                // In particular, frame 3 has an exact saved-state hit but no
+                // checksum, so insertion is skipped without taking the early
+                // missing-cell return.
+                assert!(cell.save(frame, Some(0u8), None));
+            }
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(3), session.save_mode);
+        session.last_sent_checksum_frame = Frame::new(2);
+        for frame in 0..=2 {
+            session
+                .local_checksum_history
+                .insert(Frame::new(frame), frame as u128);
+        }
+
+        session.check_checksum_send_interval();
+
+        assert_eq!(
+            session.last_sent_checksum_frame,
+            Frame::new(2),
+            "missing checksum must leave the send cursor ready to retry frame 3"
+        );
+        assert_eq!(
+            session
+                .local_checksum_history
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Frame::new(2)],
+            "scheduled frame 3 with a cap of 2 must prune frames older than 2"
+        );
+    }
+
+    #[test]
+    fn checksum_schedule_extreme_config_saturates_without_negative_frames_or_overflow() {
+        assert_eq!(
+            checksum_interval_frame_delta(u32::MAX),
+            i32::MAX,
+            "a public u32 cadence must never wrap into a negative Frame delta"
+        );
+        assert_eq!(
+            checksum_history_oldest_frame(Frame::new(3), 2, 1),
+            Frame::new(2),
+            "ordinary retention math remains unchanged"
+        );
+        assert_eq!(
+            checksum_history_oldest_frame(Frame::new(i32::MAX), usize::MAX, u32::MAX),
+            Frame::new(0),
+            "extreme accepted config values must saturate without multiplication overflow"
+        );
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _observer_guard = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_desync_detection_mode(DesyncDetection::On { interval: u32::MAX })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+
+        session.check_checksum_send_interval();
+
+        assert!(session.last_sent_checksum_frame.is_null());
+        assert!(
+            observer.is_empty(),
+            "an extreme cadence is beyond the confirmed range, not an invalid negative-cell lookup"
         );
     }
 

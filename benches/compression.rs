@@ -8,7 +8,7 @@
 // Allow benchmark-specific patterns
 #![allow(
     clippy::disallowed_macros,
-    clippy::print_stdout,
+    clippy::print_stderr,
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
@@ -212,7 +212,7 @@ fn bench_compression_ratio(c: &mut Criterion) {
         let compressed = encode(&delta);
 
         let ratio = compressed.len() as f64 / original_size as f64;
-        println!(
+        eprintln!(
             "{}: {} -> {} bytes (ratio: {:.2})",
             name,
             original_size,

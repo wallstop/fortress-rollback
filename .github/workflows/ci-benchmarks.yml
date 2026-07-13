@@ -1,8 +1,10 @@
 name: CI - Benchmarks
 
 # Run benchmarks and track regressions
-# Results are stored in GitHub Pages at gh-pages branch (bench/)
-# Alerts are posted as commit comments when performance regresses
+# Results are stored in GitHub Pages at gh-pages branch. Microsecond-scale
+# session/sync work is a hard regression gate; nanosecond-scale accessors and
+# compression primitives remain informational because shared-runner noise is a
+# material fraction of their runtime.
 
 on:
   push:
@@ -85,11 +87,18 @@ jobs:
           restore-keys: |
             bench-${{ runner.os }}-cargo-
 
-      # Run all criterion benchmarks
+      # Keep stable, microsecond-scale work separate from nanosecond-scale
+      # primitives so timer noise cannot fail the regression gate.
       - name: Run benchmarks
         run: |
           set -o pipefail
-          cargo bench --bench input_queue --bench p2p_session --bench sync_layer -- --output-format bencher | tee benchmark-results.txt
+          cargo bench --bench p2p_session -- 'Message serialization' --output-format bencher | tee benchmark-gated-results.txt
+          cargo bench --bench sync_layer -- --output-format bencher | tee -a benchmark-gated-results.txt
+          # Informational trends trade some precision for bounded CI time; they
+          # never fail the job, while gated measurements keep Criterion defaults.
+          cargo bench --bench input_queue -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee benchmark-informational-results.txt
+          cargo bench --bench compression -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
+          cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -122,56 +131,53 @@ jobs:
             fi
           fi
 
-      # Store benchmark results and detect regressions
+      # Store stable benchmark results and fail on a material regression.
       # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
-      - name: Store benchmark results
+      - name: Check gated benchmark results
         if: steps.gh-pages-check.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Fortress Rollback Benchmarks
           tool: 'cargo'
-          output-file-path: benchmark-results.txt
-          # Store results in gh-pages branch under bench/
+          output-file-path: benchmark-gated-results.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.event_name != 'pull_request' }}
-          # Alert if performance regresses by more than 50%
-          # Note: Sub-10ns benchmarks have high variance due to timer resolution,
-          # so we use a generous threshold to avoid false positives
           alert-threshold: '150%'
-          # Post alert as commit comment when regression detected
           comment-on-alert: true
-          # Don't fail workflow on alerts - use for tracking only
-          # Nanosecond-scale benchmarks have too much noise for reliable CI gates
-          fail-on-alert: false
-          # Keep benchmark history for trend analysis
+          comment-always: ${{ github.event_name == 'pull_request' }}
+          fail-on-alert: true
           max-items-in-chart: 50
-          # Only update on push to main (not PRs) to avoid benchmark pollution
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
+
+      # Track noisy, nanosecond-scale results without making them a merge gate.
+      - name: Track informational benchmark results
+        if: steps.gh-pages-check.outputs.exists == 'true'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Fortress Rollback Informational Benchmarks
+          tool: 'cargo'
+          output-file-path: benchmark-informational-results.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name != 'pull_request' }}
+          alert-threshold: '150%'
+          comment-on-alert: true
+          comment-always: ${{ github.event_name == 'pull_request' }}
+          fail-on-alert: false
+          max-items-in-chart: 50
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: bench-informational
+          # The gated action immediately above already fetched and checked out
+          # gh-pages. Re-fetching into that now-locally-advanced branch fails as
+          # a non-fast-forward on PRs; reuse the same checkout so both datasets
+          # are composed into one eventual main-branch push.
+          skip-fetch-gh-pages: true
 
       - name: Skip benchmark storage (no gh-pages branch yet)
         if: steps.gh-pages-check.outputs.exists == 'false' && github.event_name != 'push'
         run: |
           echo "::notice::Skipping benchmark storage - gh-pages branch does not exist yet."
           echo "The gh-pages branch will be created when the first commit is pushed to main."
-
-      # On PRs, compare with main branch baseline (only if gh-pages exists)
-      - name: Compare PR benchmarks with main
-        if: github.event_name == 'pull_request' && steps.gh-pages-check.outputs.exists == 'true'
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: Fortress Rollback Benchmarks
-          tool: 'cargo'
-          output-file-path: benchmark-results.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Compare against main but don't push
-          auto-push: false
-          # Summary comparison comment on PR
-          comment-always: true
-          # External JSON for baseline comparison
-          external-data-json-path: ./cache/benchmark-data.json
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: bench
 
       - name: Skip PR comparison (no baseline)
         if: github.event_name == 'pull_request' && steps.gh-pages-check.outputs.exists == 'false'
@@ -184,7 +190,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
-          path: benchmark-results.txt
+          path: |
+            benchmark-gated-results.txt
+            benchmark-informational-results.txt
           retention-days: 30
 
   # Quick benchmark sanity check (runs on every PR)
@@ -241,6 +249,7 @@ jobs:
           cargo bench --bench input_queue -- --sample-size 10 --warm-up-time 1 --measurement-time 1
           cargo bench --bench p2p_session -- --sample-size 10 --warm-up-time 1 --measurement-time 1
           cargo bench --bench sync_layer -- --sample-size 10 --warm-up-time 1 --measurement-time 1
+          cargo bench --bench compression -- --sample-size 10 --warm-up-time 1 --measurement-time 1
         timeout-minutes: 10
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
