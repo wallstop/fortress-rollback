@@ -230,11 +230,11 @@ jobs:
   # Performance notes:
   # - Property tests are 50-300x slower under Miri (skipped, use proptest directly)
   # - Concurrent tests are extremely slow under Miri (skipped, use loom instead)
-  # - Total: 8 jobs, all complete in <20 minutes
+  # - Total: 8 jobs; normally ~20-25 minutes, with a 30-minute cap for hosted-runner variance
   miri:
     name: Miri (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
