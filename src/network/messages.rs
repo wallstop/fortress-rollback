@@ -315,8 +315,11 @@ pub(crate) struct StateSnapshot {
     /// discriminator is unambiguous for every constructible session.
     pub bridge_inputs: Vec<u8>,
     /// N-peer per-slot connection statuses at `frame` (= `S`), in handle
-    /// order (S34 fix round 1): the coordinator's `local_connect_status`
-    /// captured together with the snapshot. The joiner derives each slot's
+    /// order (S34 fix round 1). Protocol v2 normalizes each epoch to the
+    /// coordinator's canonical connected-era membership generation (or that
+    /// generation plus one for a carried-disconnected slot); flags and frame
+    /// values retain the coordinator's local status captured with the
+    /// snapshot. The joiner derives each slot's
     /// bridge [`InputStatus`] from exactly the predicate every survivor's
     /// simulation of `S` used (`disconnected && last_frame < S` ⇒
     /// `Disconnected`, else `Confirmed` — so the `f0 == S` boundary presents

@@ -17,6 +17,7 @@ Fortress Rollback is the correctness-first, verified fork of the original `ggrs`
 - **Browser clock migration in 0.10:** callbacks passed to `ChaosSocket::with_clock()` must return `web_time::Instant` instead of `std::time::Instant`; see [Browser ChaosSocket Clock Callbacks](#010-browser-chaossocket-clock-callbacks).
 - **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
 - **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
+- **Current wire protocol:** canonical hot-join membership generations require protocol v2; v1/v2 peers intentionally reject one another, so upgrade every participant together.
 - **New in 0.10:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [0.10 section](#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
@@ -55,6 +56,15 @@ The `NonBlockingSocket` typed-message API is unchanged. Custom transports that
 receive raw bytes should decode them with `network::codec::decode_message` and
 use `classify_wire_bytes` for rate-limited diagnostics. Packet recordings,
 byte-preserving relays, and replay fixtures must be re-recorded for protocol v1.
+
+## Protocol v1 → v2
+
+Protocol v2 gives N-player hot-join snapshot status epochs a canonical membership-generation
+meaning. That semantic boundary prevents a replacement session from deriving a different later
+graceful-drop certificate after retry-local connection transitions. The packet layout is otherwise
+unchanged, but mixed v1/v2 sessions are rejected during raw packet decoding because accepting a v1
+snapshot would lose the canonical history required for correctness. Upgrade all participants,
+spectators, byte-preserving relays, and recorded packet fixtures as one deployment unit.
 
 ## Import Path Changes
 

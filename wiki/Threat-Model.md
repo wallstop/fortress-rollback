@@ -24,7 +24,7 @@ spoofing or on-path attackers are in scope.
 
 ## In-Scope Defenses
 
-- Protocol-v1 framing rejects legacy packets, unsupported versions, unknown
+- Protocol-v2 framing rejects legacy packets, released v1 packets, unsupported versions, unknown
   flags, bad sentinels, unknown tags, and malformed fixed-width bodies.
 - Decoding checks lengths against remaining bytes before allocation and applies
   a 64 MiB decoded-byte ceiling, configured frame/depth limits, and fallible
@@ -46,8 +46,8 @@ spoofing or on-path attackers are in scope.
   this non-blocking contract.
 - A validated 32-bit connection ID filters stale and cross-session traffic
   after synchronization; sync replies must echo an outstanding random token.
-- The v1 handshake compares the protocol floor, player count, fixed input
-  width, FPS, prediction window, checksum interval, feature bits, and canonical
+- The v2 handshake compares the protocol floor, player count, fixed input
+width, FPS, prediction window, checksum interval, feature bits, and canonical
   configuration digest before an endpoint can run.
 - A configuration mismatch is sticky and terminal for that endpoint. It emits
   one `IncompatibleSession` event and stops retry/timeout activity, while still
@@ -78,7 +78,7 @@ reported with endpoint-local `ours`/`theirs` orientation on both sides.
 `DisconnectBehavior` is intentionally excluded because it is local policy
 after a disconnect, not deterministic simulation configuration. Feature bit 0
 describes compile-time hot-join wire capability. Floor-round messages are part
-of every v1 build. V1 accepts exactly version 1; `min_compat_version` reserves a
+of every v2 build. V2 accepts exactly version 2; `min_compat_version` reserves a
 future speak-down policy but does not make current versions interoperable.
 
 Any change to bytes a message can produce or accept requires a protocol-version
@@ -100,7 +100,7 @@ sequence numbers in a bounded replay window, and bind the configured peer
 identity as associated data. Do not add address migration to raw UDP without
 packet authentication.
 
-Packet authentication is deferred from protocol v1. Its reserved flag bit
+Packet authentication remains deferred in protocol v2. Its reserved flag bit
 remains available, while requiring crypto in the core would expand the unsafe,
 SIMD, dependency-vetting, and portability surface. Dominant browser
 deployments already carry authenticated DTLS, and applications can wrap the

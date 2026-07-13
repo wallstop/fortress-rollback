@@ -107,9 +107,10 @@ impl fmt::Display for WireRejectKind {
 /// Classifies bytes that [`decode_message`] rejected.
 ///
 /// This is a diagnostic helper, not a validator: because [`WireRejectKind`] has
-/// no accepted variant, valid v1 bytes also fall through to
-/// [`WireRejectKind::Malformed`]. The legacy test is intentionally heuristic and
-/// may classify a malformed v1 packet as legacy; valid v1 connection IDs make
+/// no accepted variant, valid v2 bytes also fall through to
+/// [`WireRejectKind::Malformed`]. Released v1 bytes classify as
+/// [`WireRejectKind::UnsupportedVersion`]. The legacy test is intentionally heuristic and
+/// may classify a malformed v2 packet as legacy; valid v2 connection IDs make
 /// the layouts unambiguous.
 #[must_use]
 pub fn classify_wire_bytes(bytes: &[u8]) -> WireRejectKind {
@@ -1710,8 +1711,17 @@ fn assert_wire_golden_suite(
 }
 
 #[cfg(test)]
+#[path = "wire_golden_v2.rs"]
+mod wire_golden_v2;
+
+// Compile the released v1 literals as a rejection suite without presenting it
+// as the active golden registration. The immutable legacy-0.9 fixture module
+// imports this historical name for its opposite-direction framing checks.
+#[cfg(test)]
 #[path = "wire_golden_v1.rs"]
-mod wire_golden_v1;
+mod released_wire_golden_v1;
+#[cfg(test)]
+use self::released_wire_golden_v1 as wire_golden_v1;
 
 #[cfg(test)]
 #[path = "wire_golden_legacy_0_9.rs"]
@@ -1746,11 +1756,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_wire_golden_harness_accepts_current_v1_suite() {
+    fn shared_wire_golden_harness_accepts_current_v2_suite() {
         assert_wire_golden_suite(
-            super::wire_golden_v1::WIRE_GOLDEN_VERSION,
-            super::wire_golden_v1::fixtures(),
-            super::wire_golden_v1::expected,
+            super::wire_golden_v2::WIRE_GOLDEN_VERSION,
+            super::wire_golden_v2::fixtures(),
+            super::wire_golden_v2::expected,
         );
     }
 
@@ -1983,7 +1993,7 @@ mod tests {
     fn codec_wire_format_uses_fixed_little_endian_bytes() {
         assert_eq!(
             crate::PROTOCOL_VERSION,
-            1,
+            2,
             "wire bytes changed without a version bump"
         );
         let cases = [
@@ -2006,7 +2016,7 @@ mod tests {
                     }),
                 },
                 vec![
-                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
                     0xCD, 0xAB, 0x00, 0x00, // conn_id
                     0x00, 0x00, 0x00, 0x00, // MessageBody::SyncRequest tag
                     0xE7, 0x03, 0x00, 0x00, // random_request
@@ -2030,7 +2040,7 @@ mod tests {
                     }),
                 },
                 vec![
-                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
                     0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
                     0xFE, 0xFF, // frame_advantage: i16 -2
@@ -2045,7 +2055,7 @@ mod tests {
                     body: MessageBody::Goodbye(Goodbye { reason: 7 }),
                 },
                 vec![
-                    0xF5, 0x52, 0x01, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
                     0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x11, 0x00, 0x00, 0x00, // MessageBody::Goodbye tag 17
                     0x07, // reason
@@ -2139,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_message_rejects_every_invalid_v1_header_before_body_decode() {
+    fn decode_message_rejects_every_invalid_v2_header_before_body_decode() {
         let valid = wire_prefix(1, 7);
         for len in 0..valid.len() {
             assert!(
@@ -2155,6 +2165,9 @@ mod tests {
         let mut unsupported = valid.clone();
         unsupported[2] = crate::PROTOCOL_VERSION.saturating_add(1);
         invalid_headers.push(unsupported);
+        let mut released_v1 = valid.clone();
+        released_v1[2] = 1;
+        invalid_headers.push(released_v1);
         let mut flags = valid;
         flags[3] = 1;
         invalid_headers.push(flags);
@@ -2375,7 +2388,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_drop_v1_goldens_roundtrip_with_manual_generic_parity() {
+    fn coordinated_drop_v2_goldens_roundtrip_with_manual_generic_parity() {
         for (tag, body) in drop_bodies() {
             let original = Message {
                 header: MessageHeader::new(0x1234),
@@ -2384,14 +2397,14 @@ mod tests {
             let bytes = encode(&original).unwrap();
             let expected: &[u8] = match tag {
                 18 => &[
-                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x09,
                     0x00, 0x05, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
                 ],
                 19 => &[
-                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFF,
                     0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
@@ -2399,19 +2412,19 @@ mod tests {
                     0x00, 0x00, 0x00, 0x05, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
                 ],
                 20 => &[
-                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x01, 0x00, 0x03, 0x00, 0x18, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04,
                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD,
                 ],
                 21 => &[
-                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x1F, 0x00, 0x00, 0x00, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
                     0x11,
                 ],
                 22 => &[
-                    0xF5, 0x52, 0x01, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x02, 0x00, 0x00, 0x00,
                 ],
@@ -2419,7 +2432,7 @@ mod tests {
             };
             assert_eq!(
                 bytes, expected,
-                "immutable protocol-v1 golden for tag {tag}"
+                "immutable protocol-v2 golden for tag {tag}"
             );
             assert_eq!(bytes.get(8..12), Some(tag.to_le_bytes().as_slice()));
             assert_eq!(original.encoded_len(), bytes.len());
@@ -2900,7 +2913,7 @@ mod tests {
         }
 
         /// Stream framing is an envelope only: it must preserve the exact
-        /// protocol-v1 bytes for every body variant.
+        /// protocol-v2 bytes for every body variant.
         #[cfg_attr(miri, ignore)] // arbitrary-message proptest takes ~8 minutes on Windows Miri
         #[test]
         fn encode_framed_wraps_exact_arbitrary_message_bytes(msg in arb_message()) {

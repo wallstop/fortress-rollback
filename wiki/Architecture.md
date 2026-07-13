@@ -511,7 +511,7 @@ loop {
 - `Synchronized { addr }` — Peer fully synchronized
 - `IncompatibleSession { addr, reason }` — Terminal configuration mismatch
 
-Each protocol-v1 sync request and reply carries the peer's compatibility floor,
+Each protocol-v2 sync request and reply carries the peer's compatibility floor,
 player count, fixed serialized input width, frame rate, maximum prediction
 window, checksum interval, protocol feature bits, and a canonical FNV-1a
 digest. Fields are compared in that order. A mismatch is
@@ -921,7 +921,7 @@ The codec module provides centralized, deterministic serialization for all netwo
 - **Centralized Configuration**: Single bincode config with fixed-size integers for deterministic message sizes
 - **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
 - **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
-- **Bounded Peer Decode**: `decode_message` validates the protocol-v1 prelude and network `Message` lengths before allocation
+- **Bounded Peer Decode**: `decode_message` validates the protocol-v2 prelude and network `Message` lengths before allocation
 - **Bounded Stream Framing**: `encode_framed` and `FrameDecoder` add a u32-LE envelope for byte streams without changing datagram wire bytes
 - **Visible Refusal**: built-in sockets classify rejected legacy, version, flags, sentinel, and malformed packets and rate-limit warnings per receive poll
 - **Datagram-size Visibility**: protocol endpoints count messages at the inclusive 1,200-byte portable-datagram budget and the 1,472-byte IPv4/UDP fragmentation boundary, with distinct one-per-endpoint-era warning and alarm diagnostics
@@ -956,7 +956,7 @@ let len = encode_into(&data, &mut buffer)?;
 | `encode_framed()` | Prefix one `Message` with its u32-LE encoded length | TCP and other raw byte streams |
 | `FrameDecoder` | Incrementally buffer one bounded stream frame | Partial or concatenated stream reads |
 
-The stream envelope is transport-local: its four-byte length prefix is not part of protocol-v1's
+The stream envelope is transport-local: its four-byte length prefix is not part of protocol-v2's
 datagram format or deterministic simulation state. `FrameDecoder` yields at most one message per
 call so a large socket read cannot create an unbounded internal decoded-message queue. Datagram
 endpoints retain message boundaries and continue to use `encode` / `decode_message` directly.

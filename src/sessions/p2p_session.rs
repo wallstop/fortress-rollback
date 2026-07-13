@@ -249,6 +249,10 @@ struct CoordinatedDropState<A> {
     queued: std::collections::BTreeSet<PlayerHandle>,
     deferred_prepares: VecDeque<DropPrepare>,
     committed: BTreeMap<PlayerHandle, CoordinatedDropFence>,
+    /// Canonical connected-era generation retained after a dropped slot
+    /// successfully rejoins. Unlike spectator epochs, this advances exactly
+    /// once per committed drop and once per committed reactivation.
+    membership_generations: BTreeMap<PlayerHandle, u16>,
     closed: VecDeque<DropOperationId>,
 }
 
@@ -259,6 +263,7 @@ impl<A> Default for CoordinatedDropState<A> {
             queued: std::collections::BTreeSet::new(),
             deferred_prepares: VecDeque::new(),
             committed: BTreeMap::new(),
+            membership_generations: BTreeMap::new(),
             closed: VecDeque::new(),
         }
     }
@@ -935,6 +940,102 @@ impl<T: Config> P2PSession<T> {
         hasher.finish()
     }
 
+    /// Returns the generation used by D14's drop certificate for one slot.
+    ///
+    /// A successful rejoin can include survivor-local reopen/abort retries,
+    /// and those transitions legitimately advance the spectator-facing
+    /// [`ConnectionStatus::epoch`] by different amounts. The prior committed
+    /// drop fence is shared by every survivor, so its connected generation
+    /// plus the committed drop and reactivation transitions is the canonical
+    /// next membership generation. Initial slots and fresh joiners without a
+    /// retained fence use the carried status epoch directly.
+    fn coordinated_drop_generation(status: ConnectionStatus, canonical: Option<u16>) -> u16 {
+        canonical.unwrap_or(status.epoch)
+    }
+
+    fn local_coordinated_drop_generation(&self, handle: PlayerHandle) -> Option<u16> {
+        let status = self.local_connect_status.get(handle.as_usize()).copied()?;
+        #[cfg(feature = "hot-join")]
+        if self
+            .hot_join
+            .pending_reactivation
+            .as_ref()
+            .is_some_and(|pending| pending.handle == handle && pending.reopened)
+        {
+            // A reopened survivor that missed JoinCommitted is provisionally
+            // in the next connected era already. A coordinated drop of that
+            // live endpoint is itself valid commit evidence, so its prepare
+            // must compare against the candidate reactivation generation.
+            // This preserves the pre-D17 fail-closed path without consulting
+            // retry-skewed spectator epochs.
+            if let Some(generation) = self.coordinated_drop.membership_generations.get(&handle) {
+                return Some(generation.wrapping_add(2));
+            }
+        }
+        Some(Self::coordinated_drop_generation(
+            status,
+            self.coordinated_drop
+                .membership_generations
+                .get(&handle)
+                .copied(),
+        ))
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn record_committed_reactivation(&mut self, handle: PlayerHandle) {
+        let generation = self
+            .coordinated_drop
+            .committed
+            .remove(&handle)
+            .map(|fence| fence.target_generation.wrapping_add(2))
+            .or_else(|| {
+                self.coordinated_drop
+                    .membership_generations
+                    .get(&handle)
+                    .map(|generation| generation.wrapping_add(2))
+            });
+        if let Some(generation) = generation {
+            self.coordinated_drop
+                .membership_generations
+                .insert(handle, generation);
+        }
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn close_reopened_reactivation_for_drop_targets(&mut self, targets: &[DropTarget]) {
+        let closes_pending = self
+            .hot_join
+            .pending_reactivation
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.reopened
+                    && targets
+                        .iter()
+                        .any(|target| usize::from(target.handle) == pending.handle.as_usize())
+            });
+        if closes_pending {
+            self.close_unheard_reopened_attempt(true);
+        }
+    }
+
+    #[cfg(feature = "hot-join")]
+    fn snapshot_connect_statuses(&self) -> Vec<ConnectionStatus> {
+        let mut statuses = self.local_connect_status.clone(); // alloc-bound: exactly num_players connection-status entries.
+        for (idx, status) in statuses.iter_mut().enumerate() {
+            let handle = PlayerHandle::new(idx);
+            if let Some(fence) = self.coordinated_drop.committed.get(&handle) {
+                status.epoch = fence
+                    .target_generation
+                    .wrapping_add(u16::from(status.disconnected));
+            } else if let Some(generation) =
+                self.coordinated_drop.membership_generations.get(&handle)
+            {
+                status.epoch = generation.wrapping_add(u16::from(status.disconnected));
+            }
+        }
+        statuses
+    }
+
     fn coordinated_drop_operation_cmp(
         left: DropOperationId,
         right: DropOperationId,
@@ -1083,15 +1184,13 @@ impl<T: Config> P2PSession<T> {
                     ),
                 }
             })?;
-            let generation = self
-                .local_connect_status
-                .get(handle.as_usize())
-                .ok_or(FortressError::InternalErrorStructured {
+            let generation = self.local_coordinated_drop_generation(handle).ok_or(
+                FortressError::InternalErrorStructured {
                     kind: InternalErrorKind::DisconnectStatusNotFound {
                         player_handle: handle,
                     },
-                })?
-                .epoch;
+                },
+            )?;
             targets.push(DropTarget {
                 handle: raw,
                 generation,
@@ -1158,9 +1257,8 @@ impl<T: Config> P2PSession<T> {
             .unwrap_or(0)
             .saturating_add(1);
         let coordinator_generation = self
-            .local_connect_status
-            .get(usize::from(coordinator))
-            .map_or(0, |status| status.epoch);
+            .local_coordinated_drop_generation(PlayerHandle::new(usize::from(coordinator)))
+            .unwrap_or(0);
         let operation = DropOperationId {
             coordinator,
             coordinator_generation,
@@ -1345,7 +1443,10 @@ impl<T: Config> P2PSession<T> {
             let handle = PlayerHandle::new(usize::from(target.handle));
             self.local_connect_status
                 .get(handle.as_usize())
-                .is_some_and(|status| !status.disconnected && status.epoch == target.generation)
+                .is_some_and(|status| {
+                    !status.disconnected
+                        && self.local_coordinated_drop_generation(handle) == Some(target.generation)
+                })
         })
     }
 
@@ -2069,9 +2170,23 @@ impl<T: Config> P2PSession<T> {
                 .local_connect_status
                 .get(usize::from(target.handle))
                 .ok_or(DropAbortReason::GenerationChanged)?;
-            if status.disconnected || status.epoch != target.generation {
+            if status.disconnected
+                || self.local_coordinated_drop_generation(PlayerHandle::new(usize::from(
+                    target.handle,
+                ))) != Some(target.generation)
+            {
                 return Err(DropAbortReason::GenerationChanged);
             }
+        }
+
+        #[cfg(feature = "hot-join")]
+        {
+            // An exact D14 commit for the provisional connected generation is
+            // authoritative proof that the unheard reactivation committed.
+            // Close that older lifecycle before installing the new drop fence:
+            // otherwise a delayed JoinCommitted could mistake the new fence
+            // for the old era and advance/remove it.
+            self.close_reopened_reactivation_for_drop_targets(&targets);
         }
 
         let mut cuts = Vec::new();
@@ -2094,6 +2209,9 @@ impl<T: Config> P2PSession<T> {
 
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
+            self.coordinated_drop
+                .membership_generations
+                .insert(handle, target.generation);
             self.coordinated_drop.committed.insert(
                 handle,
                 CoordinatedDropFence {
@@ -3509,6 +3627,7 @@ impl<T: Config> P2PSession<T> {
                 );
                 continue;
             }
+            self.record_committed_reactivation(handle);
             // Force the host to re-simulate from the activation frame F so its
             // prediction for the reactivated handle anchors at F.
             //
@@ -3910,7 +4029,7 @@ impl<T: Config> P2PSession<T> {
             // under the same capture gate that makes the bridge values
             // converged (S34 fix round 1 — the joiner presents/stamps from
             // these instead of assuming every slot live).
-            self.local_connect_status.clone(),
+            self.snapshot_connect_statuses(),
         )
     }
 
@@ -4191,6 +4310,7 @@ impl<T: Config> P2PSession<T> {
                 handle
             );
         }
+        self.record_committed_reactivation(handle);
         // Anchor the reactivated slot's prediction at F, mirroring the 2-peer
         // Phase 3. Here `F == current_frame` (the pause pinned
         // current = S + 1 = F), so the next advance's `adjust_gamestate`
@@ -4800,17 +4920,6 @@ impl<T: Config> P2PSession<T> {
             );
         }
         if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-            // Restore the pre-freeze freeze frame and disconnect flag while keeping
-            // the epoch generation MONOTONE. A reopened pending armed the slot
-            // forward (E -> E+1, connected); this abort restore is a genuine
-            // connected->disconnected transition and must ADVANCE the generation
-            // (-> E+2), never regress to the captured pre-freeze `E`. A wholesale
-            // `*status = pre_freeze_status` would forward a strictly-lower epoch
-            // for a current-cycle disconnected state, breaking the per-slot
-            // drop-cycle ordering the spectator relies on (see
-            // [`Self::arm_status_epoch`] / [`ConnectionStatus::epoch`]). When the
-            // pending never reopened (slot still disconnected), `arm_status_epoch`
-            // is a no-op on the flag and the epoch is left unchanged — correct.
             status.last_frame = pre_freeze_status.last_frame;
             Self::arm_status_epoch(status, pre_freeze_status.disconnected);
         } else {
@@ -4821,6 +4930,13 @@ impl<T: Config> P2PSession<T> {
                 handle
             );
         }
+        // The attempted reactivation has now introduced a later spectator
+        // status era. Retain the canonical membership generation, but release
+        // the prior drop certificate's cut-ownership shield so ordinary
+        // post-abort gossip convergence (and its fail-closed error path) can
+        // run again. Before D17 this distinction was encoded indirectly by
+        // the spectator epoch no longer matching `target_generation + 1`.
+        self.coordinated_drop.committed.remove(&handle);
         self.hot_join.reserved_slots.insert(handle);
 
         // Speculative frames at/past F may have been simulated with the
@@ -4987,6 +5103,7 @@ impl<T: Config> P2PSession<T> {
         };
         self.record_closed_npeer_attempt(pending.handle, pending.frame);
         if committed {
+            self.record_committed_reactivation(pending.handle);
             // The slot committed live; re-seed the cached views exactly like
             // the lifecycle commit close would have (between the reopen and
             // the commit, a not-yet-reopened survivor's stale disconnected
@@ -5919,6 +6036,7 @@ impl<T: Config> P2PSession<T> {
         // reactivation floor arms here (and not at the reopen above).
         let handle = pending_handle;
         let frame = pending_frame;
+        self.record_committed_reactivation(handle);
         self.reset_reactivated_slot_gossip(
             handle,
             frame,
@@ -7046,16 +7164,22 @@ impl<T: Config> P2PSession<T> {
                 // buffer time), goes LIVE here claimed through exactly S —
                 // the bridge seeded its frame-S input and its first real
                 // input lands at F.
-                Some(_) if idx == local_idx => {
-                    Self::arm_status_epoch(status, false);
-                    status.last_frame = snapshot_frame;
+                Some(carried) if idx == local_idx => {
+                    *status = ConnectionStatus {
+                        disconnected: false,
+                        last_frame: snapshot_frame,
+                        epoch: carried.epoch.wrapping_add(1),
+                    };
                 },
                 Some(carried) if carried.disconnected => {
                     *status = *carried;
                 },
                 Some(carried) => {
-                    Self::arm_status_epoch(status, false);
-                    status.last_frame = std::cmp::min(carried.last_frame, snapshot_frame);
+                    *status = ConnectionStatus {
+                        disconnected: false,
+                        last_frame: std::cmp::min(carried.last_frame, snapshot_frame),
+                        epoch: carried.epoch,
+                    };
                 },
                 None => {
                     // Unreachable: buffer-time validation pinned exactly
@@ -7071,6 +7195,18 @@ impl<T: Config> P2PSession<T> {
                     status.last_frame = snapshot_frame;
                 },
             }
+        }
+        for (idx, carried) in buffered.snapshot.bridge_statuses.iter().enumerate() {
+            let generation = if idx == local_idx {
+                carried.epoch.wrapping_add(1)
+            } else if carried.disconnected {
+                carried.epoch.wrapping_sub(1)
+            } else {
+                carried.epoch
+            };
+            self.coordinated_drop
+                .membership_generations
+                .insert(PlayerHandle::new(idx), generation);
         }
 
         // Re-root desync-detection checksum sending onto the mesh's global
@@ -7763,11 +7899,12 @@ impl<T: Config> P2PSession<T> {
         for (idx, status) in self.local_connect_status.iter().enumerate() {
             let _ = write!(
                 out,
-                "{}{}:{}{}",
+                "{}{}:{}{}@e{}",
                 if idx == 0 { "" } else { ", " },
                 idx,
                 if status.disconnected { "D" } else { "C" },
-                status.last_frame.as_i32()
+                status.last_frame.as_i32(),
+                status.epoch
             );
         }
         let _ = write!(out, "]");
@@ -11057,9 +11194,8 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
             if let Some(fence) = self.coordinated_drop.committed.get(&handle) {
-                let expected_epoch = fence.target_generation.wrapping_add(1);
                 if let Some(status) = self.local_connect_status.get_mut(handle_idx) {
-                    if status.disconnected && status.epoch == expected_epoch {
+                    if status.disconnected {
                         status.last_frame = fence.cut;
                         continue;
                     }
@@ -12432,6 +12568,157 @@ mod tests {
         status.disconnected = false;
         P2PSession::<TestConfig>::arm_status_epoch(&mut status, true);
         assert_eq!(status.epoch, 0, "epoch wraps at u16::MAX without panicking");
+    }
+
+    /// D17: survivor-local hot-join retries may legitimately advance the
+    /// spectator epoch by different even offsets. D14 certificates must use
+    /// the shared prior fence rather than those retry-local values.
+    #[test]
+    fn coordinated_drop_generation_converges_retry_skewed_epochs_d17() {
+        let operation = |generation, sequence| DropOperationId {
+            coordinator: 3,
+            coordinator_generation: generation,
+            sequence,
+            target_set_digest: 0xD1_70,
+        };
+        let mut canonical = 0_u16;
+        for cycle in 1_u32..=21 {
+            let fence = CoordinatedDropFence {
+                operation: operation(canonical, cycle),
+                target_generation: canonical,
+                cut: Frame::new(i32::try_from(cycle).unwrap_or(i32::MAX) * 100_000),
+            };
+            let expected = canonical.wrapping_add(2);
+            for retry_offset in [0_u16, 2, 4] {
+                let local = ConnectionStatus {
+                    disconnected: false,
+                    last_frame: fence.cut,
+                    epoch: expected.wrapping_add(retry_offset),
+                };
+                assert_eq!(
+                    P2PSession::<TestConfig>::coordinated_drop_generation(local, Some(expected)),
+                    expected,
+                    "cycle {cycle} must derive one certificate generation despite retry offset {retry_offset}"
+                );
+                assert_eq!(
+                    local.epoch,
+                    expected.wrapping_add(retry_offset),
+                    "certificate derivation must not regress the spectator-facing epoch"
+                );
+            }
+            canonical = expected;
+        }
+
+        let wrap_fence = CoordinatedDropFence {
+            operation: operation(u16::MAX - 1, 22),
+            target_generation: u16::MAX - 1,
+            cut: Frame::new(2_200_000),
+        };
+        assert_eq!(
+            P2PSession::<TestConfig>::coordinated_drop_generation(
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: wrap_fence.cut,
+                    epoch: 4,
+                },
+                Some(0),
+            ),
+            0,
+            "the certificate generation uses the same documented u16 wrapping semantics"
+        );
+    }
+
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn d17_new_drop_fence_outlives_delayed_prior_join_commit() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        let coordinator = test_addr(8081);
+        let joiner = test_addr(8080);
+        let activation_frame = Frame::new(1);
+        let old_operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: 1,
+        };
+        session
+            .coordinated_drop
+            .membership_generations
+            .insert(handle, 0);
+        session.coordinated_drop.committed.insert(
+            handle,
+            CoordinatedDropFence {
+                operation: old_operation,
+                target_generation: 0,
+                cut: Frame::new(0),
+            },
+        );
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(0),
+            epoch: 6,
+        };
+        session.hot_join.pending_reactivation = Some(PendingReactivation {
+            handle,
+            frame: activation_frame,
+            coordinator_addr: coordinator,
+            joiner_addr: joiner,
+            pre_freeze_status: ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(0),
+                epoch: 5,
+            },
+            pre_freeze_input: Some(0),
+            reopened: true,
+        });
+
+        let targets = [DropTarget {
+            handle: 1,
+            generation: 2,
+        }];
+        session.close_reopened_reactivation_for_drop_targets(&targets);
+        assert!(session.hot_join.pending_reactivation.is_none());
+        assert_eq!(
+            session.coordinated_drop.membership_generations.get(&handle),
+            Some(&2),
+            "the later D14 target generation first closes the unheard committed reactivation"
+        );
+
+        let new_fence = CoordinatedDropFence {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 2,
+                sequence: 2,
+                target_set_digest: 2,
+            },
+            target_generation: 2,
+            cut: Frame::new(2),
+        };
+        session.coordinated_drop.committed.insert(handle, new_fence);
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: new_fence.cut,
+            epoch: 7,
+        };
+
+        session.handle_join_committed_directive(
+            &coordinator,
+            &crate::network::messages::JoinCommitted {
+                handle: handle.as_usize(),
+                frame: activation_frame,
+            },
+        );
+        assert_eq!(
+            session.coordinated_drop.committed.get(&handle),
+            Some(&new_fence),
+            "a delayed old JoinCommitted must not remove the later D14 fence"
+        );
+        assert_eq!(
+            session.coordinated_drop.membership_generations.get(&handle),
+            Some(&2),
+            "a delayed old JoinCommitted must not advance the later membership era"
+        );
     }
 
     #[test]
@@ -19599,7 +19886,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(serve_f.as_i32() - 1),
-                    epoch: 2, // armed: drop (epoch 1) then reactivation (epoch 2)
+                    epoch: 2,
                 },
                 "B reopened the slot at F (connected, last_frame = F - 1)"
             );
@@ -19654,7 +19941,7 @@ mod tests {
                 ConnectionStatus {
                     disconnected: false,
                     last_frame: Frame::new(serve_f.as_i32() - 1),
-                    epoch: 2, // armed generation
+                    epoch: 2,
                 },
                 "A reactivated its own slot at F"
             );
@@ -24829,13 +25116,13 @@ mod tests {
             // Positioned real-from-F: the session is at F with all statuses
             // stamped to the cap F - 1 = S.
             assert_eq!(c2.session.current_frame(), activation_frame);
-            for status in &c2.session.local_connect_status {
+            for (idx, status) in c2.session.local_connect_status.iter().enumerate() {
                 assert_eq!(
                     *status,
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: snapshot_frame,
-                        epoch: 0,
+                        epoch: u16::from(idx == 2),
                     }
                 );
             }
@@ -26621,6 +26908,46 @@ mod tests {
                 c2.session.sync_layer.player_is_frozen(PlayerHandle::new(1)),
                 "slot 1 freezes on the former joiner"
             );
+            let certified_cut = c2
+                .session
+                .coordinated_drop
+                .committed
+                .get(&PlayerHandle::new(1))
+                .map(|fence| fence.cut)
+                .expect("the former joiner retains slot 1's committed D14 cut");
+            c2.session.local_connect_status[1].epoch =
+                c2.session.local_connect_status[1].epoch.wrapping_add(4);
+            c2.session
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("former joiner has A endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(1),
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: Frame::new(certified_cut.as_i32().saturating_sub(1)),
+                        epoch: 0,
+                    },
+                );
+            c2.session.update_player_disconnects();
+            assert_eq!(
+                c2.session.local_connect_status[1].last_frame, certified_cut,
+                "D14's committed-cut shield must ignore stale lower gossip even when the spectator epoch is retry-skewed"
+            );
+            c2.session
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("former joiner has A endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(1),
+                    ConnectionStatus {
+                        disconnected: true,
+                        last_frame: certified_cut,
+                        epoch: 0,
+                    },
+                );
             for i in 0..4_u32 {
                 for _ in 0..3 {
                     poll_round_second_cycle(&mut duo, &mut c2, None);
@@ -26801,6 +27128,19 @@ mod tests {
                 b2.shadow.states.get(&probe),
                 "A and the rejoiner byte-agree at the probe frame"
             );
+            for handle in (0..3).map(PlayerHandle::new) {
+                let expected = duo.a.local_coordinated_drop_generation(handle);
+                assert_eq!(
+                    c2.session.local_coordinated_drop_generation(handle),
+                    expected,
+                    "the former joiner carries canonical membership generation for slot {handle}"
+                );
+                assert_eq!(
+                    b2.session.local_coordinated_drop_generation(handle),
+                    expected,
+                    "the second replacement imports canonical membership generation for slot {handle}"
+                );
+            }
         }
 
         /// N4 teardown contract: a coordinator that dies while the joiner is
@@ -27171,7 +27511,7 @@ mod tests {
             let second_dead = ConnectionStatus {
                 disconnected: true,
                 last_frame: Frame::new(2),
-                epoch: 0,
+                epoch: 5,
             };
             c2.coordinator_proto_mut()
                 .set_received_snapshot_for_test(seam_snapshot_with_statuses(
@@ -27185,13 +27525,13 @@ mod tests {
                             // received further): the stamp must clamp to S
                             // (what the snapshot + bridge provably cover).
                             last_frame: Frame::new(8),
-                            epoch: 0,
+                            epoch: 8,
                         },
                         second_dead,
                         ConnectionStatus {
                             disconnected: true,
                             last_frame: Frame::new(3),
-                            epoch: 0,
+                            epoch: u16::MAX,
                         },
                     ],
                 ));
@@ -27216,7 +27556,7 @@ mod tests {
                     ConnectionStatus {
                         disconnected: false,
                         last_frame: snapshot_frame,
-                        epoch: 0,
+                        epoch: 8,
                     },
                     second_dead,
                     ConnectionStatus {
@@ -27225,8 +27565,21 @@ mod tests {
                         epoch: 0,
                     },
                 ],
-                "live slots clamp to S, the carried-dead slot stays dead at \
-                 its carried freeze frame, the joining slot goes live at S"
+                "live slots preserve the carried generation while clamping to S, the carried-dead slot stays verbatim, and the joining slot advances exactly once when it goes live at S"
+            );
+            assert_eq!(
+                c2.session
+                    .coordinated_drop
+                    .membership_generations
+                    .iter()
+                    .map(|(handle, generation)| (*handle, *generation))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (PlayerHandle::new(0), 8),
+                    (PlayerHandle::new(1), 4),
+                    (PlayerHandle::new(2), 0),
+                ],
+                "the fresh joiner imports canonical connected-era membership generations for live, dead, and wrapping joining slots"
             );
 
             // The bridge presents the dead slot Disconnected (carried
