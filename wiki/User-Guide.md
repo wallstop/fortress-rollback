@@ -3518,7 +3518,7 @@ let config = SyncConfig {
 - `SyncConfig::extreme()` - Extreme burst loss survival (20 packets, 250ms, 30s timeout)
 - `SyncConfig::stress_test()` - Automated testing only (40 packets, 150ms, 60s timeout)
 
-Protocol v1 also verifies the deterministic settings on both endpoints before
+Protocol v2 also verifies the deterministic settings on both endpoints before
 the session can run. Player count, serialized input width, FPS, maximum
 prediction, desync-check interval, and compiled protocol features must match.
 If they do not, each endpoint emits one
