@@ -90,7 +90,8 @@ pub enum AppModel {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WaitRecommendationPolicy {
-    /// Minimum application frame opportunities between accepted events.
+    /// Distance between accepted application frame opportunities: an event
+    /// accepted at `t` permits the next acceptance at `t + cooldown_frames`.
     pub cooldown_frames: u32,
     /// Optional cap applied to an accepted event's `skip_frames` payload.
     pub max_skip_frames: Option<u32>,

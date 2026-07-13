@@ -186,14 +186,17 @@ with the `json` feature.
 | `unknown_source_packets` | Decoded traffic ignored because its source is not a configured endpoint |
 | `pending_output_len` | Unacknowledged per-peer input backlog |
 | `ping_ms` | Latest quality-report round-trip measurement |
+| `average_frame_advantage` | Exact per-endpoint rolling average used by the session's max-aggregated wait controller |
 | `portability_risk_messages_sent` | Messages at or above the conservative 1,200-byte path budget |
 | `fragmentation_risk_messages_sent` | Messages at or above the common 1,472-byte IPv4/UDP payload ceiling |
 
 `PeerMetrics::bytes_sent` and `bytes_received` are exact Fortress wire payload sizes. They exclude
 IP/UDP headers. `NetworkStats::kbps_sent` uses those serialized sizes plus an estimated header and
-reports decimal kilobits per second. Its ping and frame-advantage gauges update on the configured
-`ProtocolConfig::quality_report_interval` (200 ms by default), so they provide snapshots rather
-than per-packet measurements.
+reports decimal kilobits per second. Its ping and latest remote frame-advantage gauges refresh on
+the configured `ProtocolConfig::quality_report_interval` (200 ms by default). The rolling-average
+gauge advances when a local input is successfully queued, using that latest remote sample.
+`P2PSession` takes the maximum `average_frame_advantage` across connected endpoints when deciding
+whether to emit a wait recommendation.
 
 Poll snapshots on a bounded interval and export deltas for monotonic counters. Do not sum gauges.
 Alert immediately on checksum mismatches or discarded events; choose workload-specific bounds for
