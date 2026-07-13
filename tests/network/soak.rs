@@ -25,6 +25,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_STEPS_PER_TARGET_FRAME: i64 = 8;
 const MAX_CHECKSUM_HISTORY: usize = 32;
 const PENDING_OUTPUT_LIMIT: u64 = 128;
+const RSS_HOURLY_GROWTH_PERCENT: u64 = 5;
+const RSS_TOTAL_GROWTH_PERCENT: u64 = 10;
 
 fn target_confirmed_frames() -> i32 {
     std::env::var("FORTRESS_SOAK_TARGET_FRAMES")
@@ -121,6 +123,7 @@ struct SoakRun {
     drop_commit_observers: BTreeSet<usize>,
     high_water: ContainerHighWater,
     last_high_water_change_frame: i32,
+    rss_baseline: Option<(i32, u64)>,
     rss_last_hour: Option<(i32, u64)>,
 }
 
@@ -217,6 +220,7 @@ impl SoakRun {
             drop_commit_observers: BTreeSet::new(),
             high_water: ContainerHighWater::default(),
             last_high_water_change_frame: 0,
+            rss_baseline: None,
             rss_last_hour: None,
         })
     }
@@ -328,8 +332,16 @@ impl SoakRun {
         if confirmed < WARMUP_FRAMES {
             return;
         }
+        let Some(rss) = read_rss_bytes() else {
+            return;
+        };
+        if self.rss_baseline.is_none() {
+            self.rss_baseline = Some((confirmed, rss));
+            self.rss_last_hour = Some((confirmed, rss));
+            return;
+        }
         let Some((_, previous_rss)) = self.rss_last_hour else {
-            self.rss_last_hour = read_rss_bytes().map(|rss| (confirmed, rss));
+            self.rss_last_hour = Some((confirmed, rss));
             return;
         };
         let Some((previous_frame, _)) = self.rss_last_hour else {
@@ -338,12 +350,16 @@ impl SoakRun {
         if confirmed.saturating_sub(previous_frame) < VIRTUAL_HOUR_FRAMES {
             return;
         }
-        let Some(rss) = read_rss_bytes() else {
+        assert!(
+            rss_growth_within_limit(previous_rss, rss, RSS_HOURLY_GROWTH_PERCENT),
+            "RSS grew by at least 5% in one post-warmup virtual hour: {previous_rss} -> {rss} bytes"
+        );
+        let Some((_, baseline_rss)) = self.rss_baseline else {
             return;
         };
         assert!(
-            u128::from(rss).saturating_mul(100) < u128::from(previous_rss).saturating_mul(105),
-            "RSS grew by at least 5% in one post-warmup virtual hour: {previous_rss} -> {rss} bytes"
+            rss_growth_within_limit(baseline_rss, rss, RSS_TOTAL_GROWTH_PERCENT),
+            "RSS grew by at least 10% from the first post-warmup sample: {baseline_rss} -> {rss} bytes"
         );
         self.rss_last_hour = Some((confirmed, rss));
     }
@@ -482,6 +498,11 @@ fn read_rss_bytes() -> Option<u64> {
     Some(resident_pages.saturating_mul(4096))
 }
 
+fn rss_growth_within_limit(previous: u64, current: u64, growth_percent: u64) -> bool {
+    u128::from(current).saturating_mul(100)
+        < u128::from(previous).saturating_mul(u128::from(100_u64.saturating_add(growth_percent)))
+}
+
 #[test]
 #[ignore = "4,000,000-frame deterministic release-mode boundedness soak; nightly CI only"]
 fn four_million_frame_soak_preserves_bounds_replay_and_lifecycle() -> Result<(), FortressError> {
@@ -495,4 +516,10 @@ fn high_water_tracks_each_bounded_container() {
     high.observe_pending(7, 3);
     assert_eq!(high.pending_output, 7);
     assert_eq!(high.pending_checksums, 3);
+}
+
+#[test]
+fn rss_growth_gate_rejects_large_cumulative_growth() {
+    assert!(rss_growth_within_limit(100, 104, RSS_HOURLY_GROWTH_PERCENT));
+    assert!(!rss_growth_within_limit(100, 110, RSS_TOTAL_GROWTH_PERCENT));
 }

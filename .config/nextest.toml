@@ -76,8 +76,9 @@ slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s ma
 
 # Nightly network profile - used ONLY by ci-network-nightly.yml via
 # `--profile ci-network-nightly --run-ignored ignored-only`. The ignored tests
-# are the extreme-chaos scenarios (peer timeouts up to 240s) and the long
-# endurance sessions (peer timeouts up to 600s for the 5000-frame stress test).
+# are the extreme-chaos scenarios (peer timeouts up to 240s), the long
+# endurance sessions (peer timeouts up to 600s for the 5000-frame stress test),
+# and the 4,000,000-frame deterministic soak selected by ci-network-nightly.yml.
 # Their nextest budget MUST exceed those internal timeouts + harness overhead
 # on every matrix OS, otherwise nextest would SIGKILL them before their own
 # timeout fires. 960s (period 60s, terminate-after 16) covers the macOS-scaled
