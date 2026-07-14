@@ -3,10 +3,10 @@
 //! A [`Schedule`] is the **fully materialized** plan for one simulation run:
 //! per-link fault policies, timed fault events, and the heal/drain window.
 //! [`generate`] is a pure function of `(seed, SimConfig)` — every random draw
-//! comes from one seeded RNG consumed at generation time, and the runtime
-//! never touches that RNG — so a schedule reproduces exactly from its seed,
-//! and a serialized schedule (the corpus format) reproduces even after the
-//! generator itself evolves.
+//! comes from a domain-separated seeded RNG stream consumed at generation
+//! time, and the runtime never touches those streams — so a schedule
+//! reproduces exactly from its seed, and a serialized schedule (the corpus
+//! format) reproduces even after the generator itself evolves.
 //!
 //! Link-level *noise* (per-send drop/dup/jitter rolls) is separately seeded
 //! via [`Schedule::link_seed`], so editing a schedule's event list during
@@ -213,7 +213,10 @@ pub enum ScenarioMix {
 ///   evidence for fixed-cadence H-OSC experiments.
 /// - `18`: adds deterministic bounded CPU-work feedback from simulation frames
 ///   into future poll cadence for H-META-RB experiments.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 18;
+/// - `19`: adds [`BackgroundNoise::Swarm`], whose per-run link-policy ranges
+///   are drawn from the schedule seed before individual directed links are
+///   materialized.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 19;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:
@@ -236,7 +239,7 @@ pub const MAX_SIMULATION_EVENTS: usize = 100_000;
 pub const MAX_SIMULATION_BANDWIDTH_BYTES: u64 = crate::common::sim_net::MAX_BANDWIDTH_BYTES;
 
 /// Background link-noise level applied to every directed link at start.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum BackgroundNoise {
     /// Perfect links.
     Clean,
@@ -247,6 +250,11 @@ pub enum BackgroundNoise {
     /// Bad WAN / mobile: 2–10% loss, 20–80ms delay, ≤30ms jitter, ≤3% dup,
     /// occasional short loss bursts.
     Rough,
+    /// Per-run swarm testing: the seed first selects bounded loss, delay,
+    /// jitter, and duplication ranges, then every directed link is sampled
+    /// from those shared ranges. This varies the fault distribution itself,
+    /// rather than only sampling values from a fixed named profile.
+    Swarm,
 }
 
 /// Static configuration of one simulation run — the fleet's axes.
@@ -624,17 +632,22 @@ fn event_required_schema(event: &ScheduleEvent) -> u32 {
 }
 
 fn required_schema_version(schedule: &Schedule) -> u32 {
-    let mut required = if schedule.config.cpu_feedback_policy.is_some() {
-        18
-    } else if !schedule.config.wait_recommendation_policy.is_default() {
-        17
-    } else if schedule.config.frame_model == FrameModel::SkewGated60Hz {
-        15
-    } else if schedule.config.noise == BackgroundNoise::ReliableFifo {
-        9
-    } else {
-        1
-    };
+    let mut required = 1;
+    if schedule.config.noise == BackgroundNoise::ReliableFifo {
+        required = required.max(9);
+    }
+    if schedule.config.frame_model == FrameModel::SkewGated60Hz {
+        required = required.max(15);
+    }
+    if !schedule.config.wait_recommendation_policy.is_default() {
+        required = required.max(17);
+    }
+    if schedule.config.cpu_feedback_policy.is_some() {
+        required = required.max(18);
+    }
+    if schedule.config.noise == BackgroundNoise::Swarm {
+        required = required.max(19);
+    }
     for (_, _, policy) in &schedule.initial_links {
         required = required.max(link_policy_required_schema(policy));
     }
@@ -1248,6 +1261,32 @@ struct Draw<'a> {
     rng: &'a mut Pcg32,
 }
 
+/// Seed-selected range shared by every directed link in one Swarm schedule.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct SwarmNoiseProfile {
+    drop_basis_points: (u64, u64),
+    dup_basis_points: (u64, u64),
+    base_delay_ms: (u64, u64),
+    jitter_ms: (u64, u64),
+}
+
+fn roll_swarm_noise_profile(draw: &mut Draw<'_>) -> SwarmNoiseProfile {
+    let drop_min = draw.range_u64(0, 200);
+    let dup_min = draw.range_u64(0, 100);
+    let delay_min = draw.range_u64(0, 20);
+    let jitter_min = draw.range_u64(0, 10);
+    SwarmNoiseProfile {
+        drop_basis_points: (drop_min, draw.range_u64(drop_min, 1_000)),
+        dup_basis_points: (dup_min, draw.range_u64(dup_min, 300)),
+        base_delay_ms: (delay_min, draw.range_u64(delay_min, 80)),
+        jitter_ms: (jitter_min, draw.range_u64(jitter_min, 30)),
+    }
+}
+
+fn basis_points_to_rate(basis_points: u64) -> f64 {
+    basis_points as f64 / 10_000.0
+}
+
 impl Draw<'_> {
     /// Uniform `f64` in `[0, 1)`.
     fn unit(&mut self) -> f64 {
@@ -1268,7 +1307,11 @@ impl Draw<'_> {
 }
 
 /// Rolls one background-noise link policy.
-fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPolicy {
+fn roll_background_policy(
+    draw: &mut Draw<'_>,
+    noise: BackgroundNoise,
+    swarm: SwarmNoiseProfile,
+) -> LinkPolicy {
     match noise {
         BackgroundNoise::Clean => LinkPolicy::clean(),
         BackgroundNoise::ReliableFifo => LinkPolicy {
@@ -1294,6 +1337,24 @@ fn roll_background_policy(draw: &mut Draw<'_>, noise: BackgroundNoise) -> LinkPo
             jitter: Duration::from_millis(draw.range_u64(0, 30)),
             burst_rate: draw.range_f64(0.0, 0.005),
             burst_len: u32::try_from(draw.range_u64(2, 5)).unwrap_or(3),
+            retransmit_delay: Duration::ZERO,
+            gilbert_elliott: None,
+            fragmentation: None,
+            bandwidth: None,
+        },
+        BackgroundNoise::Swarm => LinkPolicy {
+            drop_rate: basis_points_to_rate(
+                draw.range_u64(swarm.drop_basis_points.0, swarm.drop_basis_points.1),
+            ),
+            dup_rate: basis_points_to_rate(
+                draw.range_u64(swarm.dup_basis_points.0, swarm.dup_basis_points.1),
+            ),
+            base_delay: Duration::from_millis(
+                draw.range_u64(swarm.base_delay_ms.0, swarm.base_delay_ms.1),
+            ),
+            jitter: Duration::from_millis(draw.range_u64(swarm.jitter_ms.0, swarm.jitter_ms.1)),
+            burst_rate: 0.0,
+            burst_len: 0,
             retransmit_delay: Duration::ZERO,
             gilbert_elliott: None,
             fragmentation: None,
@@ -1430,6 +1491,14 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
     let mut rng = Pcg32::seed_from_u64(seed ^ 0x5EED_5EED_0000_0001);
     let link_seed = seed ^ 0x1111_2222_3333_4444;
     let mut draw = Draw { rng: &mut rng };
+    let swarm_profile = if config.noise == BackgroundNoise::Swarm {
+        let mut profile_rng = Pcg32::seed_from_u64(seed ^ 0x5EED_5EED_0000_0019);
+        roll_swarm_noise_profile(&mut Draw {
+            rng: &mut profile_rng,
+        })
+    } else {
+        SwarmNoiseProfile::default()
+    };
 
     // Drain window: cover the default 2s disconnect timeout + sync retries
     // with margin at 16ms steps, but never consume the whole schedule.
@@ -1442,7 +1511,7 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
     for from in 0..n {
         for to in 0..n {
             if from != to {
-                let policy = roll_background_policy(&mut draw, config.noise);
+                let policy = roll_background_policy(&mut draw, config.noise, swarm_profile);
                 initial_links.push((from, to, policy));
             }
         }
@@ -1482,9 +1551,9 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
             StorylineKind::HeavyLossWindow => {
                 let heavy = LinkPolicy {
                     drop_rate: draw.range_f64(0.25, 0.45),
-                    ..roll_background_policy(&mut draw, config.noise)
+                    ..roll_background_policy(&mut draw, config.noise, swarm_profile)
                 };
-                let restore = roll_background_policy(&mut draw, config.noise);
+                let restore = roll_background_policy(&mut draw, config.noise, swarm_profile);
                 events.push((
                     start,
                     ScheduleEvent::SetLink {
@@ -1567,6 +1636,31 @@ pub fn generate(seed: u64, mut config: SimConfig) -> Schedule {
 mod tests {
     use super::*;
 
+    fn swarm_profile_for_seed(seed: u64) -> SwarmNoiseProfile {
+        let mut rng = Pcg32::seed_from_u64(seed ^ 0x5EED_5EED_0000_0019);
+        roll_swarm_noise_profile(&mut Draw { rng: &mut rng })
+    }
+
+    #[track_caller]
+    fn assert_policy_matches_swarm_profile(
+        policy: &LinkPolicy,
+        profile: SwarmNoiseProfile,
+        heavy_drop_override: bool,
+    ) {
+        if heavy_drop_override {
+            assert!((0.25..0.45).contains(&policy.drop_rate));
+        } else {
+            assert!(policy.drop_rate >= basis_points_to_rate(profile.drop_basis_points.0));
+            assert!(policy.drop_rate <= basis_points_to_rate(profile.drop_basis_points.1));
+        }
+        assert!(policy.dup_rate >= basis_points_to_rate(profile.dup_basis_points.0));
+        assert!(policy.dup_rate <= basis_points_to_rate(profile.dup_basis_points.1));
+        assert!(policy.base_delay >= Duration::from_millis(profile.base_delay_ms.0));
+        assert!(policy.base_delay <= Duration::from_millis(profile.base_delay_ms.1));
+        assert!(policy.jitter >= Duration::from_millis(profile.jitter_ms.0));
+        assert!(policy.jitter <= Duration::from_millis(profile.jitter_ms.1));
+    }
+
     fn valid_gilbert_elliott() -> GilbertElliottPolicy {
         GilbertElliottPolicy {
             good_to_bad: 0.05,
@@ -1588,6 +1682,165 @@ mod tests {
         let a = generate(1, SimConfig::smoke(4));
         let b = generate(2, SimConfig::smoke(4));
         assert_ne!(a, b, "different seeds should differ (links or events)");
+    }
+
+    #[test]
+    fn swarm_noise_is_deterministic_bounded_schema_v19_and_replayable() {
+        let config = SimConfig {
+            noise: BackgroundNoise::Swarm,
+            ..SimConfig::smoke(4)
+        };
+        let first = generate(0x5A4A_0001, config.clone());
+        let repeat = generate(0x5A4A_0001, config);
+        assert_eq!(first, repeat, "Swarm generation must be seed-deterministic");
+        assert_eq!(validate_schedule(&first), Ok(()));
+
+        for (from, to, policy) in &first.initial_links {
+            assert_ne!(from, to);
+            assert!((0.0..=0.10).contains(&policy.drop_rate));
+            assert!((0.0..=0.03).contains(&policy.dup_rate));
+            assert!(policy.base_delay <= Duration::from_millis(80));
+            assert!(policy.jitter <= Duration::from_millis(30));
+            assert!(policy.burst_rate.abs() < f64::EPSILON);
+            assert_eq!(policy.burst_len, 0);
+            assert_eq!(policy.retransmit_delay, Duration::ZERO);
+            assert_eq!(policy.gilbert_elliott, None);
+            assert_eq!(policy.fragmentation, None);
+            assert_eq!(policy.bandwidth, None);
+        }
+
+        let mut under_declared = first.clone();
+        under_declared.schema_version = 18;
+        assert!(validate_schedule(&under_declared)
+            .expect_err("schema v18 cannot claim Swarm generation semantics")
+            .contains("requiring schema_version 19"));
+
+        let json = serde_json::to_vec(&first).expect("Swarm schedule serializes");
+        let round_trip: Schedule =
+            serde_json::from_slice(&json).expect("Swarm schedule deserializes");
+        assert_eq!(round_trip, first);
+        assert_eq!(validate_schedule(&round_trip), Ok(()));
+    }
+
+    #[test]
+    fn swarm_profile_is_one_seed_selected_ordered_range_per_run() {
+        let seeds = [0, 1, 42, u64::MAX];
+        let mut profiles = BTreeSet::new();
+        for seed in seeds {
+            let profile = swarm_profile_for_seed(seed);
+            assert_eq!(profile, swarm_profile_for_seed(seed));
+            assert!(profile.drop_basis_points.0 <= profile.drop_basis_points.1);
+            assert!(profile.drop_basis_points.1 <= 1_000);
+            assert!(profile.dup_basis_points.0 <= profile.dup_basis_points.1);
+            assert!(profile.dup_basis_points.1 <= 300);
+            assert!(profile.base_delay_ms.0 <= profile.base_delay_ms.1);
+            assert!(profile.base_delay_ms.1 <= 80);
+            assert!(profile.jitter_ms.0 <= profile.jitter_ms.1);
+            assert!(profile.jitter_ms.1 <= 30);
+            let _ = profiles.insert(profile);
+        }
+        assert_eq!(
+            profiles.len(),
+            seeds.len(),
+            "representative seeds must vary the distribution, not only per-link rolls"
+        );
+
+        let two_player = generate(
+            42,
+            SimConfig {
+                noise: BackgroundNoise::Swarm,
+                ..SimConfig::smoke(2)
+            },
+        );
+        let sixteen_player = generate(
+            42,
+            SimConfig {
+                noise: BackgroundNoise::Swarm,
+                ..SimConfig::smoke(16)
+            },
+        );
+        assert_eq!(
+            two_player.initial_links.first(),
+            sixteen_player.initial_links.first(),
+            "the per-run profile and first link roll must not depend on mesh size"
+        );
+        let other_seed = generate(
+            43,
+            SimConfig {
+                noise: BackgroundNoise::Swarm,
+                ..SimConfig::smoke(2)
+            },
+        );
+        assert_ne!(
+            two_player.initial_links, other_seed.initial_links,
+            "different Swarm seeds must materialize different background policies"
+        );
+
+        let point_profile = SwarmNoiseProfile {
+            drop_basis_points: (123, 123),
+            dup_basis_points: (45, 45),
+            base_delay_ms: (67, 67),
+            jitter_ms: (8, 8),
+        };
+        let mut point_rng = Pcg32::seed_from_u64(99);
+        let point_policy = roll_background_policy(
+            &mut Draw {
+                rng: &mut point_rng,
+            },
+            BackgroundNoise::Swarm,
+            point_profile,
+        );
+        assert_policy_matches_swarm_profile(&point_policy, point_profile, false);
+
+        let mut saw_heavy = false;
+        let mut saw_restore = false;
+        for seed in 0..100 {
+            let schedule = generate(
+                seed,
+                SimConfig {
+                    noise: BackgroundNoise::Swarm,
+                    ..SimConfig::smoke(4)
+                },
+            );
+            let profile = swarm_profile_for_seed(seed);
+            for (_, event) in &schedule.events {
+                if let ScheduleEvent::SetLink { policy, .. } = event {
+                    let heavy = policy.drop_rate > 0.20;
+                    assert_policy_matches_swarm_profile(policy, profile, heavy);
+                    saw_heavy |= heavy;
+                    saw_restore |= !heavy;
+                }
+            }
+        }
+        assert!(
+            saw_heavy && saw_restore,
+            "bounded seed window must exercise both HeavyLoss and restore policies"
+        );
+    }
+
+    #[test]
+    fn legacy_noise_schema_floors_and_default_remain_unchanged() {
+        assert_eq!(SimConfig::smoke(2).noise, BackgroundNoise::Mild);
+        for (noise, schema_floor) in [
+            (BackgroundNoise::Clean, 1),
+            (BackgroundNoise::Mild, 1),
+            (BackgroundNoise::Rough, 1),
+            (BackgroundNoise::ReliableFifo, 9),
+        ] {
+            let mut schedule = generate(
+                7,
+                SimConfig {
+                    noise,
+                    ..SimConfig::smoke(3)
+                },
+            );
+            schedule.schema_version = schema_floor;
+            assert_eq!(
+                validate_schedule(&schedule),
+                Ok(()),
+                "legacy noise {noise:?} changed its schema floor"
+            );
+        }
     }
 
     #[test]

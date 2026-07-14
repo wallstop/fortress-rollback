@@ -46,6 +46,19 @@ fn nightly_seed(run_id: u64, shard: u64, offset: u64) -> u64 {
         .wrapping_add(offset)
 }
 
+fn nightly_noise(seed: u64) -> BackgroundNoise {
+    let swarm_residue = (seed / 20) % 5;
+    if seed % 5 == swarm_residue {
+        return BackgroundNoise::Swarm;
+    }
+    match seed % 4 {
+        0 => BackgroundNoise::Clean,
+        1 => BackgroundNoise::Mild,
+        2 => BackgroundNoise::Rough,
+        _ => BackgroundNoise::ReliableFifo,
+    }
+}
+
 fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Schedule {
     let config = SimConfig {
         steps: NIGHTLY_STEPS,
@@ -169,12 +182,7 @@ fn run_nightly_shard(shard: u64) {
     for offset in 0..NIGHTLY_SEEDS_PER_SHARD {
         let seed = nightly_seed(run_id, shard, offset);
         let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
-        let noise = match seed % 4 {
-            0 => BackgroundNoise::Clean,
-            1 => BackgroundNoise::Mild,
-            2 => BackgroundNoise::Rough,
-            _ => BackgroundNoise::ReliableFifo,
-        };
+        let noise = nightly_noise(seed);
         let schedule = nightly_schedule(seed, n_players, noise);
         let report = run(&schedule, &RunOptions::default());
         report.expect_pass(&schedule);
@@ -261,11 +269,92 @@ fn nightly_seed_windows_are_disjoint_and_repeatable() {
 }
 
 #[test]
+fn nightly_noise_selection_covers_swarm_without_perturbing_other_assignments() {
+    let mut counts = BTreeMap::new();
+    for seed in 0..20 {
+        let noise = nightly_noise(seed);
+        *counts.entry(noise).or_insert(0usize) += 1;
+        if noise != BackgroundNoise::Swarm {
+            let historical = match seed % 4 {
+                0 => BackgroundNoise::Clean,
+                1 => BackgroundNoise::Mild,
+                2 => BackgroundNoise::Rough,
+                _ => BackgroundNoise::ReliableFifo,
+            };
+            assert_eq!(noise, historical, "seed {seed} changed legacy assignment");
+        }
+    }
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            (BackgroundNoise::Clean, 4),
+            (BackgroundNoise::Mild, 4),
+            (BackgroundNoise::ReliableFifo, 4),
+            (BackgroundNoise::Rough, 4),
+            (BackgroundNoise::Swarm, 4),
+        ]),
+        "each aligned twenty-seed block must devote one fifth to every noise profile"
+    );
+
+    for shard in 0..NIGHTLY_SHARDS {
+        let swarm_seeds = (0..NIGHTLY_SEEDS_PER_SHARD)
+            .map(|offset| nightly_seed(41, shard, offset))
+            .filter(|seed| nightly_noise(*seed) == BackgroundNoise::Swarm)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            swarm_seeds.len(),
+            usize::try_from(NIGHTLY_SEEDS_PER_SHARD / 5).expect("shard fifth fits usize"),
+            "shard {shard} must devote exactly one fifth of its rows to Swarm"
+        );
+        let swarm_player_counts = swarm_seeds
+            .into_iter()
+            .map(|seed| 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            swarm_player_counts,
+            (2..=16).collect(),
+            "shard {shard} correlated Swarm with only part of the mesh-size axis"
+        );
+    }
+}
+
+#[test]
+fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
+    let schedule = generate(
+        42,
+        SimConfig {
+            noise: BackgroundNoise::Swarm,
+            ..SimConfig::smoke(3)
+        },
+    );
+    assert!(
+        schedule.initial_links.iter().any(|(_, _, policy)| {
+            policy.drop_rate > 0.0
+                && policy.dup_rate > 0.0
+                && !policy.base_delay.is_zero()
+                && !policy.jitter.is_zero()
+        }),
+        "pinned Swarm seed must exercise all four seed-selected axes"
+    );
+    let encoded = serde_json::to_vec(&schedule).expect("Swarm schedule serializes");
+    let replay: Schedule = serde_json::from_slice(&encoded).expect("Swarm schedule deserializes");
+
+    let first = run(&schedule, &RunOptions::default());
+    first.expect_pass(&schedule);
+    let second = run(&replay, &RunOptions::default());
+    second.expect_pass(&replay);
+    assert_eq!(first.trace_hash, second.trace_hash);
+    assert_eq!(first.final_confirmed, second.final_confirmed);
+    assert_eq!(first.net_stats, second.net_stats);
+}
+
+#[test]
 fn non_clean_nightly_lifecycle_rewrites_only_retirement_stories() {
     for noise in [
         BackgroundNoise::Mild,
         BackgroundNoise::Rough,
         BackgroundNoise::ReliableFifo,
+        BackgroundNoise::Swarm,
     ] {
         for seed in [2, 3, 4] {
             let schedule = nightly_schedule(seed, 5, noise);
