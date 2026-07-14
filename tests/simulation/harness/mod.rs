@@ -4177,7 +4177,7 @@ mod tests {
         };
         assert!(validate_run_options(&schedule, &invalid).is_err());
 
-        let mut no_sample = schedule.clone();
+        let mut no_sample = schedule;
         no_sample.events = vec![
             (0, ScheduleEvent::PeerKill { peer: 1 }),
             (100, ScheduleEvent::HealAll),
