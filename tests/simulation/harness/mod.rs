@@ -223,7 +223,7 @@ pub struct RetainedInputRangeEvidence {
 
 impl From<RetainedInputRangeEvidence> for u64 {
     fn from(range: RetainedInputRangeEvidence) -> Self {
-        (u64::from(range.first as u32) << 32) | u64::from(range.last as u32)
+        (Self::from(range.first as u32) << 32) | Self::from(range.last as u32)
     }
 }
 
