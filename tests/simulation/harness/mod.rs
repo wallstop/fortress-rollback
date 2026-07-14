@@ -180,6 +180,11 @@ pub struct RunOptions {
     /// for one directed `(from, to)` link after every simulation step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_output_probe_link: Option<(usize, usize)>,
+    /// If set, retain the high-water spread of authoritative direct receipts
+    /// for one target, together with each observer's physically retained input
+    /// range at that exact cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_range_probe_target: Option<usize>,
     /// Preserve a bounded, phase-resolved controller time series instead of
     /// the ordinary twelve-or-fewer progress samples. The denser series is
     /// intended for focused clock-skew/control-loop experiments. H-SKEW mode
@@ -200,6 +205,63 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+}
+
+/// Inclusive input-history interval retained by one observer at the receipt
+/// probe's high-water cut.
+///
+/// Artifact/trace serialization packs the two signed 32-bit lanes into one
+/// `u64`; validation restores and checks their frame-domain relationship. This
+/// keeps the N=16 × 64-snapshot worst case inside the fixed artifact cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(into = "u64", from = "u64")]
+pub struct RetainedInputRangeEvidence {
+    pub first: i32,
+    pub last: i32,
+}
+
+impl From<RetainedInputRangeEvidence> for u64 {
+    fn from(range: RetainedInputRangeEvidence) -> Self {
+        (u64::from(range.first as u32) << 32) | u64::from(range.last as u32)
+    }
+}
+
+impl From<u64> for RetainedInputRangeEvidence {
+    fn from(packed: u64) -> Self {
+        Self {
+            first: (packed >> 32) as u32 as i32,
+            last: packed as u32 as i32,
+        }
+    }
+}
+
+/// Bounded high-water evidence for one target's direct-receipt spread.
+/// Equal-spread ties retain the latest cut. Dead observers are excluded;
+/// connected observers that have not produced a complete receipt/range pair
+/// remain visible in the vectors but do not contribute to `max_spread`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptRangeEvidence {
+    pub target: usize,
+    pub max_spread: u32,
+    pub at_step: Option<u32>,
+    pub receipts: Vec<Option<i32>>,
+    pub connected: Vec<Option<bool>>,
+    pub retained_ranges: Vec<Option<RetainedInputRangeEvidence>>,
+}
+
+impl ReceiptRangeEvidence {
+    fn new(target: usize, peers: usize) -> Self {
+        Self {
+            target,
+            max_spread: 0,
+            at_step: None,
+            receipts: vec![None; peers],
+            connected: vec![None; peers],
+            retained_ranges: vec![None; peers],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -696,6 +758,9 @@ pub struct TraceSnapshot {
     /// Per-peer CPU-feedback state after this step. Empty when disabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cpu_feedback: Vec<CpuFeedbackEvidence>,
+    /// Receipt/range high-water evidence after this step, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
     pub scheduled_events: Vec<String>,
     pub scheduled_events_truncated: u32,
     pub observed_events: Vec<TraceObservedEvent>,
@@ -774,6 +839,8 @@ struct TraceFinalSummary {
     link_stats_by_link: Vec<TraceLinkStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pending_output_probe: Option<PendingOutputProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_range_probe: Option<ReceiptRangeEvidence>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -828,6 +895,9 @@ pub struct RunReport {
     pub probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals>,
     /// End-of-step protocol backlog evidence for the requested directed link.
     pub pending_output_probe: Option<PendingOutputProbe>,
+    /// High-water direct-receipt spread and retained-range evidence for the
+    /// requested target.
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
@@ -1028,6 +1098,62 @@ fn collect_peer_wire_by_link<I: SimInput>(
         }
     }
     by_link
+}
+
+fn update_receipt_range_probe<I: SimInput>(
+    probe: &mut ReceiptRangeEvidence,
+    peers: &[PeerSlot<I>],
+    dead: &[bool],
+    step: u32,
+) {
+    let mut receipts = vec![None; peers.len()];
+    let mut connected = vec![None; peers.len()];
+    let mut retained_ranges = vec![None; peers.len()];
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    let mut samples = 0_usize;
+    let handle = PlayerHandle::new(probe.target);
+
+    for (observer, slot) in peers.iter().enumerate() {
+        if observer == probe.target || dead.get(observer).copied().unwrap_or(true) {
+            continue;
+        }
+        let is_connected = slot.session.diagnostic_player_connected(handle);
+        let receipt = slot
+            .session
+            .diagnostic_player_receipt_frame(handle)
+            .filter(|frame| frame.is_valid())
+            .map(Frame::as_i32);
+        let retained = slot
+            .session
+            .diagnostic_player_retained_input_range(handle)
+            .map(|(first, last)| RetainedInputRangeEvidence {
+                first: first.as_i32(),
+                last: last.as_i32(),
+            });
+        connected[observer] = is_connected;
+        receipts[observer] = receipt;
+        retained_ranges[observer] = retained;
+        if is_connected == Some(true) {
+            if let (Some(frame), Some(_)) = (receipt, retained) {
+                minimum = minimum.min(frame);
+                maximum = maximum.max(frame);
+                samples = samples.saturating_add(1);
+            }
+        }
+    }
+
+    if samples < 2 {
+        return;
+    }
+    let spread = u32::try_from(maximum.saturating_sub(minimum)).unwrap_or(u32::MAX);
+    if probe.at_step.is_none() || spread >= probe.max_spread {
+        probe.max_spread = spread;
+        probe.at_step = Some(step);
+        probe.receipts = receipts;
+        probe.connected = connected;
+        probe.retained_ranges = retained_ranges;
+    }
 }
 
 fn collect_endpoint_control_samples<I: SimInput>(
@@ -1856,30 +1982,42 @@ pub(super) fn validate_run_options(
                 .to_owned(),
         );
     }
-    let Some((from, to)) = options.pending_output_probe_link else {
-        return Ok(());
-    };
-    if from >= n || to >= n || from == to {
-        return Err(format!(
-            "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
-        ));
+    if let Some(target) = options.receipt_range_probe_target {
+        if n < 3 {
+            return Err(
+                "receipt_range_probe_target requires at least three peers (two observers)"
+                    .to_owned(),
+            );
+        }
+        if target >= n {
+            return Err(format!(
+                "receipt_range_probe_target must name a peer within 0..{n}"
+            ));
+        }
     }
-    let endpoint_retires = schedule.events.iter().any(|(_, event)| {
-        let retired = match event {
-            ScheduleEvent::GracefulRemove { target, .. }
-            | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
-            ScheduleEvent::PeerKill { peer } => Some(*peer),
-            ScheduleEvent::SpectatorHostKill { host } => Some(*host),
-            #[cfg(feature = "hot-join")]
-            ScheduleEvent::HotJoin { slot } => Some(*slot),
-            _ => None,
-        };
-        retired.is_some_and(|peer| peer == from || peer == to)
-    });
-    if endpoint_retires {
-        return Err(format!(
-            "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
-        ));
+    if let Some((from, to)) = options.pending_output_probe_link {
+        if from >= n || to >= n || from == to {
+            return Err(format!(
+                "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
+            ));
+        }
+        let endpoint_retires = schedule.events.iter().any(|(_, event)| {
+            let retired = match event {
+                ScheduleEvent::GracefulRemove { target, .. }
+                | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+                ScheduleEvent::PeerKill { peer } => Some(*peer),
+                ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+                #[cfg(feature = "hot-join")]
+                ScheduleEvent::HotJoin { slot } => Some(*slot),
+                _ => None,
+            };
+            retired.is_some_and(|peer| peer == from || peer == to)
+        });
+        if endpoint_retires {
+            return Err(format!(
+                "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
+            ));
+        }
     }
     Ok(())
 }
@@ -2184,6 +2322,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 after_recovery: None,
                 final_value: 0,
             });
+    let mut receipt_range_probe = options
+        .receipt_range_probe_target
+        .map(|target| ReceiptRangeEvidence::new(target, n));
 
     // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
     // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
@@ -2840,6 +2981,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 probe.after_recovery = Some(value);
             }
         }
+        if let Some(probe) = receipt_range_probe.as_mut() {
+            update_receipt_range_probe(probe, &peers, &dead, step);
+        }
 
         if let Some(spectator) = spectator.as_mut() {
             drive_spectator(
@@ -2882,6 +3026,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 applied_frames: slot.applied_inputs.len(),
                 max_applied_frame: slot.applied_inputs.keys().next_back().copied(),
             }),
+            receipt_range_probe: receipt_range_probe.clone(),
         };
         // The digest and the artifact tail share one stable representation, so
         // every captured step observable (including lifecycle/dead state,
@@ -3083,6 +3228,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         ),
         link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
         pending_output_probe,
+        receipt_range_probe: receipt_range_probe.clone(),
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -3141,6 +3287,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         probe_confirmed,
         probe_peer_wire_by_link,
         pending_output_probe,
+        receipt_range_probe,
         net_stats: net.stats(),
         blocked_drops_by_link,
         fragmentation_drops_by_link,
@@ -3414,6 +3561,7 @@ mod tests {
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
             cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: vec!["\"HealAll\"".to_owned()],
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3465,6 +3613,7 @@ mod tests {
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
             cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3575,6 +3724,7 @@ mod tests {
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
             cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3882,6 +4032,7 @@ mod tests {
         );
         assert_eq!(implicit.link_stats_by_link, explicit.link_stats_by_link);
         assert_eq!(implicit.pending_output_probe, explicit.pending_output_probe);
+        assert_eq!(implicit.receipt_range_probe, explicit.receipt_range_probe);
         assert_eq!(
             implicit.load_game_state_observations,
             explicit.load_game_state_observations
@@ -3969,6 +4120,88 @@ mod tests {
             .push((120, schedule::ScheduleEvent::PeerKill { peer: 1 }));
         retiring.events.sort_by_key(|(step, _)| *step);
         assert!(validate_run_options(&retiring, &options).is_err());
+    }
+
+    #[test]
+    fn receipt_range_probe_tracks_authoritative_receipts_and_retained_ranges() {
+        let n = 3;
+        let mut config = schedule::SimConfig::smoke(n);
+        config.steps = 180;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let schedule = schedule::generate(0x5241_4e47, config);
+        let options = RunOptions {
+            receipt_range_probe_target: Some(2),
+            ..RunOptions::default()
+        };
+
+        let first = run(&schedule, &options);
+        let replay = run(&schedule, &options);
+        first.expect_pass(&schedule);
+        let probe = first
+            .receipt_range_probe
+            .as_ref()
+            .expect("receipt-range probe requested");
+        assert_eq!(probe.target, 2);
+        assert_eq!(probe.at_step, Some(schedule.config.steps - 1));
+        assert_eq!(probe.receipts.len(), n);
+        assert_eq!(probe.connected.len(), n);
+        assert_eq!(probe.retained_ranges.len(), n);
+        assert_eq!(probe.receipts[2], None);
+        for observer in [0, 1] {
+            assert_eq!(probe.connected[observer], Some(true));
+            assert!(probe.receipts[observer].is_some());
+            assert!(probe.retained_ranges[observer].is_some());
+        }
+        assert_eq!(first.receipt_range_probe, replay.receipt_range_probe);
+        assert_eq!(first.trace_hash, replay.trace_hash);
+        assert_eq!(
+            first
+                .trace_tail
+                .last()
+                .and_then(|snapshot| snapshot.receipt_range_probe.as_ref()),
+            first.receipt_range_probe.as_ref()
+        );
+
+        let other_target = run(
+            &schedule,
+            &RunOptions {
+                receipt_range_probe_target: Some(1),
+                ..RunOptions::default()
+            },
+        );
+        assert_ne!(first.trace_hash, other_target.trace_hash);
+
+        let invalid = RunOptions {
+            receipt_range_probe_target: Some(n),
+            ..RunOptions::default()
+        };
+        assert!(validate_run_options(&schedule, &invalid).is_err());
+
+        let mut no_sample = schedule.clone();
+        no_sample.events = vec![
+            (0, ScheduleEvent::PeerKill { peer: 1 }),
+            (100, ScheduleEvent::HealAll),
+        ];
+        no_sample.heal_at = 100;
+        let no_sample_report = run(&no_sample, &options);
+        let no_sample_probe = no_sample_report
+            .receipt_range_probe
+            .expect("requested probe is retained without a complete sample");
+        assert_eq!(no_sample_probe.at_step, None);
+        assert_eq!(no_sample_probe.max_spread, 0);
+        assert!(no_sample_probe.receipts.iter().all(Option::is_none));
+        assert!(no_sample_probe.connected.iter().all(Option::is_none));
+        assert!(no_sample_probe.retained_ranges.iter().all(Option::is_none));
+
+        let two_peer = schedule::generate(0x5241_4e48, schedule::SimConfig::smoke(2));
+        assert!(validate_run_options(
+            &two_peer,
+            &RunOptions {
+                receipt_range_probe_target: Some(1),
+                ..RunOptions::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]

@@ -54,6 +54,7 @@ struct FinalSummary {
     probe_confirmed: Vec<i32>,
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
     pending_output_probe: Option<super::PendingOutputProbe>,
+    receipt_range_probe: Option<super::ReceiptRangeEvidence>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
     fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
@@ -83,6 +84,7 @@ impl From<&RunReport> for FinalSummary {
             probe_confirmed: report.probe_confirmed.clone(),
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
             pending_output_probe: report.pending_output_probe,
+            receipt_range_probe: report.receipt_range_probe.clone(),
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
             fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
@@ -159,6 +161,9 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
         pending_output_probe_link,
+        receipt_range_probe_target: options
+            .receipt_range_probe_target
+            .and_then(|target| remap_index(target, removed)),
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
@@ -927,6 +932,7 @@ mod tests {
             probe_confirmed: Vec::new(),
             probe_peer_wire_by_link: BTreeMap::new(),
             pending_output_probe: None,
+            receipt_range_probe: None,
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
             fragmentation_drops_by_link: BTreeMap::new(),
@@ -1097,6 +1103,7 @@ mod tests {
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
             pending_output_probe_link: Some((3, 0)),
+            receipt_range_probe_target: Some(2),
             phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
@@ -1112,6 +1119,11 @@ mod tests {
         assert_eq!(mapped.probe_confirmed_at, Some(19));
         assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
+        assert_eq!(mapped.receipt_range_probe_target, Some(1));
+        assert_eq!(
+            remap_options(&options, 2, 100).receipt_range_probe_target,
+            None
+        );
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
         assert_eq!(candidate.events.len(), schedule.events.len() - 1);

@@ -303,6 +303,10 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             report.wait_frames_accepted == artifact.wait_frames_accepted,
         ),
         ("cpu_feedback", report.cpu_feedback == artifact.cpu_feedback),
+        (
+            "receipt_range_probe",
+            report.receipt_range_probe == artifact.receipt_range_probe,
+        ),
     ] {
         if !matches {
             return Err(format!(
@@ -428,6 +432,35 @@ mod tests {
         let error = reproduce_artifact(&mutated_trace)
             .expect_err("mutated per-step CPU trace evidence must be rejected");
         assert!(error.contains("trace_tail"), "wrong error: {error}");
+    }
+
+    #[test]
+    fn artifact_reproduction_rejects_mutated_receipt_range_evidence() {
+        let mut config = SimConfig::smoke(3);
+        config.steps = 60;
+        let schedule = generate(19, config);
+        let options = RunOptions {
+            corrupt_state_from: Some((1, 10)),
+            receipt_range_probe_target: Some(2),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "negative control must fail");
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        assert_eq!(reproduce_artifact(&artifact), Ok(()));
+
+        let mut mutated = artifact;
+        let probe = mutated
+            .receipt_range_probe
+            .as_mut()
+            .expect("receipt evidence requested");
+        probe.max_spread = probe.max_spread.saturating_add(1);
+        let error = reproduce_artifact(&mutated)
+            .expect_err("mutated receipt-range evidence must be rejected");
+        assert!(
+            error.contains("receipt_range_probe"),
+            "wrong error: {error}"
+        );
     }
 
     fn temp_root(label: &str) -> PathBuf {

@@ -7938,6 +7938,39 @@ impl<T: Config> P2PSession<T> {
             .map(|status| !status.disconnected)
     }
 
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns this session's authoritative direct receipt/freeze frame
+    /// for a remote `handle`. Local and unregistered handles return `None`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_receipt_frame(&self, handle: PlayerHandle) -> Option<Frame> {
+        if self.player_reg.is_local_player(handle) {
+            return None;
+        }
+        self.local_connect_status
+            .get(handle.as_usize())
+            .map(|status| status.last_frame)
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns the inclusive input-history interval physically retained
+    /// for a remote `handle`. Local and unregistered handles return `None`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_retained_input_range(
+        &self,
+        handle: PlayerHandle,
+    ) -> Option<(Frame, Frame)> {
+        if self.player_reg.is_local_player(handle) {
+            return None;
+        }
+        self.sync_layer
+            .retained_input_range(handle)
+            .ok()
+            .flatten()
+            .map(|range| (range.first, range.last))
+    }
+
     /// Returns the maximum prediction window of a session.
     #[must_use]
     pub fn max_prediction(&self) -> usize {
@@ -18644,6 +18677,20 @@ mod tests {
         assert_eq!(
             session.diagnostic_player_connected(PlayerHandle::new(3)),
             None
+        );
+        assert_eq!(
+            session.diagnostic_player_receipt_frame(PlayerHandle::new(0)),
+            None,
+            "the direct-receipt diagnostic excludes the local handle"
+        );
+        assert_eq!(
+            session.diagnostic_player_receipt_frame(PlayerHandle::new(1)),
+            Some(Frame::new(10))
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(0)),
+            None,
+            "the retained-range diagnostic excludes the local handle"
         );
         assert_eq!(
             advantage_when_connected, 42,

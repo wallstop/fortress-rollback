@@ -3,8 +3,9 @@
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
-    phase_control_sample_capacity, CpuFeedbackEvidence, ProgressSample, RunReport, TraceSnapshot,
-    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
+    phase_control_sample_capacity, CpuFeedbackEvidence, ProgressSample, ReceiptRangeEvidence,
+    RetainedInputRangeEvidence, RunReport, TraceSnapshot, TRACE_STEP_EVENT_CAPACITY,
+    TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -12,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 5 preserves schema-v18 CPU-feedback actuation evidence. Older
-// artifacts cannot diagnose that stronger trace identity and are rejected
-// explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 5;
+// Version 6 preserves direct-receipt and retained-input-range high-water
+// evidence. Older artifacts cannot diagnose that stronger trace identity and
+// are rejected explicitly.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 6;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -65,6 +66,131 @@ fn validate_cpu_feedback_entries(
                 "{context} cpu_feedback[{peer}] has inconsistent clamp evidence"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_receipt_range_evidence(
+    evidence: Option<&ReceiptRangeEvidence>,
+    expected_target: Option<usize>,
+    peers: usize,
+    steps: u32,
+    context: &str,
+) -> Result<(), String> {
+    if evidence.is_some() != expected_target.is_some() {
+        return Err(format!(
+            "{context} receipt_range_probe presence does not match replay options"
+        ));
+    }
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    if Some(evidence.target) != expected_target || evidence.target >= peers {
+        return Err(format!(
+            "{context} receipt_range_probe target {} does not match the requested target",
+            evidence.target
+        ));
+    }
+    for (name, len) in [
+        ("receipts", evidence.receipts.len()),
+        ("connected", evidence.connected.len()),
+        ("retained_ranges", evidence.retained_ranges.len()),
+    ] {
+        if len != peers {
+            return Err(format!(
+                "{context} receipt_range_probe has {len} {name} entries for {peers} peers"
+            ));
+        }
+    }
+    let target_has_observation = evidence
+        .receipts
+        .get(evidence.target)
+        .is_some_and(Option::is_some)
+        || evidence
+            .connected
+            .get(evidence.target)
+            .is_some_and(Option::is_some)
+        || evidence
+            .retained_ranges
+            .get(evidence.target)
+            .is_some_and(Option::is_some);
+    if target_has_observation {
+        return Err(format!(
+            "{context} receipt_range_probe must exclude the target's self-observation"
+        ));
+    }
+    if evidence.receipts.iter().flatten().any(|frame| *frame < 0)
+        || evidence
+            .retained_ranges
+            .iter()
+            .flatten()
+            .any(|range| range.first < 0 || range.first > range.last)
+    {
+        return Err(format!(
+            "{context} receipt_range_probe contains an invalid frame or retained range"
+        ));
+    }
+    for observer in 0..peers {
+        let receipt = evidence.receipts[observer];
+        let retained = evidence.retained_ranges[observer];
+        if let (Some(true), Some(receipt), Some(retained)) =
+            (evidence.connected[observer], receipt, retained)
+        {
+            if retained.last != receipt {
+                return Err(format!(
+                    "{context} receipt_range_probe observer {observer} retained range ends at {}, not receipt {receipt}",
+                    retained.last
+                ));
+            }
+        }
+    }
+    let Some(at_step) = evidence.at_step else {
+        if evidence.max_spread != 0 {
+            return Err(format!(
+                "{context} receipt_range_probe has spread without a sample step"
+            ));
+        }
+        if evidence.receipts.iter().any(Option::is_some)
+            || evidence.connected.iter().any(Option::is_some)
+            || evidence.retained_ranges.iter().any(Option::is_some)
+        {
+            return Err(format!(
+                "{context} receipt_range_probe has observations without a sample step"
+            ));
+        }
+        return Ok(());
+    };
+    if at_step >= steps {
+        return Err(format!(
+            "{context} receipt_range_probe step {at_step} is outside 0..{steps}"
+        ));
+    }
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    let mut samples = 0_usize;
+    for ((&connected, &receipt), &retained) in evidence
+        .connected
+        .iter()
+        .zip(&evidence.receipts)
+        .zip(&evidence.retained_ranges)
+    {
+        if let (Some(true), Some(frame), Some(_)) = (connected, receipt, retained) {
+            minimum = minimum.min(frame);
+            maximum = maximum.max(frame);
+            samples = samples.saturating_add(1);
+        }
+    }
+    if samples < 2 {
+        return Err(format!(
+            "{context} receipt_range_probe high-water sample has fewer than two connected observers"
+        ));
+    }
+    let spread = u32::try_from(maximum.saturating_sub(minimum)).unwrap_or(u32::MAX);
+    if evidence.max_spread != spread {
+        return Err(format!(
+            "{context} receipt_range_probe spread {} does not match receipt extrema {spread}",
+            evidence.max_spread
+        ));
     }
     Ok(())
 }
@@ -195,6 +321,9 @@ pub struct FailureArtifact {
     /// Final per-peer deterministic CPU-feedback evidence.
     #[serde(default)]
     pub cpu_feedback: Vec<CpuFeedbackEvidence>,
+    /// Direct-receipt and retained-range high-water evidence, when requested.
+    #[serde(default)]
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -227,6 +356,7 @@ impl FailureArtifact {
             wait_recommendations_accepted: report.wait_recommendations_accepted.clone(),
             wait_frames_accepted: report.wait_frames_accepted.clone(),
             cpu_feedback: report.cpu_feedback.clone(),
+            receipt_range_probe: report.receipt_range_probe.clone(),
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -312,6 +442,13 @@ impl FailureArtifact {
             &self.cpu_feedback,
             expected_cpu_feedback_entries,
             &self.schedule,
+            "artifact",
+        )?;
+        validate_receipt_range_evidence(
+            self.receipt_range_probe.as_ref(),
+            self.replay_options.receipt_range_probe_target,
+            n,
+            self.schedule.config.steps,
             "artifact",
         )?;
         let expected_wait_policy_entries = if self.schedule.schema_version >= 17 {
@@ -566,6 +703,13 @@ impl FailureArtifact {
                 &self.schedule,
                 &format!("trace step {}", snapshot.step),
             )?;
+            validate_receipt_range_evidence(
+                snapshot.receipt_range_probe.as_ref(),
+                self.replay_options.receipt_range_probe_target,
+                n,
+                snapshot.step.saturating_add(1),
+                &format!("trace step {}", snapshot.step),
+            )?;
             if snapshot.scheduled_events.len() > TRACE_STEP_EVENT_CAPACITY
                 || snapshot.observed_events.len() > TRACE_STEP_EVENT_CAPACITY
             {
@@ -634,6 +778,15 @@ impl FailureArtifact {
             .is_some_and(|snapshot| snapshot.cpu_feedback != self.cpu_feedback)
         {
             return Err("artifact final cpu_feedback differs from the final trace step".to_owned());
+        }
+        if self
+            .trace_tail
+            .last()
+            .is_some_and(|snapshot| snapshot.receipt_range_probe != self.receipt_range_probe)
+        {
+            return Err(
+                "artifact final receipt_range_probe differs from the final trace step".to_owned(),
+            );
         }
         Ok(())
     }
@@ -861,6 +1014,7 @@ mod tests {
             wait_recommendations_accepted: vec![0, 0],
             wait_frames_accepted: vec![0, 0],
             cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -875,6 +1029,7 @@ mod tests {
                         2
                     ],
                     cpu_feedback: Vec::new(),
+                    receipt_range_probe: None,
                     scheduled_events: Vec::new(),
                     scheduled_events_truncated: 0,
                     observed_events: Vec::new(),
@@ -1024,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_failure_builds_a_valid_v5_artifact() {
+    fn legacy_schedule_failure_builds_a_valid_v6_artifact() {
         let mut config = SimConfig::smoke(2);
         config.steps = 60;
         config.noise = BackgroundNoise::Clean;
@@ -1046,37 +1201,39 @@ mod tests {
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
             .validate()
-            .expect("legacy schedule report produces a valid v5 artifact");
+            .expect("legacy schedule report produces a valid v6 artifact");
     }
 
     #[test]
-    fn artifact_v4_without_cpu_feedback_fields_reaches_explicit_schema_rejection() {
+    fn artifact_v5_without_receipt_range_fields_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(4),
+            serde_json::Value::from(5),
         );
-        for field in [
-            "progress_samples",
-            "frame_opportunities",
-            "wait_frames_obeyed",
-            "wait_recommendation_max",
-            "wait_recommendation_frames",
-            "wait_recommendations_accepted",
-            "wait_frames_accepted",
-            "cpu_feedback",
-        ] {
-            assert!(object.remove(field).is_some(), "fixture contains {field}");
+        assert!(
+            object.remove("receipt_range_probe").is_some(),
+            "fixture contains receipt_range_probe"
+        );
+        let trace_tail = object
+            .get_mut("trace_tail")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("fixture contains trace_tail");
+        for snapshot in trace_tail {
+            let snapshot = snapshot
+                .as_object_mut()
+                .expect("trace snapshot serializes as an object");
+            let _ = snapshot.remove("receipt_range_probe");
         }
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v4 envelope reaches validation");
-        let error = artifact.validate().expect_err("v4 schema is unsupported");
+            serde_json::from_value(value).expect("v5 envelope reaches validation");
+        let error = artifact.validate().expect_err("v5 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 4"),
+            error.contains("unsupported failure artifact schema 5"),
             "wrong diagnostic: {error}"
         );
     }
@@ -1128,6 +1285,101 @@ mod tests {
         wrong_final.cpu_feedback[0].charged_frames -= 1;
         wrong_final.cpu_feedback[0].work_us -= 8_001;
         assert!(wrong_final.validate().is_err());
+    }
+
+    #[test]
+    fn receipt_range_artifact_preserves_and_validates_high_water_evidence() {
+        let mut config = SimConfig::smoke(3);
+        config.steps = 180;
+        config.noise = BackgroundNoise::Clean;
+        let schedule = crate::simulation::harness::schedule::generate(0x5241_4e47, config);
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                receipt_range_probe_target: Some(2),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert!(report.receipt_range_probe.is_some());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact
+            .validate()
+            .expect("receipt-range artifact validates");
+
+        let mut missing_entry = artifact.clone();
+        let _ = missing_entry
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .receipts
+            .pop();
+        assert!(missing_entry.validate().is_err());
+
+        let mut wrong_spread = artifact.clone();
+        wrong_spread
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .max_spread += 1;
+        assert!(wrong_spread.validate().is_err());
+
+        let mut wrong_trace = artifact.clone();
+        wrong_trace.trace_tail[0]
+            .receipt_range_probe
+            .as_mut()
+            .expect("trace probe exists")
+            .target = 1;
+        assert!(wrong_trace.validate().is_err());
+
+        let mut wrong_final = artifact;
+        wrong_final
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .receipts[0] = None;
+        assert!(wrong_final.validate().is_err());
+    }
+
+    #[test]
+    fn receipt_range_validation_allows_incomplete_and_disconnected_nonparticipants() {
+        let incomplete = ReceiptRangeEvidence {
+            target: 3,
+            max_spread: 10,
+            at_step: Some(5),
+            receipts: vec![None, Some(10), Some(0), None],
+            connected: vec![Some(true), Some(true), Some(true), None],
+            retained_ranges: vec![
+                None,
+                Some(RetainedInputRangeEvidence { first: 0, last: 10 }),
+                Some(RetainedInputRangeEvidence { first: 0, last: 0 }),
+                None,
+            ],
+        };
+        validate_receipt_range_evidence(Some(&incomplete), Some(3), 4, 10, "test")
+            .expect("an incomplete connected observer does not define the extrema");
+
+        let mut disconnected = incomplete;
+        disconnected.connected[0] = Some(false);
+        disconnected.receipts[0] = Some(4);
+        disconnected.retained_ranges[0] = Some(RetainedInputRangeEvidence { first: 0, last: 9 });
+        validate_receipt_range_evidence(Some(&disconnected), Some(3), 4, 10, "test")
+            .expect("a disconnected freeze may sit below retained history's physical end");
+
+        let mut future_step = disconnected.clone();
+        future_step.at_step = Some(10);
+        assert!(
+            validate_receipt_range_evidence(Some(&future_step), Some(3), 4, 10, "test").is_err()
+        );
+
+        let mut self_observation = disconnected;
+        self_observation.receipts[3] = Some(0);
+        assert!(
+            validate_receipt_range_evidence(Some(&self_observation), Some(3), 4, 10, "test")
+                .is_err()
+        );
     }
 
     #[test]
@@ -1236,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v18_h_osc_cpu_artifact_preserves_full_n16_evidence_under_size_cap() {
+    fn schema_v18_h_osc_cpu_receipt_artifact_preserves_full_n16_evidence_under_size_cap() {
         let n = 16;
         let mut config = SimConfig::smoke(n);
         config.steps = 3_000;
@@ -1306,6 +1558,7 @@ mod tests {
         let mut artifact = sample_artifact();
         artifact.schedule = schedule;
         artifact.replay_options.phase_resolved_control_samples = true;
+        artifact.replay_options.receipt_range_probe_target = Some(n - 1);
         artifact.final_confirmed = vec![0; n];
         artifact.progress_samples = progress_samples;
         artifact.frame_opportunities = vec![0; n];
@@ -1315,6 +1568,25 @@ mod tests {
         artifact.wait_recommendations_accepted = vec![0; n];
         artifact.wait_frames_accepted = vec![0; n];
         artifact.cpu_feedback = vec![maximum_cpu_evidence; n];
+        let mut maximum_receipts = vec![Some(i32::MAX); n];
+        maximum_receipts[0] = Some(0);
+        maximum_receipts[n - 1] = None;
+        let mut maximum_connections = vec![Some(true); n];
+        maximum_connections[n - 1] = None;
+        let mut maximum_ranges = maximum_receipts
+            .iter()
+            .map(|receipt| receipt.map(|last| RetainedInputRangeEvidence { first: 0, last }))
+            .collect::<Vec<_>>();
+        maximum_ranges[n - 1] = None;
+        let maximum_receipt_evidence = ReceiptRangeEvidence {
+            target: n - 1,
+            max_spread: i32::MAX as u32,
+            at_step: Some(2_935),
+            receipts: maximum_receipts,
+            connected: maximum_connections,
+            retained_ranges: maximum_ranges,
+        };
+        artifact.receipt_range_probe = Some(maximum_receipt_evidence.clone());
         for (offset, snapshot) in artifact.trace_tail.iter_mut().enumerate() {
             snapshot.step = 2_936 + u32::try_from(offset).expect("tail offset fits u32");
             snapshot.confirmed_frames = vec![0; n];
@@ -1322,6 +1594,7 @@ mod tests {
             snapshot.dead = vec![false; n];
             snapshot.game_states = vec![TraceGameState { frame: 0, value: 0 }; n];
             snapshot.cpu_feedback = vec![maximum_cpu_evidence; n];
+            snapshot.receipt_range_probe = Some(maximum_receipt_evidence.clone());
         }
         artifact
             .validate()
