@@ -80,12 +80,14 @@
 /// This type is re-exported in [`__internal`](crate::__internal) for testing and fuzzing.
 /// It is not part of the stable public API.
 ///
-/// # Formal Specification Alignment
-/// - **TLA+**: State machine modeled in `specs/tla/NetworkProtocol.tla`
-/// - **Verified properties**:
-///   - Valid transitions: Initializing -> Synchronizing -> Running -> Disconnected -> Shutdown
-///   - `sync_remaining` counter never negative (SyncRemainingNonNegative invariant)
-///   - Only Running state processes game inputs
+/// # Verification Coverage
+/// - Kani proofs check the five-state enum representation.
+/// - The `SyncHandshakeV1` TLA+ family models bounded two-peer, two-field configuration-handshake
+///   safety and fair-delivery convergence.
+/// - `PeerDrop.tla` models the halt-versus-continue peer-drop policy.
+///
+/// These artifacts are not a runtime trace-refinement proof; protocol and session tests exercise
+/// the corresponding production transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolState {
     /// Initial state before any communication.
@@ -305,37 +307,6 @@ mod tests {
             assert_eq!(format!("{}", state), state.as_str());
         }
     }
-
-    // ==========================================================================
-    // State Machine Transition Documentation Tests
-    // ==========================================================================
-
-    /// Documents the valid state transitions as per the TLA+ specification.
-    #[test]
-    fn protocol_state_transition_documentation() {
-        // This test documents the valid state transitions.
-        // The actual transition logic is in the Protocol struct.
-        // Valid transitions:
-        // Initializing -> Synchronizing (via synchronize())
-        // Synchronizing -> Running (via complete_sync())
-        // Running -> Disconnected (via disconnect())
-        // Disconnected -> Shutdown (via poll() when disconnected)
-        // Any state -> Shutdown (via explicit shutdown)
-
-        // Verify all states can be constructed and matched
-        let states = [
-            ProtocolState::Initializing,
-            ProtocolState::Synchronizing,
-            ProtocolState::Running,
-            ProtocolState::Disconnected,
-            ProtocolState::Shutdown,
-        ];
-
-        // Each state should be in the array
-        assert_eq!(states.len(), 5);
-        assert!(matches!(states[0], ProtocolState::Initializing));
-        assert!(matches!(states[4], ProtocolState::Shutdown));
-    }
 }
 
 // =============================================================================
@@ -348,7 +319,7 @@ mod tests {
 //
 // 1. **Discriminant Uniqueness**: Each variant has a distinct discriminant value
 // 2. **Exhaustive Matching**: All variants can be matched exhaustively
-// 3. **State Count**: Exactly 5 states exist (matching TLA+ specification)
+// 3. **State Index Domain**: The five current variants map to indices 0 through 4
 // 4. **Clone Correctness**: Cloning preserves equality
 // 5. **PartialEq Reflexivity**: Every state equals itself
 //
@@ -360,7 +331,7 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    /// Total number of protocol states (must match TLA+ specification).
+    /// Total number of current protocol-state variants.
     const PROTOCOL_STATE_COUNT: usize = 5;
 
     /// Helper to convert any u8 to a ProtocolState (for exhaustive testing).
@@ -387,16 +358,16 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: ProtocolState has exactly 5 variants.
+    /// Proof: the index helper accepts exactly the five current variant indices.
     ///
-    /// Verifies alignment with TLA+ specification which defines exactly 5 states.
-    /// This proof ensures no variants are accidentally added or removed.
+    /// This proof keeps the helper's accepted index domain explicit. The exhaustive matches below
+    /// make a newly added enum variant a compile error until the helper is updated.
     ///
     /// - Tier: 1 (Fast, <30s)
-    /// - Verifies: State enum variant count matches TLA+ spec
+    /// - Verifies: State-helper index domain
     /// - Related: proof_state_index_bijection, proof_exhaustive_match
     #[kani::proof]
-    fn proof_state_count_matches_specification() {
+    fn proof_state_index_domain() {
         let index: u8 = kani::any();
 
         // Only indices 0-4 should produce valid states
@@ -415,7 +386,7 @@ mod kani_proofs {
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Index round-trip correctness
-    /// - Related: proof_state_count_matches_specification, proof_variants_distinct
+    /// - Related: proof_state_index_domain, proof_variants_distinct
     #[kani::proof]
     fn proof_state_index_bijection() {
         let index: u8 = kani::any();
@@ -507,7 +478,7 @@ mod kani_proofs {
     ///
     /// - Tier: 1 (Fast, <30s)
     /// - Verifies: Match exhaustiveness for all state variants
-    /// - Related: proof_state_count_matches_specification
+    /// - Related: proof_state_index_domain
     #[kani::proof]
     fn proof_exhaustive_match() {
         let index: u8 = kani::any();
@@ -530,171 +501,29 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: Shutdown is reachable from any state conceptually.
-    ///
-    /// This documents that Shutdown is the terminal state. In practice,
-    /// transitions go through Disconnected first, but protocol can force
-    /// shutdown from any state via explicit shutdown call.
+    /// Proof: Shutdown uses the documented helper index.
     ///
     /// - Tier: 1 (Fast, <30s)
-    /// - Verifies: Shutdown is terminal state (highest index)
-    /// - Related: proof_initializing_is_initial, proof_transition_matrix_rejects_backwards
+    /// - Verifies: Shutdown helper index
+    /// - Related: proof_initializing_variant_index
     #[kani::proof]
-    fn proof_shutdown_is_terminal() {
-        // Shutdown is defined as the terminal state - no transitions out
-        // This proof documents this invariant symbolically
+    fn proof_shutdown_variant_index() {
         let shutdown = ProtocolState::Shutdown;
         let index = state_to_index(&shutdown);
 
-        kani::assert(index == 4, "Shutdown should have highest index (terminal)");
+        kani::assert(index == 4, "Shutdown should use index 4");
     }
 
-    /// Proof: Initializing is the only valid initial state.
-    ///
-    /// Verifies that protocols start in Initializing state (index 0).
+    /// Proof: Initializing uses the documented helper index.
     ///
     /// - Tier: 1 (Fast, <30s)
-    /// - Verifies: Initial state has index 0
-    /// - Related: proof_shutdown_is_terminal, proof_transition_matrix_sync_required
+    /// - Verifies: Initializing helper index
+    /// - Related: proof_shutdown_variant_index
     #[kani::proof]
-    fn proof_initializing_is_initial() {
+    fn proof_initializing_variant_index() {
         let initializing = ProtocolState::Initializing;
         let index = state_to_index(&initializing);
 
-        kani::assert(
-            index == 0,
-            "Initializing should have index 0 (initial state)",
-        );
-    }
-
-    // =========================================================================
-    // State Transition Matrix Verification
-    //
-    // These proofs verify the documented state transition rules from the TLA+
-    // specification. The actual production code in `UdpProtocol` is too complex
-    // for Kani (uses Vec, BTreeMap, Instant), but these proofs verify the
-    // transition matrix that production code must follow.
-    //
-    // Production code references:
-    // - synchronize() at mod.rs:380 transitions Initializing -> Synchronizing
-    // - on_sync_reply() at mod.rs:764 transitions Synchronizing -> Running
-    // - disconnect() at mod.rs:365 transitions Running -> Disconnected
-    // - poll() transitions Disconnected -> Shutdown after timeout
-    // =========================================================================
-
-    /// Helper: Documented state transition matrix.
-    ///
-    /// This function encodes the valid transitions from the TLA+ specification
-    /// (specs/tla/NetworkProtocol.tla). Production code must follow these rules.
-    ///
-    /// Valid transitions:
-    /// - Initializing (0) -> Synchronizing (1): via synchronize() at mod.rs:389
-    /// - Synchronizing (1) -> Running (2): via on_sync_reply() at mod.rs:764
-    /// - Running (2) -> Disconnected (3): via disconnect() at mod.rs:370
-    /// - Disconnected (3) -> Shutdown (4): via poll() timeout logic
-    /// - Any state -> Shutdown (4): explicit shutdown
-    /// - Same state -> Same state: no-op transitions are valid
-    fn documented_transition_valid(from_idx: u8, to_idx: u8) -> bool {
-        match (from_idx, to_idx) {
-            // Normal forward transitions per TLA+ spec
-            (0, 1) => true, // Initializing -> Synchronizing
-            (1, 2) => true, // Synchronizing -> Running
-            (2, 3) => true, // Running -> Disconnected
-            (3, 4) => true, // Disconnected -> Shutdown
-            // Emergency shutdown from any state
-            (_, 4) => true, // Any -> Shutdown
-            // Stay in same state (valid for stability)
-            (s, t) if s == t => true,
-            // All other transitions violate the TLA+ specification
-            _ => false,
-        }
-    }
-
-    /// Proof: Documented transition matrix rejects backward transitions.
-    ///
-    /// Verifies that the transition matrix properly rejects invalid backward
-    /// transitions. This is a property the production code relies on.
-    /// TLA+ alignment: NetworkProtocol.tla ValidTransition predicate.
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: No backward state transitions allowed
-    /// - Related: proof_transition_matrix_sequential, proof_transition_matrix_sync_required
-    // kani::no-unwind-needed: u8 match on transition matrix, no loops
-    #[kani::proof]
-    fn proof_transition_matrix_rejects_backwards() {
-        let from_idx: u8 = kani::any();
-        let to_idx: u8 = kani::any();
-        kani::assume(from_idx < PROTOCOL_STATE_COUNT as u8);
-        kani::assume(to_idx < PROTOCOL_STATE_COUNT as u8);
-
-        let is_valid = documented_transition_valid(from_idx, to_idx);
-
-        // Backward transitions (except staying in place) must be rejected
-        if to_idx < from_idx {
-            kani::assert(!is_valid, "Backward transitions should be invalid");
-        }
-
-        // Shutdown must always be reachable (for error recovery)
-        if to_idx == 4 {
-            kani::assert(is_valid, "Shutdown should always be reachable");
-        }
-
-        // Normal single-step forward transitions must be valid
-        if to_idx == from_idx + 1 && from_idx < 4 {
-            kani::assert(is_valid, "Forward step should be valid");
-        }
-    }
-
-    /// Proof: Transition matrix enforces sequential progression.
-    ///
-    /// Verifies that non-shutdown transitions must be single steps forward.
-    /// This ensures synchronization cannot be skipped.
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: Single-step forward progression only
-    /// - Related: proof_transition_matrix_rejects_backwards, proof_transition_matrix_sync_required
-    // kani::no-unwind-needed: u8 match on transition matrix, no loops
-    #[kani::proof]
-    fn proof_transition_matrix_sequential() {
-        let from_idx: u8 = kani::any();
-        let to_idx: u8 = kani::any();
-        kani::assume(from_idx < PROTOCOL_STATE_COUNT as u8);
-        kani::assume(to_idx < PROTOCOL_STATE_COUNT as u8);
-
-        // If not going to shutdown and not staying in place
-        if to_idx != 4 && to_idx != from_idx {
-            let is_one_step = to_idx == from_idx + 1;
-            let is_valid = documented_transition_valid(from_idx, to_idx);
-
-            // If valid and not shutdown and not same state, must be one step
-            if is_valid {
-                kani::assert(
-                    is_one_step,
-                    "Non-shutdown transitions should be single steps",
-                );
-            }
-        }
-    }
-
-    /// Proof: Cannot bypass synchronization to reach Running.
-    ///
-    /// Verifies synchronize() precondition (mod.rs:381): must be in Initializing
-    /// to start sync. Production code: `if self.state != ProtocolState::Initializing`
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: Synchronization cannot be skipped
-    /// - Related: proof_initializing_is_initial, proof_transition_matrix_sequential
-    // kani::no-unwind-needed: constant transition-matrix lookups, no loops
-    #[kani::proof]
-    fn proof_transition_matrix_sync_required() {
-        // Cannot go directly from Initializing to Running (must sync first)
-        let init_to_running = documented_transition_valid(0, 2);
-        kani::assert(!init_to_running, "Cannot skip Synchronizing");
-
-        // The valid path: Init -> Sync -> Running
-        let init_to_sync = documented_transition_valid(0, 1);
-        let sync_to_running = documented_transition_valid(1, 2);
-        kani::assert(init_to_sync, "Can go from Initializing to Synchronizing");
-        kani::assert(sync_to_running, "Can go from Synchronizing to Running");
+        kani::assert(index == 0, "Initializing should use index 0");
     }
 }

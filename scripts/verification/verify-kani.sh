@@ -435,14 +435,14 @@ TIER1_PROOFS=(
     "proof_zero_window_size_corrected"
     "proof_negative_frame_safe"
     # Protocol state proofs (src/network/protocol/state.rs)
-    "proof_state_count_matches_specification"
+    "proof_state_index_domain"
     "proof_state_index_bijection"
     "proof_clone_correctness"
     "proof_protocol_state_partial_eq_symmetric"
     "proof_variants_distinct"
     "proof_exhaustive_match"
-    "proof_shutdown_is_terminal"
-    "proof_initializing_is_initial"
+    "proof_shutdown_variant_index"
+    "proof_initializing_variant_index"
     # Protocol event proofs (src/network/protocol/event.rs)
     "proof_event_partial_eq_symmetric"
     "proof_synchronizing_preserves_fields"
@@ -474,8 +474,6 @@ TIER1_PROOFS=(
     # SyncLayer construction preconditions (src/sync_layer/mod.rs)
     "proof_sync_layer_default_queue_length_valid"
     # Protocol mod.rs proofs (src/network/protocol/mod.rs)
-    "proof_protocol_state_count"
-    "proof_running_is_active_state"
     "proof_connection_status_default"
     "proof_connection_status_frame_preservation"
     "proof_connection_status_disconnected_flag"
@@ -521,18 +519,12 @@ TIER2_PROOFS=(
     "proof_saved_states_circular_index"
     "proof_freeze_player_rejects_invalid_handle"
     "proof_freeze_player_preserves_frame_state"
-    # Protocol state transition proofs (src/network/protocol/state.rs)
-    "proof_transition_matrix_rejects_backwards"
-    "proof_transition_matrix_sequential"
-    "proof_transition_matrix_sync_required"
     # Protocol input_bytes proofs (src/network/protocol/input_bytes.rs)
     "proof_player_slice_bounds_valid"
     "proof_first_non_null_frame_selection"
     # Protocol mod.rs proofs (src/network/protocol/mod.rs)
     "proof_frame_addition_safe"
     "proof_frame_gap_safe"
-    "proof_synchronize_precondition"
-    "proof_disconnect_idempotent_from_shutdown"
     "proof_sync_counter_decrement_safe"
     "proof_sync_remaining_bounds"
     "proof_local_frame_advantage_bounds"

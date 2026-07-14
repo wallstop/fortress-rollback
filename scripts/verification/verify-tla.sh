@@ -3,7 +3,7 @@
 #
 # Usage: ./scripts/verification/verify-tla.sh [options] [spec-name]
 #   ./scripts/verification/verify-tla.sh              # Verify all specs
-#   ./scripts/verification/verify-tla.sh NetworkProtocol  # Verify single spec
+#   ./scripts/verification/verify-tla.sh SyncHandshakeV1  # Verify single spec
 #   ./scripts/verification/verify-tla.sh --quick      # Quick verification with smaller bounds
 #   ./scripts/verification/verify-tla.sh --list       # List available specs
 #
@@ -61,7 +61,6 @@ NC='\033[0m' # No Color
 
 # Specs to verify (only specs with .cfg files will be checked)
 SPECS=(
-    "NetworkProtocol"
     "SyncHandshakeV1"
     "SyncHandshakeV1Fair"
     "SyncHandshakeV1Mismatch"
@@ -115,7 +114,7 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  $0                      # Verify all specs"
-    echo "  $0 NetworkProtocol      # Verify single spec"
+    echo "  $0 SyncHandshakeV1      # Verify single spec"
     echo "  $0 --quick              # Quick verification"
     echo "  $0 --quick --fail-fast  # CI mode: quick, stop on first failure"
 }
@@ -478,6 +477,8 @@ verify_coordinated_peer_drop_companion() {
 }
 
 print_summary() {
+    local displayed_skipped=0
+
     echo ""
     echo "=========================================="
     echo "TLA+ Verification Summary"
@@ -491,14 +492,14 @@ print_summary() {
         case "$result" in
             PASS) color="$GREEN"; symbol="✓" ;;
             FAIL) color="$RED"; symbol="✗" ;;
-            SKIP) color="$YELLOW"; symbol="-" ;;
+            SKIP) color="$YELLOW"; symbol="-"; displayed_skipped=$((displayed_skipped + 1)) ;;
         esac
 
         echo -e "  $symbol $spec: ${color}$result${NC}"
     done
 
     echo "=========================================="
-    echo -e "  ${GREEN}Passed: $PASSED${NC}  ${RED}Failed: $FAILED${NC}  ${YELLOW}Skipped: $SKIPPED${NC}"
+    echo -e "  ${GREEN}Passed: $PASSED${NC}  ${RED}Failed: $FAILED${NC}  ${YELLOW}Skipped: $displayed_skipped${NC}"
     echo "=========================================="
 }
 
