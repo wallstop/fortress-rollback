@@ -57,6 +57,7 @@ TraceAction(row) ==
     CASE row.action = "SendSyncRequest" -> SendSyncRequest(row.peer)
       [] row.action = "HandleSyncRequest" -> HandleSyncRequest(row.peer)
       [] row.action = "HandleSyncReply" -> HandleSyncReply(row.peer)
+      [] row.action = "DuplicateMessage" -> DuplicateMessage(row.peer)
       [] row.action = "TickTimeout" -> TickTimeout(row.peer)
       [] row.action = "ReportSyncTimeout" -> ReportSyncTimeout(row.peer)
       [] OTHER -> FALSE

@@ -1,1 +1,1 @@
-{"schema":1,"trace":"duplicate-reply-decrement","expect":"reject","description":"An already accepted reply token cannot decrement syncRemaining again.","derived_from":"matching.ndjson","mutation":{"step":8,"variable":"syncRemaining","peer":"p1","from":1,"to":0}}
+{"schema":1,"trace":"duplicate-reply-decrement","expect":"reject","description":"A duplicated reply with an already consumed request identity cannot decrement syncRemaining again.","derived_from":"matching.ndjson","mutation":{"step":9,"variable":"syncRemaining","peer":"p1","from":1,"to":0}}

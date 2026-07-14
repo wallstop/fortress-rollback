@@ -397,6 +397,11 @@ pub mod __internal {
     pub use crate::network::protocol::{
         fuzz_protocol_input_packet, Event, ProtocolState, UdpProtocol,
     };
+    #[cfg(feature = "trace-validation")]
+    pub use crate::network::protocol::{
+        HandshakeReplyDisposition, HandshakeRequestDisposition, HandshakeRequestIdDisposition,
+        HandshakeTraceAction, HandshakeTraceConfig, HandshakeTraceEvent, HandshakeTraceOverflow,
+    };
 
     // RLE compression (internal implementation)
     pub use crate::rle::{decode as rle_decode, encode as rle_encode};
