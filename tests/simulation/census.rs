@@ -5,13 +5,14 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    oracle::OracleFailure, peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload,
-    RunOptions, RunReport, TraceSessionState, WideStubInput,
+    oracle::{OracleFailure, ViolationSource},
+    peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload, RunOptions, RunReport,
+    TraceSessionState, WideStubInput,
 };
 use crate::common::sim_net::{
     BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
 };
-use fortress_rollback::{EventKind, PlayerHandle};
+use fortress_rollback::{EventKind, PlayerHandle, SessionState};
 use std::time::Duration;
 
 const SPARSE_DROP_AT: u32 = 180;
@@ -1675,6 +1676,45 @@ fn frozen_queue_network_blip_schedule() -> Schedule {
     }
 }
 
+fn h_ring_double_failure_relay_schedule() -> Schedule {
+    const N: usize = 4;
+    const TARGET: usize = 3;
+    const LOW_ORIGIN: usize = 1;
+    let mut config = SimConfig::smoke(N);
+    config.steps = 600;
+    config.noise = BackgroundNoise::Clean;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+    config.input_delay = 0;
+    config.max_prediction = fortress_rollback::__internal::MAX_FRAME_DELAY;
+
+    let events = vec![
+        // Build the target-receipt gradient: the low origin stops receiving
+        // target inputs while the observer and relay continue receiving them.
+        (
+            50,
+            ScheduleEvent::Block {
+                from: TARGET,
+                to: LOW_ORIGIN,
+                blocked: true,
+            },
+        ),
+        // Heal before any lifecycle failure. H-RING asks whether this receipt
+        // gradient can evict the frozen slot *before* the double-failure relay
+        // choreography begins.
+        (180, ScheduleEvent::HealAll),
+    ];
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_5249,
+        link_seed: 0xCE45_524A,
+        config,
+        initial_links: clean_initial_links(N),
+        events,
+        heal_at: 180,
+    }
+}
+
 fn sparse_graceful_drop_rollback_schedule() -> Schedule {
     let n = 3;
     let mut config = SimConfig::smoke(n);
@@ -2191,4 +2231,152 @@ fn frozen_queue_survivors_resume_after_network_blip() {
         report.trace_hash, again.trace_hash,
         "network-blip census row must reproduce its exact trace"
     );
+}
+
+/// H-RING: directly measure the maximum target-receipt stagger admitted by the
+/// N=4 double-failure-relay topology. The low connected receipt pins the source
+/// at the exact ring boundary, so the hypothesized >128-frame stagger and
+/// physical eviction do not occur before the first failure. When the next
+/// input arrives, the queue must fail closed rather than evicting the frozen
+/// value or silently confirming divergent state.
+#[test]
+fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
+    const OBSERVER: usize = 0;
+    const LOW_ORIGIN: usize = 1;
+    const TARGET: usize = 3;
+    let schedule = h_ring_double_failure_relay_schedule();
+    let options = RunOptions {
+        receipt_range_probe_target: Some(TARGET),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    let probe = report
+        .receipt_range_probe
+        .as_ref()
+        .expect("H-RING requests receipt/range evidence");
+    assert_eq!(probe.target, TARGET);
+    assert_eq!(
+        probe.max_spread,
+        u32::try_from(fortress_rollback::__internal::MAX_FRAME_DELAY)
+            .expect("frame delay bound fits u32"),
+        "H-RING must fill, but not cross, the inclusive input-ring boundary: {probe:?}"
+    );
+    assert_eq!(
+        probe.connected[OBSERVER],
+        Some(true),
+        "the target must still be connected at the high observer's premise cut"
+    );
+    assert_eq!(
+        probe.connected[LOW_ORIGIN],
+        Some(true),
+        "the low receipt must still participate in the connected fold at the boundary cut"
+    );
+    let freeze = probe.receipts[LOW_ORIGIN].expect("low origin receipt");
+    let high = probe.receipts[OBSERVER].expect("high observer receipt");
+    assert_eq!(
+        u32::try_from(high.saturating_sub(freeze)).expect("oriented receipt spread fits u32"),
+        probe.max_spread,
+        "the retained-range observer must be an actual high-water extremum: {probe:?}"
+    );
+    let observer_range = probe.retained_ranges[OBSERVER].expect("observer retained range");
+    assert_eq!(
+        observer_range.first, freeze,
+        "the boundary receipt must remain physically retained: {probe:?}"
+    );
+    assert_eq!(
+        observer_range.last, high,
+        "the retained range must end at the measured high receipt: {probe:?}"
+    );
+    assert!(
+        report
+            .blocked_drops_by_link
+            .get(&(TARGET, LOW_ORIGIN))
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the target->low-origin cut must actually drop traffic"
+    );
+    assert_eq!(report.recovered_within_b, Some(false));
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::Violation { violation, .. }
+                if violation.contains("Input queue capacity 128 exhausted")
+        )),
+        "the full-ring boundary must take the explicit capacity fail-closed path: {:?}",
+        report.verdict.failures
+    );
+    let expected_failure = |failure: &OracleFailure| match failure {
+        OracleFailure::Violation {
+            source: ViolationSource::Peer(peer),
+            violation,
+        } => {
+            *peer == OBSERVER
+                && (violation.contains("Input queue capacity 128 exhausted")
+                    || violation.contains("Input sequence violation"))
+        },
+        OracleFailure::EndProgress { peer, state, .. } => {
+            matches!(*peer, OBSERVER | TARGET) && *state == SessionState::Synchronizing
+        },
+        OracleFailure::PostHealLiveness { peer, .. } => *peer < 4,
+        _ => false,
+    };
+    assert!(
+        report.verdict.failures.iter().all(expected_failure),
+        "H-RING emitted an unexpected oracle failure outside the explicit capacity fail-safe: {:?}",
+        report.verdict.failures
+    );
+    assert_eq!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .filter(|failure| matches!(failure, OracleFailure::EndProgress { .. }))
+            .count(),
+        2,
+        "exactly the observer and target must end fail-closed"
+    );
+    for peer in [OBSERVER, TARGET] {
+        assert_eq!(
+            report
+                .verdict
+                .failures
+                .iter()
+                .filter(|failure| matches!(
+                    failure,
+                    OracleFailure::EndProgress { peer: actual, .. } if *actual == peer
+                ))
+                .count(),
+            1,
+            "expected one end-progress failure for peer {peer}"
+        );
+    }
+    for peer in 0..4 {
+        assert_eq!(
+            report
+                .verdict
+                .failures
+                .iter()
+                .filter(|failure| matches!(
+                    failure,
+                    OracleFailure::PostHealLiveness { peer: actual, .. } if *actual == peer
+                ))
+                .count(),
+            1,
+            "expected one bounded post-heal failure for peer {peer}"
+        );
+    }
+    assert_eq!(
+        report
+            .trace_tail
+            .last()
+            .and_then(|snapshot| snapshot.session_states.get(OBSERVER)),
+        Some(&TraceSessionState::Synchronizing),
+        "the high observer must remain in the explicit fail-closed state"
+    );
+
+    let replay = run(&schedule, &options);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.receipt_range_probe, replay.receipt_range_probe);
 }
