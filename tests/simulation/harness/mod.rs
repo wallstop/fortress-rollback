@@ -2492,6 +2492,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     }
                 }
 
+                // Charge once for the whole peer drive. Valid schedules currently
+                // bound SkewGated60Hz to at most one opportunity per step, but
+                // drive-level aggregation keeps the CPU model exact if that bound
+                // is relaxed later.
+                let frames_advanced_before =
+                    cpu_policy.map_or(0, |_| slot.session.metrics().frames_advanced);
                 for _ in 0..opportunities {
                     if slot.session.current_state() != SessionState::Running {
                         break;
@@ -2551,17 +2557,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             } else {
                                 (0, 0, 0)
                             };
-                        let frames_advanced_before =
-                            cpu_policy.map_or(0, |_| slot.session.metrics().frames_advanced);
                         let advance_result = slot.session.advance_frame();
-                        if let Some(drive) = cpu_drives.get_mut(i).and_then(Option::as_mut) {
-                            let frames_advanced = slot
-                                .session
-                                .metrics()
-                                .frames_advanced
-                                .saturating_sub(frames_advanced_before);
-                            drive.charge(frames_advanced, schedule.config.step_dt_ms);
-                        }
                         match advance_result {
                             Ok(requests) => {
                                 if fixed_wait_policy_samples {
@@ -2613,6 +2609,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             },
                         }
                     }
+                }
+                if let Some(drive) = cpu_drives.get_mut(i).and_then(Option::as_mut) {
+                    let frames_advanced = slot
+                        .session
+                        .metrics()
+                        .frames_advanced
+                        .saturating_sub(frames_advanced_before);
+                    drive.charge(frames_advanced, schedule.config.step_dt_ms);
                 }
 
                 // Incrementally sample newly confirmed inputs (they evict).
@@ -3210,6 +3214,18 @@ mod tests {
                 "wrong future delay for {work_us}us of work"
             );
         }
+    }
+
+    #[test]
+    fn cpu_feedback_actuator_charges_aggregate_peer_drive_work() {
+        let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 8,
+        });
+        drive.charge(3, 16);
+        assert_eq!(drive.evidence.charged_frames, 3);
+        assert_eq!(drive.evidence.work_us, 24_000);
+        assert_eq!(drive.evidence.remaining_delay_steps, 1);
     }
 
     #[test]
