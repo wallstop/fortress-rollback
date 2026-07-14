@@ -5,13 +5,17 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    oracle::OracleFailure, peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload,
-    RunOptions, RunReport, TraceSessionState, WideStubInput,
+    oracle::{OracleFailure, ViolationSource},
+    peer_addr, run, run_with_input, HostileGossipMode, HostileGossipOptions, PeerEventKey,
+    PeerEventPayload, RunOptions, RunReport, TraceSessionState, WideStubInput,
 };
 use crate::common::sim_net::{
     BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
 };
-use fortress_rollback::{EventKind, PlayerHandle};
+use fortress_rollback::{
+    telemetry::{ViolationKind, ViolationSeverity},
+    EventKind, PlayerHandle, SessionState,
+};
 use std::time::Duration;
 
 const SPARSE_DROP_AT: u32 = 180;
@@ -281,7 +285,7 @@ fn scale_bandwidth_fragmentation_schedule(
     let constrained = LinkPolicy {
         fragmentation: Some(FragmentationPolicy { fragment_drop_rate }),
         bandwidth: include_bandwidth.then_some(BandwidthPolicy {
-            rate_bytes_per_second: 8_000,
+            rate_bytes_per_second: 8_750,
             burst_bytes: 8_192,
             queue_capacity_bytes: 32_768,
         }),
@@ -1265,9 +1269,12 @@ fn h_pollcap_targeted_release_defers_without_starvation() {
 /// H-BLOAT scale interaction: an N=16 mesh with incompressible 32-byte inputs
 /// releases a bounded pending-input backlog into one constrained directed
 /// link. No-bandwidth and zero-fragment-loss controls separate queue activation
-/// and fragment loss from the matched app treatments. The pinned 8 KB/s rate,
-/// 8 KB burst, and 32 KB tail-drop queue exercise a bounded near-capacity case,
-/// not a general model of every N=16 uplink.
+/// and fragment loss from the matched app treatments. The pinned 8.75 KB/s
+/// rate, 8 KB burst, and 32 KB tail-drop queue exercise a bounded near-capacity
+/// case, not a general model of every N=16 uplink. The backlog intentionally
+/// crosses the production IPv4 fragmentation alarm boundary on peers 0 and 1;
+/// those two exact alarms are premise evidence, while every other oracle
+/// failure remains fatal.
 #[test]
 #[ignore = "nightly N=16 32-byte bandwidth/fragmentation interaction"]
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
@@ -1297,21 +1304,82 @@ fn h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers() {
     let obey_report = run_with_input::<WideStubInput>(&obey, &options);
     let ignore_replay = run_with_input::<WideStubInput>(&ignore, &options);
     let replay = run_with_input::<WideStubInput>(&obey, &options);
-    unconstrained_ignore_report.expect_pass(&unconstrained_ignore);
-    unconstrained_report.expect_pass(&unconstrained);
-    fragment_ignore_report.expect_pass(&fragment_ignore);
-    fragment_obey_report.expect_pass(&fragment_obey);
-    bandwidth_ignore_report.expect_pass(&bandwidth_ignore);
-    bandwidth_obey_report.expect_pass(&bandwidth_obey);
-    ignore_report.expect_pass(&ignore);
-    obey_report.expect_pass(&obey);
+    let assert_expected_fragmentation_alarms =
+        |label: &str, report: &RunReport, encoded_bytes: [usize; 2]| {
+            let expected_alarm = |source, destination, encoded_bytes| OracleFailure::Violation {
+                source: ViolationSource::Peer(source),
+                violation: format!(
+                    "[Error/NetworkProtocol] Message queued for {destination:?} reaches the \
+                 IPv4/UDP fragmentation boundary: kind=input, encoded_bytes={encoded_bytes}, \
+                 threshold=1472. Further fragmentation alarms are suppressed for this \
+                 endpoint era; inspect PeerMetrics::fragmentation_risk_messages_sent for \
+                 the cumulative count."
+                ),
+            };
+            let expected_failures = [
+                expected_alarm(0, peer_addr(1), encoded_bytes[0]),
+                expected_alarm(1, peer_addr(0), encoded_bytes[1]),
+            ];
+            assert_eq!(
+                report.verdict.failures.as_slice(),
+                &expected_failures,
+                "{label} emitted an unexpected oracle failure: {:?}",
+                report.verdict.failures
+            );
+            assert_eq!(
+                report.violation_census.len(),
+                2,
+                "{label} emitted an unexpected violation signature: {:?}",
+                report.violation_census
+            );
+
+            let census_count = |severity| {
+                report
+                    .violation_census
+                    .iter()
+                    .filter(|(signature, _)| {
+                        signature.severity == severity
+                            && signature.kind == ViolationKind::NetworkProtocol
+                            && signature.message_prefix == "Message queued for"
+                    })
+                    .map(|(_, count)| *count)
+                    .sum::<u64>()
+            };
+            assert_eq!(census_count(ViolationSeverity::Warning), 2, "{label}");
+            assert_eq!(census_count(ViolationSeverity::Error), 2, "{label}");
+        };
+    for (label, report, encoded_bytes) in [
+        (
+            "unconstrained Ignore",
+            &unconstrained_ignore_report,
+            [1501, 1501],
+        ),
+        ("unconstrained Obey", &unconstrained_report, [1501, 1507]),
+        ("fragment Ignore", &fragment_ignore_report, [1501, 1501]),
+        ("fragment Obey", &fragment_obey_report, [1501, 1507]),
+        ("bandwidth Ignore", &bandwidth_ignore_report, [1501, 1501]),
+        ("bandwidth Obey", &bandwidth_obey_report, [1501, 1507]),
+        ("matched Ignore", &ignore_report, [1501, 1501]),
+        ("matched Obey", &obey_report, [1501, 1507]),
+        ("matched Ignore replay", &ignore_replay, [1501, 1501]),
+        ("matched Obey replay", &replay, [1501, 1507]),
+    ] {
+        assert_expected_fragmentation_alarms(label, report, encoded_bytes);
+    }
     assert_eq!(ignore_report.trace_hash, ignore_replay.trace_hash);
+    assert_eq!(ignore_report.verdict, ignore_replay.verdict);
+    assert_eq!(
+        ignore_report.violation_census,
+        ignore_replay.violation_census
+    );
     assert_eq!(
         ignore_report.progress_samples,
         ignore_replay.progress_samples
     );
     assert_eq!(ignore_report.net_stats, ignore_replay.net_stats);
     assert_eq!(obey_report.trace_hash, replay.trace_hash);
+    assert_eq!(obey_report.verdict, replay.verdict);
+    assert_eq!(obey_report.violation_census, replay.violation_census);
     assert_eq!(obey_report.progress_samples, replay.progress_samples);
     assert_eq!(obey_report.net_stats, replay.net_stats);
     assert_eq!(obey_report.link_stats_by_link, replay.link_stats_by_link);
@@ -1673,6 +1741,340 @@ fn frozen_queue_network_blip_schedule() -> Schedule {
         events,
         heal_at,
     }
+}
+
+fn h_ring_double_failure_relay_schedule() -> Schedule {
+    const N: usize = 4;
+    const TARGET: usize = 3;
+    const LOW_ORIGIN: usize = 1;
+    let mut config = SimConfig::smoke(N);
+    config.steps = 600;
+    config.noise = BackgroundNoise::Clean;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+    config.input_delay = 0;
+    config.max_prediction = fortress_rollback::__internal::MAX_FRAME_DELAY;
+
+    let events = vec![
+        // Build the target-receipt gradient: the low origin stops receiving
+        // target inputs while the observer and relay continue receiving them.
+        (
+            50,
+            ScheduleEvent::Block {
+                from: TARGET,
+                to: LOW_ORIGIN,
+                blocked: true,
+            },
+        ),
+        // Heal before any lifecycle failure. H-RING asks whether this receipt
+        // gradient can evict the frozen slot *before* the double-failure relay
+        // choreography begins.
+        (180, ScheduleEvent::HealAll),
+    ];
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_5249,
+        link_seed: 0xCE45_524A,
+        config,
+        initial_links: clean_initial_links(N),
+        events,
+        heal_at: 180,
+    }
+}
+
+fn hostile_connection_status_schedule() -> Schedule {
+    const N: usize = 4;
+    let mut config = SimConfig::smoke(N);
+    // Leave a complete recovery window after the step-251 HealAll. The
+    // bounded-liveness oracle requires `steps - heal_at >= B`.
+    config.steps = 502;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+    config.max_prediction = 32;
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_B200,
+        link_seed: 0xCE45_B201,
+        config,
+        initial_links: clean_initial_links(N),
+        events: vec![(251, ScheduleEvent::HealAll)],
+        heal_at: 251,
+    }
+}
+
+fn hostile_floor_reply_schedule() -> Schedule {
+    const N: usize = 4;
+    const PRUNED_ORIGIN: usize = 0;
+    let mut config = SimConfig::smoke(N);
+    config.steps = 650;
+    config.noise = BackgroundNoise::Clean;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+    config.input_delay = 0;
+    config.max_prediction = 32;
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_B400,
+        link_seed: 0xCE45_B401,
+        config,
+        initial_links: clean_initial_links(N),
+        events: vec![
+            (
+                50,
+                ScheduleEvent::PeerKill {
+                    peer: PRUNED_ORIGIN,
+                },
+            ),
+            (300, ScheduleEvent::HealAll),
+        ],
+        heal_at: 300,
+    }
+}
+
+fn hostile_options(
+    mode: HostileGossipMode,
+    delta: i32,
+    from_step: u32,
+    until_step: u32,
+) -> RunOptions {
+    RunOptions {
+        probe_confirmed_at: until_step.checked_sub(1),
+        hostile_gossip: Some(HostileGossipOptions {
+            liar: 1,
+            observer: 3,
+            target: 2,
+            delta,
+            from_step,
+            until_step,
+            mode,
+        }),
+        ..RunOptions::default()
+    }
+}
+
+/// B2: one peer's valid but false third-party connection-status frame can only
+/// lower the selected observer's minimum by the lie magnitude. An inflated
+/// claim cannot lift the bound because the honest direct/witness terms remain.
+#[test]
+fn hostile_connection_status_lie_has_bounded_single_observer_effect() {
+    const OBSERVER: usize = 3;
+    const DELTA: i32 = 12;
+    let schedule = hostile_connection_status_schedule();
+    let control_options = hostile_options(HostileGossipMode::ConnectionStatus, 0, 150, 251);
+    let control = run(&schedule, &control_options);
+    let low = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::ConnectionStatus, -DELTA, 150, 251),
+    );
+    let high = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::ConnectionStatus, DELTA, 150, 251),
+    );
+    control.expect_pass(&schedule);
+    low.expect_pass(&schedule);
+    high.expect_pass(&schedule);
+
+    let control_confirmed = control.probe_confirmed[OBSERVER];
+    let control_evidence = control.hostile_gossip.expect("matched B2 control evidence");
+    assert_eq!(control_evidence.messages_mutated, 0);
+    let control_probe = control_evidence.probe.expect("matched B2 control probe");
+    assert!(!control_probe.status_disconnected);
+    assert_eq!(
+        control_probe.effective_reported_frame,
+        control_probe.status_frame
+    );
+    assert_eq!(
+        control_probe.target_confirmed_bound,
+        Some(control_confirmed)
+    );
+    for (name, report, delta) in [("low", &low, -DELTA), ("high", &high, DELTA)] {
+        let evidence = report
+            .hostile_gossip
+            .expect("hostile B2 run must preserve mutation evidence");
+        let probe = evidence
+            .probe
+            .expect("hostile B2 run must preserve receiver evidence");
+        assert!(evidence.messages_mutated > 0, "{name}: {evidence:?}");
+        assert_eq!(evidence.last_step, Some(250), "{name}: {evidence:?}");
+        assert_eq!(probe.at_step, 250, "{name}: {probe:?}");
+        assert_eq!(probe.status_frame, evidence.last_after.unwrap_or(i32::MIN));
+        assert_eq!(probe.effective_reported_frame, probe.status_frame);
+        assert!(!probe.status_disconnected, "{name}: {probe:?}");
+        assert_eq!(probe.direct_receipt, control_probe.direct_receipt);
+        assert_eq!(evidence.last_before, Some(control_probe.status_frame));
+        assert!(evidence.last_before.is_some_and(|before| before >= DELTA));
+        assert!(
+            !probe.relay_topology,
+            "{name}: B2 must use the ordinary fold"
+        );
+        assert_eq!(evidence.last_round_seq, None);
+        assert_eq!(
+            evidence.last_after,
+            evidence
+                .last_before
+                .map(|before| before.saturating_add(delta).max(0))
+        );
+        assert!(
+            report.probe_confirmed[OBSERVER].abs_diff(control_confirmed) <= DELTA.unsigned_abs(),
+            "{name}: a ±{DELTA} lie exceeded its exact magnitude bound: control={}, hostile={}, evidence={evidence:?}",
+            control_confirmed,
+            report.probe_confirmed[OBSERVER]
+        );
+    }
+    let low_probe = low
+        .hostile_gossip
+        .and_then(|evidence| evidence.probe)
+        .expect("low B2 probe");
+    let high_probe = high
+        .hostile_gossip
+        .and_then(|evidence| evidence.probe)
+        .expect("high B2 probe");
+    assert_eq!(
+        low.probe_confirmed[OBSERVER],
+        control_confirmed - DELTA,
+        "the low treatment must non-vacuously pin confirmation by the exact lie"
+    );
+    assert_eq!(
+        low_probe.target_confirmed_bound,
+        Some(control_confirmed - DELTA)
+    );
+    assert_eq!(
+        high.probe_confirmed[OBSERVER], control_confirmed,
+        "an inflated single-peer claim must not raise the honest mesh minimum"
+    );
+    assert_eq!(high_probe.target_confirmed_bound, Some(control_confirmed));
+    assert_eq!(
+        low.final_confirmed, control.final_confirmed,
+        "the observer must recover exactly after the bounded lie stops"
+    );
+    assert_eq!(high.final_confirmed, control.final_confirmed);
+    assert_eq!(control.recovered_within_b, Some(true));
+    assert_eq!(low.recovered_within_b, Some(true));
+    assert_eq!(high.recovered_within_b, Some(true));
+}
+
+/// B4: after a genuine prune engages the floor-round topology, a low valid
+/// floor conservatively wedges one observer; a high valid floor can prematurely
+/// release it, but the truthful status and other honest terms bound both effects.
+#[test]
+fn hostile_floor_reply_lie_has_bounded_wedge_and_release_effects() {
+    const OBSERVER: usize = 3;
+    const DELTA: i32 = 12;
+    let schedule = hostile_floor_reply_schedule();
+    let control_options = hostile_options(HostileGossipMode::FloorReply, 0, 150, 300);
+    let control = run(&schedule, &control_options);
+    let low = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::FloorReply, -DELTA, 150, 300),
+    );
+    let high = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::FloorReply, DELTA, 150, 300),
+    );
+    control.expect_pass(&schedule);
+    low.expect_pass(&schedule);
+    high.expect_pass(&schedule);
+
+    let control_confirmed = control.probe_confirmed[OBSERVER];
+    let control_evidence = control.hostile_gossip.expect("matched B4 control evidence");
+    assert_eq!(control_evidence.messages_mutated, 0);
+    let control_probe = control_evidence.probe.expect("matched B4 control probe");
+    assert!(control_probe.relay_topology && control_probe.round_fresh);
+    assert!(!control_probe.status_disconnected);
+    assert!(
+        control_probe.round_floor < control_probe.status_frame,
+        "the truthful floor must be a live, binding term: {control_probe:?}"
+    );
+    assert_eq!(
+        control_probe.effective_reported_frame,
+        control_probe.round_floor
+    );
+    assert_eq!(
+        control_probe.target_confirmed_bound,
+        Some(control_confirmed)
+    );
+    for (name, report, delta) in [("low", &low, -DELTA), ("high", &high, DELTA)] {
+        let evidence = report
+            .hostile_gossip
+            .expect("hostile B4 run must preserve mutation evidence");
+        let probe = evidence
+            .probe
+            .expect("hostile B4 run must preserve receiver evidence");
+        assert!(evidence.messages_mutated > 0, "{name}: {evidence:?}");
+        assert!(
+            evidence
+                .last_step
+                .is_some_and(|step| (150..300).contains(&step)),
+            "{name}: {evidence:?}"
+        );
+        assert!(
+            probe.relay_topology,
+            "{name}: floor consumption must be live"
+        );
+        assert!(
+            probe.endpoint_running && probe.round_fresh,
+            "{name}: {probe:?}"
+        );
+        assert!(!probe.status_disconnected, "{name}: {probe:?}");
+        assert_eq!(probe.status_frame, control_probe.status_frame);
+        assert_eq!(probe.direct_receipt, control_probe.direct_receipt);
+        assert_eq!(evidence.last_before, Some(control_probe.round_floor));
+        assert!(evidence.last_before.is_some_and(|before| before >= DELTA));
+        assert_eq!(probe.round_floor, evidence.last_after.unwrap_or(i32::MIN));
+        assert_eq!(Some(probe.reply_seq), evidence.last_round_seq);
+        assert!(probe.reply_seq > probe.prune_seq && probe.reply_seq <= probe.request_seq);
+        assert_eq!(
+            evidence.last_after,
+            evidence
+                .last_before
+                .map(|before| before.saturating_add(delta).max(0))
+        );
+        assert!(
+            report.probe_confirmed[OBSERVER].abs_diff(control_confirmed) <= DELTA.unsigned_abs(),
+            "{name}: a ±{DELTA} floor exceeded its exact magnitude bound: control={}, hostile={}, evidence={evidence:?}",
+            control_confirmed,
+            report.probe_confirmed[OBSERVER]
+        );
+    }
+    let low_evidence = low.hostile_gossip.expect("low B4 evidence");
+    let low_probe = low_evidence.probe.expect("low B4 receiver evidence");
+    let high_evidence = high.hostile_gossip.expect("high B4 evidence");
+    let high_probe = high_evidence.probe.expect("high B4 receiver evidence");
+    assert_eq!(
+        low_probe.effective_reported_frame,
+        control_probe.round_floor - DELTA
+    );
+    assert_eq!(
+        low.probe_confirmed[OBSERVER],
+        control_confirmed - DELTA,
+        "the low floor must non-vacuously wedge by the exact lie: {low_evidence:?}"
+    );
+    assert_eq!(
+        high_probe.effective_reported_frame, high_probe.status_frame,
+        "an inflated floor must remain capped by the truthful status term: {high_evidence:?}"
+    );
+    assert!(
+        high_probe
+            .target_confirmed_bound
+            .is_some_and(|bound| bound <= high_probe.status_frame),
+        "the aggregate bound must not exceed the liar's truthful status term: {high_evidence:?}"
+    );
+    assert!(
+        high.probe_confirmed[OBSERVER] > control_confirmed,
+        "the high treatment must non-vacuously exercise bounded premature release: {high_evidence:?}"
+    );
+    assert!(
+        high_probe
+            .target_confirmed_bound
+            .is_some_and(|bound| bound > control_confirmed),
+        "the high floor must raise the live aggregate target bound: {high_evidence:?}"
+    );
+    assert_eq!(low.final_confirmed, control.final_confirmed);
+    assert_eq!(high.final_confirmed, control.final_confirmed);
+    assert_eq!(control.recovered_within_b, Some(true));
+    assert_eq!(low.recovered_within_b, Some(true));
+    assert_eq!(high.recovered_within_b, Some(true));
 }
 
 fn sparse_graceful_drop_rollback_schedule() -> Schedule {
@@ -2191,4 +2593,152 @@ fn frozen_queue_survivors_resume_after_network_blip() {
         report.trace_hash, again.trace_hash,
         "network-blip census row must reproduce its exact trace"
     );
+}
+
+/// H-RING: directly measure the maximum target-receipt stagger admitted by the
+/// N=4 double-failure-relay topology. The low connected receipt pins the source
+/// at the exact ring boundary, so the hypothesized >128-frame stagger and
+/// physical eviction do not occur before the first failure. When the next
+/// input arrives, the queue must fail closed rather than evicting the frozen
+/// value or silently confirming divergent state.
+#[test]
+fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
+    const OBSERVER: usize = 0;
+    const LOW_ORIGIN: usize = 1;
+    const TARGET: usize = 3;
+    let schedule = h_ring_double_failure_relay_schedule();
+    let options = RunOptions {
+        receipt_range_probe_target: Some(TARGET),
+        ..RunOptions::default()
+    };
+
+    let report = run(&schedule, &options);
+    let probe = report
+        .receipt_range_probe
+        .as_ref()
+        .expect("H-RING requests receipt/range evidence");
+    assert_eq!(probe.target, TARGET);
+    assert_eq!(
+        probe.max_spread,
+        u32::try_from(fortress_rollback::__internal::MAX_FRAME_DELAY)
+            .expect("frame delay bound fits u32"),
+        "H-RING must fill, but not cross, the inclusive input-ring boundary: {probe:?}"
+    );
+    assert_eq!(
+        probe.connected[OBSERVER],
+        Some(true),
+        "the target must still be connected at the high observer's premise cut"
+    );
+    assert_eq!(
+        probe.connected[LOW_ORIGIN],
+        Some(true),
+        "the low receipt must still participate in the connected fold at the boundary cut"
+    );
+    let freeze = probe.receipts[LOW_ORIGIN].expect("low origin receipt");
+    let high = probe.receipts[OBSERVER].expect("high observer receipt");
+    assert_eq!(
+        u32::try_from(high.saturating_sub(freeze)).expect("oriented receipt spread fits u32"),
+        probe.max_spread,
+        "the retained-range observer must be an actual high-water extremum: {probe:?}"
+    );
+    let observer_range = probe.retained_ranges[OBSERVER].expect("observer retained range");
+    assert_eq!(
+        observer_range.first, freeze,
+        "the boundary receipt must remain physically retained: {probe:?}"
+    );
+    assert_eq!(
+        observer_range.last, high,
+        "the retained range must end at the measured high receipt: {probe:?}"
+    );
+    assert!(
+        report
+            .blocked_drops_by_link
+            .get(&(TARGET, LOW_ORIGIN))
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the target->low-origin cut must actually drop traffic"
+    );
+    assert_eq!(report.recovered_within_b, Some(false));
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::Violation { violation, .. }
+                if violation.contains("Input queue capacity 128 exhausted")
+        )),
+        "the full-ring boundary must take the explicit capacity fail-closed path: {:?}",
+        report.verdict.failures
+    );
+    let expected_failure = |failure: &OracleFailure| match failure {
+        OracleFailure::Violation {
+            source: ViolationSource::Peer(peer),
+            violation,
+        } => {
+            *peer == OBSERVER
+                && (violation.contains("Input queue capacity 128 exhausted")
+                    || violation.contains("Input sequence violation"))
+        },
+        OracleFailure::EndProgress { peer, state, .. } => {
+            matches!(*peer, OBSERVER | TARGET) && *state == SessionState::Synchronizing
+        },
+        OracleFailure::PostHealLiveness { peer, .. } => *peer < 4,
+        _ => false,
+    };
+    assert!(
+        report.verdict.failures.iter().all(expected_failure),
+        "H-RING emitted an unexpected oracle failure outside the explicit capacity fail-safe: {:?}",
+        report.verdict.failures
+    );
+    assert_eq!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .filter(|failure| matches!(failure, OracleFailure::EndProgress { .. }))
+            .count(),
+        2,
+        "exactly the observer and target must end fail-closed"
+    );
+    for peer in [OBSERVER, TARGET] {
+        assert_eq!(
+            report
+                .verdict
+                .failures
+                .iter()
+                .filter(|failure| matches!(
+                    failure,
+                    OracleFailure::EndProgress { peer: actual, .. } if *actual == peer
+                ))
+                .count(),
+            1,
+            "expected one end-progress failure for peer {peer}"
+        );
+    }
+    for peer in 0..4 {
+        assert_eq!(
+            report
+                .verdict
+                .failures
+                .iter()
+                .filter(|failure| matches!(
+                    failure,
+                    OracleFailure::PostHealLiveness { peer: actual, .. } if *actual == peer
+                ))
+                .count(),
+            1,
+            "expected one bounded post-heal failure for peer {peer}"
+        );
+    }
+    assert_eq!(
+        report
+            .trace_tail
+            .last()
+            .and_then(|snapshot| snapshot.session_states.get(OBSERVER)),
+        Some(&TraceSessionState::Synchronizing),
+        "the high observer must remain in the explicit fail-closed state"
+    );
+
+    let replay = run(&schedule, &options);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.receipt_range_probe, replay.receipt_range_probe);
 }

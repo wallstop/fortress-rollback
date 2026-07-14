@@ -269,6 +269,23 @@ impl<A> Default for CoordinatedDropState<A> {
     }
 }
 
+/// Receiver-side evidence for deterministic hostile-gossip integration tests.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostileGossipDiagnostic {
+    pub endpoint_running: bool,
+    pub status_disconnected: bool,
+    pub status_frame: Frame,
+    pub relay_topology: bool,
+    pub round_floor: Frame,
+    pub round_fresh: bool,
+    pub request_seq: u32,
+    pub reply_seq: u32,
+    pub prune_seq: u32,
+    pub effective_reported_frame: Frame,
+    pub target_confirmed_bound: Option<Frame>,
+}
+
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 ///
 /// This type implements the [`Session`] trait, enabling it to be used in generic
@@ -7924,6 +7941,116 @@ impl<T: Config> P2PSession<T> {
             let _ = write!(out, "]");
         }
         out
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): reports whether this session's local connection-status gate admits
+    /// `handle`. This is the exact per-handle gate used by the production
+    /// frame-advantage controller.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_connected(&self, handle: PlayerHandle) -> Option<bool> {
+        self.local_connect_status
+            .get(handle.as_usize())
+            .map(|status| !status.disconnected)
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns this session's authoritative direct receipt/freeze frame
+    /// for a remote `handle`. Local and unregistered handles return `None`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_receipt_frame(&self, handle: PlayerHandle) -> Option<Frame> {
+        if self.player_reg.is_local_player(handle) {
+            return None;
+        }
+        self.local_connect_status
+            .get(handle.as_usize())
+            .map(|status| status.last_frame)
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns the exact receiver-side cache and fold contribution for
+    /// one remote endpoint's report about a third-party slot.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_hostile_gossip(
+        &self,
+        endpoint_handle: PlayerHandle,
+        target: PlayerHandle,
+    ) -> Option<HostileGossipDiagnostic> {
+        let PlayerType::Remote(addr) = self.player_reg.handles.get(&endpoint_handle)? else {
+            return None;
+        };
+        let endpoint = self.player_reg.remotes.get(addr)?;
+        let status = endpoint.peer_connect_status(target);
+        let relay_topology = self.pessimistic_floor_relay_topology();
+        let round_floor = endpoint.round_floor(target);
+        let round_fresh = endpoint.floor_round_is_fresh();
+        let reported = if relay_topology
+            && !status.disconnected
+            && round_fresh
+            && round_floor != Frame::NULL
+        {
+            std::cmp::min(status.last_frame, round_floor)
+        } else {
+            status.last_frame
+        };
+        #[cfg(feature = "hot-join")]
+        let effective_reported_frame = if status.disconnected {
+            self.hot_join
+                .pending_reactivation
+                .as_ref()
+                .filter(|pending| pending.reopened && pending.handle == target)
+                .map_or(reported, |pending| {
+                    safe_frame_sub!(
+                        pending.frame,
+                        1,
+                        "P2PSession::diagnostic_hostile_gossip pending clamp"
+                    )
+                })
+        } else {
+            reported
+        };
+        #[cfg(not(feature = "hot-join"))]
+        let effective_reported_frame = reported;
+        let (request_seq, reply_seq, prune_seq) = endpoint.floor_round_diagnostic();
+        let target_confirmed_bound = self
+            .local_connect_status
+            .get(target.as_usize())
+            .and_then(|local| self.remote_slot_confirmed_bound(target, local));
+        Some(HostileGossipDiagnostic {
+            endpoint_running: endpoint.is_running(),
+            status_disconnected: status.disconnected,
+            status_frame: status.last_frame,
+            relay_topology,
+            round_floor,
+            round_fresh,
+            request_seq,
+            reply_seq,
+            prune_seq,
+            effective_reported_frame,
+            target_confirmed_bound,
+        })
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns the inclusive input-history interval physically retained
+    /// for a remote `handle`. Local and unregistered handles return `None`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_player_retained_input_range(
+        &self,
+        handle: PlayerHandle,
+    ) -> Option<(Frame, Frame)> {
+        if self.player_reg.is_local_player(handle) {
+            return None;
+        }
+        self.sync_layer
+            .retained_input_range(handle)
+            .ok()
+            .flatten()
+            .map(|range| (range.first, range.last))
     }
 
     /// Returns the maximum prediction window of a session.
@@ -18584,6 +18711,14 @@ mod tests {
 
         let advantage_when_disconnected = session.max_frame_advantage();
         assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(1)),
+            Some(false)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(2)),
+            Some(false)
+        );
+        assert_eq!(
             advantage_when_disconnected, 0,
             "a fully-disconnected multi-handle endpoint must contribute nothing \
              (max_frame_advantage falls back to 0 when no connected remote is folded)"
@@ -18613,6 +18748,32 @@ mod tests {
         };
 
         let advantage_when_connected = session.max_frame_advantage();
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(1)),
+            Some(true)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(2)),
+            Some(true)
+        );
+        assert_eq!(
+            session.diagnostic_player_connected(PlayerHandle::new(3)),
+            None
+        );
+        assert_eq!(
+            session.diagnostic_player_receipt_frame(PlayerHandle::new(0)),
+            None,
+            "the direct-receipt diagnostic excludes the local handle"
+        );
+        assert_eq!(
+            session.diagnostic_player_receipt_frame(PlayerHandle::new(1)),
+            Some(Frame::new(10))
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(0)),
+            None,
+            "the retained-range diagnostic excludes the local handle"
+        );
         assert_eq!(
             advantage_when_connected, 42,
             "a connected+running endpoint's seeded average must be counted"

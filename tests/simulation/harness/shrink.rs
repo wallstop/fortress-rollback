@@ -54,12 +54,15 @@ struct FinalSummary {
     probe_confirmed: Vec<i32>,
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
     pending_output_probe: Option<super::PendingOutputProbe>,
+    receipt_range_probe: Option<super::ReceiptRangeEvidence>,
+    hostile_gossip: Option<super::HostileGossipEvidence>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
     fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
     link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     load_game_state_observations: Vec<super::LoadGameStateObservation>,
     metrics: Vec<fortress_rollback::SessionMetrics>,
+    cpu_feedback: Vec<super::CpuFeedbackEvidence>,
     peer_wire: Vec<super::PeerWireTotals>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
@@ -82,12 +85,15 @@ impl From<&RunReport> for FinalSummary {
             probe_confirmed: report.probe_confirmed.clone(),
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
             pending_output_probe: report.pending_output_probe,
+            receipt_range_probe: report.receipt_range_probe.clone(),
+            hostile_gossip: report.hostile_gossip,
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
             fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
             link_stats_by_link: report.link_stats_by_link.clone(),
             load_game_state_observations: report.load_game_state_observations.clone(),
             metrics: report.metrics.clone(),
+            cpu_feedback: report.cpu_feedback.clone(),
             peer_wire: report.peer_wire.clone(),
             confirmed_at_heal: report.confirmed_at_heal.clone(),
             confirmed_after_recovery: report.confirmed_after_recovery.clone(),
@@ -147,6 +153,20 @@ fn remap_peer_frame(value: Option<(usize, i32)>, removed: usize) -> Option<(usiz
     value.and_then(|(peer, frame)| remap_index(peer, removed).map(|mapped| (mapped, frame)))
 }
 
+fn remap_hostile_gossip(
+    value: Option<super::HostileGossipOptions>,
+    removed: usize,
+    steps: u32,
+) -> Option<super::HostileGossipOptions> {
+    value.and_then(|mut hostile| {
+        hostile.liar = remap_index(hostile.liar, removed)?;
+        hostile.observer = remap_index(hostile.observer, removed)?;
+        hostile.target = remap_index(hostile.target, removed)?;
+        hostile.until_step = hostile.until_step.min(steps);
+        (hostile.from_step < hostile.until_step).then_some(hostile)
+    })
+}
+
 fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions {
     let pending_output_probe_link = options
         .pending_output_probe_link
@@ -157,6 +177,10 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
         pending_output_probe_link,
+        receipt_range_probe_target: options
+            .receipt_range_probe_target
+            .and_then(|target| remap_index(target, removed)),
+        hostile_gossip: remap_hostile_gossip(options.hostile_gossip, removed, steps),
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
@@ -311,6 +335,11 @@ fn truncate_schedule(
 ) -> (Schedule, RunOptions) {
     let mut candidate = schedule.clone();
     candidate.config.steps = steps.max(2);
+    if let Some(policy) = candidate.config.cpu_feedback_policy.as_mut() {
+        // A cap above the shortened horizon is observationally equivalent to
+        // the horizon itself and would otherwise make the prefix invalid.
+        policy.max_poll_delay_steps = policy.max_poll_delay_steps.min(candidate.config.steps);
+    }
     let final_heal = actual_final_heal(schedule);
     candidate
         .events
@@ -320,6 +349,16 @@ fn truncate_schedule(
     options.probe_confirmed_at = options
         .probe_confirmed_at
         .filter(|probe| *probe < candidate.config.steps);
+    options.hostile_gossip = match (options.hostile_gossip, options.probe_confirmed_at) {
+        (Some(mut hostile), Some(probe)) => {
+            hostile.until_step = hostile.until_step.min(candidate.config.steps);
+            (hostile.from_step < hostile.until_step
+                && probe >= hostile.from_step
+                && probe < hostile.until_step)
+                .then_some(hostile)
+        },
+        _ => None,
+    };
     (candidate, options)
 }
 
@@ -652,6 +691,17 @@ where
         }
     }
 
+    // Dense controller samples are diagnostic rather than causal. Remove that
+    // replay option independently so a failure that does not need the H-OSC
+    // evidence surface can subsequently collapse back to lockstep cadence.
+    if current_options.phase_resolved_control_samples {
+        let mut candidate_options = current_options.clone();
+        candidate_options.phase_resolved_control_samples = false;
+        if evaluator.confirm(&current, &candidate_options).is_some() {
+            current_options = candidate_options;
+        }
+    }
+
     // Collapse the frame-production model before simplifying its clock rates;
     // a failure that does not require rate-gated production should replay on
     // the historical lockstep model.
@@ -659,6 +709,71 @@ where
         let mut candidate = current.clone();
         candidate.config.frame_model = super::schedule::FrameModel::Lockstep;
         if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+
+    // Remove the whole deterministic CPU-feedback model when it is not
+    // causal. If it is required, independently probe whether either declared
+    // axis can collapse to its minimum domain value.
+    if current.config.cpu_feedback_policy.is_some() {
+        let mut candidate = current.clone();
+        candidate.config.cpu_feedback_policy = None;
+        if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+    if current.config.cpu_feedback_policy.is_some() {
+        for simplify in [
+            |schedule: &mut Schedule| {
+                if let Some(policy) = schedule.config.cpu_feedback_policy.as_mut() {
+                    policy.simulated_frame_cost_us = 1;
+                }
+            },
+            |schedule: &mut Schedule| {
+                if let Some(policy) = schedule.config.cpu_feedback_policy.as_mut() {
+                    policy.max_poll_delay_steps = 1;
+                }
+            },
+        ] {
+            if !evaluator.has_budget(2) {
+                break;
+            }
+            let mut candidate = current.clone();
+            simplify(&mut candidate);
+            if candidate != current && evaluator.confirm(&candidate, &current_options).is_some() {
+                current = candidate;
+            }
+        }
+    }
+
+    // Remove each application-side wait-control axis independently. A failure
+    // may need the controller to remain active while only one cooldown, cap,
+    // response-delay, or smearing behavior is material.
+    let wait_policy_simplifications: [fn(&mut Schedule); 4] = [
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.cooldown_frames = 0;
+        },
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.max_skip_frames = None;
+        },
+        |schedule: &mut Schedule| {
+            schedule
+                .config
+                .wait_recommendation_policy
+                .response_delay_frames = 0;
+        },
+        |schedule: &mut Schedule| {
+            schedule.config.wait_recommendation_policy.smear_interval = 1;
+        },
+    ];
+    for simplify in wait_policy_simplifications {
+        if !evaluator.has_budget(2) {
+            break;
+        }
+        let mut candidate = current.clone();
+        simplify(&mut candidate);
+        if candidate != current && evaluator.confirm(&candidate, &current_options).is_some() {
             current = candidate;
         }
     }
@@ -771,7 +886,11 @@ mod tests {
     use crate::simulation::harness::oracle::{OracleFailure, Verdict};
     use crate::simulation::harness::run;
     use crate::simulation::harness::schedule::{
-        BackgroundNoise, FrameModel, SimConfig, SCHEDULE_SCHEMA_VERSION,
+        AppModel, BackgroundNoise, CpuFeedbackPolicy, FrameModel, SimConfig,
+        WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
+    };
+    use crate::simulation::harness::{
+        validate_run_options, HostileGossipMode, HostileGossipOptions,
     };
 
     fn clean_schedule(n_players: usize, steps: u32) -> Schedule {
@@ -843,6 +962,8 @@ mod tests {
             probe_confirmed: Vec::new(),
             probe_peer_wire_by_link: BTreeMap::new(),
             pending_output_probe: None,
+            receipt_range_probe: None,
+            hostile_gossip: None,
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
             fragmentation_drops_by_link: BTreeMap::new(),
@@ -855,6 +976,11 @@ mod tests {
             progress_samples: Vec::new(),
             frame_opportunities: Vec::new(),
             wait_frames_obeyed: Vec::new(),
+            wait_recommendation_max: Vec::new(),
+            wait_recommendation_frames: Vec::new(),
+            wait_recommendations_accepted: Vec::new(),
+            wait_frames_accepted: Vec::new(),
+            cpu_feedback: Vec::new(),
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
             confirmed_at_heal: Vec::new(),
             confirmed_after_recovery: Vec::new(),
@@ -1008,6 +1134,16 @@ mod tests {
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
             pending_output_probe_link: Some((3, 0)),
+            receipt_range_probe_target: Some(2),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 3,
+                observer: 0,
+                target: 2,
+                delta: -7,
+                from_step: 10,
+                until_step: 20,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
             phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
@@ -1023,6 +1159,24 @@ mod tests {
         assert_eq!(mapped.probe_confirmed_at, Some(19));
         assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
+        assert_eq!(mapped.receipt_range_probe_target, Some(1));
+        assert_eq!(
+            mapped.hostile_gossip,
+            Some(HostileGossipOptions {
+                liar: 2,
+                observer: 0,
+                target: 1,
+                delta: -7,
+                from_step: 10,
+                until_step: 20,
+                mode: HostileGossipMode::ConnectionStatus,
+            })
+        );
+        assert_eq!(remap_options(&options, 0, 100).hostile_gossip, None);
+        assert_eq!(
+            remap_options(&options, 2, 100).receipt_range_probe_target,
+            None
+        );
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
         assert_eq!(candidate.events.len(), schedule.events.len() - 1);
@@ -1372,6 +1526,34 @@ mod tests {
     }
 
     #[test]
+    fn truncation_clips_or_drops_hostile_gossip_with_its_probe() {
+        let schedule = clean_schedule(4, 100);
+        let options = RunOptions {
+            probe_confirmed_at: Some(60),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -12,
+                from_step: 10,
+                until_step: 80,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+
+        let (clipped_schedule, clipped) = truncate_schedule(&schedule, &options, 70);
+        assert_eq!(clipped.probe_confirmed_at, Some(60));
+        assert_eq!(clipped.hostile_gossip.unwrap().until_step, 70);
+        validate_run_options(&clipped_schedule, &clipped)
+            .expect("clipped hostile interval remains replayable");
+
+        let (_, dropped) = truncate_schedule(&schedule, &options, 50);
+        assert_eq!(dropped.probe_confirmed_at, None);
+        assert_eq!(dropped.hostile_gossip, None);
+    }
+
+    #[test]
     fn individual_link_simplification_keeps_only_the_required_dimension() {
         let mut schedule = clean_schedule(2, 2);
         let required = schedule
@@ -1602,9 +1784,13 @@ mod tests {
     fn frame_model_shrinking_collapses_or_retains_the_required_gate() {
         let mut collapsible = clean_schedule(2, 2);
         collapsible.config.frame_model = FrameModel::SkewGated60Hz;
+        let phase_options = RunOptions {
+            phase_resolved_control_samples: true,
+            ..RunOptions::default()
+        };
         let collapsed = shrink_failure(
             &collapsible,
-            &RunOptions::default(),
+            &phase_options,
             "StateDivergence",
             ShrinkConfig {
                 max_runs: 40,
@@ -1615,6 +1801,34 @@ mod tests {
         )
         .expect("failure persists without the frame gate");
         assert_eq!(collapsed.schedule.config.frame_model, FrameModel::Lockstep);
+        assert!(!collapsed.options.phase_resolved_control_samples);
+
+        let phase_required = shrink_failure(
+            &collapsible,
+            &phase_options,
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, options| {
+                let failures = if candidate.config.frame_model == FrameModel::SkewGated60Hz
+                    && options.phase_resolved_control_samples
+                {
+                    vec![state_failure(1)]
+                } else {
+                    Vec::new()
+                };
+                synthetic_report(candidate, failures, 0xC011_A95E)
+            },
+            |_, _, _| {},
+        )
+        .expect("failure requires dense phase evidence");
+        assert_eq!(
+            phase_required.schedule.config.frame_model,
+            FrameModel::SkewGated60Hz
+        );
+        assert!(phase_required.options.phase_resolved_control_samples);
 
         let mut required = clean_schedule(2, 2);
         required.config.frame_model = FrameModel::SkewGated60Hz;
@@ -1646,6 +1860,127 @@ mod tests {
             FrameModel::SkewGated60Hz
         );
         assert_eq!(retained.schedule.config.clock_skew_ppm, vec![1_000, 0]);
+    }
+
+    #[test]
+    fn wait_policy_shrinking_removes_irrelevant_axes_and_retains_required_cap() {
+        let mut schedule = clean_schedule(2, 2);
+        schedule.config.app_model = AppModel::Obey;
+        schedule.config.wait_recommendation_policy = WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            response_delay_frames: 30,
+            smear_interval: 4,
+        };
+        let result = shrink_failure(
+            &schedule,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| {
+                let failures =
+                    if candidate.config.wait_recommendation_policy.max_skip_frames == Some(9) {
+                        vec![state_failure(1)]
+                    } else {
+                        Vec::new()
+                    };
+                synthetic_report(candidate, failures, 0x0A10)
+            },
+            |_, _, _| {},
+        )
+        .expect("failure requires only the wait payload cap");
+
+        assert_eq!(
+            result.schedule.config.wait_recommendation_policy,
+            WaitRecommendationPolicy {
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            }
+        );
+    }
+
+    #[test]
+    fn cpu_feedback_shrinking_removes_or_simplifies_independent_axes() {
+        let policy = CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 8,
+        };
+
+        let run_case = |required_axis: &str| {
+            let mut schedule = clean_schedule(2, 10);
+            schedule.config.cpu_feedback_policy = Some(policy);
+            shrink_failure(
+                &schedule,
+                &RunOptions::default(),
+                "StateDivergence",
+                ShrinkConfig {
+                    max_runs: 80,
+                    max_duration: Duration::from_secs(10),
+                },
+                |candidate, _| {
+                    let present = candidate.config.cpu_feedback_policy;
+                    let failures = if match required_axis {
+                        "none" => true,
+                        "cost" => present.is_some_and(|value| {
+                            value.simulated_frame_cost_us == policy.simulated_frame_cost_us
+                        }),
+                        "cap" => present.is_some_and(|value| {
+                            value.max_poll_delay_steps == policy.max_poll_delay_steps
+                        }),
+                        _ => unreachable!(),
+                    } {
+                        vec![state_failure(1)]
+                    } else {
+                        Vec::new()
+                    };
+                    synthetic_report(candidate, failures, 0xC0FE)
+                },
+                |_, _, _| {},
+            )
+            .expect("synthetic CPU-policy failure shrinks")
+            .schedule
+            .config
+            .cpu_feedback_policy
+        };
+
+        assert_eq!(run_case("none"), None);
+        assert_eq!(
+            run_case("cost"),
+            Some(CpuFeedbackPolicy {
+                simulated_frame_cost_us: 8_000,
+                max_poll_delay_steps: 1,
+            })
+        );
+        assert_eq!(
+            run_case("cap"),
+            Some(CpuFeedbackPolicy {
+                simulated_frame_cost_us: 1,
+                max_poll_delay_steps: 8,
+            })
+        );
+
+        let mut long_schedule = clean_schedule(2, 100);
+        long_schedule.config.cpu_feedback_policy = Some(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 80,
+        });
+        let prefix = shrink_failure(
+            &long_schedule,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 80,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| synthetic_report(candidate, vec![state_failure(1)], 0xC0FE),
+            |_, _, _| {},
+        )
+        .expect("an irrelevant high CPU cap must not block prefix shrinking");
+        assert_eq!(prefix.schedule.config.steps, 2);
+        assert_eq!(prefix.schedule.config.cpu_feedback_policy, None);
     }
 
     #[test]

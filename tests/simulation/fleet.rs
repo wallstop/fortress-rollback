@@ -6,8 +6,9 @@
 //! proves nothing.
 
 use super::harness::schedule::{
-    generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, FrameModel, ScenarioMix,
-    Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+    generate, validate_schedule, AppModel, BackgroundNoise, CpuFeedbackPolicy, DropPolicy,
+    FrameModel, ScenarioMix, Schedule, ScheduleEvent, SimConfig, WaitRecommendationPolicy,
+    SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
@@ -2622,6 +2623,408 @@ fn symmetric_delay_does_not_create_mutual_sleep_h_osc() {
     }
 }
 
+const H_OSC_JITTER_START: u32 = 300;
+const H_OSC_JITTER_END: u32 = 1_200;
+const H_OSC_STEPS: u32 = 2_400;
+const H_OSC_JITTER_EPOCH_STEPS: u32 = 30;
+const H_OSC_JITTER_EPOCHS: u32 = (H_OSC_JITTER_END - H_OSC_JITTER_START) / H_OSC_JITTER_EPOCH_STEPS;
+
+fn h_osc_exogenous_delay_ms(epoch: u32, from: usize, to: usize, salt: u64) -> u64 {
+    let low = from.min(to);
+    let high = from.max(to);
+    let phase = u32::try_from(salt % u64::from(H_OSC_JITTER_EPOCHS))
+        .expect("phase is bounded by the epoch count");
+    let balanced_epoch = if from < to {
+        epoch.saturating_add(phase) % H_OSC_JITTER_EPOCHS
+    } else {
+        (H_OSC_JITTER_EPOCHS - 1 - epoch).saturating_add(phase) % H_OSC_JITTER_EPOCHS
+    };
+    let mut value = u64::from(balanced_epoch)
+        ^ u64::try_from(low)
+            .expect("peer index fits u64")
+            .rotate_left(21)
+        ^ u64::try_from(high)
+            .expect("peer index fits u64")
+            .rotate_left(42);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    20 + ((value ^ (value >> 31)) % 1_001)
+}
+
+fn h_osc_jitter_schedule(n: usize, policy: WaitRecommendationPolicy, salt: u64) -> Schedule {
+    let mut schedule = wait_rec_schedule(n, AppModel::Obey);
+    schedule.config.steps = H_OSC_STEPS;
+    schedule.config.frame_model = FrameModel::SkewGated60Hz;
+    schedule.config.wait_recommendation_policy = policy;
+    for (_, _, link) in &mut schedule.initial_links {
+        link.base_delay = Duration::from_millis(20);
+        link.jitter = Duration::ZERO;
+    }
+    let treatment_epochs =
+        usize::try_from(H_OSC_JITTER_EPOCHS).expect("treatment epoch count fits usize");
+    let mut events = Vec::with_capacity(schedule.initial_links.len() * treatment_epochs + 1);
+    for step in (H_OSC_JITTER_START..H_OSC_JITTER_END)
+        .step_by(usize::try_from(H_OSC_JITTER_EPOCH_STEPS).expect("epoch interval fits usize"))
+    {
+        let epoch = (step - H_OSC_JITTER_START) / H_OSC_JITTER_EPOCH_STEPS;
+        for (from, to, clean) in &schedule.initial_links {
+            let mut treatment = clean.clone();
+            treatment.base_delay =
+                Duration::from_millis(h_osc_exogenous_delay_ms(epoch, *from, *to, salt));
+            events.push((
+                step,
+                ScheduleEvent::SetLink {
+                    from: *from,
+                    to: *to,
+                    policy: treatment,
+                },
+            ));
+        }
+    }
+    events.push((H_OSC_JITTER_END, ScheduleEvent::HealAll));
+    events.sort_by_key(|(step, _)| *step);
+    schedule.events = events;
+    schedule.heal_at = H_OSC_JITTER_END;
+    schedule
+}
+
+fn h_osc_run(schedule: &Schedule) -> RunReport {
+    run(
+        schedule,
+        &RunOptions {
+            phase_resolved_control_samples: true,
+            ..RunOptions::default()
+        },
+    )
+}
+
+#[test]
+fn h_osc_balanced_exogenous_delay_policy_matrix_decays() {
+    let policies = [
+        (
+            "60-none",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "60-9",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "240-none",
+            WaitRecommendationPolicy {
+                cooldown_frames: 240,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "240-9",
+            WaitRecommendationPolicy {
+                cooldown_frames: 240,
+                max_skip_frames: Some(9),
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "late",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                response_delay_frames: 30,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+        (
+            "smear",
+            WaitRecommendationPolicy {
+                cooldown_frames: 60,
+                max_skip_frames: Some(9),
+                smear_interval: 4,
+                ..WaitRecommendationPolicy::default()
+            },
+        ),
+    ];
+    let mut reports = BTreeMap::new();
+    for (label, policy) in policies {
+        let schedule = h_osc_jitter_schedule(2, policy, 0);
+        let report = h_osc_run(&schedule);
+        let replay = h_osc_run(&schedule);
+        report.expect_pass(&schedule);
+        assert_eq!(report.trace_hash, replay.trace_hash, "policy={label}");
+        assert_eq!(
+            report.progress_samples, replay.progress_samples,
+            "policy={label}"
+        );
+        assert_eq!(
+            report.wait_recommendations_accepted, replay.wait_recommendations_accepted,
+            "policy={label}"
+        );
+        assert_eq!(
+            report.wait_frames_accepted, replay.wait_frames_accepted,
+            "policy={label}"
+        );
+        assert!(
+            report
+                .metrics
+                .iter()
+                .all(|metrics| metrics.wait_recommendations > 0),
+            "symmetric jitter must activate both controllers (policy={label})"
+        );
+        assert!(
+            report
+                .wait_recommendations_accepted
+                .iter()
+                .all(|&accepted| accepted > 0),
+            "every peer must accept a recommendation (policy={label})"
+        );
+        assert_eq!(
+            report.wait_frames_accepted, report.wait_frames_obeyed,
+            "all accepted debt must drain before the run ends (policy={label})"
+        );
+        assert_eq!(
+            report.recovered_within_b,
+            Some(true),
+            "the real HealAll must satisfy the bounded recovery oracle (policy={label})"
+        );
+        let settled: Vec<_> = report
+            .progress_samples
+            .iter()
+            .filter(|sample| sample.step >= H_OSC_JITTER_END + 600)
+            .collect();
+        let first = settled.first().expect("post-jitter settled samples");
+        let last = settled.last().expect("post-jitter final sample");
+        assert_eq!(
+            first.wait_recommendations, last.wait_recommendations,
+            "recommendations must stop after clean-link settling (policy={label})"
+        );
+        assert!(
+            settled
+                .iter()
+                .flat_map(|sample| &sample.frames_ahead)
+                .all(|advantage| advantage.abs() < 3),
+            "the clean tail must remain inside the recommendation dead band (policy={label})"
+        );
+        reports.insert(label, report);
+    }
+
+    let fast_uncapped = &reports["60-none"];
+    let fast_capped = &reports["60-9"];
+    let slow_uncapped = &reports["240-none"];
+    assert!(
+        slow_uncapped
+            .wait_recommendations_accepted
+            .iter()
+            .sum::<u64>()
+            < fast_uncapped
+                .wait_recommendations_accepted
+                .iter()
+                .sum::<u64>(),
+        "the 240-frame cooldown must reject corrections accepted at 60 frames"
+    );
+    assert!(
+        fast_capped.wait_recommendation_max.iter().copied().max() > Some(9),
+        "the treatment must produce a recommendation above the nine-frame cap"
+    );
+    assert!(
+        fast_capped.wait_frames_accepted.iter().sum::<u64>()
+            <= fast_capped
+                .wait_recommendations_accepted
+                .iter()
+                .sum::<u64>()
+                * 9,
+        "every accepted payload must obey the nine-frame cap"
+    );
+    assert_eq!(
+        fast_uncapped.wait_frames_accepted, fast_uncapped.wait_recommendation_frames,
+        "the uncapped control must accept every payload frame"
+    );
+    assert_ne!(
+        fast_capped.trace_hash, fast_uncapped.trace_hash,
+        "the exercised nine-frame cap must alter matched execution"
+    );
+    assert_ne!(reports["late"].trace_hash, fast_capped.trace_hash);
+    assert_ne!(reports["smear"].trace_hash, fast_capped.trace_hash);
+}
+
+#[test]
+#[ignore = "nightly H-OSC N=2/8/16 aggregation census"]
+fn h_osc_aggregation_pressure_is_measured_and_decays() {
+    let policy = WaitRecommendationPolicy {
+        cooldown_frames: 60,
+        max_skip_frames: Some(9),
+        smear_interval: 4,
+        ..WaitRecommendationPolicy::default()
+    };
+    let mut trigger_duty = Vec::new();
+    let mut phase_trigger_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut phase_endpoint_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
+    for n in [2usize, 8, 16] {
+        let mut n_aggregate_triggers = 0_u64;
+        let mut n_aggregate_evaluations = 0_u64;
+        for (phase, salt) in [0_u64, 1, 2].into_iter().enumerate() {
+            let schedule = h_osc_jitter_schedule(n, policy, salt);
+            let report = h_osc_run(&schedule);
+            let replay = h_osc_run(&schedule);
+            report.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash, "n={n}, salt={salt}");
+            assert_eq!(
+                report.progress_samples, replay.progress_samples,
+                "n={n}, salt={salt}"
+            );
+            assert_eq!(
+                report.wait_frames_obeyed, replay.wait_frames_obeyed,
+                "n={n}, salt={salt}"
+            );
+            assert_eq!(report.progress_samples.len(), 80, "n={n}, salt={salt}");
+            for sample in &report.progress_samples {
+                assert_eq!(sample.endpoints.len(), n * (n - 1), "n={n}, salt={salt}");
+                assert_eq!(
+                    sample.max_endpoint_average_frame_advantage.len(),
+                    n,
+                    "n={n}, salt={salt}"
+                );
+                assert_eq!(sample.wait_controller_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_trigger_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_endpoint_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_endpoint_trigger_evaluations.len(), n);
+                assert_eq!(sample.wait_controller_input_mismatches, vec![0; n]);
+            }
+            let before_treatment = report
+                .progress_samples
+                .iter()
+                .find(|sample| sample.step == H_OSC_JITTER_START - 1)
+                .expect("fixed cut immediately precedes treatment");
+            let after_treatment = report
+                .progress_samples
+                .iter()
+                .find(|sample| sample.step == H_OSC_JITTER_END - 1)
+                .expect("fixed cut closes treatment");
+            let aggregate_evaluations = after_treatment
+                .wait_controller_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let aggregate_triggers = after_treatment
+                .wait_controller_trigger_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_trigger_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let endpoint_evaluations = after_treatment
+                .wait_controller_endpoint_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_endpoint_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            let endpoint_triggers = after_treatment
+                .wait_controller_endpoint_trigger_evaluations
+                .iter()
+                .zip(&before_treatment.wait_controller_endpoint_trigger_evaluations)
+                .map(|(after, before)| after.saturating_sub(*before))
+                .sum::<u64>();
+            assert!(aggregate_evaluations > 0, "n={n}, salt={salt}");
+            assert!(aggregate_triggers > 0, "n={n}, salt={salt}");
+            assert_eq!(
+                endpoint_evaluations,
+                aggregate_evaluations * u64::try_from(n - 1).expect("mesh degree fits u64"),
+                "every production evaluation must inspect every live endpoint (n={n}, salt={salt})"
+            );
+            phase_trigger_duty[phase].push((aggregate_triggers, aggregate_evaluations));
+            phase_endpoint_duty[phase].push((endpoint_triggers, endpoint_evaluations));
+            let treatment: Vec<_> = report
+                .progress_samples
+                .iter()
+                .filter(|sample| (H_OSC_JITTER_START..H_OSC_JITTER_END).contains(&sample.step))
+                .collect();
+            let endpoint_values: Vec<_> = treatment
+                .iter()
+                .flat_map(|sample| &sample.endpoints)
+                .map(|endpoint| endpoint.average_frame_advantage)
+                .collect();
+            let settled: Vec<_> = report
+                .progress_samples
+                .iter()
+                .filter(|sample| sample.step >= H_OSC_JITTER_END + 600)
+                .collect();
+            assert!(!endpoint_values.is_empty(), "n={n}, salt={salt}");
+            assert_eq!(endpoint_values.len(), n * (n - 1) * 30);
+            assert!(
+                report
+                    .metrics
+                    .iter()
+                    .any(|metrics| metrics.wait_recommendations > 0),
+                "each phase must activate the controller census (n={n}, salt={salt}): {:?}",
+                report.metrics
+            );
+            assert!(
+                report.wait_frames_obeyed.iter().any(|&frames| frames > 0),
+                "each phase must apply at least one correction (n={n}, salt={salt})"
+            );
+            assert_eq!(
+                report.wait_frames_accepted, report.wait_frames_obeyed,
+                "all correction debt must drain (n={n}, salt={salt})"
+            );
+            assert_eq!(report.recovered_within_b, Some(true), "n={n}, salt={salt}");
+            let first = settled.first().expect("settled sample");
+            let last = settled.last().expect("final settled sample");
+            assert_eq!(
+                first.wait_recommendations, last.wait_recommendations,
+                "n={n}, salt={salt}"
+            );
+            assert!(
+                settled
+                    .iter()
+                    .flat_map(|sample| &sample.endpoints)
+                    .all(|endpoint| endpoint.average_frame_advantage.abs() < 3),
+                "every exact endpoint average must decay inside the dead band \
+                 (n={n}, salt={salt})"
+            );
+            n_aggregate_triggers = n_aggregate_triggers.saturating_add(aggregate_triggers);
+            n_aggregate_evaluations = n_aggregate_evaluations.saturating_add(aggregate_evaluations);
+        }
+        trigger_duty.push((n_aggregate_triggers, n_aggregate_evaluations));
+    }
+    assert!(
+        trigger_duty[1].0 * trigger_duty[0].1 > trigger_duty[0].0 * trigger_duty[1].1
+            && trigger_duty[2].0 * trigger_duty[1].1 > trigger_duty[1].0 * trigger_duty[2].1,
+        "pooled production trigger duty must rise with N: {trigger_duty:?}"
+    );
+    for (phase, duty) in phase_trigger_duty.iter().enumerate() {
+        assert_eq!(duty.len(), 3, "phase={phase}");
+        assert!(
+            duty[1].0 * duty[0].1 > duty[0].0 * duty[1].1,
+            "N=8 production trigger duty must exceed N=2 in phase {phase}: {duty:?}"
+        );
+        assert!(
+            duty[2].0 * duty[1].1 > duty[1].0 * duty[2].1,
+            "N=16 production trigger duty must exceed N=8 in phase {phase}: {duty:?}"
+        );
+        for n_index in 1..duty.len() {
+            let endpoint = phase_endpoint_duty[phase][n_index];
+            assert!(
+                duty[n_index].0 * endpoint.1 > endpoint.0 * duty[n_index].1,
+                "N=8/16 production max-aggregate duty must exceed matched per-endpoint duty \
+                 in phase {phase}: aggregate={duty:?}, endpoint={:?}",
+                phase_endpoint_duty[phase]
+            );
+        }
+    }
+}
+
+#[test]
+fn nightly_workflow_runs_h_osc_aggregation_census() {
+    let workflow = include_str!("../../.github/workflows/ci-simulation-nightly.yml");
+    assert!(workflow
+        .contains("test(simulation::fleet::h_osc_aggregation_pressure_is_measured_and_decays)"));
+}
+
 /// H-ASYM matched experiment: a 10/200 ms one-way split has the same 210 ms
 /// RTT as its symmetric control. It creates a measurable throughput/stall
 /// asymmetry, but the reported advantages stay below the sleep dead band and
@@ -2721,6 +3124,10 @@ fn h_asym_biases_throughput_without_wait_recommendations() {
 }
 
 fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
+    meta_rb_schedule(delay_ms, None)
+}
+
+fn meta_rb_schedule(delay_ms: u64, cpu_feedback_policy: Option<CpuFeedbackPolicy>) -> Schedule {
     const N: usize = 4;
     const SPIKE_START: u32 = 500;
     const HEAL_AT: u32 = 625;
@@ -2731,6 +3138,7 @@ fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
         step_dt_ms: 16,
         input_delay: 0,
         noise: BackgroundNoise::Clean,
+        cpu_feedback_policy,
         ..SimConfig::smoke(N)
     };
     let mut initial_links = Vec::new();
@@ -2785,10 +3193,290 @@ fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
     }
 }
 
+fn meta_rb_feedback_schedule(
+    delay_ms: u64,
+    cpu_feedback_policy: Option<CpuFeedbackPolicy>,
+) -> Schedule {
+    let mut schedule = meta_rb_schedule(delay_ms, cpu_feedback_policy);
+    schedule.events.retain(|(_, event)| {
+        matches!(event, ScheduleEvent::HealAll)
+            || matches!(event, ScheduleEvent::SetLink { from: 0, .. })
+    });
+    schedule
+}
+
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+/// H-META-RB: a deterministic one-way RTT spike creates rollback work; at the
+/// declared 8 ms/frame capacity bound that work causes future missed polls and
+/// measurably inflates relative RTT, but does not sustain runaway cumulative
+/// resimulation and all modeled debt drains after heal.
+fn rollback_cpu_feedback_is_bounded_without_runaway_resimulation() {
+    fn sample(report: &RunReport, step: u32) -> &super::harness::ProgressSample {
+        report
+            .progress_samples
+            .iter()
+            .find(|sample| sample.step == step)
+            .expect("aligned H-META sample")
+    }
+
+    let cpu = Some(CpuFeedbackPolicy {
+        simulated_frame_cost_us: 8_000,
+        max_poll_delay_steps: 16,
+    });
+    let fixed_clean_schedule = meta_rb_feedback_schedule(0, None);
+    let fixed_spike_schedule = meta_rb_feedback_schedule(150, None);
+    let fixed_clean = run(&fixed_clean_schedule, &RunOptions::default());
+    let fixed_spike = run(&fixed_spike_schedule, &RunOptions::default());
+    let cpu_clean_schedule = meta_rb_feedback_schedule(0, cpu);
+    let cpu_spike_schedule = meta_rb_feedback_schedule(150, cpu);
+    let cpu_clean = run(&cpu_clean_schedule, &RunOptions::default());
+    let cpu_spike = run(&cpu_spike_schedule, &RunOptions::default());
+    let replay = run(&cpu_spike_schedule, &RunOptions::default());
+
+    for (schedule, report) in [
+        (&fixed_clean_schedule, &fixed_clean),
+        (&fixed_spike_schedule, &fixed_spike),
+        (&cpu_clean_schedule, &cpu_clean),
+        (&cpu_spike_schedule, &cpu_spike),
+    ] {
+        report.expect_pass(schedule);
+    }
+    assert_eq!(cpu_spike.trace_hash, replay.trace_hash);
+    assert_eq!(cpu_spike.progress_samples, replay.progress_samples);
+    assert_eq!(cpu_spike.cpu_feedback, replay.cpu_feedback);
+    assert_eq!(cpu_spike.metrics, replay.metrics);
+    assert_eq!(cpu_spike.net_stats, replay.net_stats);
+
+    let delayed = |report: &RunReport| {
+        report
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .sum::<u64>()
+    };
+    let sensitivity = [4_000, 12_000].map(|cost| {
+        let policy = Some(CpuFeedbackPolicy {
+            simulated_frame_cost_us: cost,
+            max_poll_delay_steps: 16,
+        });
+        let clean_schedule = meta_rb_feedback_schedule(0, policy);
+        let spike_schedule = meta_rb_feedback_schedule(150, policy);
+        let clean = run(&clean_schedule, &RunOptions::default());
+        let spike = run(&spike_schedule, &RunOptions::default());
+        clean.expect_pass(&clean_schedule);
+        spike.expect_pass(&spike_schedule);
+        for report in [&clean, &spike] {
+            assert!(report
+                .cpu_feedback
+                .iter()
+                .all(|evidence| evidence.clamp_count == 0));
+        }
+        (cost, delayed(&clean), delayed(&spike))
+    });
+    println!(
+        "H-META-RB CPU clean={:?} spike={:?} fixed_spike_resim={} cpu_spike_resim={}",
+        cpu_clean.cpu_feedback,
+        cpu_spike.cpu_feedback,
+        fixed_spike
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>(),
+        cpu_spike
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    );
+    println!("H-META-RB CPU cost sensitivity={sensitivity:?}");
+    assert_eq!(delayed(&cpu_clean), 0, "matched CPU control is overloaded");
+    assert_eq!(fixed_clean.metrics, cpu_clean.metrics);
+    assert_eq!(fixed_clean.final_confirmed, cpu_clean.final_confirmed);
+    assert_eq!(fixed_clean.net_stats, cpu_clean.net_stats);
+    assert!(
+        delayed(&cpu_spike) > delayed(&cpu_clean),
+        "rollback spike did not create CPU-delayed polls"
+    );
+    assert!(
+        sensitivity[0].1 == 0
+            && sensitivity[0].2 < delayed(&cpu_spike)
+            && sensitivity[1].1 > 0
+            && sensitivity[1].2 >= delayed(&cpu_spike),
+        "cost sensitivity did not bracket the selected healthy/active bound: {sensitivity:?}"
+    );
+    for report in [&cpu_clean, &cpu_spike] {
+        assert_eq!(report.cpu_feedback.len(), 4);
+        assert_eq!(report.recovered_within_b, Some(true));
+        assert!(report.wait_frames_obeyed.iter().all(|&value| value == 0));
+        assert_eq!(report.net_stats.bandwidth_queued_datagrams, 0);
+        assert_eq!(report.net_stats.bandwidth_tail_drops, 0);
+        for (peer, evidence) in report.cpu_feedback.iter().enumerate() {
+            assert_eq!(
+                evidence.charged_frames,
+                report.metrics[peer].frames_advanced
+            );
+            assert_eq!(evidence.work_us, evidence.charged_frames * 8_000);
+            assert_eq!(evidence.clamp_count, 0);
+            assert_eq!(evidence.clamped_delay_steps, 0);
+            assert_eq!(evidence.remaining_delay_steps, 0);
+        }
+        assert!(report
+            .metrics
+            .iter()
+            .all(|metrics| metrics.events_discarded_total == 0));
+    }
+
+    let endpoint_rtt_sum = |report: &RunReport, step| {
+        sample(report, step)
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .sum::<u128>()
+    };
+    println!(
+        "H-META-RB RTT fixed spike={} CPU spike={} CPU late={} CPU clean late={}",
+        endpoint_rtt_sum(&fixed_spike, 624),
+        endpoint_rtt_sum(&cpu_spike, 624),
+        endpoint_rtt_sum(&cpu_spike, 999),
+        endpoint_rtt_sum(&cpu_clean, 999)
+    );
+    assert!(
+        endpoint_rtt_sum(&cpu_spike, 624) > endpoint_rtt_sum(&fixed_spike, 624),
+        "CPU-delayed polls did not inflate the spike RTT premise"
+    );
+    assert_eq!(
+        sample(&fixed_clean, 624).endpoints,
+        sample(&cpu_clean, 624).endpoints,
+        "zero-delay CPU control must be observationally identical to fixed cadence"
+    );
+    let fixed_spike_endpoints = &sample(&fixed_spike, 624).endpoints;
+    let cpu_spike_endpoints = &sample(&cpu_spike, 624).endpoints;
+    assert_eq!(fixed_spike_endpoints.len(), 12);
+    assert_eq!(cpu_spike_endpoints.len(), fixed_spike_endpoints.len());
+    assert!(
+        cpu_spike_endpoints
+            .iter()
+            .zip(fixed_spike_endpoints)
+            .all(|(cpu, fixed)| {
+                let same_link = (cpu.from, cpu.to) == (fixed.from, fixed.to);
+                same_link && cpu.ping_ms >= fixed.ping_ms
+            })
+            && cpu_spike_endpoints
+                .iter()
+                .zip(fixed_spike_endpoints)
+                .any(|(cpu, fixed)| cpu.ping_ms > fixed.ping_ms),
+        "CPU feedback must not hide a per-endpoint RTT regression: \
+         fixed={fixed_spike_endpoints:?}, cpu={cpu_spike_endpoints:?}"
+    );
+    assert!(
+        endpoint_rtt_sum(&cpu_spike, 999) <= endpoint_rtt_sum(&cpu_clean, 999),
+        "late RTT did not return to the matched CPU-control envelope"
+    );
+    let cpu_late_endpoints = &sample(&cpu_spike, 999).endpoints;
+    let clean_late_endpoints = &sample(&cpu_clean, 999).endpoints;
+    assert_eq!(cpu_late_endpoints.len(), 12);
+    assert_eq!(clean_late_endpoints.len(), cpu_late_endpoints.len());
+    assert!(
+        cpu_late_endpoints
+            .iter()
+            .zip(clean_late_endpoints)
+            .all(|(spike, clean)| {
+                let same_link = (spike.from, spike.to) == (clean.from, clean.to);
+                same_link
+                    && spike.ping_ms == clean.ping_ms
+                    && spike.average_frame_advantage.abs() < 3
+            }),
+        "every late endpoint RTT must match control and its controller average return to dead band"
+    );
+
+    let delayed_at = |report: &RunReport, step| {
+        sample(report, step)
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .collect::<Vec<_>>()
+    };
+    let before_spike_delays = delayed_at(&cpu_spike, 499);
+    let after_spike_delays = delayed_at(&cpu_spike, 624);
+    assert!(
+        after_spike_delays
+            .iter()
+            .zip(&before_spike_delays)
+            .any(|(after, before)| after > before),
+        "the RTT sample lacks a matching spike-window missed-poll premise"
+    );
+    assert!(
+        sample(&cpu_spike, 874)
+            .cpu_feedback
+            .iter()
+            .all(|evidence| evidence.remaining_delay_steps == 0
+                && evidence.current_delay_streak == 0),
+        "CPU feedback debt had not drained at the recovery-bound sample"
+    );
+    assert_eq!(
+        delayed_at(&cpu_spike, 999),
+        delayed_at(&cpu_spike, 874),
+        "CPU-delayed polls continued increasing in the clean late window"
+    );
+    assert_eq!(
+        cpu_spike
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .collect::<Vec<_>>(),
+        delayed_at(&cpu_spike, 874),
+        "CPU-delayed polls resumed after the sampled late window"
+    );
+
+    let cumulative_work =
+        |report: &RunReport, step| sample(report, step).resimulated_frames.iter().sum::<u64>();
+    let window_work = |report: &RunReport, from, to| {
+        cumulative_work(report, to).saturating_sub(cumulative_work(report, from))
+    };
+    let clean_late = window_work(&cpu_clean, 874, 999);
+    let spike_late = window_work(&cpu_spike, 874, 999);
+    let clean_spike = window_work(&cpu_clean, 499, 624);
+    let treatment_spike = window_work(&cpu_spike, 499, 624);
+    let fixed_treatment_spike = window_work(&fixed_spike, 499, 624);
+    let total_resimulation = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    };
+    assert_eq!(
+        (
+            total_resimulation(&fixed_spike),
+            total_resimulation(&cpu_spike)
+        ),
+        (9_210, 4_624),
+        "the full-run cumulative-resimulation result changed"
+    );
+    println!("H-META-RB late resimulation clean={clean_late} spike={spike_late}");
+    assert!(
+        treatment_spike > clean_spike,
+        "network spike did not increase rollback work under CPU feedback: \
+         clean={clean_spike}, treatment={treatment_spike}"
+    );
+    assert!(
+        treatment_spike < fixed_treatment_spike,
+        "CPU feedback amplified rather than damped cumulative spike-window rollback work: \
+         fixed={fixed_treatment_spike}, cpu={treatment_spike}"
+    );
+    assert!(
+        spike_late.saturating_mul(100) <= clean_late.saturating_mul(105),
+        "late rollback work did not return to the matched CPU-control envelope"
+    );
+    assert!(fixed_clean.cpu_feedback.is_empty());
+    assert!(fixed_spike.cpu_feedback.is_empty());
+}
+
 /// H-META-RB-OPENLOOP: under the harness's fixed poll cadence, a two-second
 /// symmetric RTT spike creates rollback work, then that work decays after heal
-/// instead of sustaining itself. This does not close full H-META-RB: the
-/// runner does not yet convert resimulation cost into delayed future polls.
+/// instead of sustaining itself. This legacy open-loop row does not enable the
+/// CPU-feedback policy that converts simulation work into delayed future polls.
 #[test]
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
 fn rollback_storm_decays_after_rtt_spike_under_fixed_cadence() {

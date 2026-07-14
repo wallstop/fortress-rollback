@@ -3,8 +3,9 @@
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
-    phase_control_sample_capacity, ProgressSample, RunReport, TraceSnapshot,
-    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY,
+    phase_control_sample_capacity, CpuFeedbackEvidence, HostileGossipEvidence, ProgressSample,
+    ReceiptRangeEvidence, RetainedInputRangeEvidence, RunReport, TraceSnapshot,
+    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -12,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 3 preserves schema-v15 clock/control-loop evidence. Older artifacts
-// cannot diagnose that stronger trace identity and are rejected explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 3;
+// Version 7 preserves hostile-gossip mutation and receiver-side diagnostic
+// evidence. Older artifacts cannot reproduce that evidence and are rejected
+// explicitly.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 7;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -25,6 +27,258 @@ pub const MAX_FAILURE_DETAIL_BYTES: usize = 4096;
 pub const MAX_TEST_NAME_COMPONENT_BYTES: usize = 120;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn validate_cpu_feedback_entries(
+    entries: &[CpuFeedbackEvidence],
+    expected: usize,
+    schedule: &Schedule,
+    context: &str,
+) -> Result<(), String> {
+    if entries.len() != expected {
+        return Err(format!(
+            "{context} has {} cpu_feedback entries (expected {expected})",
+            entries.len()
+        ));
+    }
+    let Some(policy) = schedule.config.cpu_feedback_policy else {
+        return Ok(());
+    };
+    for (peer, evidence) in entries.iter().enumerate() {
+        let expected_work = evidence
+            .charged_frames
+            .saturating_mul(u64::from(policy.simulated_frame_cost_us));
+        if evidence.work_us != expected_work {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] work_us {} does not equal charged_frames {} × cost {}",
+                evidence.work_us, evidence.charged_frames, policy.simulated_frame_cost_us
+            ));
+        }
+        let exceeds_delay_cap = evidence.remaining_delay_steps > policy.max_poll_delay_steps
+            || evidence.max_delay_streak > policy.max_poll_delay_steps;
+        let reverses_streak_order = evidence.current_delay_streak > evidence.max_delay_streak;
+        if exceeds_delay_cap || reverses_streak_order {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] exceeds the declared delay cap or streak ordering"
+            ));
+        }
+        if (evidence.clamp_count == 0) != (evidence.clamped_delay_steps == 0) {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] has inconsistent clamp evidence"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_receipt_range_evidence(
+    evidence: Option<&ReceiptRangeEvidence>,
+    expected_target: Option<usize>,
+    peers: usize,
+    steps: u32,
+    context: &str,
+) -> Result<(), String> {
+    if evidence.is_some() != expected_target.is_some() {
+        return Err(format!(
+            "{context} receipt_range_probe presence does not match replay options"
+        ));
+    }
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    if Some(evidence.target) != expected_target || evidence.target >= peers {
+        return Err(format!(
+            "{context} receipt_range_probe target {} does not match the requested target",
+            evidence.target
+        ));
+    }
+    for (name, len) in [
+        ("receipts", evidence.receipts.len()),
+        ("connected", evidence.connected.len()),
+        ("retained_ranges", evidence.retained_ranges.len()),
+    ] {
+        if len != peers {
+            return Err(format!(
+                "{context} receipt_range_probe has {len} {name} entries for {peers} peers"
+            ));
+        }
+    }
+    let target_has_observation = evidence
+        .receipts
+        .get(evidence.target)
+        .is_some_and(Option::is_some)
+        || evidence
+            .connected
+            .get(evidence.target)
+            .is_some_and(Option::is_some)
+        || evidence
+            .retained_ranges
+            .get(evidence.target)
+            .is_some_and(Option::is_some);
+    if target_has_observation {
+        return Err(format!(
+            "{context} receipt_range_probe must exclude the target's self-observation"
+        ));
+    }
+    if evidence.receipts.iter().flatten().any(|frame| *frame < 0)
+        || evidence
+            .retained_ranges
+            .iter()
+            .flatten()
+            .any(|range| range.first < 0 || range.first > range.last)
+    {
+        return Err(format!(
+            "{context} receipt_range_probe contains an invalid frame or retained range"
+        ));
+    }
+    for observer in 0..peers {
+        let receipt = evidence.receipts[observer];
+        let retained = evidence.retained_ranges[observer];
+        if let (Some(true), Some(receipt), Some(retained)) =
+            (evidence.connected[observer], receipt, retained)
+        {
+            if retained.last != receipt {
+                return Err(format!(
+                    "{context} receipt_range_probe observer {observer} retained range ends at {}, not receipt {receipt}",
+                    retained.last
+                ));
+            }
+        }
+    }
+    let Some(at_step) = evidence.at_step else {
+        if evidence.max_spread != 0 {
+            return Err(format!(
+                "{context} receipt_range_probe has spread without a sample step"
+            ));
+        }
+        if evidence.receipts.iter().any(Option::is_some)
+            || evidence.connected.iter().any(Option::is_some)
+            || evidence.retained_ranges.iter().any(Option::is_some)
+        {
+            return Err(format!(
+                "{context} receipt_range_probe has observations without a sample step"
+            ));
+        }
+        return Ok(());
+    };
+    if at_step >= steps {
+        return Err(format!(
+            "{context} receipt_range_probe step {at_step} is outside 0..{steps}"
+        ));
+    }
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    let mut samples = 0_usize;
+    for ((&connected, &receipt), &retained) in evidence
+        .connected
+        .iter()
+        .zip(&evidence.receipts)
+        .zip(&evidence.retained_ranges)
+    {
+        if let (Some(true), Some(frame), Some(_)) = (connected, receipt, retained) {
+            minimum = minimum.min(frame);
+            maximum = maximum.max(frame);
+            samples = samples.saturating_add(1);
+        }
+    }
+    if samples < 2 {
+        return Err(format!(
+            "{context} receipt_range_probe high-water sample has fewer than two connected observers"
+        ));
+    }
+    let spread = u32::try_from(maximum.saturating_sub(minimum)).unwrap_or(u32::MAX);
+    if evidence.max_spread != spread {
+        return Err(format!(
+            "{context} receipt_range_probe spread {} does not match receipt extrema {spread}",
+            evidence.max_spread
+        ));
+    }
+    Ok(())
+}
+
+fn validate_hostile_gossip_evidence(
+    evidence: Option<&HostileGossipEvidence>,
+    options: Option<super::HostileGossipOptions>,
+    expected_probe_step: Option<u32>,
+    context: &str,
+) -> Result<(), String> {
+    if evidence.is_some() != options.is_some() {
+        return Err(format!(
+            "{context} hostile_gossip evidence presence does not match replay options"
+        ));
+    }
+    let (Some(evidence), Some(options)) = (evidence, options) else {
+        return Ok(());
+    };
+    let Some(probe) = evidence.probe else {
+        return Err(format!(
+            "{context} hostile_gossip is missing receiver-side probe evidence"
+        ));
+    };
+    if Some(probe.at_step) != expected_probe_step
+        || probe.at_step < options.from_step
+        || probe.at_step >= options.until_step
+        || !probe.endpoint_running
+        || probe.observer_confirmed < fortress_rollback::Frame::NULL.as_i32()
+        || probe.status_frame < fortress_rollback::Frame::NULL.as_i32()
+        || probe.round_floor < fortress_rollback::Frame::NULL.as_i32()
+        || probe.effective_reported_frame < fortress_rollback::Frame::NULL.as_i32()
+        || probe
+            .direct_receipt
+            .is_some_and(|frame| frame < fortress_rollback::Frame::NULL.as_i32())
+        || probe
+            .target_confirmed_bound
+            .is_some_and(|frame| frame < fortress_rollback::Frame::NULL.as_i32())
+        || probe.reply_seq > probe.request_seq
+        || probe.prune_seq > probe.request_seq
+    {
+        return Err(format!(
+            "{context} hostile_gossip receiver-side probe is inconsistent"
+        ));
+    }
+    if evidence.messages_mutated == 0 {
+        if evidence.first_step.is_some()
+            || evidence.last_step.is_some()
+            || evidence.last_before.is_some()
+            || evidence.last_after.is_some()
+            || evidence.last_round_seq.is_some()
+        {
+            return Err(format!(
+                "{context} hostile_gossip has step evidence without a mutation"
+            ));
+        }
+        return Ok(());
+    }
+    let (Some(first), Some(last)) = (evidence.first_step, evidence.last_step) else {
+        return Err(format!(
+            "{context} hostile_gossip mutations are missing step evidence"
+        ));
+    };
+    if first > last || first < options.from_step || last >= options.until_step {
+        return Err(format!(
+            "{context} hostile_gossip mutation steps are outside the configured interval"
+        ));
+    }
+    let (Some(before), Some(after)) = (evidence.last_before, evidence.last_after) else {
+        return Err(format!(
+            "{context} hostile_gossip mutations are missing before/after evidence"
+        ));
+    };
+    if before < 0
+        || after < 0
+        || before == after
+        || after != before.saturating_add(options.delta).max(0)
+    {
+        return Err(format!(
+            "{context} hostile_gossip before/after evidence does not match the configured delta"
+        ));
+    }
+    if (options.mode == super::HostileGossipMode::FloorReply) != evidence.last_round_seq.is_some() {
+        return Err(format!(
+            "{context} hostile_gossip round-sequence evidence does not match its mode"
+        ));
+    }
+    Ok(())
+}
 
 /// Stable serialization identity for every oracle failure variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +391,27 @@ pub struct FailureArtifact {
     /// Final per-peer obeyed-wait totals.
     #[serde(default)]
     pub wait_frames_obeyed: Vec<u64>,
+    /// Largest recommendation payload emitted for each peer.
+    #[serde(default)]
+    pub wait_recommendation_max: Vec<u32>,
+    /// Sum of all recommendation payloads emitted for each peer.
+    #[serde(default)]
+    pub wait_recommendation_frames: Vec<u64>,
+    /// Recommendations accepted by each application-side actuator.
+    #[serde(default)]
+    pub wait_recommendations_accepted: Vec<u64>,
+    /// Recommendation debt accepted by each application-side actuator.
+    #[serde(default)]
+    pub wait_frames_accepted: Vec<u64>,
+    /// Final per-peer deterministic CPU-feedback evidence.
+    #[serde(default)]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
+    /// Direct-receipt and retained-range high-water evidence, when requested.
+    #[serde(default)]
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
+    /// Captured hostile-gossip mutation and receiver-side diagnostic evidence.
+    #[serde(default)]
+    pub hostile_gossip: Option<HostileGossipEvidence>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -164,6 +439,13 @@ impl FailureArtifact {
             progress_samples: report.progress_samples.clone(),
             frame_opportunities: report.frame_opportunities.clone(),
             wait_frames_obeyed: report.wait_frames_obeyed.clone(),
+            wait_recommendation_max: report.wait_recommendation_max.clone(),
+            wait_recommendation_frames: report.wait_recommendation_frames.clone(),
+            wait_recommendations_accepted: report.wait_recommendations_accepted.clone(),
+            wait_frames_accepted: report.wait_frames_accepted.clone(),
+            cpu_feedback: report.cpu_feedback.clone(),
+            receipt_range_probe: report.receipt_range_probe.clone(),
+            hostile_gossip: report.hostile_gossip,
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -240,7 +522,64 @@ impl FailureArtifact {
                 return Err(format!("artifact has {len} {name} entries for {n} peers"));
             }
         }
-        let maximum_progress_samples = if self.replay_options.phase_resolved_control_samples {
+        let expected_cpu_feedback_entries = if self.schedule.config.cpu_feedback_policy.is_some() {
+            n
+        } else {
+            0
+        };
+        validate_cpu_feedback_entries(
+            &self.cpu_feedback,
+            expected_cpu_feedback_entries,
+            &self.schedule,
+            "artifact",
+        )?;
+        validate_receipt_range_evidence(
+            self.receipt_range_probe.as_ref(),
+            self.replay_options.receipt_range_probe_target,
+            n,
+            self.schedule.config.steps,
+            "artifact",
+        )?;
+        validate_hostile_gossip_evidence(
+            self.hostile_gossip.as_ref(),
+            self.replay_options.hostile_gossip,
+            self.replay_options.probe_confirmed_at,
+            "artifact",
+        )?;
+        let expected_wait_policy_entries = if self.schedule.schema_version >= 17 {
+            n
+        } else {
+            0
+        };
+        for (name, len) in [
+            (
+                "wait_recommendation_max",
+                self.wait_recommendation_max.len(),
+            ),
+            (
+                "wait_recommendation_frames",
+                self.wait_recommendation_frames.len(),
+            ),
+            (
+                "wait_recommendations_accepted",
+                self.wait_recommendations_accepted.len(),
+            ),
+            ("wait_frames_accepted", self.wait_frames_accepted.len()),
+        ] {
+            if len != expected_wait_policy_entries {
+                return Err(format!(
+                    "artifact has {len} {name} entries (expected {expected_wait_policy_entries} \
+                     for schedule schema {})",
+                    self.schedule.schema_version
+                ));
+            }
+        }
+        let wait_policy_samples = self.replay_options.phase_resolved_control_samples
+            && self.schedule.schema_version >= 17
+            && !self.schedule.config.wait_recommendation_policy.is_default();
+        let maximum_progress_samples = if wait_policy_samples {
+            WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+        } else if self.replay_options.phase_resolved_control_samples {
             phase_control_sample_capacity(n)
         } else {
             12
@@ -270,6 +609,43 @@ impl FailureArtifact {
                     ));
                 }
             }
+            validate_cpu_feedback_entries(
+                &sample.cpu_feedback,
+                expected_cpu_feedback_entries,
+                &self.schedule,
+                &format!("artifact progress sample at step {}", sample.step),
+            )?;
+            let expected_controller_evidence = if wait_policy_samples { n } else { 0 };
+            for (name, len) in [
+                (
+                    "wait_controller_evaluations",
+                    sample.wait_controller_evaluations.len(),
+                ),
+                (
+                    "wait_controller_trigger_evaluations",
+                    sample.wait_controller_trigger_evaluations.len(),
+                ),
+                (
+                    "wait_controller_endpoint_evaluations",
+                    sample.wait_controller_endpoint_evaluations.len(),
+                ),
+                (
+                    "wait_controller_endpoint_trigger_evaluations",
+                    sample.wait_controller_endpoint_trigger_evaluations.len(),
+                ),
+                (
+                    "wait_controller_input_mismatches",
+                    sample.wait_controller_input_mismatches.len(),
+                ),
+            ] {
+                if len != expected_controller_evidence {
+                    return Err(format!(
+                        "artifact progress sample at step {} has {len} {name} entries \
+                         (expected {expected_controller_evidence})",
+                        sample.step
+                    ));
+                }
+            }
             let expected_frames_ahead = if self.replay_options.phase_resolved_control_samples {
                 n
             } else {
@@ -283,6 +659,16 @@ impl FailureArtifact {
                     sample.frames_ahead.len()
                 ));
             }
+            let expected_average_advantage = if wait_policy_samples { n } else { 0 };
+            if sample.max_endpoint_average_frame_advantage.len() != expected_average_advantage {
+                return Err(format!(
+                    "artifact progress sample at step {} has {} \
+                     max_endpoint_average_frame_advantage entries (expected \
+                     {expected_average_advantage})",
+                    sample.step,
+                    sample.max_endpoint_average_frame_advantage.len()
+                ));
+            }
             if sample.step >= self.schedule.config.steps {
                 return Err(format!(
                     "artifact progress sample step {} is outside embedded schedule",
@@ -290,12 +676,13 @@ impl FailureArtifact {
                 ));
             }
             let directed_links = n.saturating_mul(n.saturating_sub(1));
-            for (name, len) in [
-                ("endpoints", sample.endpoints.len()),
-                ("link_queues", sample.link_queues.len()),
+            for (name, len, include_in_wait_policy_samples) in [
+                ("endpoints", sample.endpoints.len(), true),
+                ("link_queues", sample.link_queues.len(), false),
             ] {
                 let expected = if self.schedule.schema_version >= 16
-                    && !self.replay_options.phase_resolved_control_samples
+                    && (!self.replay_options.phase_resolved_control_samples
+                        || (wait_policy_samples && include_in_wait_policy_samples))
                 {
                     directed_links
                 } else {
@@ -323,6 +710,26 @@ impl FailureArtifact {
                          {expected_from}->{expected_to})",
                         endpoint.from, endpoint.to
                     ));
+                }
+            }
+            if wait_policy_samples {
+                for (peer, endpoints) in sample
+                    .endpoints
+                    .chunks_exact(n.saturating_sub(1))
+                    .enumerate()
+                {
+                    let expected_max = endpoints
+                        .iter()
+                        .map(|endpoint| endpoint.average_frame_advantage)
+                        .max()
+                        .unwrap_or(0);
+                    if sample.max_endpoint_average_frame_advantage[peer] != expected_max {
+                        return Err(format!(
+                            "artifact progress sample at step {} has aggregate advantage {} for \
+                             peer {peer} (expected endpoint maximum {expected_max})",
+                            sample.step, sample.max_endpoint_average_frame_advantage[peer]
+                        ));
+                    }
                 }
             }
             for (index, queue) in sample.link_queues.iter().enumerate() {
@@ -385,6 +792,19 @@ impl FailureArtifact {
                     ));
                 }
             }
+            validate_cpu_feedback_entries(
+                &snapshot.cpu_feedback,
+                expected_cpu_feedback_entries,
+                &self.schedule,
+                &format!("trace step {}", snapshot.step),
+            )?;
+            validate_receipt_range_evidence(
+                snapshot.receipt_range_probe.as_ref(),
+                self.replay_options.receipt_range_probe_target,
+                n,
+                snapshot.step.saturating_add(1),
+                &format!("trace step {}", snapshot.step),
+            )?;
             if snapshot.scheduled_events.len() > TRACE_STEP_EVENT_CAPACITY
                 || snapshot.observed_events.len() > TRACE_STEP_EVENT_CAPACITY
             {
@@ -446,6 +866,22 @@ impl FailureArtifact {
                     ));
                 }
             }
+        }
+        if self
+            .trace_tail
+            .last()
+            .is_some_and(|snapshot| snapshot.cpu_feedback != self.cpu_feedback)
+        {
+            return Err("artifact final cpu_feedback differs from the final trace step".to_owned());
+        }
+        if self
+            .trace_tail
+            .last()
+            .is_some_and(|snapshot| snapshot.receipt_range_probe != self.receipt_range_probe)
+        {
+            return Err(
+                "artifact final receipt_range_probe differs from the final trace step".to_owned(),
+            );
         }
         Ok(())
     }
@@ -630,11 +1066,13 @@ mod tests {
     use super::*;
     use crate::common::sim_net::LinkPolicy;
     use crate::simulation::harness::schedule::{
-        BackgroundNoise, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+        AppModel, BackgroundNoise, FrameModel, ScheduleEvent, SimConfig, WaitRecommendationPolicy,
+        SCHEDULE_SCHEMA_VERSION,
     };
     use crate::simulation::harness::{
-        run, EndpointControlSample, LinkQueueSample, ProgressSample, RunOptions, TraceGameState,
-        TraceNetStats, TraceSessionState, TRACE_TAIL_CAPACITY,
+        run, EndpointControlSample, HostileGossipMode, HostileGossipOptions, LinkQueueSample,
+        ProgressSample, RunOptions, TraceGameState, TraceNetStats, TraceSessionState,
+        TRACE_TAIL_CAPACITY,
     };
 
     fn temp_artifact_root(label: &str) -> PathBuf {
@@ -667,6 +1105,13 @@ mod tests {
             progress_samples: Vec::new(),
             frame_opportunities: vec![600, 600],
             wait_frames_obeyed: vec![0, 0],
+            wait_recommendation_max: vec![0, 0],
+            wait_recommendation_frames: vec![0, 0],
+            wait_recommendations_accepted: vec![0, 0],
+            wait_frames_accepted: vec![0, 0],
+            cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
+            hostile_gossip: None,
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -680,6 +1125,8 @@ mod tests {
                         };
                         2
                     ],
+                    cpu_feedback: Vec::new(),
+                    receipt_range_probe: None,
                     scheduled_events: Vec::new(),
                     scheduled_events_truncated: 0,
                     observed_events: Vec::new(),
@@ -814,6 +1261,10 @@ mod tests {
 
         let mut artifact = sample_artifact();
         artifact.schedule.schema_version = 1;
+        artifact.wait_recommendation_max.clear();
+        artifact.wait_recommendation_frames.clear();
+        artifact.wait_recommendations_accepted.clear();
+        artifact.wait_frames_accepted.clear();
         assert!(
             artifact.validate().is_ok(),
             "artifact envelope must preserve the schedule validator's compatibility window"
@@ -825,29 +1276,245 @@ mod tests {
     }
 
     #[test]
-    fn artifact_v2_without_progress_fields_reaches_explicit_schema_rejection() {
+    fn legacy_schedule_failure_builds_a_valid_v7_artifact() {
+        let mut config = SimConfig::smoke(2);
+        config.steps = 60;
+        config.noise = BackgroundNoise::Clean;
+        let mut schedule = crate::simulation::harness::schedule::generate(0x001E_6AC7, config);
+        schedule.schema_version = 16;
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert!(report.wait_recommendation_max.is_empty());
+        assert!(report.wait_recommendation_frames.is_empty());
+        assert!(report.wait_recommendations_accepted.is_empty());
+        assert!(report.wait_frames_accepted.is_empty());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact
+            .validate()
+            .expect("legacy schedule report produces a valid v7 artifact");
+    }
+
+    #[test]
+    fn artifact_v6_without_hostile_gossip_evidence_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(2),
+            serde_json::Value::from(6),
         );
-        for field in [
-            "progress_samples",
-            "frame_opportunities",
-            "wait_frames_obeyed",
-        ] {
-            assert!(object.remove(field).is_some(), "fixture contains {field}");
-        }
+        assert!(
+            object.remove("hostile_gossip").is_some(),
+            "fixture contains hostile_gossip"
+        );
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v2 envelope reaches validation");
-        let error = artifact.validate().expect_err("v2 schema is unsupported");
+            serde_json::from_value(value).expect("v6 envelope reaches validation");
+        let error = artifact.validate().expect_err("v6 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 2"),
+            error.contains("unsupported failure artifact schema 6"),
             "wrong diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn hostile_gossip_artifact_preserves_receiver_side_evidence() {
+        let mut config = SimConfig::smoke(4);
+        config.steps = 320;
+        config.noise = BackgroundNoise::Clean;
+        let schedule = crate::simulation::harness::schedule::generate(0xB2A4, config);
+        let options = RunOptions {
+            corrupt_state_from: Some((0, 220)),
+            probe_confirmed_at: Some(180),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -9,
+                from_step: 100,
+                until_step: 181,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "negative control must fail");
+        let evidence = report.hostile_gossip.expect("hostile evidence");
+        assert!(evidence.messages_mutated > 0);
+        assert!(evidence.probe.is_some());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact.validate().expect("hostile artifact is valid");
+        let encoded = serde_json::to_vec(&artifact).expect("artifact serializes");
+        let decoded: FailureArtifact = serde_json::from_slice(&encoded).expect("artifact decodes");
+        decoded
+            .validate()
+            .expect("decoded hostile artifact is valid");
+        assert_eq!(decoded.hostile_gossip, Some(evidence));
+        assert_eq!(decoded.replay_options, options);
+
+        let mut tampered = decoded;
+        tampered
+            .hostile_gossip
+            .as_mut()
+            .and_then(|evidence| evidence.probe.as_mut())
+            .expect("hostile-gossip probe")
+            .observer_confirmed = fortress_rollback::Frame::NULL.as_i32() - 1;
+        assert!(
+            tampered.validate().is_err(),
+            "artifact validation must reject an out-of-domain confirmed frame"
+        );
+    }
+
+    #[test]
+    fn schema_v18_cpu_feedback_artifact_preserves_and_validates_exact_evidence() {
+        let mut config = SimConfig::smoke(2);
+        config.steps = 80;
+        config.noise = BackgroundNoise::Clean;
+        config.cpu_feedback_policy =
+            Some(crate::simulation::harness::schedule::CpuFeedbackPolicy {
+                simulated_frame_cost_us: 8_001,
+                max_poll_delay_steps: 8,
+            });
+        let schedule = crate::simulation::harness::schedule::generate(0xC0FE, config);
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert_eq!(report.cpu_feedback.len(), 2);
+        for (peer, evidence) in report.cpu_feedback.iter().enumerate() {
+            assert_eq!(
+                evidence.charged_frames,
+                report.metrics[peer].frames_advanced
+            );
+            assert_eq!(evidence.work_us, evidence.charged_frames * 8_001);
+        }
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact.validate().expect("CPU artifact validates");
+
+        let mut missing = artifact.clone();
+        let _ = missing.cpu_feedback.pop();
+        assert!(missing.validate().is_err());
+        let mut wrong_work = artifact.clone();
+        wrong_work.cpu_feedback[0].work_us += 1;
+        assert!(wrong_work.validate().is_err());
+        let mut wrong_progress = artifact.clone();
+        let _ = wrong_progress.progress_samples[0].cpu_feedback.pop();
+        assert!(wrong_progress.validate().is_err());
+        let mut wrong_trace = artifact.clone();
+        wrong_trace.trace_tail[0].cpu_feedback[0].max_delay_streak = 9;
+        assert!(wrong_trace.validate().is_err());
+        let mut wrong_final = artifact;
+        wrong_final.cpu_feedback[0].charged_frames -= 1;
+        wrong_final.cpu_feedback[0].work_us -= 8_001;
+        assert!(wrong_final.validate().is_err());
+    }
+
+    #[test]
+    fn receipt_range_artifact_preserves_and_validates_high_water_evidence() {
+        let mut config = SimConfig::smoke(3);
+        config.steps = 180;
+        config.noise = BackgroundNoise::Clean;
+        let schedule = crate::simulation::harness::schedule::generate(0x5241_4e47, config);
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                receipt_range_probe_target: Some(2),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert!(report.receipt_range_probe.is_some());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact
+            .validate()
+            .expect("receipt-range artifact validates");
+
+        let mut missing_entry = artifact.clone();
+        let _ = missing_entry
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .receipts
+            .pop();
+        assert!(missing_entry.validate().is_err());
+
+        let mut wrong_spread = artifact.clone();
+        wrong_spread
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .max_spread += 1;
+        assert!(wrong_spread.validate().is_err());
+
+        let mut wrong_trace = artifact.clone();
+        wrong_trace.trace_tail[0]
+            .receipt_range_probe
+            .as_mut()
+            .expect("trace probe exists")
+            .target = 1;
+        assert!(wrong_trace.validate().is_err());
+
+        let mut wrong_final = artifact;
+        wrong_final
+            .receipt_range_probe
+            .as_mut()
+            .expect("probe exists")
+            .receipts[0] = None;
+        assert!(wrong_final.validate().is_err());
+    }
+
+    #[test]
+    fn receipt_range_validation_allows_incomplete_and_disconnected_nonparticipants() {
+        let incomplete = ReceiptRangeEvidence {
+            target: 3,
+            max_spread: 10,
+            at_step: Some(5),
+            receipts: vec![None, Some(10), Some(0), None],
+            connected: vec![Some(true), Some(true), Some(true), None],
+            retained_ranges: vec![
+                None,
+                Some(RetainedInputRangeEvidence { first: 0, last: 10 }),
+                Some(RetainedInputRangeEvidence { first: 0, last: 0 }),
+                None,
+            ],
+        };
+        validate_receipt_range_evidence(Some(&incomplete), Some(3), 4, 10, "test")
+            .expect("an incomplete connected observer does not define the extrema");
+
+        let mut disconnected = incomplete;
+        disconnected.connected[0] = Some(false);
+        disconnected.receipts[0] = Some(4);
+        disconnected.retained_ranges[0] = Some(RetainedInputRangeEvidence { first: 0, last: 9 });
+        validate_receipt_range_evidence(Some(&disconnected), Some(3), 4, 10, "test")
+            .expect("a disconnected freeze may sit below retained history's physical end");
+
+        let mut future_step = disconnected.clone();
+        future_step.at_step = Some(10);
+        assert!(
+            validate_receipt_range_evidence(Some(&future_step), Some(3), 4, 10, "test").is_err()
+        );
+
+        let mut self_observation = disconnected;
+        self_observation.receipts[3] = Some(0);
+        assert!(
+            validate_receipt_range_evidence(Some(&self_observation), Some(3), 4, 10, "test")
+                .is_err()
         );
     }
 
@@ -864,13 +1531,21 @@ mod tests {
             prediction_miss_count: vec![0, 0],
             frame_opportunities: vec![1, 1],
             wait_frames_obeyed: vec![0, 0],
+            cpu_feedback: Vec::new(),
+            wait_controller_evaluations: Vec::new(),
+            wait_controller_trigger_evaluations: Vec::new(),
+            wait_controller_endpoint_evaluations: Vec::new(),
+            wait_controller_endpoint_trigger_evaluations: Vec::new(),
+            wait_controller_input_mismatches: Vec::new(),
             frames_ahead: Vec::new(),
+            max_endpoint_average_frame_advantage: Vec::new(),
             endpoints: vec![
                 EndpointControlSample {
                     from: 0,
                     to: 1,
                     ping_ms: 10,
                     remote_frame_advantage: 1,
+                    average_frame_advantage: 0,
                     pending_output_len: 2,
                 },
                 EndpointControlSample {
@@ -878,6 +1553,7 @@ mod tests {
                     to: 0,
                     ping_ms: 10,
                     remote_frame_advantage: -1,
+                    average_frame_advantage: 0,
                     pending_output_len: 2,
                 },
             ],
@@ -948,6 +1624,148 @@ mod tests {
     }
 
     #[test]
+    fn schema_v18_h_osc_cpu_receipt_artifact_preserves_full_n16_evidence_under_size_cap() {
+        let n = 16;
+        let mut config = SimConfig::smoke(n);
+        config.steps = 3_000;
+        config.noise = BackgroundNoise::Clean;
+        config.app_model = AppModel::Obey;
+        config.frame_model = FrameModel::SkewGated60Hz;
+        config.wait_recommendation_policy = WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            response_delay_frames: 30,
+            smear_interval: 4,
+        };
+        config.cpu_feedback_policy =
+            Some(crate::simulation::harness::schedule::CpuFeedbackPolicy {
+                simulated_frame_cost_us: 1,
+                max_poll_delay_steps: 3_000,
+            });
+        let schedule = crate::simulation::harness::schedule::generate(0xA10, config);
+        let endpoints: Vec<_> = (0..n)
+            .flat_map(|from| {
+                (0..n)
+                    .filter(move |&to| from != to)
+                    .map(move |to| EndpointControlSample {
+                        from,
+                        to,
+                        ping_ms: u128::MAX,
+                        remote_frame_advantage: i32::MAX,
+                        average_frame_advantage: i32::MIN,
+                        pending_output_len: u64::MAX,
+                    })
+            })
+            .collect();
+        let maximum_cpu_evidence = CpuFeedbackEvidence {
+            charged_frames: u64::MAX,
+            work_us: u64::MAX,
+            delayed_poll_steps: u64::MAX,
+            current_delay_streak: 3_000,
+            max_delay_streak: 3_000,
+            remaining_delay_steps: 3_000,
+            clamp_count: u64::MAX,
+            clamped_delay_steps: u64::MAX,
+        };
+        let progress_samples: Vec<_> = (0..100_u32)
+            .map(|index| ProgressSample {
+                step: index.saturating_mul(30).saturating_add(29),
+                current_frames: vec![i32::MAX; n],
+                confirmed_frames: vec![i32::MAX; n],
+                confirmation_lag: vec![u64::MAX; n],
+                wait_recommendations: vec![u64::MAX; n],
+                rollback_count: vec![u64::MAX; n],
+                resimulated_frames: vec![u64::MAX; n],
+                prediction_miss_count: vec![u64::MAX; n],
+                frame_opportunities: vec![u64::MAX; n],
+                wait_frames_obeyed: vec![u64::MAX; n],
+                cpu_feedback: vec![maximum_cpu_evidence; n],
+                wait_controller_evaluations: vec![u64::MAX; n],
+                wait_controller_trigger_evaluations: vec![u64::MAX; n],
+                wait_controller_endpoint_evaluations: vec![u64::MAX; n],
+                wait_controller_endpoint_trigger_evaluations: vec![u64::MAX; n],
+                wait_controller_input_mismatches: vec![0; n],
+                frames_ahead: vec![i32::MAX; n],
+                max_endpoint_average_frame_advantage: vec![i32::MIN; n],
+                endpoints: endpoints.clone(),
+                link_queues: Vec::new(),
+            })
+            .collect();
+        let mut artifact = sample_artifact();
+        artifact.schedule = schedule;
+        artifact.replay_options.phase_resolved_control_samples = true;
+        artifact.replay_options.receipt_range_probe_target = Some(n - 1);
+        artifact.final_confirmed = vec![0; n];
+        artifact.progress_samples = progress_samples;
+        artifact.frame_opportunities = vec![0; n];
+        artifact.wait_frames_obeyed = vec![0; n];
+        artifact.wait_recommendation_max = vec![0; n];
+        artifact.wait_recommendation_frames = vec![0; n];
+        artifact.wait_recommendations_accepted = vec![0; n];
+        artifact.wait_frames_accepted = vec![0; n];
+        artifact.cpu_feedback = vec![maximum_cpu_evidence; n];
+        let mut maximum_receipts = vec![Some(i32::MAX); n];
+        maximum_receipts[0] = Some(0);
+        maximum_receipts[n - 1] = None;
+        let mut maximum_connections = vec![Some(true); n];
+        maximum_connections[n - 1] = None;
+        let mut maximum_ranges = maximum_receipts
+            .iter()
+            .map(|receipt| receipt.map(|last| RetainedInputRangeEvidence { first: 0, last }))
+            .collect::<Vec<_>>();
+        maximum_ranges[n - 1] = None;
+        let maximum_receipt_evidence = ReceiptRangeEvidence {
+            target: n - 1,
+            max_spread: i32::MAX as u32,
+            at_step: Some(2_935),
+            receipts: maximum_receipts,
+            connected: maximum_connections,
+            retained_ranges: maximum_ranges,
+        };
+        artifact.receipt_range_probe = Some(maximum_receipt_evidence.clone());
+        for (offset, snapshot) in artifact.trace_tail.iter_mut().enumerate() {
+            snapshot.step = 2_936 + u32::try_from(offset).expect("tail offset fits u32");
+            snapshot.confirmed_frames = vec![0; n];
+            snapshot.session_states = vec![TraceSessionState::Running; n];
+            snapshot.dead = vec![false; n];
+            snapshot.game_states = vec![TraceGameState { frame: 0, value: 0 }; n];
+            snapshot.cpu_feedback = vec![maximum_cpu_evidence; n];
+            snapshot.receipt_range_probe = Some(maximum_receipt_evidence.clone());
+        }
+        artifact
+            .validate()
+            .expect("schema-v18 H-OSC/CPU shape validates");
+        assert_eq!(
+            artifact.progress_samples.len(),
+            WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+        );
+        let mut over_capacity = artifact.clone();
+        over_capacity.progress_samples.push(
+            artifact
+                .progress_samples
+                .last()
+                .expect("maximum shape has samples")
+                .clone(),
+        );
+        assert!(
+            over_capacity.validate().is_err(),
+            "validator must reject an H-OSC artifact above the bounded sample cap"
+        );
+
+        let serialized = serde_json::to_vec_pretty(&artifact).expect("artifact serializes");
+        assert!(
+            serialized.len() <= MAX_FAILURE_ARTIFACT_BYTES,
+            "N=16 H-OSC/CPU artifact uses {} bytes (cap {MAX_FAILURE_ARTIFACT_BYTES})",
+            serialized.len()
+        );
+        let root = temp_artifact_root("h-osc-cpu-n16");
+        let path = write_artifact(&root, "h-osc-cpu-n16", &artifact, ExistingArtifact::Refuse)
+            .expect("bounded H-OSC/CPU artifact writes");
+        assert_eq!(read_artifact(&path).expect("artifact reads"), artifact);
+        std::fs::remove_dir_all(root).expect("temporary artifact tree removes");
+    }
+
+    #[test]
     fn artifact_validation_rejects_incomplete_or_inconsistent_envelopes() {
         let mutations: Vec<Box<dyn Fn(&mut FailureArtifact)>> = vec![
             Box::new(|artifact| artifact.failures.clear()),
@@ -959,6 +1777,18 @@ mod tests {
             }),
             Box::new(|artifact| {
                 let _ = artifact.wait_frames_obeyed.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendation_max.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendation_frames.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_recommendations_accepted.pop();
+            }),
+            Box::new(|artifact| {
+                let _ = artifact.wait_frames_accepted.pop();
             }),
             Box::new(|artifact| artifact.trace_tail.clear()),
             Box::new(|artifact| artifact.trace_tail[1].step += 1),

@@ -3,7 +3,7 @@
 #
 # Usage: ./scripts/verification/verify-tla.sh [options] [spec-name]
 #   ./scripts/verification/verify-tla.sh              # Verify all specs
-#   ./scripts/verification/verify-tla.sh NetworkProtocol  # Verify single spec
+#   ./scripts/verification/verify-tla.sh SyncHandshakeV1  # Verify single spec
 #   ./scripts/verification/verify-tla.sh --quick      # Quick verification with smaller bounds
 #   ./scripts/verification/verify-tla.sh --list       # List available specs
 #
@@ -61,7 +61,6 @@ NC='\033[0m' # No Color
 
 # Specs to verify (only specs with .cfg files will be checked)
 SPECS=(
-    "NetworkProtocol"
     "SyncHandshakeV1"
     "SyncHandshakeV1Fair"
     "SyncHandshakeV1Mismatch"
@@ -97,6 +96,12 @@ ADDITIONAL_CHECKS=(
     "CoordinatedPeerDropFaults"
 )
 
+# Hand-authored NDJSON traces constrained through real SyncHandshakeV1 actions.
+# The wrapper includes three positive traces and one exact expected-reject mutation.
+TRACE_CHECKS=(
+    "SyncHandshakeV1TraceContract"
+)
+
 # Track results
 declare -A RESULTS
 PASSED=0
@@ -115,7 +120,8 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  $0                      # Verify all specs"
-    echo "  $0 NetworkProtocol      # Verify single spec"
+    echo "  $0 SyncHandshakeV1      # Verify single spec"
+    echo "  $0 SyncHandshakeV1TraceContract  # Verify hand-authored trace contract"
     echo "  $0 --quick              # Quick verification"
     echo "  $0 --quick --fail-fast  # CI mode: quick, stop on first failure"
 }
@@ -131,6 +137,7 @@ print_specs() {
         [[ ! -f "$cfg_file" ]] && status="✗ (missing .cfg)"
         echo "  $spec  $status"
     done
+    echo "  SyncHandshakeV1TraceContract  ✓ (NDJSON trace suite)"
 }
 
 check_java() {
@@ -370,6 +377,32 @@ verify_sync_handshake_handlers_disabled() {
     return 1
 }
 
+verify_sync_handshake_trace_contract() {
+    local verbose="${1:-false}"
+    local label="SyncHandshakeV1TraceContract"
+    local -a command=(
+        python3
+        "$PROJECT_ROOT/scripts/verification/verify-sync-handshake-traces.py"
+        --jar "$TLA_TOOLS_JAR"
+    )
+    if [[ "$verbose" == "true" ]]; then
+        command+=(--verbose)
+    fi
+
+    echo -e "${BLUE}Verifying $label...${NC}"
+    if "${command[@]}"; then
+        echo -e "${GREEN}✓ $label passed${NC}"
+        RESULTS[$label]="PASS"
+        ((PASSED++))
+        return 0
+    fi
+
+    echo -e "${RED}✗ $label failed${NC}"
+    RESULTS[$label]="FAIL"
+    ((FAILED++))
+    return 1
+}
+
 verify_coordinated_peer_drop_immediate_min() {
     local verbose="${1:-false}"
     local label="CoordinatedPeerDropImmediateMin"
@@ -478,12 +511,18 @@ verify_coordinated_peer_drop_companion() {
 }
 
 print_summary() {
+    local displayed_skipped=0
+
     echo ""
     echo "=========================================="
     echo "TLA+ Verification Summary"
     echo "=========================================="
 
-    for spec in "${SPECS[@]}" "${EXPECTED_FAILURE_CHECKS[@]}" "${ADDITIONAL_CHECKS[@]}"; do
+    for spec in \
+        "${SPECS[@]}" \
+        "${EXPECTED_FAILURE_CHECKS[@]}" \
+        "${ADDITIONAL_CHECKS[@]}" \
+        "${TRACE_CHECKS[@]}"; do
         local result="${RESULTS[$spec]:-SKIP}"
         local color="$NC"
         local symbol="?"
@@ -491,14 +530,14 @@ print_summary() {
         case "$result" in
             PASS) color="$GREEN"; symbol="✓" ;;
             FAIL) color="$RED"; symbol="✗" ;;
-            SKIP) color="$YELLOW"; symbol="-" ;;
+            SKIP) color="$YELLOW"; symbol="-"; displayed_skipped=$((displayed_skipped + 1)) ;;
         esac
 
         echo -e "  $symbol $spec: ${color}$result${NC}"
     done
 
     echo "=========================================="
-    echo -e "  ${GREEN}Passed: $PASSED${NC}  ${RED}Failed: $FAILED${NC}  ${YELLOW}Skipped: $SKIPPED${NC}"
+    echo -e "  ${GREEN}Passed: $PASSED${NC}  ${RED}Failed: $FAILED${NC}  ${YELLOW}Skipped: $displayed_skipped${NC}"
     echo "=========================================="
 }
 
@@ -556,7 +595,7 @@ main() {
     if [[ -n "$target_spec" ]]; then
         # Verify target spec exists
         local found=false
-        for spec in "${SPECS[@]}"; do
+        for spec in "${SPECS[@]}" "${TRACE_CHECKS[@]}"; do
             if [[ "$spec" == "$target_spec" ]]; then
                 found=true
                 break
@@ -569,7 +608,11 @@ main() {
             exit 1
         fi
 
-        specs_to_verify=("$target_spec")
+        if [[ "$target_spec" == "SyncHandshakeV1TraceContract" ]]; then
+            specs_to_verify=()
+        else
+            specs_to_verify=("$target_spec")
+        fi
     fi
 
     # Apply quick mode settings
@@ -599,6 +642,18 @@ main() {
         : # A prior failure already requested an immediate stop.
     elif [[ -z "$target_spec" || "$target_spec" == "SyncHandshakeV1" ]]; then
         if ! verify_sync_handshake_handlers_disabled "$verbose"; then
+            any_failed=true
+        fi
+        echo ""
+
+    fi
+
+    # The trace contract is also independently selectable for its fast spike gate.
+    if [[ "$any_failed" == "true" && "$fail_fast" == "true" ]]; then
+        :
+    elif [[ -z "$target_spec" || "$target_spec" == "SyncHandshakeV1" || \
+        "$target_spec" == "SyncHandshakeV1TraceContract" ]]; then
+        if ! verify_sync_handshake_trace_contract "$verbose"; then
             any_failed=true
         fi
         echo ""

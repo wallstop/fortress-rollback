@@ -1127,6 +1127,7 @@ impl<T: Config> UdpProtocol<T> {
             pending_checksums_len: u64::try_from(self.pending_checksums.len()).unwrap_or(u64::MAX),
             ping_ms: self.round_trip_time,
             remote_frame_advantage: self.remote_frame_advantage,
+            average_frame_advantage: self.average_frame_advantage(),
         }
     }
 
@@ -2885,6 +2886,15 @@ impl<T: Config> UdpProtocol<T> {
     /// never fresh, so its slot holds.
     pub(crate) fn floor_round_is_fresh(&self) -> bool {
         self.floor_reply_seq > self.floor_prune_seq
+    }
+
+    /// Hidden diagnostics for deterministic hostile-gossip integration tests.
+    pub(crate) fn floor_round_diagnostic(&self) -> (u32, u32, u32) {
+        (
+            self.floor_request_seq,
+            self.floor_reply_seq,
+            self.floor_prune_seq,
+        )
     }
 
     /// Resets this endpoint's floor freshness on a prune: snapshots the current
@@ -10534,172 +10544,22 @@ mod property_tests {
 //
 // ## Verified Invariants
 //
-// 1. **ProtocolState Transitions**: Valid state transitions match TLA+ spec
-// 2. **Frame Arithmetic**: Frame::is_null() correctly identifies NULL frames
-// 3. **PlayerHandle Preservation**: Handle indices are preserved through operations
-// 4. **ConnectionStatus Invariants**: last_frame is always set correctly
+// 1. **Frame Arithmetic**: Frame::is_null() correctly identifies NULL frames
+// 2. **PlayerHandle Preservation**: Handle indices are preserved through operations
+// 3. **ConnectionStatus Invariants**: last_frame is always set correctly
 //
 // ## Design Notes
 //
 // The UdpProtocol type is complex with many dependencies (Vec, BTreeMap, Instant).
 // We focus on verifying types that CAN be instantiated in Kani:
-// - ProtocolState: Simple enum, no dependencies
 // - ConnectionStatus: Simple struct with primitives
 // - Frame: Wrapper around i32
 // - PlayerHandle: Wrapper around usize
-//
-// Full protocol verification requires integration with the TLA+ model.
 // =============================================================================
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
     use crate::network::messages::ConnectionStatus;
-
-    // =========================================================================
-    // ProtocolState Verification
-    //
-    // These proofs verify the state machine properties documented in state.rs.
-    // TLA+ alignment: specs/tla/NetworkProtocol.tla
-    // =========================================================================
-
-    /// Proof: ProtocolState transitions follow valid paths.
-    ///
-    /// Verifies that the state machine has exactly 5 states matching TLA+ spec.
-    /// TLA+ alignment: NetworkProtocol.tla defines States = {Init, Sync, Running, Disconnected, Shutdown}
-    ///
-    /// - Tier: 1 (Fast, <30s)
-    /// - Verifies: State machine has exactly 5 states
-    /// - Related: proof_running_is_active_state, proof_state_count_matches_specification
-    #[kani::proof]
-    fn proof_protocol_state_count() {
-        let state_idx: u8 = kani::any();
-
-        // The protocol has exactly 5 valid states
-        let is_valid_state = state_idx < 5;
-
-        let state = match state_idx {
-            0 => Some(ProtocolState::Initializing),
-            1 => Some(ProtocolState::Synchronizing),
-            2 => Some(ProtocolState::Running),
-            3 => Some(ProtocolState::Disconnected),
-            4 => Some(ProtocolState::Shutdown),
-            _ => None,
-        };
-
-        kani::assert(
-            state.is_some() == is_valid_state,
-            "State should exist iff index < 5",
-        );
-    }
-
-    /// Proof: ProtocolState::Running is the only state that processes inputs.
-    ///
-    /// Verifies INV-PROTO-1: Only Running state should handle game inputs.
-    /// This is a state predicate that the protocol relies on.
-    ///
-    /// - Tier: 1 (Fast, <30s)
-    /// - Verifies: Running is the only input-processing state (INV-PROTO-1)
-    /// - Related: proof_protocol_state_count, proof_synchronize_precondition
-    #[kani::proof]
-    fn proof_running_is_active_state() {
-        let state_idx: u8 = kani::any();
-        kani::assume(state_idx < 5);
-
-        let state = match state_idx {
-            0 => ProtocolState::Initializing,
-            1 => ProtocolState::Synchronizing,
-            2 => ProtocolState::Running,
-            3 => ProtocolState::Disconnected,
-            _ => ProtocolState::Shutdown,
-        };
-
-        // Only Running state should accept game inputs
-        let accepts_inputs = matches!(state, ProtocolState::Running);
-
-        // Verify this matches the expected index
-        kani::assert(
-            accepts_inputs == (state_idx == 2),
-            "Only Running (index 2) accepts inputs",
-        );
-    }
-
-    /// Proof: disconnect() is idempotent from Shutdown state.
-    ///
-    /// Verifies the guard condition at mod.rs:366: `if self.state == ProtocolState::Shutdown`
-    /// ensures calling disconnect() from Shutdown is a no-op.
-    /// Production code: disconnect() returns early if already in Shutdown state.
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: Disconnect idempotence from Shutdown state
-    /// - Related: proof_synchronize_precondition, proof_shutdown_is_terminal
-    // kani::no-unwind-needed: u8 state-index guard logic, no loops
-    #[kani::proof]
-    fn proof_disconnect_idempotent_from_shutdown() {
-        // The disconnect() function at mod.rs:365-373 checks:
-        // if self.state == ProtocolState::Shutdown { return; }
-        // This means disconnect from Shutdown should be a no-op.
-
-        let state_idx: u8 = kani::any();
-        kani::assume(state_idx < 5);
-
-        // Model the disconnect guard condition
-        let is_shutdown = state_idx == 4;
-        let would_transition = !is_shutdown; // disconnect only transitions if not in Shutdown
-
-        // From Shutdown, disconnect does nothing (idempotent)
-        if is_shutdown {
-            kani::assert(
-                !would_transition,
-                "Disconnect from Shutdown should be no-op",
-            );
-        }
-
-        // From non-Shutdown states, disconnect transitions to Disconnected (3)
-        // Note: In production, state would become Disconnected (index 3)
-        if !is_shutdown && would_transition {
-            let target_state = 3u8; // Disconnected
-            kani::assert(
-                target_state > 0 && target_state < 5,
-                "Disconnect targets valid Disconnected state",
-            );
-        }
-    }
-
-    /// Proof: synchronize() precondition matches production code.
-    ///
-    /// Verifies the condition checked at mod.rs:381:
-    /// `if self.state != ProtocolState::Initializing { return Err(...) }`
-    /// Production code only allows sync from Initializing state.
-    ///
-    /// - Tier: 2 (Medium, 30s-2min)
-    /// - Verifies: Synchronize precondition from Initializing only
-    /// - Related: proof_initializing_is_initial, proof_transition_matrix_sync_required
-    // kani::no-unwind-needed: u8 state-index guard logic, no loops
-    #[kani::proof]
-    fn proof_synchronize_precondition() {
-        let state_idx: u8 = kani::any();
-        kani::assume(state_idx < 5);
-
-        // The synchronize() function at mod.rs:380-394 checks:
-        // if self.state != ProtocolState::Initializing { return Err(...) }
-        let is_initializing = state_idx == 0;
-        let can_synchronize = is_initializing;
-
-        // Verify the precondition: only Initializing (0) can synchronize
-        kani::assert(
-            can_synchronize == (state_idx == 0),
-            "Only Initializing state can call synchronize()",
-        );
-
-        // If we can synchronize, target state is Synchronizing (1)
-        if can_synchronize {
-            let target_state = 1u8; // Synchronizing
-            kani::assert(
-                target_state == state_idx + 1,
-                "synchronize() transitions to next state",
-            );
-        }
-    }
 
     // =========================================================================
     // ConnectionStatus Verification

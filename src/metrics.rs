@@ -860,12 +860,13 @@ impl Serialize for MessageKindCounts {
 /// # Counters vs gauges
 ///
 /// The byte, packet, message-kind, and input-compression fields are **cumulative
-/// counters**, monotonic for the life of the endpoint. The trailing four fields —
+/// counters**, monotonic for the life of the endpoint. The trailing five fields —
 /// [`pending_output_len`](Self::pending_output_len),
 /// [`pending_checksums_len`](Self::pending_checksums_len),
-/// [`ping_ms`](Self::ping_ms), and
-/// [`remote_frame_advantage`](Self::remote_frame_advantage) — are **instantaneous
-/// gauges** sampled at the moment of the snapshot.
+/// [`ping_ms`](Self::ping_ms),
+/// [`remote_frame_advantage`](Self::remote_frame_advantage), and
+/// [`average_frame_advantage`](Self::average_frame_advantage) — are
+/// **instantaneous gauges** sampled at the moment of the snapshot.
 ///
 /// Byte counts are wire-exact (the same arithmetic as the bandwidth accounting
 /// behind [`NetworkStats`](crate::NetworkStats)) and count payload bytes only —
@@ -971,6 +972,12 @@ pub struct PeerMetrics {
     ///
     /// [`NetworkStats::remote_frames_behind`]: crate::NetworkStats::remote_frames_behind
     pub remote_frame_advantage: i32,
+
+    /// **Gauge.** The rolling average of the local/remote frame-advantage
+    /// samples for this endpoint. `P2PSession` takes the maximum of this exact
+    /// quantity across connected endpoints when deciding whether to emit a
+    /// `WaitRecommendation`.
+    pub average_frame_advantage: i32,
 }
 
 impl PeerMetrics {
@@ -1388,6 +1395,7 @@ mod tests {
         assert_eq!(m.pending_checksums_len, 0);
         assert_eq!(m.ping_ms, 0);
         assert_eq!(m.remote_frame_advantage, 0);
+        assert_eq!(m.average_frame_advantage, 0);
     }
 
     #[cfg(feature = "json")]
@@ -1397,6 +1405,7 @@ mod tests {
             packets_sent: 1,
             portability_risk_messages_sent: 3,
             fragmentation_risk_messages_sent: 2,
+            average_frame_advantage: 7,
             ..Default::default()
         };
         m.messages_sent_by_kind.record(MessageKind::Input);
@@ -1410,6 +1419,7 @@ mod tests {
             json.contains(r#""fragmentation_risk_messages_sent":2"#),
             "{json}"
         );
+        assert!(json.contains(r#""average_frame_advantage":7"#), "{json}");
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""input":1"#), "{json}");
         assert!(json.contains(r#""keep_alive":0"#), "{json}");

@@ -65,13 +65,13 @@ jobs:
             simulation-nightly-${{ runner.os }}-cargo-
             network-nightly-${{ runner.os }}-cargo-
 
-      - name: Run sharded fleet and hour-equivalent clock-skew probe
+      - name: Run sharded fleet and targeted probes
         run: >-
           cargo nextest run
           --profile ci-simulation-nightly
           --release
           --run-ignored ignored-only
-          -E 'test(simulation::fleet::nightly_seed_shard_) or test(simulation::fleet::h_skew_hour_equivalent_measures_lag_correction_and_cost) or test(simulation::census::h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers) or test(simulation::census::h_pollcap_targeted_release_defers_without_starvation)'
+          -E 'test(simulation::fleet::nightly_seed_shard_) or test(simulation::fleet::h_skew_hour_equivalent_measures_lag_correction_and_cost) or test(simulation::fleet::h_osc_aggregation_pressure_is_measured_and_decays) or test(simulation::census::h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers) or test(simulation::census::h_pollcap_targeted_release_defers_without_starvation)'
           --test simulation
           --features hot-join
           --no-capture

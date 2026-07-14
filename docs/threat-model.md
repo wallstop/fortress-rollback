@@ -30,7 +30,10 @@ spoofing or on-path attackers are in scope.
   a 64 MiB decoded-byte ceiling, configured frame/depth limits, and fallible
   allocation.
 - Built-in sockets cap each poll at 256 raw receive attempts and 256 decoded
-  messages. Protocol output and recovery queues are bounded.
+  messages. Persistent pending-output, pending-checksum, input/recovery,
+  drop-mailbox, and session-event structures have explicit caps. The transient
+  protocol send queue relies on bounded ingress and poll behavior rather than
+  an independent queue limit.
 - Raw byte-stream adapters can use `codec::FrameDecoder`, which rejects zero or
   over-64-MiB length declarations before payload allocation, buffers at most one
   incomplete frame, and remains poisoned after malformed input until the
@@ -116,12 +119,16 @@ rollback traffic where the platform permits them.
 
 ## Dishonest-Peer Capabilities
 
+This matrix assumes at most one dishonest match participant. The separately
+described on-path or source-spoofing attacker is outside that premise unless an
+authenticated transport reduces it to a configured participant identity.
+
 | Capability | Current posture | Residual risk |
 | --- | --- | --- |
-| Conflicting inputs for one frame | Later checksum divergence can detect, but not attribute, it | Honest peers may diverge; prevention needs stronger agreement or signed evidence |
-| False connection-status gossip | Range checks and converge-down merging limit some values | A peer can delay progress or falsely describe a third peer |
+| Conflicting inputs for one frame | With checksum detection enabled and continued progress, downstream divergence can be detected but not attributed | Honest peers may diverge; prevention needs stronger agreement or signed evidence |
+| False connection-status gossip | Range checks and converge-down merging bound invalid or inflated values | One valid low report can conservatively pin one observer; the measured one-edge B2 row recovered after the lie stopped |
 | False checksum report | Advisory per-peer trust downgrade; never automatic ejection | A peer can accuse an honest participant; a mismatch does not prove local fault |
-| False floor-round report | Range and consumer-state checks reject invalid domains | A valid-looking lie can wedge or release lifecycle holds incorrectly |
+| False floor-round report | Range, solicitation, sequence, freshness, and consumer-state checks reject malformed or stale reports | One valid low floor can wedge an observer; one valid high floor can release a hold early, bounded by truthful status and other terms in the measured B4 row |
 | Packet or handshake flood | Bounded decode, allocation, queues, and per-poll work | Kernel/raw-UDP pressure and distributed DDoS remain outside the model |
 | Poisoned hot-join snapshot | Desync detection can expose later disagreement | The joiner initially trusts its coordinator's snapshot |
 | Cross-session replay | Connection ID plus sync-token echo after binding | Pre-binding sync requests are not replay-protected and can terminally poison a new raw-UDP handshake; use an authenticated transport |
@@ -129,7 +136,84 @@ rollback traffic where the platform permits them.
 
 Checksum reports are evidence of disagreement, not proof of which endpoint is
 faulty. Preserve replays and input logs for investigation. A future signed-input
-scheme could provide transferable equivocation evidence, but is not part of v1.
+scheme could provide transferable equivocation evidence, but is not part of v2.
+
+### B1: Equivocation is detected, not prevented
+
+A dishonest participant can send different input bytes for the same player and
+frame to different recipients. Fortress does not run a commit-reveal round or
+cross-sign every 60 Hz input. If that equivocation creates a state difference
+that persists to a scheduled comparison frame and the application supplies
+checksums, the checksum exchange can expose disagreement. Detection is not
+guaranteed when inputs are semantically equivalent, state reconverges before a
+comparison, checksums are omitted, or checksums collide. Even when detected,
+the exchange cannot prove which sender or recipient lied. A liar can also send
+false checksum reports.
+
+Quarantine or void the match at the application's chosen first-disagreement
+boundary. Preserve the replay, build and configuration identity, per-peer input
+logs, and authenticated transport packet logs when available. Do not present
+one peer's accusation as transferable proof. Applications that require
+attribution must add authenticated, frame-bound input evidence or a stronger
+agreement protocol outside Fortress; neither is implemented by protocol v2.
+Commit-reveal remains deliberately unadopted because its extra rounds add
+slowest-peer latency and cryptographic work to the live input path.
+
+### B3: Checksum accusations require corroboration
+
+`peer_checksum_mismatch_count(handle)` counts confirmed-frame reports from one
+remote that disagree with local retained history. Ten mismatching comparisons
+currently produce one advisory trust-downgrade warning. The warning is a
+persistence signal, not a verdict, and the library never ejects the peer. One
+underlying divergence can span many confirmed comparisons and cross the
+threshold; conversely, a dishonest peer can fabricate every checksum it sends.
+
+Compare the same confirmed frame across independently captured replays, input
+logs, builds, and other peers before assigning blame. Agreement among multiple
+honest peers is useful operational evidence under this single-dishonest-peer
+model, but it is not cryptographic proof and does not extend to collusion. The
+[desync incident playbook](desync-playbook.md) defines the quarantine and
+evidence-preservation steps.
+
+### B5: Flood resistance ends at the socket boundary
+
+The decoder bounds work and memory per accepted message, built-in sockets
+inspect at most 256 raw receive attempts and return at most 256 decoded messages
+per poll, and the named persistent protocol/session structures have explicit
+limits. With the built-in sockets, those limits keep one poll's ingress work
+finite; a custom `NonBlockingSocket` must impose an equivalent finite receive
+batch. The transient protocol send queue has no independent limit and instead
+relies on bounded ingress/poll behavior. None of these controls guarantees
+useful traffic wins admission when every poll is saturated, nor do they bound
+kernel queues, interrupt load, link bandwidth, upstream amplification, or a
+distributed flood.
+
+Keep polling and draining events under load, alert on sustained cap saturation,
+unknown-source traffic, queue high-water marks, and packet loss, and rate-limit
+before the `NonBlockingSocket` boundary. Prefer an authenticated transport or
+front-end that drops unauthenticated traffic cheaply. Apply OS and network-edge
+controls for raw UDP deployments. Raising Fortress queue or receive limits is
+capacity tuning, not DDoS mitigation, and can increase the attacker's resource
+budget.
+
+### B6: Hot-join coordinators are trusted state authorities
+
+With `hot-join` enabled, a joiner loads the state snapshot supplied by the
+selected coordinator. Fortress bounds and validates the encoded snapshot, but
+it does not authenticate the state semantics or ask a second survivor to attest
+to its digest. A malicious coordinator can therefore start the joiner from a
+fabricated state. Later checksum disagreement may reveal the inconsistency; it
+cannot undo the initial trust decision or prove who fabricated the state.
+
+Authenticate participant identity and permit snapshot service only from a
+coordinator the application trusts for that match. Record the coordinator,
+snapshot frame, and build/configuration identity. If the application computes a
+fingerprint of the loaded state, retain it as incident evidence. The optional
+snapshot checksum is supplied by that same coordinator, and neither it nor an
+application-computed fingerprint independently proves provenance. Abort the
+join and rebuild from a separately trusted source when provenance is uncertain.
+A second-survivor countersignature is a research direction, not a current
+defense.
 
 ## Structural Non-Goals
 

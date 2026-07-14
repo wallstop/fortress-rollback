@@ -1,0 +1,5 @@
+{"schema":1,"trace":"timeout","expect":"accept","description":"Timeout reporting is event-only and leaves retry sending enabled."}
+{"step":0,"action":"Init","state":{"phase":{"p1":"Syncing","p2":"Syncing"},"localConfig":{"p1":{"numPlayers":2,"inputWidth":4},"p2":{"numPlayers":2,"inputWidth":4}},"learnedConfig":{"p1":null,"p2":null},"learnedFrom":{"p1":null,"p2":null},"syncRemaining":{"p1":2,"p2":2},"acceptedTokens":{"p1":[],"p2":[]},"nextToken":{"p1":1,"p2":1},"timeoutTicks":{"p1":0,"p2":0},"timeoutEventCount":{"p1":0,"p2":0},"incompatibleEventCount":{"p1":0,"p2":0},"reasonField":{"p1":"None","p2":"None"},"reasonOurs":{"p1":null,"p2":null},"reasonTheirs":{"p1":null,"p2":null},"network":[]}}
+{"step":1,"action":"TickTimeout","peer":"p1","updates":{"timeoutTicks":{"p1":1,"p2":0}}}
+{"step":2,"action":"ReportSyncTimeout","peer":"p1","updates":{"timeoutEventCount":{"p1":1,"p2":0}}}
+{"step":3,"action":"SendSyncRequest","peer":"p1","updates":{"nextToken":{"p1":2,"p2":1},"network":[{"kind":"SyncRequest","from":"p1","to":"p2","token":1,"config":{"numPlayers":2,"inputWidth":4}}]}}

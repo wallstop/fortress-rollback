@@ -1,10 +1,8 @@
 name: CI - Benchmarks
 
-# Run benchmarks and track regressions
-# Results are stored in GitHub Pages at gh-pages branch. Microsecond-scale
-# session/sync work is a hard regression gate; nanosecond-scale accessors and
-# compression primitives remain informational because shared-runner noise is a
-# material fraction of their runtime.
+# Run benchmarks and track regressions. Historical results are informational
+# because GitHub runner hardware varies between jobs. Pull requests use three
+# paired base/merge comparisons on one runner as the hard regression gate.
 
 on:
   push:
@@ -39,19 +37,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
-      # Required for github-pages deployment
-      contents: write
-      # Required for posting benchmark comments on commits
-      deployments: write
-      # Required for posting PR comments (benchmark alerts)
-      pull-requests: write
-    # Skip for Dependabot PRs - it doesn't have write permissions for PR comments
-    if: github.actor != 'dependabot[bot]'
+      contents: read
+    if: github.event_name == 'pull_request'
     # Use a consistent runner for reproducible results
     # Note: Performance may vary between runner hardware revisions
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -87,15 +82,138 @@ jobs:
           restore-keys: |
             bench-${{ runner.os }}-cargo-
 
-      # Keep stable, microsecond-scale work separate from nanosecond-scale
-      # primitives so timer noise cannot fail the regression gate.
-      - name: Run benchmarks
+      # Alternate base/merge order to offset thermal and shared-runner drift.
+      # Criterion's median estimates are compared only with measurements from
+      # this runner; a regression needs both a >1.50 median ratio and two votes.
+      - name: Run paired Criterion regression gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RAW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TESTED_MERGE_SHA: ${{ github.sha }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+        run: |
+          set -euo pipefail
+          original_sha="$(git rev-parse HEAD)"
+          if [ "$original_sha" != "$TESTED_MERGE_SHA" ]; then
+            echo "::error::Checkout $original_sha does not match tested merge $TESTED_MERGE_SHA."
+            exit 1
+          fi
+
+          results="$PWD/benchmark-paired-results"
+          rm -rf "$results"
+          mkdir -p "$results"
+
+          {
+            echo "BASE_SHA=$BASE_SHA"
+            echo "RAW_HEAD_SHA=$RAW_HEAD_SHA"
+            echo "TESTED_MERGE_SHA=$TESTED_MERGE_SHA"
+            echo "PAIR_ORDER=base-1/merge-1,merge-2/base-2,base-3/merge-3"
+            rustc --version --verbose
+            lscpu
+          } | tee "$results/metadata.txt"
+
+          for harness in benches/p2p_session.rs benches/sync_layer.rs; do
+            if ! git cat-file -e "$BASE_SHA:$harness" || \
+               ! git cat-file -e "$TESTED_MERGE_SHA:$harness" || \
+               ! git diff --quiet "$BASE_SHA" "$TESTED_MERGE_SHA" -- "$harness"; then
+              echo "::error::Gated benchmark harness differs or is missing: $harness"
+              exit 1
+            fi
+          done
+
+          restore_checkout() {
+            git checkout --detach --quiet "$original_sha"
+          }
+          trap restore_checkout EXIT
+
+          measure() {
+            label="$1"
+            revision="$2"
+            git checkout --detach --quiet "$revision"
+            rm -rf target/criterion
+            cargo bench --bench p2p_session -- 'Message serialization'
+            cargo bench --bench sync_layer
+            cp -R target/criterion "$results/$label"
+          }
+
+          measure base-1 "$BASE_SHA"
+          measure merge-1 "$TESTED_MERGE_SHA"
+          measure merge-2 "$TESTED_MERGE_SHA"
+          measure base-2 "$BASE_SHA"
+          measure base-3 "$BASE_SHA"
+          measure merge-3 "$TESTED_MERGE_SHA"
+          restore_checkout
+          trap - EXIT
+
+          python3 scripts/ci/check-benchmark-regressions.py \
+            --base "$results/base-1" --candidate "$results/merge-1" \
+            --base "$results/base-2" --candidate "$results/merge-2" \
+            --base "$results/base-3" --candidate "$results/merge-3" \
+            --threshold 1.50
+
+      - name: Upload paired benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-paired-results
+          path: benchmark-paired-results/
+          retention-days: 30
+
+  benchmark-history:
+    name: Track Benchmark History
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      deployments: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Configure sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        continue-on-error: true
+
+      - name: Verify sccache is working
+        id: sccache-check
+        if: steps.sccache.outcome == 'success'
+        run: ./scripts/ci/verify-sccache.sh
+        continue-on-error: true
+
+      - name: Clear sccache env on failure
+        if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
+        run: |
+          echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-history-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-history-${{ runner.os }}-cargo-
+
+      - name: Run benchmarks for historical tracking
         run: |
           set -o pipefail
           cargo bench --bench p2p_session -- 'Message serialization' --output-format bencher | tee benchmark-gated-results.txt
           cargo bench --bench sync_layer -- --output-format bencher | tee -a benchmark-gated-results.txt
-          # Informational trends trade some precision for bounded CI time; they
-          # never fail the job, while gated measurements keep Criterion defaults.
           cargo bench --bench input_queue -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee benchmark-informational-results.txt
           cargo bench --bench compression -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
           cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
@@ -103,11 +221,9 @@ jobs:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          # Increase startup timeout to handle slow GitHub Actions runners
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      # Check if gh-pages branch exists, create it if pushing to main
       - name: Check and create gh-pages branch if needed
         id: gh-pages-check
         run: |
@@ -116,7 +232,6 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::gh-pages branch does not exist yet."
-            # Create gh-pages branch on push to main (bootstrap case)
             if [ "${{ github.event_name }}" = "push" ]; then
               echo "Creating gh-pages branch for benchmark storage..."
               git config user.name "github-actions[bot]"
@@ -127,13 +242,10 @@ jobs:
               git push origin gh-pages
               git checkout main
               echo "exists=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::gh-pages branch created successfully."
             fi
           fi
 
-      # Store stable benchmark results and fail on a material regression.
-      # Uses github-action-benchmark: https://github.com/benchmark-action/github-action-benchmark
-      - name: Check gated benchmark results
+      - name: Track stable benchmark history
         if: steps.gh-pages-check.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -141,16 +253,15 @@ jobs:
           tool: 'cargo'
           output-file-path: benchmark-gated-results.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.event_name != 'pull_request' }}
+          auto-push: true
           alert-threshold: '150%'
-          comment-on-alert: true
-          comment-always: ${{ github.event_name == 'pull_request' }}
-          fail-on-alert: true
+          comment-on-alert: false
+          comment-always: false
+          fail-on-alert: false
           max-items-in-chart: 50
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench
 
-      # Track noisy, nanosecond-scale results without making them a merge gate.
       - name: Track informational benchmark results
         if: steps.gh-pages-check.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
@@ -159,18 +270,14 @@ jobs:
           tool: 'cargo'
           output-file-path: benchmark-informational-results.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.event_name != 'pull_request' }}
+          auto-push: true
           alert-threshold: '150%'
-          comment-on-alert: true
-          comment-always: ${{ github.event_name == 'pull_request' }}
+          comment-on-alert: false
+          comment-always: false
           fail-on-alert: false
           max-items-in-chart: 50
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: bench-informational
-          # The gated action immediately above already fetched and checked out
-          # gh-pages. Re-fetching into that now-locally-advanced branch fails as
-          # a non-fast-forward on PRs; reuse the same checkout so both datasets
-          # are composed into one eventual main-branch push.
           skip-fetch-gh-pages: true
 
       - name: Skip benchmark storage (no gh-pages branch yet)
@@ -179,17 +286,11 @@ jobs:
           echo "::notice::Skipping benchmark storage - gh-pages branch does not exist yet."
           echo "The gh-pages branch will be created when the first commit is pushed to main."
 
-      - name: Skip PR comparison (no baseline)
-        if: github.event_name == 'pull_request' && steps.gh-pages-check.outputs.exists == 'false'
-        run: |
-          echo "::notice::Skipping PR benchmark comparison - no baseline data available yet."
-          echo "Baseline will be established after first merge to main."
-
-      # Upload raw benchmark results as artifact for debugging
-      - name: Upload benchmark results
+      - name: Upload historical benchmark results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results
+          name: benchmark-history-results
           path: |
             benchmark-gated-results.txt
             benchmark-informational-results.txt
@@ -202,12 +303,13 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-    # Quick benchmarks run even if full benchmark fails
-    # Skip for Dependabot PRs - benchmark results aren't useful for dependency updates
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    # Quick benchmarks run even if full benchmark fails.
+    if: github.event_name == 'pull_request'
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master

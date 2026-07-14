@@ -28,22 +28,24 @@ use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
-    GameStateCell, InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics,
-    PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState,
-    SpectatorSession,
+    GameStateCell, InputStatus, InputVec, Message, MessageKind, NonBlockingSocket, P2PSession,
+    PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder,
+    SessionState, SpectatorSession,
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, OracleFailure, Verdict,
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
 use schedule::{
-    hot_join_host_for_slot, validate_schedule, AppModel, FrameModel, Schedule, ScheduleEvent,
+    hot_join_host_for_slot, validate_schedule, AppModel, CpuFeedbackPolicy, FrameModel, Schedule,
+    ScheduleEvent, WaitRecommendationPolicy,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::Hasher as _;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Input contract used by the deterministic simulation harness.
@@ -153,8 +155,76 @@ impl SimInput for WideStubInput {
     }
 }
 
+/// Which valid, peer-controlled gossip field one simulated dishonest endpoint
+/// rewrites on its outbound messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum HostileGossipMode {
+    /// Rewrite `Input.peer_connect_status[target].last_frame`.
+    ConnectionStatus,
+    /// Rewrite `FloorReply.floors[target]`.
+    FloorReply,
+}
+
+pub const MAX_HOSTILE_GOSSIP_DELTA: u32 = 1_024;
+
+/// Deterministic single-dishonest-peer message mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipOptions {
+    /// Logical peer whose socket rewrites its own outbound messages.
+    pub liar: usize,
+    /// Sole logical recipient of the rewritten messages.
+    pub observer: usize,
+    /// Third-party slot about which the liar reports a false frame/floor.
+    pub target: usize,
+    /// Signed offset applied to each valid frame in the selected field. Zero
+    /// selects a diagnostic-only matched control without rewriting messages.
+    pub delta: i32,
+    /// First outer simulation step on which mutation is enabled.
+    pub from_step: u32,
+    /// Exclusive outer simulation step at which mutation stops.
+    pub until_step: u32,
+    /// Message field to rewrite.
+    pub mode: HostileGossipMode,
+}
+
+/// Mutation accounting plus receiver-side diagnostics for a hostile-gossip
+/// treatment or its zero-delta matched control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipEvidence {
+    pub messages_mutated: u64,
+    pub first_step: Option<u32>,
+    pub last_step: Option<u32>,
+    pub last_before: Option<i32>,
+    pub last_after: Option<i32>,
+    pub last_round_seq: Option<u32>,
+    pub probe: Option<HostileGossipProbeEvidence>,
+}
+
+/// Receiver-side cache and fold state sampled at the configured probe cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipProbeEvidence {
+    pub at_step: u32,
+    pub observer_confirmed: i32,
+    pub direct_receipt: Option<i32>,
+    pub endpoint_running: bool,
+    pub status_disconnected: bool,
+    pub status_frame: i32,
+    pub relay_topology: bool,
+    pub round_floor: i32,
+    pub round_fresh: bool,
+    pub request_seq: u32,
+    pub reply_seq: u32,
+    pub prune_seq: u32,
+    pub effective_reported_frame: i32,
+    pub target_confirmed_bound: Option<i32>,
+}
+
 /// Options for fault-injection *inside the harness itself* — used by the
-/// oracle's negative controls to prove the invariants actually fire.
+/// oracle's negative controls and focused hostile-message census rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunOptions {
@@ -179,12 +249,24 @@ pub struct RunOptions {
     /// for one directed `(from, to)` link after every simulation step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_output_probe_link: Option<(usize, usize)>,
+    /// If set, retain the high-water spread of authoritative direct receipts
+    /// for one target, together with each observer's physically retained input
+    /// range at that exact cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_range_probe_target: Option<usize>,
+    /// If set, one peer rewrites a valid third-party gossip field for a bounded
+    /// step interval, or records a diagnostic-only matched control when the
+    /// delta is zero. `None` preserves every historical run and trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostile_gossip: Option<HostileGossipOptions>,
     /// Preserve a bounded, phase-resolved controller time series instead of
     /// the ordinary twelve-or-fewer progress samples. The denser series is
-    /// intended for focused clock-skew/control-loop experiments and records
-    /// new opportunity-lead high-water marks and obeyed waits plus evenly spaced
-    /// samples carrying the frame-advantage gauge. It is valid only for
-    /// schema-v16-or-newer
+    /// intended for focused clock-skew/control-loop experiments. H-SKEW mode
+    /// records new opportunity-lead high-water marks and obeyed-wait transitions
+    /// plus evenly spaced frame-advantage samples. Schema-v17 H-OSC schedules
+    /// with a non-default wait policy instead take fixed 30-step cuts carrying
+    /// exact per-endpoint rolling averages, capped at 100 retained samples. The
+    /// option is valid only for schema-v16-or-newer
     /// [`FrameModel::SkewGated60Hz`] schedules.
     #[serde(default, skip_serializing_if = "is_false")]
     pub phase_resolved_control_samples: bool,
@@ -197,6 +279,236 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+}
+
+/// Inclusive input-history interval retained by one observer at the receipt
+/// probe's high-water cut.
+///
+/// Artifact/trace serialization packs the two signed 32-bit lanes into one
+/// `u64`; validation restores and checks their frame-domain relationship. This
+/// keeps the N=16 × 64-snapshot worst case inside the fixed artifact cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(into = "u64", from = "u64")]
+pub struct RetainedInputRangeEvidence {
+    pub first: i32,
+    pub last: i32,
+}
+
+impl From<RetainedInputRangeEvidence> for u64 {
+    fn from(range: RetainedInputRangeEvidence) -> Self {
+        (Self::from(range.first as u32) << 32) | Self::from(range.last as u32)
+    }
+}
+
+impl From<u64> for RetainedInputRangeEvidence {
+    fn from(packed: u64) -> Self {
+        Self {
+            first: (packed >> 32) as u32 as i32,
+            last: packed as u32 as i32,
+        }
+    }
+}
+
+/// Bounded high-water evidence for one target's direct-receipt spread.
+/// Equal-spread ties retain the latest cut. Dead observers are excluded;
+/// connected observers that have not produced a complete receipt/range pair
+/// remain visible in the vectors but do not contribute to `max_spread`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptRangeEvidence {
+    pub target: usize,
+    pub max_spread: u32,
+    pub at_step: Option<u32>,
+    pub receipts: Vec<Option<i32>>,
+    pub connected: Vec<Option<bool>>,
+    pub retained_ranges: Vec<Option<RetainedInputRangeEvidence>>,
+}
+
+impl ReceiptRangeEvidence {
+    fn new(target: usize, peers: usize) -> Self {
+        Self {
+            target,
+            max_spread: 0,
+            at_step: None,
+            receipts: vec![None; peers],
+            connected: vec![None; peers],
+            retained_ranges: vec![None; peers],
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WaitActuator {
+    policy: WaitRecommendationPolicy,
+    active_skip: u32,
+    pending: VecDeque<(u64, u32)>,
+    next_accept: u64,
+    smear_countdown: u32,
+}
+
+impl WaitActuator {
+    fn new(policy: WaitRecommendationPolicy) -> Self {
+        Self {
+            policy,
+            active_skip: 0,
+            pending: VecDeque::new(),
+            next_accept: 0,
+            smear_countdown: 0,
+        }
+    }
+
+    fn accept(&mut self, opportunity: u64, requested: u32) -> Option<u32> {
+        if opportunity < self.next_accept {
+            return None;
+        }
+        let accepted = self
+            .policy
+            .max_skip_frames
+            .map_or(requested, |cap| requested.min(cap));
+        let due = opportunity.saturating_add(u64::from(self.policy.response_delay_frames));
+        let debt_added;
+        if let Some((last_due, last_skip)) = self.pending.back_mut() {
+            if *last_due == due {
+                debt_added = accepted.saturating_sub(*last_skip);
+                *last_skip = (*last_skip).max(accepted);
+            } else {
+                debt_added = accepted;
+                self.pending.push_back((due, accepted));
+            }
+        } else {
+            debt_added = accepted;
+            self.pending.push_back((due, accepted));
+        }
+        self.next_accept = opportunity.saturating_add(u64::from(self.policy.cooldown_frames));
+        Some(debt_added)
+    }
+
+    fn should_skip(&mut self, opportunity: u64) -> bool {
+        while self
+            .pending
+            .front()
+            .is_some_and(|(due, _)| opportunity >= *due)
+        {
+            if let Some((_, matured_skip)) = self.pending.pop_front() {
+                let had_active_debt = self.active_skip > 0;
+                self.active_skip = self.active_skip.saturating_add(matured_skip);
+                if !had_active_debt {
+                    self.smear_countdown = 0;
+                }
+            }
+        }
+        if self.active_skip > 0 && self.smear_countdown == 0 {
+            self.active_skip -= 1;
+            self.smear_countdown = self.policy.smear_interval.saturating_sub(1);
+            true
+        } else {
+            if self.active_skip > 0 {
+                self.smear_countdown = self.smear_countdown.saturating_sub(1);
+            } else {
+                self.smear_countdown = 0;
+            }
+            false
+        }
+    }
+}
+
+/// Per-peer evidence from the deterministic CPU-feedback drive model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CpuFeedbackEvidence {
+    /// Simulation frames charged to the model (visual plus re-simulated).
+    #[serde(rename = "f")]
+    pub charged_frames: u64,
+    /// Cumulative modeled CPU work in microseconds.
+    #[serde(rename = "u")]
+    pub work_us: u64,
+    /// Whole future peer drives skipped because modeled work was still active.
+    #[serde(rename = "d")]
+    pub delayed_poll_steps: u64,
+    /// Consecutive CPU-delayed steps at the current sample boundary.
+    #[serde(rename = "s")]
+    pub current_delay_streak: u32,
+    /// Largest consecutive CPU-delayed streak observed.
+    #[serde(rename = "m")]
+    pub max_delay_streak: u32,
+    /// Modeled delay still owed after the current step.
+    #[serde(rename = "r")]
+    pub remaining_delay_steps: u32,
+    /// Advances whose raw future delay exceeded the configured safety cap.
+    #[serde(rename = "c")]
+    pub clamp_count: u64,
+    /// Raw future delay steps discarded by the safety cap.
+    #[serde(rename = "x")]
+    pub clamped_delay_steps: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CpuBudgetDrive {
+    policy: CpuFeedbackPolicy,
+    evidence: CpuFeedbackEvidence,
+}
+
+impl CpuBudgetDrive {
+    fn new(policy: CpuFeedbackPolicy) -> Self {
+        Self {
+            policy,
+            evidence: CpuFeedbackEvidence::default(),
+        }
+    }
+
+    /// Ages one outer step of debt and reports whether CPU was the effective
+    /// blocker. Explicit stalls/death still age virtual CPU time but do not
+    /// double-count the already-missed poll as CPU-caused.
+    fn tick(&mut self, blocked_elsewhere: bool) -> bool {
+        if self.evidence.remaining_delay_steps == 0 {
+            self.evidence.current_delay_streak = 0;
+            return false;
+        }
+        self.evidence.remaining_delay_steps -= 1;
+        if blocked_elsewhere {
+            self.evidence.current_delay_streak = 0;
+            return false;
+        }
+        self.evidence.delayed_poll_steps = self.evidence.delayed_poll_steps.saturating_add(1);
+        self.evidence.current_delay_streak = self.evidence.current_delay_streak.saturating_add(1);
+        self.evidence.max_delay_streak = self
+            .evidence
+            .max_delay_streak
+            .max(self.evidence.current_delay_streak);
+        true
+    }
+
+    /// Charges actual session work after an advance attempt. Exact completion
+    /// at the next poll boundary misses zero polls; any positive remainder
+    /// consumes one further whole drive opportunity.
+    fn charge(&mut self, frames_advanced: u64, step_dt_ms: u64) {
+        if frames_advanced == 0 {
+            return;
+        }
+        self.evidence.charged_frames = self.evidence.charged_frames.saturating_add(frames_advanced);
+        let work_us =
+            frames_advanced.saturating_mul(u64::from(self.policy.simulated_frame_cost_us));
+        self.evidence.work_us = self.evidence.work_us.saturating_add(work_us);
+        let step_us = step_dt_ms.saturating_mul(1_000).max(1);
+        let raw_delay = work_us.div_ceil(step_us).saturating_sub(1);
+        let applied_delay = raw_delay.min(u64::from(self.policy.max_poll_delay_steps));
+        let discarded = raw_delay.saturating_sub(applied_delay);
+        if discarded > 0 {
+            self.evidence.clamp_count = self.evidence.clamp_count.saturating_add(1);
+            self.evidence.clamped_delay_steps =
+                self.evidence.clamped_delay_steps.saturating_add(discarded);
+        }
+        self.evidence.remaining_delay_steps =
+            u32::try_from(applied_delay).unwrap_or(self.policy.max_poll_delay_steps);
+    }
+}
+
+fn cpu_feedback_evidence(drives: &[Option<CpuBudgetDrive>]) -> Vec<CpuFeedbackEvidence> {
+    drives
+        .iter()
+        .filter_map(|drive| drive.as_ref().map(|drive| drive.evidence))
+        .collect()
 }
 
 /// End-of-step pending-output evidence for one directed protocol link.
@@ -256,10 +568,33 @@ pub struct ProgressSample {
     pub prediction_miss_count: Vec<u64>,
     pub frame_opportunities: Vec<u64>,
     pub wait_frames_obeyed: Vec<u64>,
+    /// Per-peer CPU-feedback state at this sample boundary. Empty when the
+    /// schedule uses the historical fixed-cost drive model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
+    /// Successful production wait-controller evaluations, indexed by peer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_evaluations: Vec<u64>,
+    /// Evaluations whose production aggregate crossed the wait threshold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_trigger_evaluations: Vec<u64>,
+    /// Exact endpoint inputs inspected across successful controller evaluations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_endpoint_evaluations: Vec<u64>,
+    /// Endpoint inputs at or above the wait threshold on those evaluations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_endpoint_trigger_evaluations: Vec<u64>,
+    /// Evaluations where production's cached aggregate differed from the exact
+    /// maximum endpoint input captured immediately before the advance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_controller_input_mismatches: Vec<u64>,
     /// Session-level maximum remote frame advantage, indexed by peer. Present
     /// only for opt-in phase-resolved controller samples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames_ahead: Vec<i32>,
+    /// End-of-step max of each peer's exact per-endpoint rolling averages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub max_endpoint_average_frame_advantage: Vec<i32>,
     /// Per-directed-endpoint control-loop gauges in `(from, to)` order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointControlSample>,
@@ -275,6 +610,8 @@ pub struct EndpointControlSample {
     pub to: usize,
     pub ping_ms: u128,
     pub remote_frame_advantage: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub average_frame_advantage: i32,
     pub pending_output_len: u64,
 }
 
@@ -294,9 +631,15 @@ pub const MAX_PHASE_CONTROL_SAMPLES: usize = 4_096;
 /// sample cap by player count prevents a 16-player artifact from multiplying
 /// the two-player memory budget by eight.
 const MAX_PHASE_CONTROL_SAMPLE_PLAYER_CELLS: usize = 8_192;
+const WAIT_POLICY_CONTROL_SAMPLE_INTERVAL: u32 = 30;
+pub(super) const WAIT_POLICY_CONTROL_SAMPLE_CAPACITY: usize = 100;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
 }
 
 pub(super) fn phase_control_sample_capacity(n_players: usize) -> usize {
@@ -486,6 +829,12 @@ pub struct TraceSnapshot {
     pub session_states: Vec<TraceSessionState>,
     pub dead: Vec<bool>,
     pub game_states: Vec<TraceGameState>,
+    /// Per-peer CPU-feedback state after this step. Empty when disabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
+    /// Receipt/range high-water evidence after this step, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
     pub scheduled_events: Vec<String>,
     pub scheduled_events_truncated: u32,
     pub observed_events: Vec<TraceObservedEvent>,
@@ -564,6 +913,10 @@ struct TraceFinalSummary {
     link_stats_by_link: Vec<TraceLinkStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pending_output_probe: Option<PendingOutputProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_range_probe: Option<ReceiptRangeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostile_gossip: Option<HostileGossipEvidence>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -576,6 +929,16 @@ struct TraceFinalSummary {
     frame_opportunities: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wait_frames_obeyed: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendation_max: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendation_frames: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_recommendations_accepted: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wait_frames_accepted: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cpu_feedback: Vec<CpuFeedbackEvidence>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     receive_stats_by_peer: Vec<crate::common::sim_net::SimReceiveStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -608,6 +971,12 @@ pub struct RunReport {
     pub probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals>,
     /// End-of-step protocol backlog evidence for the requested directed link.
     pub pending_output_probe: Option<PendingOutputProbe>,
+    /// High-water direct-receipt spread and retained-range evidence for the
+    /// requested target.
+    pub receipt_range_probe: Option<ReceiptRangeEvidence>,
+    /// Mutation accounting and receiver diagnostics for a dishonest treatment
+    /// or its zero-delta matched control.
+    pub hostile_gossip: Option<HostileGossipEvidence>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
@@ -626,13 +995,26 @@ pub struct RunReport {
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
-    /// Twelve-or-fewer evenly spaced samples for skew/control-loop analysis.
-    /// Empty for legacy lockstep schedules.
+    /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
+    /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
+    /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
+    /// lockstep schedules.
     pub progress_samples: Vec<ProgressSample>,
     /// Frame opportunities produced by each peer's selected frame model.
     pub frame_opportunities: Vec<u64>,
     /// Opportunities suppressed because the `Obey` app model honored a wait.
     pub wait_frames_obeyed: Vec<u64>,
+    /// Largest `skip_frames` payload observed from each peer's session.
+    pub wait_recommendation_max: Vec<u32>,
+    /// Sum of all observed `skip_frames` payloads, before app policy filtering.
+    pub wait_recommendation_frames: Vec<u64>,
+    /// Recommendation events accepted after the app-policy cooldown.
+    pub wait_recommendations_accepted: Vec<u64>,
+    /// Skip-frame debt accepted after the app-policy cap.
+    pub wait_frames_accepted: Vec<u64>,
+    /// Final deterministic CPU-feedback evidence, indexed by peer. Empty when
+    /// the schedule uses fixed poll cadence.
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
@@ -797,9 +1179,66 @@ fn collect_peer_wire_by_link<I: SimInput>(
     by_link
 }
 
+fn update_receipt_range_probe<I: SimInput>(
+    probe: &mut ReceiptRangeEvidence,
+    peers: &[PeerSlot<I>],
+    dead: &[bool],
+    step: u32,
+) {
+    let mut receipts = vec![None; peers.len()];
+    let mut connected = vec![None; peers.len()];
+    let mut retained_ranges = vec![None; peers.len()];
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    let mut samples = 0_usize;
+    let handle = PlayerHandle::new(probe.target);
+
+    for (observer, slot) in peers.iter().enumerate() {
+        if observer == probe.target || dead.get(observer).copied().unwrap_or(true) {
+            continue;
+        }
+        let is_connected = slot.session.diagnostic_player_connected(handle);
+        let receipt = slot
+            .session
+            .diagnostic_player_receipt_frame(handle)
+            .filter(|frame| frame.is_valid())
+            .map(Frame::as_i32);
+        let retained = slot
+            .session
+            .diagnostic_player_retained_input_range(handle)
+            .map(|(first, last)| RetainedInputRangeEvidence {
+                first: first.as_i32(),
+                last: last.as_i32(),
+            });
+        connected[observer] = is_connected;
+        receipts[observer] = receipt;
+        retained_ranges[observer] = retained;
+        if is_connected == Some(true) {
+            if let (Some(frame), Some(_)) = (receipt, retained) {
+                minimum = minimum.min(frame);
+                maximum = maximum.max(frame);
+                samples = samples.saturating_add(1);
+            }
+        }
+    }
+
+    if samples < 2 {
+        return;
+    }
+    let spread = u32::try_from(maximum.saturating_sub(minimum)).unwrap_or(u32::MAX);
+    if probe.at_step.is_none() || spread >= probe.max_spread {
+        probe.max_spread = spread;
+        probe.at_step = Some(step);
+        probe.receipts = receipts;
+        probe.connected = connected;
+        probe.retained_ranges = retained_ranges;
+    }
+}
+
 fn collect_endpoint_control_samples<I: SimInput>(
     peers: &[PeerSlot<I>],
     n_players: usize,
+    include_average: bool,
 ) -> Vec<EndpointControlSample> {
     let mut samples = Vec::with_capacity(n_players.saturating_mul(n_players.saturating_sub(1)));
     for (from, slot) in peers.iter().enumerate() {
@@ -816,6 +1255,11 @@ fn collect_endpoint_control_samples<I: SimInput>(
                 to,
                 ping_ms: metrics.ping_ms,
                 remote_frame_advantage: metrics.remote_frame_advantage,
+                average_frame_advantage: if include_average {
+                    metrics.average_frame_advantage
+                } else {
+                    0
+                },
                 pending_output_len: metrics.pending_output_len,
             });
         }
@@ -1019,6 +1463,106 @@ impl<I: SimInput> SimGameStub<I> {
             }
         }
         self.recorded.insert(self.gs.frame, self.gs);
+    }
+}
+
+struct HostileGossipCounters {
+    messages_mutated: AtomicU64,
+    first_step: AtomicU32,
+    last_step: AtomicU32,
+    last_before: AtomicI32,
+    last_after: AtomicI32,
+    last_round_seq: AtomicU32,
+}
+
+impl HostileGossipCounters {
+    const NO_STEP: u32 = u32::MAX;
+
+    fn new() -> Self {
+        Self {
+            messages_mutated: AtomicU64::new(0),
+            first_step: AtomicU32::new(Self::NO_STEP),
+            last_step: AtomicU32::new(0),
+            last_before: AtomicI32::new(Frame::NULL.as_i32()),
+            last_after: AtomicI32::new(Frame::NULL.as_i32()),
+            last_round_seq: AtomicU32::new(0),
+        }
+    }
+
+    fn record(&self, step: u32, before: Frame, after: Frame, round_seq: Option<u32>) {
+        self.messages_mutated.fetch_add(1, Ordering::Relaxed);
+        self.first_step.fetch_min(step, Ordering::Relaxed);
+        self.last_step.fetch_max(step, Ordering::Relaxed);
+        self.last_before.store(before.as_i32(), Ordering::Relaxed);
+        self.last_after.store(after.as_i32(), Ordering::Relaxed);
+        self.last_round_seq
+            .store(round_seq.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    fn evidence(&self, probe: Option<HostileGossipProbeEvidence>) -> HostileGossipEvidence {
+        let messages_mutated = self.messages_mutated.load(Ordering::Relaxed);
+        let first_step = self.first_step.load(Ordering::Relaxed);
+        let last_step = self.last_step.load(Ordering::Relaxed);
+        HostileGossipEvidence {
+            messages_mutated,
+            first_step: (messages_mutated != 0).then_some(first_step),
+            last_step: (messages_mutated != 0).then_some(last_step),
+            last_before: (messages_mutated != 0).then(|| self.last_before.load(Ordering::Relaxed)),
+            last_after: (messages_mutated != 0).then(|| self.last_after.load(Ordering::Relaxed)),
+            last_round_seq: (messages_mutated != 0
+                && self.last_round_seq.load(Ordering::Relaxed) != 0)
+                .then(|| self.last_round_seq.load(Ordering::Relaxed)),
+            probe,
+        }
+    }
+}
+
+struct HostileGossipSocket {
+    inner: SimSocket<Message>,
+    options: HostileGossipOptions,
+    observer_addr: SocketAddr,
+    current_step: Arc<AtomicU32>,
+    counters: Arc<HostileGossipCounters>,
+}
+
+impl NonBlockingSocket<SocketAddr> for HostileGossipSocket {
+    fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
+        let step = self.current_step.load(Ordering::Relaxed);
+        let active = self.options.from_step <= step && step < self.options.until_step;
+        if !active || *addr != self.observer_addr {
+            self.inner.send_to(msg, addr);
+            return;
+        }
+
+        let mut rewritten = msg.clone();
+        let changed = match self.options.mode {
+            HostileGossipMode::ConnectionStatus => {
+                fortress_rollback::__internal::mutate_input_gossip_frame(
+                    &mut rewritten,
+                    self.options.target,
+                    self.options.delta,
+                )
+                .map(|(before, after)| (before, after, None))
+            },
+            HostileGossipMode::FloorReply => {
+                fortress_rollback::__internal::mutate_floor_reply_frame(
+                    &mut rewritten,
+                    self.options.target,
+                    self.options.delta,
+                )
+                .map(|(before, after, round_seq)| (before, after, Some(round_seq)))
+            },
+        };
+        if let Some((before, after, round_seq)) = changed {
+            self.counters.record(step, before, after, round_seq);
+            self.inner.send_to(&rewritten, addr);
+        } else {
+            self.inner.send_to(msg, addr);
+        }
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        self.inner.receive_all_messages()
     }
 }
 
@@ -1608,6 +2152,69 @@ pub(super) fn validate_run_options(
             schedule.config.steps
         ));
     }
+    if let Some(hostile) = options.hostile_gossip {
+        if n < 3
+            || hostile.liar >= n
+            || hostile.observer >= n
+            || hostile.target >= n
+            || hostile.liar == hostile.observer
+            || hostile.liar == hostile.target
+            || hostile.observer == hostile.target
+        {
+            return Err(format!(
+                "hostile_gossip liar {}, observer {}, and target {} must name distinct peers within 0..{n}, with at least three peers",
+                hostile.liar, hostile.observer, hostile.target
+            ));
+        }
+        if hostile.mode == HostileGossipMode::FloorReply && n < 4 {
+            return Err("FloorReply hostile_gossip requires at least four peers".to_owned());
+        }
+        if hostile.delta.unsigned_abs() > MAX_HOSTILE_GOSSIP_DELTA {
+            return Err(format!(
+                "hostile_gossip delta magnitude must be <= {MAX_HOSTILE_GOSSIP_DELTA}"
+            ));
+        }
+        if hostile.from_step >= hostile.until_step || hostile.until_step > schedule.config.steps {
+            return Err(format!(
+                "hostile_gossip interval must be non-empty and within 0..{}",
+                schedule.config.steps
+            ));
+        }
+        if options
+            .probe_confirmed_at
+            .is_none_or(|probe| probe < hostile.from_step || probe >= hostile.until_step)
+        {
+            return Err(
+                "hostile_gossip requires probe_confirmed_at inside its active interval".to_owned(),
+            );
+        }
+        let endpoint_retires = schedule.events.iter().any(|(step, event)| {
+            if *step >= hostile.until_step {
+                return false;
+            }
+            let retired = match event {
+                ScheduleEvent::GracefulRemove { target, .. }
+                | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+                ScheduleEvent::PeerKill { peer } => Some(*peer),
+                ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+                #[cfg(feature = "hot-join")]
+                ScheduleEvent::HotJoin { slot } => Some(*slot),
+                _ => None,
+            };
+            retired.is_some_and(|peer| {
+                peer == hostile.liar
+                    || peer == hostile.observer
+                    || (hostile.mode == HostileGossipMode::ConnectionStatus
+                        && peer == hostile.target)
+            })
+        });
+        if endpoint_retires {
+            return Err(
+                "hostile_gossip liar and observer must remain live throughout its active interval; a ConnectionStatus target must also remain live"
+                    .to_owned(),
+            );
+        }
+    }
     if options.phase_resolved_control_samples
         && (schedule.schema_version < 16
             || schedule.config.frame_model != FrameModel::SkewGated60Hz)
@@ -1617,30 +2224,42 @@ pub(super) fn validate_run_options(
                 .to_owned(),
         );
     }
-    let Some((from, to)) = options.pending_output_probe_link else {
-        return Ok(());
-    };
-    if from >= n || to >= n || from == to {
-        return Err(format!(
-            "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
-        ));
+    if let Some(target) = options.receipt_range_probe_target {
+        if n < 3 {
+            return Err(
+                "receipt_range_probe_target requires at least three peers (two observers)"
+                    .to_owned(),
+            );
+        }
+        if target >= n {
+            return Err(format!(
+                "receipt_range_probe_target must name a peer within 0..{n}"
+            ));
+        }
     }
-    let endpoint_retires = schedule.events.iter().any(|(_, event)| {
-        let retired = match event {
-            ScheduleEvent::GracefulRemove { target, .. }
-            | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
-            ScheduleEvent::PeerKill { peer } => Some(*peer),
-            ScheduleEvent::SpectatorHostKill { host } => Some(*host),
-            #[cfg(feature = "hot-join")]
-            ScheduleEvent::HotJoin { slot } => Some(*slot),
-            _ => None,
-        };
-        retired.is_some_and(|peer| peer == from || peer == to)
-    });
-    if endpoint_retires {
-        return Err(format!(
-            "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
-        ));
+    if let Some((from, to)) = options.pending_output_probe_link {
+        if from >= n || to >= n || from == to {
+            return Err(format!(
+                "pending_output_probe_link ({from}, {to}) must name two distinct peers within 0..{n}"
+            ));
+        }
+        let endpoint_retires = schedule.events.iter().any(|(_, event)| {
+            let retired = match event {
+                ScheduleEvent::GracefulRemove { target, .. }
+                | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+                ScheduleEvent::PeerKill { peer } => Some(*peer),
+                ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+                #[cfg(feature = "hot-join")]
+                ScheduleEvent::HotJoin { slot } => Some(*slot),
+                _ => None,
+            };
+            retired.is_some_and(|peer| peer == from || peer == to)
+        });
+        if endpoint_retires {
+            return Err(format!(
+                "pending_output_probe_link ({from}, {to}) cannot target an endpoint retired or replaced during the run"
+            ));
+        }
     }
     Ok(())
 }
@@ -1711,6 +2330,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // numbers/sync tokens are reproducible.
     let spectator_addr = peer_addr(n);
     let spectator_handle = PlayerHandle::new(n);
+    let hostile_current_step = Arc::new(AtomicU32::new(0));
+    let hostile_counters = Arc::new(HostileGossipCounters::new());
     let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
@@ -1757,7 +2378,23 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .add_player(PlayerType::Spectator(spectator_addr), spectator_handle)
                     .expect("valid spectator registration");
             }
-            let session = builder.start_p2p_session(socket).expect("session starts");
+            let session = if options
+                .hostile_gossip
+                .is_some_and(|hostile| hostile.liar == i)
+            {
+                let hostile = options.hostile_gossip.expect("checked above");
+                builder
+                    .start_p2p_session(HostileGossipSocket {
+                        inner: socket,
+                        options: hostile,
+                        observer_addr: addrs[hostile.observer],
+                        current_step: Arc::clone(&hostile_current_step),
+                        counters: Arc::clone(&hostile_counters),
+                    })
+                    .expect("session starts")
+            } else {
+                builder.start_p2p_session(socket).expect("session starts")
+            };
 
             let mut game = SimGameStub::<I>::new();
             if let Some((peer, from)) = options.corrupt_state_from {
@@ -1845,10 +2482,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // (only accumulates under `AppModel::Obey`). While > 0 the peer polls but
     // does not advance, letting the others catch up — the closed time-sync loop.
     let app_model = schedule.config.app_model;
-    let mut wait_skip: Vec<u32> = vec![0; n];
+    let wait_policy = schedule.config.wait_recommendation_policy;
+    let mut wait_actuators = vec![WaitActuator::new(wait_policy); n];
+    let cpu_policy = schedule.config.cpu_feedback_policy;
+    let mut cpu_drives: Vec<Option<CpuBudgetDrive>> = (0..n)
+        .map(|_| cpu_policy.map(CpuBudgetDrive::new))
+        .collect();
     let frame_model = schedule.config.frame_model;
     let sample_control_loop = (schedule.schema_version >= 15
         && frame_model == FrameModel::SkewGated60Hz)
+        || cpu_policy.is_some()
         || (schedule.schema_version >= 16
             && (app_model == AppModel::Obey
                 || schedule
@@ -1862,14 +2505,33 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     )
                 })));
     let phase_resolved_control_samples = options.phase_resolved_control_samples;
-    let sample_control_gauges = schedule.schema_version >= 16 && !phase_resolved_control_samples;
+    let fixed_wait_policy_samples = phase_resolved_control_samples
+        && schedule.schema_version >= 17
+        && !wait_policy.is_default();
+    let sample_endpoint_gauges = schedule.schema_version >= 16
+        && (!phase_resolved_control_samples || fixed_wait_policy_samples);
+    let sample_link_queue_gauges = schedule.schema_version >= 16 && !phase_resolved_control_samples;
     let mut frame_opportunities = vec![0_u64; n];
     let mut skew_targets_seen = vec![0_u64; n];
     let mut wait_frames_obeyed = vec![0_u64; n];
+    let mut wait_recommendation_max = vec![0_u32; n];
+    let mut wait_recommendation_frames = vec![0_u64; n];
+    let mut wait_recommendations_accepted = vec![0_u64; n];
+    let mut wait_frames_accepted = vec![0_u64; n];
+    let mut wait_controller_evaluations = vec![0_u64; n];
+    let mut wait_controller_trigger_evaluations = vec![0_u64; n];
+    let mut wait_controller_endpoint_evaluations = vec![0_u64; n];
+    let mut wait_controller_endpoint_trigger_evaluations = vec![0_u64; n];
+    let mut wait_controller_input_mismatches = vec![0_u64; n];
     let mut local_input_ordinals = vec![0_u32; n];
     let phase_sample_capacity = phase_control_sample_capacity(n);
-    let mut progress_samples = VecDeque::with_capacity(if phase_resolved_control_samples {
+    let control_sample_capacity = if fixed_wait_policy_samples {
+        WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
+    } else {
         phase_sample_capacity
+    };
+    let mut progress_samples = VecDeque::with_capacity(if phase_resolved_control_samples {
+        control_sample_capacity
     } else {
         12
     });
@@ -1885,7 +2547,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     } else {
         Vec::new()
     };
-    let progress_interval = if phase_resolved_control_samples {
+    let progress_interval = if fixed_wait_policy_samples {
+        WAIT_POLICY_CONTROL_SAMPLE_INTERVAL
+    } else if phase_resolved_control_samples {
         phase_control_progress_interval(schedule.config.steps, n)
     } else {
         schedule.config.steps.div_ceil(12).max(1)
@@ -1903,6 +2567,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
     let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
+    let mut hostile_gossip_probe = None;
     let mut pending_output_probe =
         options
             .pending_output_probe_link
@@ -1918,6 +2583,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 after_recovery: None,
                 final_value: 0,
             });
+    let mut receipt_range_probe = options
+        .receipt_range_probe_target
+        .map(|target| ReceiptRangeEvidence::new(target, n));
 
     // (c) bounded post-heal liveness anchors. The heal step is the ACTUAL last
     // `HealAll` event, not `schedule.heal_at` — a schedule can set `heal_at`
@@ -1970,6 +2638,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut spectator_required_min_frame: Option<i32> = None;
 
     for step in 0..schedule.config.steps {
+        hostile_current_step.store(step, Ordering::Relaxed);
         let mut step_confirmed = Vec::with_capacity(n);
         let mut scheduled_events = Vec::new();
         let mut scheduled_events_truncated = 0u32;
@@ -2155,10 +2824,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 },
             };
             frame_opportunities[i] = frame_opportunities[i].saturating_add(opportunities);
+            let blocked_elsewhere = dead[i] || step < stalled_until[i];
+            let cpu_delayed = cpu_drives
+                .get_mut(i)
+                .and_then(Option::as_mut)
+                .is_some_and(|drive| drive.tick(blocked_elsewhere));
             // Confirmed frame after this step's drive (or the frozen value for a
             // stalled/dead peer): read exactly once and reused for both the
             // trace fold and any probe snapshot.
-            let confirmed = if !dead[i] && step >= stalled_until[i] {
+            let confirmed = if !blocked_elsewhere && !cpu_delayed {
                 slot.session.poll_remote_clients();
 
                 // A starved peer never drains its event queue (models a wedged
@@ -2198,21 +2872,40 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 );
                             }
                         }
-                        // Closed-loop app model: obey a `WaitRecommendation` by owing
-                        // that many skipped advances (max so a stronger one wins).
-                        if app_model == AppModel::Obey {
-                            if let FortressEvent::WaitRecommendation { skip_frames } = event {
-                                wait_skip[i] = wait_skip[i].max(*skip_frames);
+                        // Closed-loop app model: accept recommendations according to
+                        // the configured application-side cooldown/cap, then stage
+                        // the strongest debt until its response delay expires.
+                        if let FortressEvent::WaitRecommendation { skip_frames } = event {
+                            wait_recommendation_max[i] =
+                                wait_recommendation_max[i].max(*skip_frames);
+                            wait_recommendation_frames[i] = wait_recommendation_frames[i]
+                                .saturating_add(u64::from(*skip_frames));
+                            if app_model == AppModel::Obey {
+                                let opportunity = frame_opportunities[i];
+                                if let Some(debt_added) =
+                                    wait_actuators[i].accept(opportunity, *skip_frames)
+                                {
+                                    wait_recommendations_accepted[i] =
+                                        wait_recommendations_accepted[i].saturating_add(1);
+                                    wait_frames_accepted[i] = wait_frames_accepted[i]
+                                        .saturating_add(u64::from(debt_added));
+                                }
                             }
                         }
                     }
                 }
 
+                // Charge once for the whole peer drive. Valid schedules currently
+                // bound SkewGated60Hz to at most one opportunity per step, but
+                // drive-level aggregation keeps the CPU model exact if that bound
+                // is relaxed later.
+                let frames_advanced_before =
+                    cpu_policy.map_or(0, |_| slot.session.metrics().frames_advanced);
                 for _ in 0..opportunities {
                     if slot.session.current_state() != SessionState::Running {
                         break;
                     }
-                    if wait_skip[i] > 0 {
+                    if wait_actuators[i].should_skip(frame_opportunities[i]) {
                         // Obeying a WaitRecommendation: poll/receive this step
                         // (done above) but skip the advance so the ahead peer
                         // lets the others catch up. Count down only on steps that
@@ -2220,7 +2913,6 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         // that briefly leaves `Running` mid-wait (transient
                         // resync) must not silently consume its owed skips, or it
                         // would stop obeying once it resumes.
-                        wait_skip[i] -= 1;
                         wait_frames_obeyed[i] = wait_frames_obeyed[i].saturating_add(1);
                     } else {
                         let input_ordinal = match frame_model {
@@ -2239,8 +2931,58 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                 oracle.observe_session_error("add_local_input", i, step, &error);
                             }
                         }
-                        match slot.session.advance_frame() {
+                        let (exact_controller_input, endpoint_evaluations, endpoint_triggers) =
+                            if fixed_wait_policy_samples {
+                                let mut maximum = i32::MIN;
+                                let mut evaluations = 0_u64;
+                                let mut triggers = 0_u64;
+                                for peer in (0..n).filter(|&peer| peer != i) {
+                                    let handle = PlayerHandle::new(peer);
+                                    if slot.session.diagnostic_player_connected(handle)
+                                        != Some(true)
+                                    {
+                                        continue;
+                                    }
+                                    let Ok(metrics) = slot.session.peer_metrics(handle) else {
+                                        continue;
+                                    };
+                                    maximum = maximum.max(metrics.average_frame_advantage);
+                                    evaluations = evaluations.saturating_add(1);
+                                    if metrics.average_frame_advantage >= 3 {
+                                        triggers = triggers.saturating_add(1);
+                                    }
+                                }
+                                (
+                                    if evaluations == 0 { 0 } else { maximum },
+                                    evaluations,
+                                    triggers,
+                                )
+                            } else {
+                                (0, 0, 0)
+                            };
+                        let advance_result = slot.session.advance_frame();
+                        match advance_result {
                             Ok(requests) => {
+                                if fixed_wait_policy_samples {
+                                    let production_input = slot.session.frames_ahead();
+                                    wait_controller_evaluations[i] =
+                                        wait_controller_evaluations[i].saturating_add(1);
+                                    if production_input >= 3 {
+                                        wait_controller_trigger_evaluations[i] =
+                                            wait_controller_trigger_evaluations[i]
+                                                .saturating_add(1);
+                                    }
+                                    wait_controller_endpoint_evaluations[i] =
+                                        wait_controller_endpoint_evaluations[i]
+                                            .saturating_add(endpoint_evaluations);
+                                    wait_controller_endpoint_trigger_evaluations[i] =
+                                        wait_controller_endpoint_trigger_evaluations[i]
+                                            .saturating_add(endpoint_triggers);
+                                    if production_input != exact_controller_input {
+                                        wait_controller_input_mismatches[i] =
+                                            wait_controller_input_mismatches[i].saturating_add(1);
+                                    }
+                                }
                                 if let Some(frame) = SimGameStub::<I>::loaded_frame(&requests) {
                                     load_game_state_observations.push(LoadGameStateObservation {
                                         step,
@@ -2270,6 +3012,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             },
                         }
                     }
+                }
+                if let Some(drive) = cpu_drives.get_mut(i).and_then(Option::as_mut) {
+                    let frames_advanced = slot
+                        .session
+                        .metrics()
+                        .frames_advanced
+                        .saturating_sub(frames_advanced_before);
+                    drive.charge(frames_advanced, schedule.config.step_dt_ms);
                 }
 
                 // Incrementally sample newly confirmed inputs (they evict).
@@ -2332,7 +3082,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
-        let phase_changed = if phase_resolved_control_samples {
+        let phase_changed = if phase_resolved_control_samples && !fixed_wait_policy_samples {
             let minimum_opportunities = frame_opportunities.iter().copied().min().unwrap_or(0);
             let opportunity_lead_increased = last_phase_opportunity_lead.len() != n
                 || frame_opportunities
@@ -2366,7 +3116,26 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         let periodic_sample_due = (step + 1) % progress_interval == 0 || step == last_step;
         if sample_control_loop && (periodic_sample_due || phase_changed) {
             let sample_metrics: Vec<_> = peers.iter().map(|slot| slot.session.metrics()).collect();
-            if progress_samples.len() == phase_sample_capacity {
+            let endpoints = if sample_endpoint_gauges {
+                collect_endpoint_control_samples(&peers, n, fixed_wait_policy_samples)
+            } else {
+                Vec::new()
+            };
+            let max_endpoint_average_frame_advantage = if fixed_wait_policy_samples {
+                endpoints
+                    .chunks_exact(n.saturating_sub(1))
+                    .map(|peer_endpoints| {
+                        peer_endpoints
+                            .iter()
+                            .map(|endpoint| endpoint.average_frame_advantage)
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if progress_samples.len() == control_sample_capacity {
                 let _ = progress_samples.pop_front();
             }
             progress_samples.push_back(ProgressSample {
@@ -2398,6 +3167,32 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .collect(),
                 frame_opportunities: frame_opportunities.clone(),
                 wait_frames_obeyed: wait_frames_obeyed.clone(),
+                cpu_feedback: cpu_feedback_evidence(&cpu_drives),
+                wait_controller_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_trigger_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_trigger_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_endpoint_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_endpoint_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_endpoint_trigger_evaluations: if fixed_wait_policy_samples {
+                    wait_controller_endpoint_trigger_evaluations.clone()
+                } else {
+                    Vec::new()
+                },
+                wait_controller_input_mismatches: if fixed_wait_policy_samples {
+                    wait_controller_input_mismatches.clone()
+                } else {
+                    Vec::new()
+                },
                 frames_ahead: if phase_resolved_control_samples {
                     peers
                         .iter()
@@ -2406,12 +3201,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 } else {
                     Vec::new()
                 },
-                endpoints: if sample_control_gauges {
-                    collect_endpoint_control_samples(&peers, n)
-                } else {
-                    Vec::new()
-                },
-                link_queues: if sample_control_gauges {
+                max_endpoint_average_frame_advantage,
+                endpoints,
+                link_queues: if sample_link_queue_gauges {
                     collect_link_queue_samples(&net, &peers, &addrs)
                 } else {
                     Vec::new()
@@ -2424,6 +3216,31 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         // cut rather than a mixture of before/after states across peers.
         if options.probe_confirmed_at == Some(step) {
             probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
+            if let Some(hostile) = options.hostile_gossip {
+                let diagnostic = peers[hostile.observer].session.diagnostic_hostile_gossip(
+                    PlayerHandle::new(hostile.liar),
+                    PlayerHandle::new(hostile.target),
+                );
+                hostile_gossip_probe = diagnostic.map(|diagnostic| HostileGossipProbeEvidence {
+                    at_step: step,
+                    observer_confirmed: peers[hostile.observer].session.confirmed_frame().as_i32(),
+                    direct_receipt: peers[hostile.observer]
+                        .session
+                        .diagnostic_player_receipt_frame(PlayerHandle::new(hostile.target))
+                        .map(Frame::as_i32),
+                    endpoint_running: diagnostic.endpoint_running,
+                    status_disconnected: diagnostic.status_disconnected,
+                    status_frame: diagnostic.status_frame.as_i32(),
+                    relay_topology: diagnostic.relay_topology,
+                    round_floor: diagnostic.round_floor.as_i32(),
+                    round_fresh: diagnostic.round_fresh,
+                    request_seq: diagnostic.request_seq,
+                    reply_seq: diagnostic.reply_seq,
+                    prune_seq: diagnostic.prune_seq,
+                    effective_reported_frame: diagnostic.effective_reported_frame.as_i32(),
+                    target_confirmed_bound: diagnostic.target_confirmed_bound.map(Frame::as_i32),
+                });
+            }
         }
         if let Some(probe) = pending_output_probe.as_mut() {
             let value = peers[probe.from]
@@ -2450,6 +3267,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             if run_c && step == recovery_anchor_at {
                 probe.after_recovery = Some(value);
             }
+        }
+        if let Some(probe) = receipt_range_probe.as_mut() {
+            update_receipt_range_probe(probe, &peers, &dead, step);
         }
 
         if let Some(spectator) = spectator.as_mut() {
@@ -2481,6 +3301,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     value: slot.game.gs.state,
                 })
                 .collect(),
+            cpu_feedback: cpu_feedback_evidence(&cpu_drives),
             scheduled_events,
             scheduled_events_truncated,
             observed_events,
@@ -2492,6 +3313,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 applied_frames: slot.applied_inputs.len(),
                 max_applied_frame: slot.applied_inputs.keys().next_back().copied(),
             }),
+            receipt_range_probe: receipt_range_probe.clone(),
         };
         // The digest and the artifact tail share one stable representation, so
         // every captured step observable (including lifecycle/dead state,
@@ -2674,6 +3496,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .receive_message_limit
         .map_or_else(Vec::new, |_| first_synchronized_step);
     let progress_samples: Vec<_> = progress_samples.into();
+    let cpu_feedback = cpu_feedback_evidence(&cpu_drives);
+    let hostile_gossip = options
+        .hostile_gossip
+        .map(|_| hostile_counters.evidence(hostile_gossip_probe));
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -2692,6 +3518,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         ),
         link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
         pending_output_probe,
+        receipt_range_probe: receipt_range_probe.clone(),
+        hostile_gossip,
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -2713,6 +3541,27 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         } else {
             Vec::new()
         },
+        wait_recommendation_max: if schedule.schema_version >= 17 {
+            wait_recommendation_max.clone()
+        } else {
+            Vec::new()
+        },
+        wait_recommendation_frames: if schedule.schema_version >= 17 {
+            wait_recommendation_frames.clone()
+        } else {
+            Vec::new()
+        },
+        wait_recommendations_accepted: if schedule.schema_version >= 17 {
+            wait_recommendations_accepted.clone()
+        } else {
+            Vec::new()
+        },
+        wait_frames_accepted: if schedule.schema_version >= 17 {
+            wait_frames_accepted.clone()
+        } else {
+            Vec::new()
+        },
+        cpu_feedback: cpu_feedback.clone(),
         receive_stats_by_peer: receive_stats_by_peer.clone(),
         first_running_step: reported_first_running_step.clone(),
         first_synchronized_step: reported_first_synchronized_step.clone(),
@@ -2729,6 +3578,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         probe_confirmed,
         probe_peer_wire_by_link,
         pending_output_probe,
+        receipt_range_probe,
+        hostile_gossip,
         net_stats: net.stats(),
         blocked_drops_by_link,
         fragmentation_drops_by_link,
@@ -2741,6 +3592,27 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,
+        wait_recommendation_max: if schedule.schema_version >= 17 {
+            wait_recommendation_max
+        } else {
+            Vec::new()
+        },
+        wait_recommendation_frames: if schedule.schema_version >= 17 {
+            wait_recommendation_frames
+        } else {
+            Vec::new()
+        },
+        wait_recommendations_accepted: if schedule.schema_version >= 17 {
+            wait_recommendations_accepted
+        } else {
+            Vec::new()
+        },
+        wait_frames_accepted: if schedule.schema_version >= 17 {
+            wait_frames_accepted
+        } else {
+            Vec::new()
+        },
+        cpu_feedback,
         peer_wire,
         confirmed_at_heal,
         confirmed_after_recovery,
@@ -2761,6 +3633,157 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn hostile_gossip_only_requires_live_endpoints_while_active() {
+        let mut config = schedule::SimConfig::smoke(4);
+        config.steps = 100;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let mut schedule = schedule::generate(0xB2B4_11FE, config);
+        schedule.events = vec![(40, schedule::ScheduleEvent::PeerKill { peer: 1 })];
+        schedule.heal_at = schedule.config.steps;
+        let options = RunOptions {
+            probe_confirmed_at: Some(20),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -12,
+                from_step: 10,
+                until_step: 30,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+
+        validate_run_options(&schedule, &options)
+            .expect("retirement after the hostile interval is irrelevant");
+        schedule.events[0].0 = 29;
+        assert!(validate_run_options(&schedule, &options).is_err());
+    }
+
+    #[test]
+    fn cpu_feedback_actuator_has_exact_poll_boundaries() {
+        let policy = CpuFeedbackPolicy {
+            simulated_frame_cost_us: 1,
+            max_poll_delay_steps: 8,
+        };
+        for (work_us, expected_delay) in
+            [(0, 0), (16_000, 0), (16_001, 1), (32_000, 1), (32_001, 2)]
+        {
+            let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+                simulated_frame_cost_us: work_us,
+                ..policy
+            });
+            drive.charge(u64::from(work_us > 0), 16);
+            assert_eq!(
+                drive.evidence.remaining_delay_steps, expected_delay,
+                "wrong future delay for {work_us}us of work"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_feedback_actuator_charges_aggregate_peer_drive_work() {
+        let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 8,
+        });
+        drive.charge(3, 16);
+        assert_eq!(drive.evidence.charged_frames, 3);
+        assert_eq!(drive.evidence.work_us, 24_000);
+        assert_eq!(drive.evidence.remaining_delay_steps, 1);
+    }
+
+    #[test]
+    fn cpu_feedback_actuator_caps_and_ages_over_stalls_exactly() {
+        let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 160_001,
+            max_poll_delay_steps: 3,
+        });
+        drive.charge(1, 16);
+        assert_eq!(drive.evidence.remaining_delay_steps, 3);
+        assert_eq!(drive.evidence.clamp_count, 1);
+        assert_eq!(drive.evidence.clamped_delay_steps, 7);
+
+        assert!(!drive.tick(true), "an explicit stall owns the missed poll");
+        assert_eq!(drive.evidence.remaining_delay_steps, 2);
+        assert_eq!(drive.evidence.delayed_poll_steps, 0);
+        assert!(drive.tick(false));
+        assert!(drive.tick(false));
+        assert!(!drive.tick(false));
+        assert_eq!(drive.evidence.delayed_poll_steps, 2);
+        assert_eq!(drive.evidence.max_delay_streak, 2);
+        assert_eq!(drive.evidence.current_delay_streak, 0);
+    }
+
+    #[test]
+    fn wait_actuator_keeps_overlapping_response_delays_independent() {
+        let mut actuator = WaitActuator::new(WaitRecommendationPolicy {
+            cooldown_frames: 1,
+            response_delay_frames: 30,
+            smear_interval: 4,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(actuator.accept(100, 9), Some(9));
+        assert_eq!(actuator.accept(101, 3), Some(3));
+        for opportunity in 100..130 {
+            assert!(!actuator.should_skip(opportunity));
+        }
+        assert!(actuator.should_skip(130), "the first debt matures at 130");
+        assert!(
+            !actuator.should_skip(131),
+            "the second debt keeps the smear cadence"
+        );
+        let later_skips = (132..180)
+            .filter(|&opportunity| actuator.should_skip(opportunity))
+            .count();
+        assert_eq!(
+            later_skips, 11,
+            "all twelve accepted frames must survive overlapping maturation"
+        );
+    }
+
+    #[test]
+    fn wait_actuator_counts_only_same_due_debt_increase() {
+        let mut actuator = WaitActuator::new(WaitRecommendationPolicy {
+            response_delay_frames: 30,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(actuator.accept(100, 3), Some(3));
+        assert_eq!(actuator.accept(100, 9), Some(6));
+        assert_eq!(actuator.accept(100, 4), Some(0));
+
+        assert_eq!(
+            (100..140)
+                .filter(|&opportunity| actuator.should_skip(opportunity))
+                .count(),
+            9,
+            "same-due recommendations merge by max, so accepted evidence must total nine"
+        );
+    }
+
+    #[test]
+    fn wait_actuator_applies_cap_cooldown_and_smear_exactly() {
+        let mut capped = WaitActuator::new(WaitRecommendationPolicy {
+            cooldown_frames: 60,
+            max_skip_frames: Some(9),
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(capped.accept(100, 12), Some(9));
+        assert_eq!(capped.accept(159, 12), None);
+        assert_eq!(capped.accept(160, 12), Some(9));
+
+        let mut smeared = WaitActuator::new(WaitRecommendationPolicy {
+            smear_interval: 4,
+            ..WaitRecommendationPolicy::default()
+        });
+        assert_eq!(smeared.accept(0, 3), Some(3));
+        let skipped: Vec<_> = (0..=8)
+            .filter(|&opportunity| smeared.should_skip(opportunity))
+            .collect();
+        assert_eq!(skipped, vec![0, 4, 8]);
+    }
 
     #[test]
     fn skew_gate_counts_exact_fast_slow_and_frozen_clocks() {
@@ -2857,6 +3880,8 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: vec!["\"HealAll\"".to_owned()],
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -2907,6 +3932,8 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3016,6 +4043,8 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
+            receipt_range_probe: None,
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3323,6 +4352,7 @@ mod tests {
         );
         assert_eq!(implicit.link_stats_by_link, explicit.link_stats_by_link);
         assert_eq!(implicit.pending_output_probe, explicit.pending_output_probe);
+        assert_eq!(implicit.receipt_range_probe, explicit.receipt_range_probe);
         assert_eq!(
             implicit.load_game_state_observations,
             explicit.load_game_state_observations
@@ -3410,6 +4440,88 @@ mod tests {
             .push((120, schedule::ScheduleEvent::PeerKill { peer: 1 }));
         retiring.events.sort_by_key(|(step, _)| *step);
         assert!(validate_run_options(&retiring, &options).is_err());
+    }
+
+    #[test]
+    fn receipt_range_probe_tracks_authoritative_receipts_and_retained_ranges() {
+        let n = 3;
+        let mut config = schedule::SimConfig::smoke(n);
+        config.steps = 180;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let schedule = schedule::generate(0x5241_4e47, config);
+        let options = RunOptions {
+            receipt_range_probe_target: Some(2),
+            ..RunOptions::default()
+        };
+
+        let first = run(&schedule, &options);
+        let replay = run(&schedule, &options);
+        first.expect_pass(&schedule);
+        let probe = first
+            .receipt_range_probe
+            .as_ref()
+            .expect("receipt-range probe requested");
+        assert_eq!(probe.target, 2);
+        assert_eq!(probe.at_step, Some(schedule.config.steps - 1));
+        assert_eq!(probe.receipts.len(), n);
+        assert_eq!(probe.connected.len(), n);
+        assert_eq!(probe.retained_ranges.len(), n);
+        assert_eq!(probe.receipts[2], None);
+        for observer in [0, 1] {
+            assert_eq!(probe.connected[observer], Some(true));
+            assert!(probe.receipts[observer].is_some());
+            assert!(probe.retained_ranges[observer].is_some());
+        }
+        assert_eq!(first.receipt_range_probe, replay.receipt_range_probe);
+        assert_eq!(first.trace_hash, replay.trace_hash);
+        assert_eq!(
+            first
+                .trace_tail
+                .last()
+                .and_then(|snapshot| snapshot.receipt_range_probe.as_ref()),
+            first.receipt_range_probe.as_ref()
+        );
+
+        let other_target = run(
+            &schedule,
+            &RunOptions {
+                receipt_range_probe_target: Some(1),
+                ..RunOptions::default()
+            },
+        );
+        assert_ne!(first.trace_hash, other_target.trace_hash);
+
+        let invalid = RunOptions {
+            receipt_range_probe_target: Some(n),
+            ..RunOptions::default()
+        };
+        assert!(validate_run_options(&schedule, &invalid).is_err());
+
+        let mut no_sample = schedule;
+        no_sample.events = vec![
+            (0, ScheduleEvent::PeerKill { peer: 1 }),
+            (100, ScheduleEvent::HealAll),
+        ];
+        no_sample.heal_at = 100;
+        let no_sample_report = run(&no_sample, &options);
+        let no_sample_probe = no_sample_report
+            .receipt_range_probe
+            .expect("requested probe is retained without a complete sample");
+        assert_eq!(no_sample_probe.at_step, None);
+        assert_eq!(no_sample_probe.max_spread, 0);
+        assert!(no_sample_probe.receipts.iter().all(Option::is_none));
+        assert!(no_sample_probe.connected.iter().all(Option::is_none));
+        assert!(no_sample_probe.retained_ranges.iter().all(Option::is_none));
+
+        let two_peer = schedule::generate(0x5241_4e48, schedule::SimConfig::smoke(2));
+        assert!(validate_run_options(
+            &two_peer,
+            &RunOptions {
+                receipt_range_probe_target: Some(1),
+                ..RunOptions::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
