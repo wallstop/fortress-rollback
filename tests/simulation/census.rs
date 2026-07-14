@@ -12,7 +12,10 @@ use super::harness::{
 use crate::common::sim_net::{
     BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
 };
-use fortress_rollback::{EventKind, PlayerHandle, SessionState};
+use fortress_rollback::{
+    telemetry::{ViolationKind, ViolationSeverity},
+    EventKind, PlayerHandle, SessionState,
+};
 use std::time::Duration;
 
 const SPARSE_DROP_AT: u32 = 180;
@@ -282,7 +285,7 @@ fn scale_bandwidth_fragmentation_schedule(
     let constrained = LinkPolicy {
         fragmentation: Some(FragmentationPolicy { fragment_drop_rate }),
         bandwidth: include_bandwidth.then_some(BandwidthPolicy {
-            rate_bytes_per_second: 8_000,
+            rate_bytes_per_second: 8_750,
             burst_bytes: 8_192,
             queue_capacity_bytes: 32_768,
         }),
@@ -1266,9 +1269,12 @@ fn h_pollcap_targeted_release_defers_without_starvation() {
 /// H-BLOAT scale interaction: an N=16 mesh with incompressible 32-byte inputs
 /// releases a bounded pending-input backlog into one constrained directed
 /// link. No-bandwidth and zero-fragment-loss controls separate queue activation
-/// and fragment loss from the matched app treatments. The pinned 8 KB/s rate,
-/// 8 KB burst, and 32 KB tail-drop queue exercise a bounded near-capacity case,
-/// not a general model of every N=16 uplink.
+/// and fragment loss from the matched app treatments. The pinned 8.75 KB/s
+/// rate, 8 KB burst, and 32 KB tail-drop queue exercise a bounded near-capacity
+/// case, not a general model of every N=16 uplink. The backlog intentionally
+/// crosses the production IPv4 fragmentation alarm boundary on peers 0 and 1;
+/// those two exact alarms are premise evidence, while every other oracle
+/// failure remains fatal.
 #[test]
 #[ignore = "nightly N=16 32-byte bandwidth/fragmentation interaction"]
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
@@ -1298,21 +1304,82 @@ fn h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers() {
     let obey_report = run_with_input::<WideStubInput>(&obey, &options);
     let ignore_replay = run_with_input::<WideStubInput>(&ignore, &options);
     let replay = run_with_input::<WideStubInput>(&obey, &options);
-    unconstrained_ignore_report.expect_pass(&unconstrained_ignore);
-    unconstrained_report.expect_pass(&unconstrained);
-    fragment_ignore_report.expect_pass(&fragment_ignore);
-    fragment_obey_report.expect_pass(&fragment_obey);
-    bandwidth_ignore_report.expect_pass(&bandwidth_ignore);
-    bandwidth_obey_report.expect_pass(&bandwidth_obey);
-    ignore_report.expect_pass(&ignore);
-    obey_report.expect_pass(&obey);
+    let assert_expected_fragmentation_alarms =
+        |label: &str, report: &RunReport, encoded_bytes: [usize; 2]| {
+            let expected_alarm = |source, destination, encoded_bytes| OracleFailure::Violation {
+                source: ViolationSource::Peer(source),
+                violation: format!(
+                    "[Error/NetworkProtocol] Message queued for {destination:?} reaches the \
+                 IPv4/UDP fragmentation boundary: kind=input, encoded_bytes={encoded_bytes}, \
+                 threshold=1472. Further fragmentation alarms are suppressed for this \
+                 endpoint era; inspect PeerMetrics::fragmentation_risk_messages_sent for \
+                 the cumulative count."
+                ),
+            };
+            let expected_failures = [
+                expected_alarm(0, peer_addr(1), encoded_bytes[0]),
+                expected_alarm(1, peer_addr(0), encoded_bytes[1]),
+            ];
+            assert_eq!(
+                report.verdict.failures.as_slice(),
+                &expected_failures,
+                "{label} emitted an unexpected oracle failure: {:?}",
+                report.verdict.failures
+            );
+            assert_eq!(
+                report.violation_census.len(),
+                2,
+                "{label} emitted an unexpected violation signature: {:?}",
+                report.violation_census
+            );
+
+            let census_count = |severity| {
+                report
+                    .violation_census
+                    .iter()
+                    .filter(|(signature, _)| {
+                        signature.severity == severity
+                            && signature.kind == ViolationKind::NetworkProtocol
+                            && signature.message_prefix == "Message queued for"
+                    })
+                    .map(|(_, count)| *count)
+                    .sum::<u64>()
+            };
+            assert_eq!(census_count(ViolationSeverity::Warning), 2, "{label}");
+            assert_eq!(census_count(ViolationSeverity::Error), 2, "{label}");
+        };
+    for (label, report, encoded_bytes) in [
+        (
+            "unconstrained Ignore",
+            &unconstrained_ignore_report,
+            [1501, 1501],
+        ),
+        ("unconstrained Obey", &unconstrained_report, [1501, 1507]),
+        ("fragment Ignore", &fragment_ignore_report, [1501, 1501]),
+        ("fragment Obey", &fragment_obey_report, [1501, 1507]),
+        ("bandwidth Ignore", &bandwidth_ignore_report, [1501, 1501]),
+        ("bandwidth Obey", &bandwidth_obey_report, [1501, 1507]),
+        ("matched Ignore", &ignore_report, [1501, 1501]),
+        ("matched Obey", &obey_report, [1501, 1507]),
+        ("matched Ignore replay", &ignore_replay, [1501, 1501]),
+        ("matched Obey replay", &replay, [1501, 1507]),
+    ] {
+        assert_expected_fragmentation_alarms(label, report, encoded_bytes);
+    }
     assert_eq!(ignore_report.trace_hash, ignore_replay.trace_hash);
+    assert_eq!(ignore_report.verdict, ignore_replay.verdict);
+    assert_eq!(
+        ignore_report.violation_census,
+        ignore_replay.violation_census
+    );
     assert_eq!(
         ignore_report.progress_samples,
         ignore_replay.progress_samples
     );
     assert_eq!(ignore_report.net_stats, ignore_replay.net_stats);
     assert_eq!(obey_report.trace_hash, replay.trace_hash);
+    assert_eq!(obey_report.verdict, replay.verdict);
+    assert_eq!(obey_report.violation_census, replay.violation_census);
     assert_eq!(obey_report.progress_samples, replay.progress_samples);
     assert_eq!(obey_report.net_stats, replay.net_stats);
     assert_eq!(obey_report.link_stats_by_link, replay.link_stats_by_link);
