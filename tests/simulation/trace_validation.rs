@@ -269,6 +269,7 @@ struct ModelState {
     local_config: [ModelConfig; 2],
     learned_config: [Option<ModelConfig>; 2],
     learned_from: [Option<&'static str>; 2],
+    initial_sync_remaining: [u32; 2],
     sync_remaining: [u32; 2],
     accepted_tokens: [Vec<u32>; 2],
     next_token: [u32; 2],
@@ -401,7 +402,7 @@ impl ModelState {
         }
         assert_eq!(
             self.accepted_tokens[peer].len() as u32,
-            2_u32.saturating_sub(self.sync_remaining[peer]),
+            self.initial_sync_remaining[peer].saturating_sub(self.sync_remaining[peer]),
             "runtime remaining-roundtrip count must match accepted identities"
         );
     }
@@ -447,6 +448,10 @@ fn normalize_runtime_trace(
             initial_remaining[ordered.peer] = Some(ordered.event.sync_remaining_roundtrips);
         }
     }
+    let initial_sync_remaining = [
+        initial_remaining[0].expect("peer 1 begin transition is recorded"),
+        initial_remaining[1].expect("peer 2 begin transition is recorded"),
+    ];
     let mut state = ModelState {
         phase: ["Syncing", "Syncing"],
         local_config: [
@@ -455,10 +460,8 @@ fn normalize_runtime_trace(
         ],
         learned_config: [None, None],
         learned_from: [None, None],
-        sync_remaining: [
-            initial_remaining[0].expect("peer 1 begin transition is recorded"),
-            initial_remaining[1].expect("peer 2 begin transition is recorded"),
-        ],
+        initial_sync_remaining,
+        sync_remaining: initial_sync_remaining,
         accepted_tokens: [Vec::new(), Vec::new()],
         next_token: [1, 1],
         timeout_ticks: [0, 0],
