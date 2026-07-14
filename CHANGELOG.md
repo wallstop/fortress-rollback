@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.0] - 2026-07-13
 
+Release scope: deterministic simulation validates full-mesh correctness and liveness through
+`N=16` under documented profiles, not as a production endorsement. Full meshes above eight
+players exceed attested industry practice; measure the actual game, topology, input width, state
+cost, bandwidth, stalls, and hardware before declaring support.
+
 ### Added
 
 - `SessionMetrics::unknown_source_packets` counts decoded protocol messages received from addresses that are not configured endpoints for a P2P or spectator session. The first such message also emits a `NetworkProtocol` warning with its source address; later warnings are suppressed for the session while the cumulative counter continues rising. This makes stale traffic, source spoofing, and NAT rebinding distinguishable from pure peer silence. Malformed datagrams rejected by a socket before decoding remain outside this session-level counter.

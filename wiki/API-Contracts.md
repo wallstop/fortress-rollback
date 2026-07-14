@@ -488,12 +488,16 @@ Each API is documented with:
 ### `frames_ahead(&self) -> i32`
 
 ```rust
-/// Get recommended frame delay (for pacing).
+/// Get the signed local frame-advantage estimate used for pacing.
 ```
 
 **Pre:** None
 
-**Post:** Returns frame advantage estimate
+**Post:** Returns the maximum estimate across connected remote endpoints. A positive value means
+the local session is ahead and should slow or skip bounded simulation opportunities; a negative
+value means the local session is behind. Zero means no nonzero signed aggregate is currently
+visible at integer-frame precision; zero does not prove peer alignment. The value is advisory:
+remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric paths can bias it.
 
 **Errors:** None
 
