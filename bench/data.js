@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784048661826,
+  "lastUpdate": 1784054722890,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "e740b7a433e0ee7bae11f99f2e9aba4816067de7",
-          "message": "feat: Peer-Mesh Hardening (#178)\n\n## Description\n\nThis branch hardens peer-controlled decode paths and improves multi-peer\nrollback diagnostics.\nIt adds a per-peer checksum mismatch counter for `P2PSession`, emits a\none-time advisory warning when a peer shows persistent checksum\ndivergence, and keeps that signal advisory rather than auto-ejecting a\npeer.\n\nIt also makes hot-join snapshot decoding reject deeply nested recursive\nstate payloads with a recoverable error instead of risking a stack\noverflow, while keeping the existing bounded-allocation protections.\n\nBeyond the runtime changes, this branch expands N>=3/N>=4 chaos and\npeer-drop coverage and adds a new `DoubleFailureRelay` TLA+ spec plus\ndocumentation that formalize the remaining multi-peer freeze-barrier\nresidual. That spec work proves the mesh-acked-floor fix design and\ndocuments why cheaper cache-only alternatives are unsound; it does not\nship that protocol change yet.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n<!-- Please review and check all applicable items -->\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Added bounded-recursion decode coverage for hot-join snapshot\ndecoding.\n- Expanded in-process chaos coverage for N>=3 multi-peer topologies.\n- Added/expanded peer-drop regressions for checksum-mismatch persistence\nand the N=4 double-failure relay scenario.\n- Added `DoubleFailureRelay` to the TLA+ verification suite and\nrefreshed the verification docs.\n\n**Manual testing performed:**\n\n- None documented in this PR draft.\n\n## Related Issues\n\n- None referenced.\n\n---\n\n<!-- Thank you for contributing to Fortress Rollback! -->\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Touches P2P desync/checksum behavior, peer-controlled hot-join\ndeserialization, and formalizes a deferred multi-peer freeze-barrier\nfix—runtime changes affect session safety paths and hostile-input\nhandling.\n> \n> **Overview**\n> **P2P diagnostics:** Tracks per-remote **checksum mismatch counts** on\nconfirmed frames, exposes them via\n**`P2PSession::peer_checksum_mismatch_count`**, and logs a **one-time\nadvisory WARNING** when a peer crosses an internal threshold—**no\nauto-eject**; apps choose policy from the raw count. Changelog/docs\nclarify **`SyncHealth::DesyncDetected`** handling.\n> \n> **Hot-join decode hardening:** **`codec::decode_bounded`** for\n**`Config::State`** now uses a new **`codec_depth`** serde wrapper so\npeer snapshots nested past **`MAX_DECODE_DEPTH`** fail with **`Err`**\ninstead of risking stack overflow, while keeping the existing byte cap;\ninput decode stays on the fast path.\n> \n> **Zero-panic / lint:** **`#![cfg_attr(not(test))]`** denies\npanic-prone clippy lints on library **`src/`**; **`rle`** and protocol\npaths replace slicing with **`get`**-based access.\n> \n> **Formal methods:** Adds **`DoubleFailureRelay.tla`** (Baseline /\nTombstone / MeshAgree / InheritedFloor configs), registers the passing\n**MeshAgree** model in **`verify-tla.sh`**, and documents why cheaper\ncache-only fixes are unsound—the **mesh-acked-floor** protocol change is\n**spec-only**, not implemented in production.\n> \n> **CI & docs quality:** Workflow **`run`** steps that pipe to **`tee`**\nuse **`set -o pipefail`**; **`check-rust-semantic-claims.py`** is wired\nthrough **`check-doc-claims.sh`**, **agent preflight**, and **ci-docs**\npath filters, with pytest coverage for semantic claims and tee\npipelines.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n8cccba67525283bb192581f249aa81244e680afc. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-14T16:58:19-07:00",
-          "tree_id": "9c21e6d3cbae852d6b89d6e1db8377a7cbbfb0f1",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/e740b7a433e0ee7bae11f99f2e9aba4816067de7"
-        },
-        "date": 1781481782107,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 108,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 155,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 431,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 696,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1015,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128604,
-            "range": "± 475",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45721,
-            "range": "± 216",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 87",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5987,6 +5861,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2807,
             "range": "± 228",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6e3a641450bf85175eca7c58dd04b42cb5a49f0c",
+          "message": "Add bounded handshake trace recorder (#239)\n\n## Summary\n\n- model handshake request identities as a fresh bounded namespace\nindependent of successful roundtrip count\n- strengthen the strict NDJSON trace contract with a genuine duplicated\nmessage and fail-closed schema validation\n- add an opt-in, fixed-capacity protocol-local handshake recorder that\ncompiles out of normal builds\n- classify overflow and raw request-ID collisions explicitly, including\ntimeout and hot-join rearm ordering\n\n## Validation\n\n- `cargo nextest run --no-capture` (2,869 passed)\n- `cargo nextest run --features hot-join --no-capture` (3,125 passed)\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo clippy --workspace --all-targets --features\ntokio,json,trace-validation,hot-join`\n- `./scripts/verification/verify-tla.sh SyncHandshakeV1` (936,756\ndistinct states; all trace cases pass)\n- `python3 -m pytest -q\nscripts/tests/test_verify_sync_handshake_traces.py` (27 passed)\n- `python3 scripts/ci/agent-preflight.py`\n- rustdoc, links, Markdown, spelling, and allocation-bound checks\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches core sync handshake logic and formal specs; production\nbehavior is gated behind `trace-validation`, but spec/trace contract\nchanges affect CI verification breadth.\n> \n> **Overview**\n> Adds an unstable **`trace-validation`** Cargo feature and a\nfixed-capacity **`HandshakeTraceRecorder`** on `UdpProtocol` that\nrecords raw handshake transitions (sends, handlers, timeout,\nduplicate/collision dispositions) and fails closed on overflow or\nambiguous raw request-ID reuse; it is absent from default builds.\n> \n> **TLA+ / NDJSON contract:** `SyncHandshakeV1` now treats message\ntokens as a **fresh, bounded request-ID namespace** (`REQUEST_ID_COUNT`\n> `NUM_SYNC_PACKETS`) with monotonic `nextToken` (no wrap), a trace-only\n**`DuplicateMessage`** action, and **`TraceDelivery`** mode. The\nmatching NDJSON trace, Python verifier, and tests were updated for\ngenuine duplication, stricter integer `schema` validation, and the\nshifted reject mutation at step 9.\n> \n> Docs and design history note the recorder is landed while\nruntime-to-TLC normalization remains pending.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nee2c8a4ca2f2473760af39d7b5304cfc641e5fd6. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-14T11:37:00-07:00",
+          "tree_id": "b94b3475c22e6166cfbf0f8c2d9cc283f366d031",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/6e3a641450bf85175eca7c58dd04b42cb5a49f0c"
+        },
+        "date": 1784054721120,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 106583,
+            "range": "± 600",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 39284,
+            "range": "± 302",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 743,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 991,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 7553,
+            "range": "± 115",
             "unit": "ns/iter"
           }
         ]
