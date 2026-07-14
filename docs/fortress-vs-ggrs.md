@@ -474,7 +474,7 @@ ChaosConfig::intercontinental() // High-latency stable connection
 
 ### Formal Verification
 
-- **18 TLA+ modules** covering core protocols (Rollback, InputQueue, TimeSync, ChecksumExchange, SpectatorSession, Concurrency, and the protocol-v1 handshake family) as well as N-peer/freeze/failover protocols (CoordinatedPeerDrop, DoubleFailureRelay, FrameAdvantageAggregation, FreezeConvergence, NPeerReactivation, NPeerServeFreezeConvergence, PeerDrop, SpectatorFailover, and SpectatorReactivationEpoch)
+- **19 TLA+ modules** covering core protocols (Rollback, InputQueue, TimeSync, ChecksumExchange, SpectatorSession, Concurrency, the protocol-v1 handshake family, and its hand-authored trace contract) as well as N-peer/freeze/failover protocols (CoordinatedPeerDrop, DoubleFailureRelay, FrameAdvantageAggregation, FreezeConvergence, NPeerReactivation, NPeerServeFreezeConvergence, PeerDrop, SpectatorFailover, and SpectatorReactivationEpoch)
 - **123 Kani proofs** for bounded model checking
 - **65 Z3 SMT proofs** for algorithmic correctness
 

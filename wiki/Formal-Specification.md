@@ -745,7 +745,8 @@ implementation/test obligations.
 | SAFE-6 (no int overflow)      | Kani | ✅ Implemented                                    |
 | Protocol-state enum representation | Kani | ✅ Implemented (`src/network/protocol/state.rs`) |
 | Production state transitions | Rust tests | ✅ Implemented (`src/network/protocol/mod.rs`) |
-| Bounded config-handshake safety and fair-delivery convergence | TLA+ | ✅ Implemented (`specs/tla/SyncHandshakeV1*.tla`) |
+| Bounded config-handshake safety and fair-delivery convergence | TLA+ | ✅ Implemented (`SyncHandshakeV1.tla`, `SyncHandshakeV1Fair.tla`, and `SyncHandshakeV1Mismatch.tla`) |
+| Hand-authored config-handshake trace contract | TLA+ / NDJSON | ⚠️ Mutation-sensitive spike; no runtime refinement (`specs/tla/traces/sync-handshake-v1/`) |
 | SAFE-4 (rollback consistency) | TLA+ | ✅ Implemented (`specs/tla/Rollback.tla`)         |
 | Frame arithmetic              | Z3   | ✅ Implemented (`tests/verification/z3.rs`)       |
 | Queue index math              | Z3   | ✅ Implemented (`tests/verification/z3.rs`)       |

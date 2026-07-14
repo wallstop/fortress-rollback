@@ -53,7 +53,8 @@ runtime refinement link:
 | --------- | --------------------- | --------------- | ------ |
 | `ProtocolState` enum representation | Kani enum proofs | `src/network/protocol/state.rs` | ✅ Bounded enum checks |
 | Production state transitions | Rust protocol tests | `src/network/protocol/mod.rs` | ⚠️ Implementation tests; no model refinement |
-| Two-peer, two-field config handshake | `specs/tla/SyncHandshakeV1*.tla` plus Rust protocol/session tests | `src/network/protocol/mod.rs` | ⚠️ Bounded model and implementation tests; no trace refinement |
+| Two-peer, two-field config handshake | `SyncHandshakeV1.tla`, `SyncHandshakeV1Fair.tla`, and `SyncHandshakeV1Mismatch.tla` plus Rust protocol/session tests | `src/network/protocol/mod.rs` | ⚠️ Bounded model and implementation tests; no trace refinement |
+| Hand-authored handshake traces | `specs/tla/SyncHandshakeV1Trace.tla` and NDJSON fixtures | No runtime producer yet | ⚠️ Mutation-sensitive contract only; instrumentation/refinement pending |
 | `SyncLayer` fields | `specs/tla/Rollback.tla` | `src/sync_layer/mod.rs` | ✅ Aligned |
 | `InputQueue` fields | `specs/tla/InputQueue.tla` | `src/input_queue/mod.rs` | ✅ Aligned |
 
