@@ -3,7 +3,7 @@
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
-    phase_control_sample_capacity, ProgressSample, RunReport, TraceSnapshot,
+    phase_control_sample_capacity, CpuFeedbackEvidence, ProgressSample, RunReport, TraceSnapshot,
     TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 4 preserves schema-v17 wait-policy actuation evidence. Older
+// Version 5 preserves schema-v18 CPU-feedback actuation evidence. Older
 // artifacts cannot diagnose that stronger trace identity and are rejected
 // explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 4;
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 5;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -26,6 +26,48 @@ pub const MAX_FAILURE_DETAIL_BYTES: usize = 4096;
 pub const MAX_TEST_NAME_COMPONENT_BYTES: usize = 120;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn validate_cpu_feedback_entries(
+    entries: &[CpuFeedbackEvidence],
+    expected: usize,
+    schedule: &Schedule,
+    context: &str,
+) -> Result<(), String> {
+    if entries.len() != expected {
+        return Err(format!(
+            "{context} has {} cpu_feedback entries (expected {expected})",
+            entries.len()
+        ));
+    }
+    let Some(policy) = schedule.config.cpu_feedback_policy else {
+        return Ok(());
+    };
+    for (peer, evidence) in entries.iter().enumerate() {
+        let expected_work = evidence
+            .charged_frames
+            .saturating_mul(u64::from(policy.simulated_frame_cost_us));
+        if evidence.work_us != expected_work {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] work_us {} does not equal charged_frames {} × cost {}",
+                evidence.work_us, evidence.charged_frames, policy.simulated_frame_cost_us
+            ));
+        }
+        let exceeds_delay_cap = evidence.remaining_delay_steps > policy.max_poll_delay_steps
+            || evidence.max_delay_streak > policy.max_poll_delay_steps;
+        let reverses_streak_order = evidence.current_delay_streak > evidence.max_delay_streak;
+        if exceeds_delay_cap || reverses_streak_order {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] exceeds the declared delay cap or streak ordering"
+            ));
+        }
+        if (evidence.clamp_count == 0) != (evidence.clamped_delay_steps == 0) {
+            return Err(format!(
+                "{context} cpu_feedback[{peer}] has inconsistent clamp evidence"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Stable serialization identity for every oracle failure variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +192,9 @@ pub struct FailureArtifact {
     /// Recommendation debt accepted by each application-side actuator.
     #[serde(default)]
     pub wait_frames_accepted: Vec<u64>,
+    /// Final per-peer deterministic CPU-feedback evidence.
+    #[serde(default)]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -181,6 +226,7 @@ impl FailureArtifact {
             wait_recommendation_frames: report.wait_recommendation_frames.clone(),
             wait_recommendations_accepted: report.wait_recommendations_accepted.clone(),
             wait_frames_accepted: report.wait_frames_accepted.clone(),
+            cpu_feedback: report.cpu_feedback.clone(),
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -257,6 +303,17 @@ impl FailureArtifact {
                 return Err(format!("artifact has {len} {name} entries for {n} peers"));
             }
         }
+        let expected_cpu_feedback_entries = if self.schedule.config.cpu_feedback_policy.is_some() {
+            n
+        } else {
+            0
+        };
+        validate_cpu_feedback_entries(
+            &self.cpu_feedback,
+            expected_cpu_feedback_entries,
+            &self.schedule,
+            "artifact",
+        )?;
         let expected_wait_policy_entries = if self.schedule.schema_version >= 17 {
             n
         } else {
@@ -320,6 +377,12 @@ impl FailureArtifact {
                     ));
                 }
             }
+            validate_cpu_feedback_entries(
+                &sample.cpu_feedback,
+                expected_cpu_feedback_entries,
+                &self.schedule,
+                &format!("artifact progress sample at step {}", sample.step),
+            )?;
             let expected_controller_evidence = if wait_policy_samples { n } else { 0 };
             for (name, len) in [
                 (
@@ -497,6 +560,12 @@ impl FailureArtifact {
                     ));
                 }
             }
+            validate_cpu_feedback_entries(
+                &snapshot.cpu_feedback,
+                expected_cpu_feedback_entries,
+                &self.schedule,
+                &format!("trace step {}", snapshot.step),
+            )?;
             if snapshot.scheduled_events.len() > TRACE_STEP_EVENT_CAPACITY
                 || snapshot.observed_events.len() > TRACE_STEP_EVENT_CAPACITY
             {
@@ -558,6 +627,13 @@ impl FailureArtifact {
                     ));
                 }
             }
+        }
+        if self
+            .trace_tail
+            .last()
+            .is_some_and(|snapshot| snapshot.cpu_feedback != self.cpu_feedback)
+        {
+            return Err("artifact final cpu_feedback differs from the final trace step".to_owned());
         }
         Ok(())
     }
@@ -784,6 +860,7 @@ mod tests {
             wait_recommendation_frames: vec![0, 0],
             wait_recommendations_accepted: vec![0, 0],
             wait_frames_accepted: vec![0, 0],
+            cpu_feedback: Vec::new(),
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -797,6 +874,7 @@ mod tests {
                         };
                         2
                     ],
+                    cpu_feedback: Vec::new(),
                     scheduled_events: Vec::new(),
                     scheduled_events_truncated: 0,
                     observed_events: Vec::new(),
@@ -946,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_failure_builds_a_valid_v4_artifact() {
+    fn legacy_schedule_failure_builds_a_valid_v5_artifact() {
         let mut config = SimConfig::smoke(2);
         config.steps = 60;
         config.noise = BackgroundNoise::Clean;
@@ -968,18 +1046,18 @@ mod tests {
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
             .validate()
-            .expect("legacy schedule report produces a valid v4 artifact");
+            .expect("legacy schedule report produces a valid v5 artifact");
     }
 
     #[test]
-    fn artifact_v3_without_wait_policy_fields_reaches_explicit_schema_rejection() {
+    fn artifact_v4_without_cpu_feedback_fields_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(3),
+            serde_json::Value::from(4),
         );
         for field in [
             "progress_samples",
@@ -989,17 +1067,67 @@ mod tests {
             "wait_recommendation_frames",
             "wait_recommendations_accepted",
             "wait_frames_accepted",
+            "cpu_feedback",
         ] {
             assert!(object.remove(field).is_some(), "fixture contains {field}");
         }
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v3 envelope reaches validation");
-        let error = artifact.validate().expect_err("v3 schema is unsupported");
+            serde_json::from_value(value).expect("v4 envelope reaches validation");
+        let error = artifact.validate().expect_err("v4 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 3"),
+            error.contains("unsupported failure artifact schema 4"),
             "wrong diagnostic: {error}"
         );
+    }
+
+    #[test]
+    fn schema_v18_cpu_feedback_artifact_preserves_and_validates_exact_evidence() {
+        let mut config = SimConfig::smoke(2);
+        config.steps = 80;
+        config.noise = BackgroundNoise::Clean;
+        config.cpu_feedback_policy =
+            Some(crate::simulation::harness::schedule::CpuFeedbackPolicy {
+                simulated_frame_cost_us: 8_001,
+                max_poll_delay_steps: 8,
+            });
+        let schedule = crate::simulation::harness::schedule::generate(0xC0FE, config);
+        let report = run(
+            &schedule,
+            &RunOptions {
+                corrupt_state_from: Some((1, 8)),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!report.verdict.passed(), "negative control must fail");
+        assert_eq!(report.cpu_feedback.len(), 2);
+        for (peer, evidence) in report.cpu_feedback.iter().enumerate() {
+            assert_eq!(
+                evidence.charged_frames,
+                report.metrics[peer].frames_advanced
+            );
+            assert_eq!(evidence.work_us, evidence.charged_frames * 8_001);
+        }
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact.validate().expect("CPU artifact validates");
+
+        let mut missing = artifact.clone();
+        let _ = missing.cpu_feedback.pop();
+        assert!(missing.validate().is_err());
+        let mut wrong_work = artifact.clone();
+        wrong_work.cpu_feedback[0].work_us += 1;
+        assert!(wrong_work.validate().is_err());
+        let mut wrong_progress = artifact.clone();
+        let _ = wrong_progress.progress_samples[0].cpu_feedback.pop();
+        assert!(wrong_progress.validate().is_err());
+        let mut wrong_trace = artifact.clone();
+        wrong_trace.trace_tail[0].cpu_feedback[0].max_delay_streak = 9;
+        assert!(wrong_trace.validate().is_err());
+        let mut wrong_final = artifact;
+        wrong_final.cpu_feedback[0].charged_frames -= 1;
+        wrong_final.cpu_feedback[0].work_us -= 8_001;
+        assert!(wrong_final.validate().is_err());
     }
 
     #[test]
@@ -1015,6 +1143,7 @@ mod tests {
             prediction_miss_count: vec![0, 0],
             frame_opportunities: vec![1, 1],
             wait_frames_obeyed: vec![0, 0],
+            cpu_feedback: Vec::new(),
             wait_controller_evaluations: Vec::new(),
             wait_controller_trigger_evaluations: Vec::new(),
             wait_controller_endpoint_evaluations: Vec::new(),
@@ -1107,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v17_h_osc_artifact_preserves_full_n16_evidence_under_size_cap() {
+    fn schema_v18_h_osc_cpu_artifact_preserves_full_n16_evidence_under_size_cap() {
         let n = 16;
         let mut config = SimConfig::smoke(n);
         config.steps = 3_000;
@@ -1120,6 +1249,11 @@ mod tests {
             response_delay_frames: 30,
             smear_interval: 4,
         };
+        config.cpu_feedback_policy =
+            Some(crate::simulation::harness::schedule::CpuFeedbackPolicy {
+                simulated_frame_cost_us: 1,
+                max_poll_delay_steps: 3_000,
+            });
         let schedule = crate::simulation::harness::schedule::generate(0xA10, config);
         let endpoints: Vec<_> = (0..n)
             .flat_map(|from| {
@@ -1135,6 +1269,16 @@ mod tests {
                     })
             })
             .collect();
+        let maximum_cpu_evidence = CpuFeedbackEvidence {
+            charged_frames: u64::MAX,
+            work_us: u64::MAX,
+            delayed_poll_steps: u64::MAX,
+            current_delay_streak: 3_000,
+            max_delay_streak: 3_000,
+            remaining_delay_steps: 3_000,
+            clamp_count: u64::MAX,
+            clamped_delay_steps: u64::MAX,
+        };
         let progress_samples: Vec<_> = (0..100_u32)
             .map(|index| ProgressSample {
                 step: index.saturating_mul(30).saturating_add(29),
@@ -1147,6 +1291,7 @@ mod tests {
                 prediction_miss_count: vec![u64::MAX; n],
                 frame_opportunities: vec![u64::MAX; n],
                 wait_frames_obeyed: vec![u64::MAX; n],
+                cpu_feedback: vec![maximum_cpu_evidence; n],
                 wait_controller_evaluations: vec![u64::MAX; n],
                 wait_controller_trigger_evaluations: vec![u64::MAX; n],
                 wait_controller_endpoint_evaluations: vec![u64::MAX; n],
@@ -1169,16 +1314,18 @@ mod tests {
         artifact.wait_recommendation_frames = vec![0; n];
         artifact.wait_recommendations_accepted = vec![0; n];
         artifact.wait_frames_accepted = vec![0; n];
+        artifact.cpu_feedback = vec![maximum_cpu_evidence; n];
         for (offset, snapshot) in artifact.trace_tail.iter_mut().enumerate() {
             snapshot.step = 2_936 + u32::try_from(offset).expect("tail offset fits u32");
             snapshot.confirmed_frames = vec![0; n];
             snapshot.session_states = vec![TraceSessionState::Running; n];
             snapshot.dead = vec![false; n];
             snapshot.game_states = vec![TraceGameState { frame: 0, value: 0 }; n];
+            snapshot.cpu_feedback = vec![maximum_cpu_evidence; n];
         }
         artifact
             .validate()
-            .expect("schema-v17 H-OSC shape validates");
+            .expect("schema-v18 H-OSC/CPU shape validates");
         assert_eq!(
             artifact.progress_samples.len(),
             WAIT_POLICY_CONTROL_SAMPLE_CAPACITY
@@ -1199,12 +1346,12 @@ mod tests {
         let serialized = serde_json::to_vec_pretty(&artifact).expect("artifact serializes");
         assert!(
             serialized.len() <= MAX_FAILURE_ARTIFACT_BYTES,
-            "N=16 H-OSC artifact uses {} bytes (cap {MAX_FAILURE_ARTIFACT_BYTES})",
+            "N=16 H-OSC/CPU artifact uses {} bytes (cap {MAX_FAILURE_ARTIFACT_BYTES})",
             serialized.len()
         );
-        let root = temp_artifact_root("h-osc-n16");
-        let path = write_artifact(&root, "h-osc-n16", &artifact, ExistingArtifact::Refuse)
-            .expect("bounded H-OSC artifact writes");
+        let root = temp_artifact_root("h-osc-cpu-n16");
+        let path = write_artifact(&root, "h-osc-cpu-n16", &artifact, ExistingArtifact::Refuse)
+            .expect("bounded H-OSC/CPU artifact writes");
         assert_eq!(read_artifact(&path).expect("artifact reads"), artifact);
         std::fs::remove_dir_all(root).expect("temporary artifact tree removes");
     }

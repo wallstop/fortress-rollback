@@ -60,6 +60,7 @@ struct FinalSummary {
     link_stats_by_link: BTreeMap<(usize, usize), crate::common::sim_net::SimLinkStats>,
     load_game_state_observations: Vec<super::LoadGameStateObservation>,
     metrics: Vec<fortress_rollback::SessionMetrics>,
+    cpu_feedback: Vec<super::CpuFeedbackEvidence>,
     peer_wire: Vec<super::PeerWireTotals>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
@@ -88,6 +89,7 @@ impl From<&RunReport> for FinalSummary {
             link_stats_by_link: report.link_stats_by_link.clone(),
             load_game_state_observations: report.load_game_state_observations.clone(),
             metrics: report.metrics.clone(),
+            cpu_feedback: report.cpu_feedback.clone(),
             peer_wire: report.peer_wire.clone(),
             confirmed_at_heal: report.confirmed_at_heal.clone(),
             confirmed_after_recovery: report.confirmed_after_recovery.clone(),
@@ -311,6 +313,11 @@ fn truncate_schedule(
 ) -> (Schedule, RunOptions) {
     let mut candidate = schedule.clone();
     candidate.config.steps = steps.max(2);
+    if let Some(policy) = candidate.config.cpu_feedback_policy.as_mut() {
+        // A cap above the shortened horizon is observationally equivalent to
+        // the horizon itself and would otherwise make the prefix invalid.
+        policy.max_poll_delay_steps = policy.max_poll_delay_steps.min(candidate.config.steps);
+    }
     let final_heal = actual_final_heal(schedule);
     candidate
         .events
@@ -674,6 +681,40 @@ where
         }
     }
 
+    // Remove the whole deterministic CPU-feedback model when it is not
+    // causal. If it is required, independently probe whether either declared
+    // axis can collapse to its minimum domain value.
+    if current.config.cpu_feedback_policy.is_some() {
+        let mut candidate = current.clone();
+        candidate.config.cpu_feedback_policy = None;
+        if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+    if current.config.cpu_feedback_policy.is_some() {
+        for simplify in [
+            |schedule: &mut Schedule| {
+                if let Some(policy) = schedule.config.cpu_feedback_policy.as_mut() {
+                    policy.simulated_frame_cost_us = 1;
+                }
+            },
+            |schedule: &mut Schedule| {
+                if let Some(policy) = schedule.config.cpu_feedback_policy.as_mut() {
+                    policy.max_poll_delay_steps = 1;
+                }
+            },
+        ] {
+            if !evaluator.has_budget(2) {
+                break;
+            }
+            let mut candidate = current.clone();
+            simplify(&mut candidate);
+            if candidate != current && evaluator.confirm(&candidate, &current_options).is_some() {
+                current = candidate;
+            }
+        }
+    }
+
     // Remove each application-side wait-control axis independently. A failure
     // may need the controller to remain active while only one cooldown, cap,
     // response-delay, or smearing behavior is material.
@@ -813,8 +854,8 @@ mod tests {
     use crate::simulation::harness::oracle::{OracleFailure, Verdict};
     use crate::simulation::harness::run;
     use crate::simulation::harness::schedule::{
-        AppModel, BackgroundNoise, FrameModel, SimConfig, WaitRecommendationPolicy,
-        SCHEDULE_SCHEMA_VERSION,
+        AppModel, BackgroundNoise, CpuFeedbackPolicy, FrameModel, SimConfig,
+        WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
     };
 
     fn clean_schedule(n_players: usize, steps: u32) -> Schedule {
@@ -902,6 +943,7 @@ mod tests {
             wait_recommendation_frames: Vec::new(),
             wait_recommendations_accepted: Vec::new(),
             wait_frames_accepted: Vec::new(),
+            cpu_feedback: Vec::new(),
             peer_wire: vec![super::super::PeerWireTotals::default(); n],
             confirmed_at_heal: Vec::new(),
             confirmed_after_recovery: Vec::new(),
@@ -1765,6 +1807,87 @@ mod tests {
                 ..WaitRecommendationPolicy::default()
             }
         );
+    }
+
+    #[test]
+    fn cpu_feedback_shrinking_removes_or_simplifies_independent_axes() {
+        let policy = CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 8,
+        };
+
+        let run_case = |required_axis: &str| {
+            let mut schedule = clean_schedule(2, 10);
+            schedule.config.cpu_feedback_policy = Some(policy);
+            shrink_failure(
+                &schedule,
+                &RunOptions::default(),
+                "StateDivergence",
+                ShrinkConfig {
+                    max_runs: 80,
+                    max_duration: Duration::from_secs(10),
+                },
+                |candidate, _| {
+                    let present = candidate.config.cpu_feedback_policy;
+                    let failures = if match required_axis {
+                        "none" => true,
+                        "cost" => present.is_some_and(|value| {
+                            value.simulated_frame_cost_us == policy.simulated_frame_cost_us
+                        }),
+                        "cap" => present.is_some_and(|value| {
+                            value.max_poll_delay_steps == policy.max_poll_delay_steps
+                        }),
+                        _ => unreachable!(),
+                    } {
+                        vec![state_failure(1)]
+                    } else {
+                        Vec::new()
+                    };
+                    synthetic_report(candidate, failures, 0xC0FE)
+                },
+                |_, _, _| {},
+            )
+            .expect("synthetic CPU-policy failure shrinks")
+            .schedule
+            .config
+            .cpu_feedback_policy
+        };
+
+        assert_eq!(run_case("none"), None);
+        assert_eq!(
+            run_case("cost"),
+            Some(CpuFeedbackPolicy {
+                simulated_frame_cost_us: 8_000,
+                max_poll_delay_steps: 1,
+            })
+        );
+        assert_eq!(
+            run_case("cap"),
+            Some(CpuFeedbackPolicy {
+                simulated_frame_cost_us: 1,
+                max_poll_delay_steps: 8,
+            })
+        );
+
+        let mut long_schedule = clean_schedule(2, 100);
+        long_schedule.config.cpu_feedback_policy = Some(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_000,
+            max_poll_delay_steps: 80,
+        });
+        let prefix = shrink_failure(
+            &long_schedule,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 80,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| synthetic_report(candidate, vec![state_failure(1)], 0xC0FE),
+            |_, _, _| {},
+        )
+        .expect("an irrelevant high CPU cap must not block prefix shrinking");
+        assert_eq!(prefix.schedule.config.steps, 2);
+        assert_eq!(prefix.schedule.config.cpu_feedback_policy, None);
     }
 
     #[test]

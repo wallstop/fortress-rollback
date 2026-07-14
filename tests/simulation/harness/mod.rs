@@ -37,8 +37,8 @@ use oracle::{
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
 use schedule::{
-    hot_join_host_for_slot, validate_schedule, AppModel, FrameModel, Schedule, ScheduleEvent,
-    WaitRecommendationPolicy,
+    hot_join_host_for_slot, validate_schedule, AppModel, CpuFeedbackPolicy, FrameModel, Schedule,
+    ScheduleEvent, WaitRecommendationPolicy,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -277,6 +277,104 @@ impl WaitActuator {
     }
 }
 
+/// Per-peer evidence from the deterministic CPU-feedback drive model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CpuFeedbackEvidence {
+    /// Simulation frames charged to the model (visual plus re-simulated).
+    #[serde(rename = "f")]
+    pub charged_frames: u64,
+    /// Cumulative modeled CPU work in microseconds.
+    #[serde(rename = "u")]
+    pub work_us: u64,
+    /// Whole future peer drives skipped because modeled work was still active.
+    #[serde(rename = "d")]
+    pub delayed_poll_steps: u64,
+    /// Consecutive CPU-delayed steps at the current sample boundary.
+    #[serde(rename = "s")]
+    pub current_delay_streak: u32,
+    /// Largest consecutive CPU-delayed streak observed.
+    #[serde(rename = "m")]
+    pub max_delay_streak: u32,
+    /// Modeled delay still owed after the current step.
+    #[serde(rename = "r")]
+    pub remaining_delay_steps: u32,
+    /// Advances whose raw future delay exceeded the configured safety cap.
+    #[serde(rename = "c")]
+    pub clamp_count: u64,
+    /// Raw future delay steps discarded by the safety cap.
+    #[serde(rename = "x")]
+    pub clamped_delay_steps: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CpuBudgetDrive {
+    policy: CpuFeedbackPolicy,
+    evidence: CpuFeedbackEvidence,
+}
+
+impl CpuBudgetDrive {
+    fn new(policy: CpuFeedbackPolicy) -> Self {
+        Self {
+            policy,
+            evidence: CpuFeedbackEvidence::default(),
+        }
+    }
+
+    /// Ages one outer step of debt and reports whether CPU was the effective
+    /// blocker. Explicit stalls/death still age virtual CPU time but do not
+    /// double-count the already-missed poll as CPU-caused.
+    fn tick(&mut self, blocked_elsewhere: bool) -> bool {
+        if self.evidence.remaining_delay_steps == 0 {
+            self.evidence.current_delay_streak = 0;
+            return false;
+        }
+        self.evidence.remaining_delay_steps -= 1;
+        if blocked_elsewhere {
+            self.evidence.current_delay_streak = 0;
+            return false;
+        }
+        self.evidence.delayed_poll_steps = self.evidence.delayed_poll_steps.saturating_add(1);
+        self.evidence.current_delay_streak = self.evidence.current_delay_streak.saturating_add(1);
+        self.evidence.max_delay_streak = self
+            .evidence
+            .max_delay_streak
+            .max(self.evidence.current_delay_streak);
+        true
+    }
+
+    /// Charges actual session work after an advance attempt. Exact completion
+    /// at the next poll boundary misses zero polls; any positive remainder
+    /// consumes one further whole drive opportunity.
+    fn charge(&mut self, frames_advanced: u64, step_dt_ms: u64) {
+        if frames_advanced == 0 {
+            return;
+        }
+        self.evidence.charged_frames = self.evidence.charged_frames.saturating_add(frames_advanced);
+        let work_us =
+            frames_advanced.saturating_mul(u64::from(self.policy.simulated_frame_cost_us));
+        self.evidence.work_us = self.evidence.work_us.saturating_add(work_us);
+        let step_us = step_dt_ms.saturating_mul(1_000).max(1);
+        let raw_delay = work_us.div_ceil(step_us).saturating_sub(1);
+        let applied_delay = raw_delay.min(u64::from(self.policy.max_poll_delay_steps));
+        let discarded = raw_delay.saturating_sub(applied_delay);
+        if discarded > 0 {
+            self.evidence.clamp_count = self.evidence.clamp_count.saturating_add(1);
+            self.evidence.clamped_delay_steps =
+                self.evidence.clamped_delay_steps.saturating_add(discarded);
+        }
+        self.evidence.remaining_delay_steps =
+            u32::try_from(applied_delay).unwrap_or(self.policy.max_poll_delay_steps);
+    }
+}
+
+fn cpu_feedback_evidence(drives: &[Option<CpuBudgetDrive>]) -> Vec<CpuFeedbackEvidence> {
+    drives
+        .iter()
+        .filter_map(|drive| drive.as_ref().map(|drive| drive.evidence))
+        .collect()
+}
+
 /// End-of-step pending-output evidence for one directed protocol link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,6 +432,10 @@ pub struct ProgressSample {
     pub prediction_miss_count: Vec<u64>,
     pub frame_opportunities: Vec<u64>,
     pub wait_frames_obeyed: Vec<u64>,
+    /// Per-peer CPU-feedback state at this sample boundary. Empty when the
+    /// schedule uses the historical fixed-cost drive model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
     /// Successful production wait-controller evaluations, indexed by peer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_controller_evaluations: Vec<u64>,
@@ -591,6 +693,9 @@ pub struct TraceSnapshot {
     pub session_states: Vec<TraceSessionState>,
     pub dead: Vec<bool>,
     pub game_states: Vec<TraceGameState>,
+    /// Per-peer CPU-feedback state after this step. Empty when disabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
     pub scheduled_events: Vec<String>,
     pub scheduled_events_truncated: u32,
     pub observed_events: Vec<TraceObservedEvent>,
@@ -690,6 +795,8 @@ struct TraceFinalSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wait_frames_accepted: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    cpu_feedback: Vec<CpuFeedbackEvidence>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     receive_stats_by_peer: Vec<crate::common::sim_net::SimReceiveStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     first_running_step: Vec<Option<u32>>,
@@ -756,6 +863,9 @@ pub struct RunReport {
     pub wait_recommendations_accepted: Vec<u64>,
     /// Skip-frame debt accepted after the app-policy cap.
     pub wait_frames_accepted: Vec<u64>,
+    /// Final deterministic CPU-feedback evidence, indexed by peer. Empty when
+    /// the schedule uses fixed poll cadence.
+    pub cpu_feedback: Vec<CpuFeedbackEvidence>,
     /// Each peer's wire-traffic totals, aggregated over all of that peer's
     /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
     /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
@@ -1976,9 +2086,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let app_model = schedule.config.app_model;
     let wait_policy = schedule.config.wait_recommendation_policy;
     let mut wait_actuators = vec![WaitActuator::new(wait_policy); n];
+    let cpu_policy = schedule.config.cpu_feedback_policy;
+    let mut cpu_drives: Vec<Option<CpuBudgetDrive>> = (0..n)
+        .map(|_| cpu_policy.map(CpuBudgetDrive::new))
+        .collect();
     let frame_model = schedule.config.frame_model;
     let sample_control_loop = (schedule.schema_version >= 15
         && frame_model == FrameModel::SkewGated60Hz)
+        || cpu_policy.is_some()
         || (schedule.schema_version >= 16
             && (app_model == AppModel::Obey
                 || schedule
@@ -2306,10 +2421,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 },
             };
             frame_opportunities[i] = frame_opportunities[i].saturating_add(opportunities);
+            let blocked_elsewhere = dead[i] || step < stalled_until[i];
+            let cpu_delayed = cpu_drives
+                .get_mut(i)
+                .and_then(Option::as_mut)
+                .is_some_and(|drive| drive.tick(blocked_elsewhere));
             // Confirmed frame after this step's drive (or the frozen value for a
             // stalled/dead peer): read exactly once and reused for both the
             // trace fold and any probe snapshot.
-            let confirmed = if !dead[i] && step >= stalled_until[i] {
+            let confirmed = if !blocked_elsewhere && !cpu_delayed {
                 slot.session.poll_remote_clients();
 
                 // A starved peer never drains its event queue (models a wedged
@@ -2431,7 +2551,18 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                             } else {
                                 (0, 0, 0)
                             };
-                        match slot.session.advance_frame() {
+                        let frames_advanced_before =
+                            cpu_policy.map_or(0, |_| slot.session.metrics().frames_advanced);
+                        let advance_result = slot.session.advance_frame();
+                        if let Some(drive) = cpu_drives.get_mut(i).and_then(Option::as_mut) {
+                            let frames_advanced = slot
+                                .session
+                                .metrics()
+                                .frames_advanced
+                                .saturating_sub(frames_advanced_before);
+                            drive.charge(frames_advanced, schedule.config.step_dt_ms);
+                        }
+                        match advance_result {
                             Ok(requests) => {
                                 if fixed_wait_policy_samples {
                                     let production_input = slot.session.frames_ahead();
@@ -2629,6 +2760,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .collect(),
                 frame_opportunities: frame_opportunities.clone(),
                 wait_frames_obeyed: wait_frames_obeyed.clone(),
+                cpu_feedback: cpu_feedback_evidence(&cpu_drives),
                 wait_controller_evaluations: if fixed_wait_policy_samples {
                     wait_controller_evaluations.clone()
                 } else {
@@ -2734,6 +2866,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     value: slot.game.gs.state,
                 })
                 .collect(),
+            cpu_feedback: cpu_feedback_evidence(&cpu_drives),
             scheduled_events,
             scheduled_events_truncated,
             observed_events,
@@ -2927,6 +3060,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .receive_message_limit
         .map_or_else(Vec::new, |_| first_synchronized_step);
     let progress_samples: Vec<_> = progress_samples.into();
+    let cpu_feedback = cpu_feedback_evidence(&cpu_drives);
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -2986,6 +3120,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         } else {
             Vec::new()
         },
+        cpu_feedback: cpu_feedback.clone(),
         receive_stats_by_peer: receive_stats_by_peer.clone(),
         first_running_step: reported_first_running_step.clone(),
         first_synchronized_step: reported_first_synchronized_step.clone(),
@@ -3034,6 +3169,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         } else {
             Vec::new()
         },
+        cpu_feedback,
         peer_wire,
         confirmed_at_heal,
         confirmed_after_recovery,
@@ -3054,6 +3190,49 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn cpu_feedback_actuator_has_exact_poll_boundaries() {
+        let policy = CpuFeedbackPolicy {
+            simulated_frame_cost_us: 1,
+            max_poll_delay_steps: 8,
+        };
+        for (work_us, expected_delay) in
+            [(0, 0), (16_000, 0), (16_001, 1), (32_000, 1), (32_001, 2)]
+        {
+            let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+                simulated_frame_cost_us: work_us,
+                ..policy
+            });
+            drive.charge(u64::from(work_us > 0), 16);
+            assert_eq!(
+                drive.evidence.remaining_delay_steps, expected_delay,
+                "wrong future delay for {work_us}us of work"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_feedback_actuator_caps_and_ages_over_stalls_exactly() {
+        let mut drive = CpuBudgetDrive::new(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 160_001,
+            max_poll_delay_steps: 3,
+        });
+        drive.charge(1, 16);
+        assert_eq!(drive.evidence.remaining_delay_steps, 3);
+        assert_eq!(drive.evidence.clamp_count, 1);
+        assert_eq!(drive.evidence.clamped_delay_steps, 7);
+
+        assert!(!drive.tick(true), "an explicit stall owns the missed poll");
+        assert_eq!(drive.evidence.remaining_delay_steps, 2);
+        assert_eq!(drive.evidence.delayed_poll_steps, 0);
+        assert!(drive.tick(false));
+        assert!(drive.tick(false));
+        assert!(!drive.tick(false));
+        assert_eq!(drive.evidence.delayed_poll_steps, 2);
+        assert_eq!(drive.evidence.max_delay_streak, 2);
+        assert_eq!(drive.evidence.current_delay_streak, 0);
+    }
 
     #[test]
     fn wait_actuator_keeps_overlapping_response_delays_independent() {
@@ -3218,6 +3397,7 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
             scheduled_events: vec!["\"HealAll\"".to_owned()],
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3268,6 +3448,7 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),
@@ -3377,6 +3558,7 @@ mod tests {
             session_states: vec![TraceSessionState::Running; 2],
             dead: vec![false, false],
             game_states: vec![TraceGameState { frame: 6, value: 9 }; 2],
+            cpu_feedback: Vec::new(),
             scheduled_events: Vec::new(),
             scheduled_events_truncated: 0,
             observed_events: Vec::new(),

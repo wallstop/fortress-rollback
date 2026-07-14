@@ -277,6 +277,7 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             "progress_samples",
             report.progress_samples == artifact.progress_samples,
         ),
+        ("trace_tail", report.trace_tail == artifact.trace_tail),
         (
             "frame_opportunities",
             report.frame_opportunities == artifact.frame_opportunities,
@@ -301,6 +302,7 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             "wait_frames_accepted",
             report.wait_frames_accepted == artifact.wait_frames_accepted,
         ),
+        ("cpu_feedback", report.cpu_feedback == artifact.cpu_feedback),
     ] {
         if !matches {
             return Err(format!(
@@ -370,7 +372,7 @@ fn validate_and_extract_candidate_artifact() {
 mod tests {
     use super::*;
     use crate::simulation::harness::artifact::{write_artifact, ExistingArtifact, FailureArtifact};
-    use crate::simulation::harness::schedule::{generate, SimConfig};
+    use crate::simulation::harness::schedule::{generate, CpuFeedbackPolicy, SimConfig};
 
     #[test]
     fn artifact_reproduction_rejects_mutated_progress_evidence() {
@@ -391,6 +393,41 @@ mod tests {
             error.contains("frame_opportunities"),
             "wrong error: {error}"
         );
+    }
+
+    #[test]
+    fn artifact_reproduction_rejects_mutated_cpu_feedback_evidence() {
+        let mut config = SimConfig::smoke(2);
+        config.steps = 60;
+        config.cpu_feedback_policy = Some(CpuFeedbackPolicy {
+            simulated_frame_cost_us: 8_001,
+            max_poll_delay_steps: 8,
+        });
+        let schedule = generate(18, config);
+        let options = RunOptions {
+            corrupt_state_from: Some((1, 10)),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "negative control must fail");
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        assert_eq!(reproduce_artifact(&artifact), Ok(()));
+
+        let mut mutated = artifact;
+        mutated.cpu_feedback[0].delayed_poll_steps =
+            mutated.cpu_feedback[0].delayed_poll_steps.saturating_add(1);
+        let error =
+            reproduce_artifact(&mutated).expect_err("mutated CPU evidence must be rejected");
+        assert!(error.contains("cpu_feedback"), "wrong error: {error}");
+
+        let mut mutated_trace = FailureArtifact::from_report(&schedule, &report);
+        mutated_trace.trace_tail[0].cpu_feedback[0].delayed_poll_steps =
+            mutated_trace.trace_tail[0].cpu_feedback[0]
+                .delayed_poll_steps
+                .saturating_add(1);
+        let error = reproduce_artifact(&mutated_trace)
+            .expect_err("mutated per-step CPU trace evidence must be rejected");
+        assert!(error.contains("trace_tail"), "wrong error: {error}");
     }
 
     fn temp_root(label: &str) -> PathBuf {

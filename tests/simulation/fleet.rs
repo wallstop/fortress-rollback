@@ -6,8 +6,9 @@
 //! proves nothing.
 
 use super::harness::schedule::{
-    generate, validate_schedule, AppModel, BackgroundNoise, DropPolicy, FrameModel, ScenarioMix,
-    Schedule, ScheduleEvent, SimConfig, WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
+    generate, validate_schedule, AppModel, BackgroundNoise, CpuFeedbackPolicy, DropPolicy,
+    FrameModel, ScenarioMix, Schedule, ScheduleEvent, SimConfig, WaitRecommendationPolicy,
+    SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
@@ -3123,6 +3124,10 @@ fn h_asym_biases_throughput_without_wait_recommendations() {
 }
 
 fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
+    meta_rb_schedule(delay_ms, None)
+}
+
+fn meta_rb_schedule(delay_ms: u64, cpu_feedback_policy: Option<CpuFeedbackPolicy>) -> Schedule {
     const N: usize = 4;
     const SPIKE_START: u32 = 500;
     const HEAL_AT: u32 = 625;
@@ -3133,6 +3138,7 @@ fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
         step_dt_ms: 16,
         input_delay: 0,
         noise: BackgroundNoise::Clean,
+        cpu_feedback_policy,
         ..SimConfig::smoke(N)
     };
     let mut initial_links = Vec::new();
@@ -3187,10 +3193,290 @@ fn meta_rb_open_loop_schedule(delay_ms: u64) -> Schedule {
     }
 }
 
+fn meta_rb_feedback_schedule(
+    delay_ms: u64,
+    cpu_feedback_policy: Option<CpuFeedbackPolicy>,
+) -> Schedule {
+    let mut schedule = meta_rb_schedule(delay_ms, cpu_feedback_policy);
+    schedule.events.retain(|(_, event)| {
+        matches!(event, ScheduleEvent::HealAll)
+            || matches!(event, ScheduleEvent::SetLink { from: 0, .. })
+    });
+    schedule
+}
+
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+/// H-META-RB: a deterministic one-way RTT spike creates rollback work; at the
+/// declared 8 ms/frame capacity bound that work causes future missed polls and
+/// measurably inflates relative RTT, but does not sustain runaway cumulative
+/// resimulation and all modeled debt drains after heal.
+fn rollback_cpu_feedback_is_bounded_without_runaway_resimulation() {
+    fn sample(report: &RunReport, step: u32) -> &super::harness::ProgressSample {
+        report
+            .progress_samples
+            .iter()
+            .find(|sample| sample.step == step)
+            .expect("aligned H-META sample")
+    }
+
+    let cpu = Some(CpuFeedbackPolicy {
+        simulated_frame_cost_us: 8_000,
+        max_poll_delay_steps: 16,
+    });
+    let fixed_clean_schedule = meta_rb_feedback_schedule(0, None);
+    let fixed_spike_schedule = meta_rb_feedback_schedule(150, None);
+    let fixed_clean = run(&fixed_clean_schedule, &RunOptions::default());
+    let fixed_spike = run(&fixed_spike_schedule, &RunOptions::default());
+    let cpu_clean_schedule = meta_rb_feedback_schedule(0, cpu);
+    let cpu_spike_schedule = meta_rb_feedback_schedule(150, cpu);
+    let cpu_clean = run(&cpu_clean_schedule, &RunOptions::default());
+    let cpu_spike = run(&cpu_spike_schedule, &RunOptions::default());
+    let replay = run(&cpu_spike_schedule, &RunOptions::default());
+
+    for (schedule, report) in [
+        (&fixed_clean_schedule, &fixed_clean),
+        (&fixed_spike_schedule, &fixed_spike),
+        (&cpu_clean_schedule, &cpu_clean),
+        (&cpu_spike_schedule, &cpu_spike),
+    ] {
+        report.expect_pass(schedule);
+    }
+    assert_eq!(cpu_spike.trace_hash, replay.trace_hash);
+    assert_eq!(cpu_spike.progress_samples, replay.progress_samples);
+    assert_eq!(cpu_spike.cpu_feedback, replay.cpu_feedback);
+    assert_eq!(cpu_spike.metrics, replay.metrics);
+    assert_eq!(cpu_spike.net_stats, replay.net_stats);
+
+    let delayed = |report: &RunReport| {
+        report
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .sum::<u64>()
+    };
+    let sensitivity = [4_000, 12_000].map(|cost| {
+        let policy = Some(CpuFeedbackPolicy {
+            simulated_frame_cost_us: cost,
+            max_poll_delay_steps: 16,
+        });
+        let clean_schedule = meta_rb_feedback_schedule(0, policy);
+        let spike_schedule = meta_rb_feedback_schedule(150, policy);
+        let clean = run(&clean_schedule, &RunOptions::default());
+        let spike = run(&spike_schedule, &RunOptions::default());
+        clean.expect_pass(&clean_schedule);
+        spike.expect_pass(&spike_schedule);
+        for report in [&clean, &spike] {
+            assert!(report
+                .cpu_feedback
+                .iter()
+                .all(|evidence| evidence.clamp_count == 0));
+        }
+        (cost, delayed(&clean), delayed(&spike))
+    });
+    println!(
+        "H-META-RB CPU clean={:?} spike={:?} fixed_spike_resim={} cpu_spike_resim={}",
+        cpu_clean.cpu_feedback,
+        cpu_spike.cpu_feedback,
+        fixed_spike
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>(),
+        cpu_spike
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    );
+    println!("H-META-RB CPU cost sensitivity={sensitivity:?}");
+    assert_eq!(delayed(&cpu_clean), 0, "matched CPU control is overloaded");
+    assert_eq!(fixed_clean.metrics, cpu_clean.metrics);
+    assert_eq!(fixed_clean.final_confirmed, cpu_clean.final_confirmed);
+    assert_eq!(fixed_clean.net_stats, cpu_clean.net_stats);
+    assert!(
+        delayed(&cpu_spike) > delayed(&cpu_clean),
+        "rollback spike did not create CPU-delayed polls"
+    );
+    assert!(
+        sensitivity[0].1 == 0
+            && sensitivity[0].2 < delayed(&cpu_spike)
+            && sensitivity[1].1 > 0
+            && sensitivity[1].2 >= delayed(&cpu_spike),
+        "cost sensitivity did not bracket the selected healthy/active bound: {sensitivity:?}"
+    );
+    for report in [&cpu_clean, &cpu_spike] {
+        assert_eq!(report.cpu_feedback.len(), 4);
+        assert_eq!(report.recovered_within_b, Some(true));
+        assert!(report.wait_frames_obeyed.iter().all(|&value| value == 0));
+        assert_eq!(report.net_stats.bandwidth_queued_datagrams, 0);
+        assert_eq!(report.net_stats.bandwidth_tail_drops, 0);
+        for (peer, evidence) in report.cpu_feedback.iter().enumerate() {
+            assert_eq!(
+                evidence.charged_frames,
+                report.metrics[peer].frames_advanced
+            );
+            assert_eq!(evidence.work_us, evidence.charged_frames * 8_000);
+            assert_eq!(evidence.clamp_count, 0);
+            assert_eq!(evidence.clamped_delay_steps, 0);
+            assert_eq!(evidence.remaining_delay_steps, 0);
+        }
+        assert!(report
+            .metrics
+            .iter()
+            .all(|metrics| metrics.events_discarded_total == 0));
+    }
+
+    let endpoint_rtt_sum = |report: &RunReport, step| {
+        sample(report, step)
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.ping_ms)
+            .sum::<u128>()
+    };
+    println!(
+        "H-META-RB RTT fixed spike={} CPU spike={} CPU late={} CPU clean late={}",
+        endpoint_rtt_sum(&fixed_spike, 624),
+        endpoint_rtt_sum(&cpu_spike, 624),
+        endpoint_rtt_sum(&cpu_spike, 999),
+        endpoint_rtt_sum(&cpu_clean, 999)
+    );
+    assert!(
+        endpoint_rtt_sum(&cpu_spike, 624) > endpoint_rtt_sum(&fixed_spike, 624),
+        "CPU-delayed polls did not inflate the spike RTT premise"
+    );
+    assert_eq!(
+        sample(&fixed_clean, 624).endpoints,
+        sample(&cpu_clean, 624).endpoints,
+        "zero-delay CPU control must be observationally identical to fixed cadence"
+    );
+    let fixed_spike_endpoints = &sample(&fixed_spike, 624).endpoints;
+    let cpu_spike_endpoints = &sample(&cpu_spike, 624).endpoints;
+    assert_eq!(fixed_spike_endpoints.len(), 12);
+    assert_eq!(cpu_spike_endpoints.len(), fixed_spike_endpoints.len());
+    assert!(
+        cpu_spike_endpoints
+            .iter()
+            .zip(fixed_spike_endpoints)
+            .all(|(cpu, fixed)| {
+                let same_link = (cpu.from, cpu.to) == (fixed.from, fixed.to);
+                same_link && cpu.ping_ms >= fixed.ping_ms
+            })
+            && cpu_spike_endpoints
+                .iter()
+                .zip(fixed_spike_endpoints)
+                .any(|(cpu, fixed)| cpu.ping_ms > fixed.ping_ms),
+        "CPU feedback must not hide a per-endpoint RTT regression: \
+         fixed={fixed_spike_endpoints:?}, cpu={cpu_spike_endpoints:?}"
+    );
+    assert!(
+        endpoint_rtt_sum(&cpu_spike, 999) <= endpoint_rtt_sum(&cpu_clean, 999),
+        "late RTT did not return to the matched CPU-control envelope"
+    );
+    let cpu_late_endpoints = &sample(&cpu_spike, 999).endpoints;
+    let clean_late_endpoints = &sample(&cpu_clean, 999).endpoints;
+    assert_eq!(cpu_late_endpoints.len(), 12);
+    assert_eq!(clean_late_endpoints.len(), cpu_late_endpoints.len());
+    assert!(
+        cpu_late_endpoints
+            .iter()
+            .zip(clean_late_endpoints)
+            .all(|(spike, clean)| {
+                let same_link = (spike.from, spike.to) == (clean.from, clean.to);
+                same_link
+                    && spike.ping_ms == clean.ping_ms
+                    && spike.average_frame_advantage.abs() < 3
+            }),
+        "every late endpoint RTT must match control and its controller average return to dead band"
+    );
+
+    let delayed_at = |report: &RunReport, step| {
+        sample(report, step)
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .collect::<Vec<_>>()
+    };
+    let before_spike_delays = delayed_at(&cpu_spike, 499);
+    let after_spike_delays = delayed_at(&cpu_spike, 624);
+    assert!(
+        after_spike_delays
+            .iter()
+            .zip(&before_spike_delays)
+            .any(|(after, before)| after > before),
+        "the RTT sample lacks a matching spike-window missed-poll premise"
+    );
+    assert!(
+        sample(&cpu_spike, 874)
+            .cpu_feedback
+            .iter()
+            .all(|evidence| evidence.remaining_delay_steps == 0
+                && evidence.current_delay_streak == 0),
+        "CPU feedback debt had not drained at the recovery-bound sample"
+    );
+    assert_eq!(
+        delayed_at(&cpu_spike, 999),
+        delayed_at(&cpu_spike, 874),
+        "CPU-delayed polls continued increasing in the clean late window"
+    );
+    assert_eq!(
+        cpu_spike
+            .cpu_feedback
+            .iter()
+            .map(|evidence| evidence.delayed_poll_steps)
+            .collect::<Vec<_>>(),
+        delayed_at(&cpu_spike, 874),
+        "CPU-delayed polls resumed after the sampled late window"
+    );
+
+    let cumulative_work =
+        |report: &RunReport, step| sample(report, step).resimulated_frames.iter().sum::<u64>();
+    let window_work = |report: &RunReport, from, to| {
+        cumulative_work(report, to).saturating_sub(cumulative_work(report, from))
+    };
+    let clean_late = window_work(&cpu_clean, 874, 999);
+    let spike_late = window_work(&cpu_spike, 874, 999);
+    let clean_spike = window_work(&cpu_clean, 499, 624);
+    let treatment_spike = window_work(&cpu_spike, 499, 624);
+    let fixed_treatment_spike = window_work(&fixed_spike, 499, 624);
+    let total_resimulation = |report: &RunReport| {
+        report
+            .metrics
+            .iter()
+            .map(|metrics| metrics.resimulated_frames)
+            .sum::<u64>()
+    };
+    assert_eq!(
+        (
+            total_resimulation(&fixed_spike),
+            total_resimulation(&cpu_spike)
+        ),
+        (9_210, 4_624),
+        "the full-run cumulative-resimulation result changed"
+    );
+    println!("H-META-RB late resimulation clean={clean_late} spike={spike_late}");
+    assert!(
+        treatment_spike > clean_spike,
+        "network spike did not increase rollback work under CPU feedback: \
+         clean={clean_spike}, treatment={treatment_spike}"
+    );
+    assert!(
+        treatment_spike < fixed_treatment_spike,
+        "CPU feedback amplified rather than damped cumulative spike-window rollback work: \
+         fixed={fixed_treatment_spike}, cpu={treatment_spike}"
+    );
+    assert!(
+        spike_late.saturating_mul(100) <= clean_late.saturating_mul(105),
+        "late rollback work did not return to the matched CPU-control envelope"
+    );
+    assert!(fixed_clean.cpu_feedback.is_empty());
+    assert!(fixed_spike.cpu_feedback.is_empty());
+}
+
 /// H-META-RB-OPENLOOP: under the harness's fixed poll cadence, a two-second
 /// symmetric RTT spike creates rollback work, then that work decays after heal
-/// instead of sustaining itself. This does not close full H-META-RB: the
-/// runner does not yet convert resimulation cost into delayed future polls.
+/// instead of sustaining itself. This legacy open-loop row does not enable the
+/// CPU-feedback policy that converts simulation work into delayed future polls.
 #[test]
 #[allow(clippy::print_stdout, clippy::disallowed_macros)]
 fn rollback_storm_decays_after_rtt_spike_under_fixed_cadence() {
