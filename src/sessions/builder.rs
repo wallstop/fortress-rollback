@@ -64,6 +64,13 @@ const DEFAULT_CATCHUP_SPEED: usize = 1;
 /// At capacity, the oldest queued routine is evicted first. Otherwise an incoming
 /// routine is discarded or an incoming durable replaces the oldest durable.
 pub(crate) const DEFAULT_EVENT_QUEUE_SIZE: usize = 100;
+/// Per-endpoint semantic ceiling for the unstable handshake refinement trace.
+///
+/// A complete two-roundtrip handshake needs fewer than twenty records. Sixty-four
+/// leaves room for retries, duplicates, and the timeout transition while keeping
+/// every endpoint's fixed-size verification allocation small and predictable.
+#[cfg(feature = "trace-validation")]
+const MAX_HANDSHAKE_TRACE_EVENTS: usize = 64;
 
 /// The [`SessionBuilder`] builds all Fortress Rollback Sessions.
 ///
@@ -113,6 +120,9 @@ where
     /// Defaults to [`DisconnectBehavior::Halt`] for back-compat with legacy
     /// GGRS-style behavior.
     disconnect_behavior: DisconnectBehavior,
+    /// Fixed record capacity for the unstable handshake refinement recorder.
+    #[cfg(feature = "trace-validation")]
+    handshake_trace_capacity: Option<usize>,
     /// Whether this session serves hot-joins (host role). Set via
     /// [`with_hot_join`](Self::with_hot_join) or implied by
     /// [`add_reserved_player`](Self::add_reserved_player).
@@ -166,6 +176,8 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             recording,
             telemetry,
             disconnect_behavior,
+            #[cfg(feature = "trace-validation")]
+            handshake_trace_capacity,
             #[cfg(feature = "hot-join")]
             accept_hot_join,
             #[cfg(feature = "hot-join")]
@@ -203,6 +215,8 @@ impl<T: Config> std::fmt::Debug for SessionBuilder<T> {
             .field("event_queue_size", event_queue_size)
             .field("recording", recording)
             .field("disconnect_behavior", disconnect_behavior);
+        #[cfg(feature = "trace-validation")]
+        debug.field("handshake_trace_capacity", handshake_trace_capacity);
         #[cfg(feature = "hot-join")]
         debug
             .field("accept_hot_join", accept_hot_join)
@@ -250,6 +264,8 @@ impl<T: Config> SessionBuilder<T> {
             recording: false,
             telemetry: None,
             disconnect_behavior: DisconnectBehavior::default(),
+            #[cfg(feature = "trace-validation")]
+            handshake_trace_capacity: None,
             #[cfg(feature = "hot-join")]
             accept_hot_join: false,
             #[cfg(feature = "hot-join")]
@@ -263,6 +279,33 @@ impl<T: Config> SessionBuilder<T> {
             #[cfg(feature = "hot-join")]
             hot_join_ack_resends: crate::sessions::p2p_session::DEFAULT_HOT_JOIN_ACK_RESENDS,
         }
+    }
+
+    /// Enables the unstable, fixed-capacity handshake refinement recorder.
+    ///
+    /// This verification-only option is compiled out unless the
+    /// `trace-validation` feature is enabled. It applies to every endpoint built
+    /// for a P2P session and activates before the endpoint's first synchronization
+    /// request. Normal applications must not depend on this hidden API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::ConfigValueOutOfRange`] when `capacity` is
+    /// zero or exceeds the semantic per-endpoint ceiling of 64 records.
+    #[cfg(feature = "trace-validation")]
+    #[doc(hidden)]
+    pub fn with_handshake_trace_capacity(mut self, capacity: usize) -> Result<Self, FortressError> {
+        if !(1..=MAX_HANDSHAKE_TRACE_EVENTS).contains(&capacity) {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "handshake_trace_capacity",
+                min: 1,
+                max: MAX_HANDSHAKE_TRACE_EVENTS as u64,
+                actual: u64::try_from(capacity).unwrap_or(u64::MAX),
+            }
+            .into());
+        }
+        self.handshake_trace_capacity = Some(capacity);
+        Ok(self)
     }
 
     /// Must be called for each player in the session (e.g. in a 3 player session, must be called 3 times) before starting the session.
@@ -2250,6 +2293,10 @@ impl<T: Config> SessionBuilder<T> {
             self.protocol_config.clone(),
             self.time_sync_config,
         )?;
+        #[cfg(feature = "trace-validation")]
+        if let Some(capacity) = self.handshake_trace_capacity {
+            endpoint.activate_handshake_trace(capacity)?;
+        }
         // start the synchronization
         endpoint.synchronize()?;
         Ok(endpoint)
@@ -2449,6 +2496,41 @@ mod tests {
         let builder =
             SessionBuilder::<TestConfig>::new().with_sync_config(SyncConfig::high_latency());
         assert_eq!(builder.sync_config, SyncConfig::high_latency());
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_capacity_accepts_semantic_endpoint_bound() {
+        let builder = SessionBuilder::<TestConfig>::new()
+            .with_handshake_trace_capacity(MAX_HANDSHAKE_TRACE_EVENTS)
+            .expect("semantic endpoint bound is valid");
+
+        assert_eq!(
+            builder.handshake_trace_capacity,
+            Some(MAX_HANDSHAKE_TRACE_EVENTS)
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_capacity_rejects_zero_and_above_semantic_bound() {
+        for invalid in [0, MAX_HANDSHAKE_TRACE_EVENTS + 1] {
+            let error = SessionBuilder::<TestConfig>::new()
+                .with_handshake_trace_capacity(invalid)
+                .expect_err("out-of-range trace capacity must fail");
+
+            assert_eq!(
+                error,
+                FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::ConfigValueOutOfRange {
+                        field: "handshake_trace_capacity",
+                        min: 1,
+                        max: MAX_HANDSHAKE_TRACE_EVENTS as u64,
+                        actual: invalid as u64,
+                    },
+                }
+            );
+        }
     }
 
     #[test]
