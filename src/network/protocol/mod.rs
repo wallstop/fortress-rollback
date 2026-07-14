@@ -4,10 +4,19 @@
 //! between peers in a rollback networking session.
 
 mod event;
+#[cfg(feature = "trace-validation")]
+mod handshake_trace;
 mod input_bytes;
 mod state;
 
 pub use event::Event;
+#[cfg(feature = "trace-validation")]
+use handshake_trace::HandshakeTraceRecorder;
+#[cfg(feature = "trace-validation")]
+pub use handshake_trace::{
+    HandshakeReplyDisposition, HandshakeRequestDisposition, HandshakeRequestIdDisposition,
+    HandshakeTraceAction, HandshakeTraceConfig, HandshakeTraceEvent, HandshakeTraceOverflow,
+};
 use input_bytes::{log_input_decode_error, InputBytes};
 pub use state::ProtocolState;
 
@@ -258,6 +267,9 @@ where
     received_drop_messages: VecDeque<DropControlMessage>,
     /// Rate-limits a full-mailbox diagnostic to once per endpoint era.
     drop_mailbox_warning_sent: bool,
+    /// Opt-in bounded runtime-refinement trace. Absent from normal builds.
+    #[cfg(feature = "trace-validation")]
+    handshake_trace: Option<HandshakeTraceRecorder>,
 
     // state
     state: ProtocolState,
@@ -895,6 +907,8 @@ impl<T: Config> UdpProtocol<T> {
             event_queue: VecDeque::new(),
             received_drop_messages: VecDeque::new(),
             drop_mailbox_warning_sent: false,
+            #[cfg(feature = "trace-validation")]
+            handshake_trace: None,
 
             // state
             state: ProtocolState::Initializing,
@@ -1145,6 +1159,77 @@ impl<T: Config> UdpProtocol<T> {
         self.state == ProtocolState::Running
     }
 
+    /// Activates the bounded raw handshake trace before synchronization begins.
+    ///
+    /// Re-activating while still initializing replaces the unused recorder. The
+    /// complete capacity is reserved fallibly here; subsequent recording never
+    /// allocates. A zero capacity is rejected because it cannot retain the
+    /// required activation record. The verification caller is the capacity
+    /// authority: this low-level hook intentionally does not invent a hard
+    /// ceiling for caller-owned configuration, and instead reports reservation
+    /// failure structurally. Any future higher-level builder option must impose
+    /// the trace driver's semantic event/byte budget before calling this hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-request error when the endpoint is no longer
+    /// initializing, the capacity is zero, or the fixed reservation fails.
+    #[cfg(feature = "trace-validation")]
+    pub fn activate_handshake_trace(&mut self, capacity: usize) -> Result<(), FortressError> {
+        if self.state != ProtocolState::Initializing {
+            return Err(InvalidRequestKind::WrongProtocolState {
+                current_state: self.state.as_str(),
+                expected_state: "Initializing",
+            }
+            .into());
+        }
+        if capacity == 0 {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "handshake_trace_capacity",
+                min: 1,
+                max: u64::MAX,
+                actual: 0,
+            }
+            .into());
+        }
+
+        self.handshake_trace = Some(HandshakeTraceRecorder::try_new(capacity)?);
+        self.record_handshake_trace(HandshakeTraceAction::Activated, None);
+        Ok(())
+    }
+
+    /// Returns the complete trace, or its explicit terminal overflow status.
+    #[cfg(feature = "trace-validation")]
+    pub fn handshake_trace(
+        &self,
+    ) -> Option<Result<&[HandshakeTraceEvent], HandshakeTraceOverflow>> {
+        self.handshake_trace
+            .as_ref()
+            .map(HandshakeTraceRecorder::result)
+    }
+
+    #[cfg(feature = "trace-validation")]
+    fn record_handshake_trace(
+        &mut self,
+        action: HandshakeTraceAction,
+        remote_config: Option<HandshakeTraceConfig>,
+    ) {
+        let event = HandshakeTraceEvent {
+            action,
+            state: self.state,
+            local_config: self.local_handshake.into(),
+            remote_config,
+            sync_remaining_roundtrips: self.sync_remaining_roundtrips,
+            outstanding_request_count: self.sync_random_requests.len(),
+            remote_conn_id: self.remote_conn_id,
+            timeout_event_sent: self.sync_timeout_event_sent,
+            incompatibility: self.handshake_failed,
+        };
+        if let Some(recorder) = &mut self.handshake_trace {
+            recorder.record(event);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn force_running_for_tests(&mut self) {
         self.state = ProtocolState::Running;
@@ -1319,6 +1404,8 @@ impl<T: Config> UdpProtocol<T> {
         self.state = ProtocolState::Synchronizing;
         self.sync_remaining_roundtrips = self.sync_config.num_sync_packets;
         self.stats_start_time = self.now();
+        #[cfg(feature = "trace-validation")]
+        self.record_handshake_trace(HandshakeTraceAction::BeginSynchronization, None);
         self.send_sync_request();
         Ok(())
     }
@@ -1407,6 +1494,10 @@ impl<T: Config> UdpProtocol<T> {
         if self.protocol_rng.is_some() {
             rebuilt.protocol_rng = self.protocol_rng.take();
         }
+        #[cfg(feature = "trace-validation")]
+        {
+            rebuilt.handshake_trace = self.handshake_trace.take();
+        }
         rebuilt.conn_id = super::next_conn_id(old_conn_id);
 
         *self = rebuilt;
@@ -1439,6 +1530,13 @@ impl<T: Config> UdpProtocol<T> {
                             self.event_queue.push_back(Event::SyncTimeout {
                                 elapsed_ms: elapsed.as_millis(),
                             });
+                            #[cfg(feature = "trace-validation")]
+                            self.record_handshake_trace(
+                                HandshakeTraceAction::ReportTimeout {
+                                    elapsed_ms: elapsed.as_millis(),
+                                },
+                                None,
+                            );
                         }
                     }
 
@@ -2085,9 +2183,24 @@ impl<T: Config> UdpProtocol<T> {
             Some(rng) => rng.gen(),
             None => random(),
         };
+        #[cfg(feature = "trace-validation")]
+        let request_id_disposition = if self.sync_random_requests.insert(random_number) {
+            HandshakeRequestIdDisposition::Fresh
+        } else {
+            HandshakeRequestIdDisposition::Collision
+        };
+        #[cfg(not(feature = "trace-validation"))]
         self.sync_random_requests.insert(random_number);
         let body = self.local_handshake.request(random_number);
         self.queue_message(MessageBody::SyncRequest(body));
+        #[cfg(feature = "trace-validation")]
+        self.record_handshake_trace(
+            HandshakeTraceAction::SendRequest {
+                request_id: random_number,
+                disposition: request_id_disposition,
+            },
+            None,
+        );
     }
 
     fn send_quality_report(&mut self) {
@@ -2299,6 +2412,8 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Upon receiving a `SyncRequest`, answer with a `SyncReply` with the proper data
     fn on_sync_request(&mut self, body: SyncRequest) {
+        #[cfg(feature = "trace-validation")]
+        let already_incompatible = self.handshake_failed.is_some();
         // Always answer with our own configuration, including after our local
         // handshake has failed, so the requester can independently diagnose
         // the same incompatibility with its own ours/theirs orientation.
@@ -2307,6 +2422,26 @@ impl<T: Config> UdpProtocol<T> {
 
         if self.state == ProtocolState::Synchronizing {
             self.observe_handshake(HandshakeConfig::from_request(body));
+        }
+
+        #[cfg(feature = "trace-validation")]
+        {
+            let disposition = if self.state != ProtocolState::Synchronizing {
+                HandshakeRequestDisposition::AnsweredOnly
+            } else if already_incompatible {
+                HandshakeRequestDisposition::AlreadyIncompatible
+            } else if self.handshake_failed.is_some() {
+                HandshakeRequestDisposition::Incompatible
+            } else {
+                HandshakeRequestDisposition::Observed
+            };
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleRequest {
+                    request_id: body.random_request,
+                    disposition,
+                },
+                Some(HandshakeConfig::from_request(body).into()),
+            );
         }
     }
 
@@ -2337,11 +2472,49 @@ impl<T: Config> UdpProtocol<T> {
     /// Upon receiving a `SyncReply`, check validity and either continue the synchronization process or conclude synchronization.
     fn on_sync_reply(&mut self, header: MessageHeader, body: SyncReply) {
         // ignore sync replies when not syncing
-        if self.state != ProtocolState::Synchronizing || self.handshake_failed.is_some() {
+        if self.state != ProtocolState::Synchronizing {
+            #[cfg(feature = "trace-validation")]
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleReply {
+                    request_id: body.random_reply,
+                    disposition: HandshakeReplyDisposition::NotSynchronizing,
+                },
+                Some(HandshakeConfig::from_reply(body).into()),
+            );
+            return;
+        }
+        if self.handshake_failed.is_some() {
+            #[cfg(feature = "trace-validation")]
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleReply {
+                    request_id: body.random_reply,
+                    disposition: HandshakeReplyDisposition::AlreadyIncompatible,
+                },
+                Some(HandshakeConfig::from_reply(body).into()),
+            );
             return;
         }
         // this is not the correct reply
         if !self.sync_random_requests.remove(&body.random_reply) {
+            #[cfg(feature = "trace-validation")]
+            {
+                let disposition = match &self.handshake_trace {
+                    Some(trace) if trace.request_id_collision_was_recorded(body.random_reply) => {
+                        HandshakeReplyDisposition::AmbiguousRequestIdCollision
+                    },
+                    Some(trace) if trace.accepted_reply_was_recorded(body.random_reply) => {
+                        HandshakeReplyDisposition::Duplicate
+                    },
+                    Some(_) | None => HandshakeReplyDisposition::Unknown,
+                };
+                self.record_handshake_trace(
+                    HandshakeTraceAction::HandleReply {
+                        request_id: body.random_reply,
+                        disposition,
+                    },
+                    Some(HandshakeConfig::from_reply(body).into()),
+                );
+            }
             return;
         }
         // A reply's peer-controlled configuration is trusted only after its
@@ -2349,6 +2522,14 @@ impl<T: Config> UdpProtocol<T> {
         // Otherwise a stale/forged reply could terminally poison a handshake.
         self.observe_handshake(HandshakeConfig::from_reply(body));
         if self.handshake_failed.is_some() {
+            #[cfg(feature = "trace-validation")]
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleReply {
+                    request_id: body.random_reply,
+                    disposition: HandshakeReplyDisposition::Incompatible,
+                },
+                Some(HandshakeConfig::from_reply(body).into()),
+            );
             return;
         }
         // A correct random echo binds the header connection ID. Lock it
@@ -2370,6 +2551,14 @@ impl<T: Config> UdpProtocol<T> {
                 elapsed_ms,
             };
             self.event_queue.push_back(evt);
+            #[cfg(feature = "trace-validation")]
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleReply {
+                    request_id: body.random_reply,
+                    disposition: HandshakeReplyDisposition::Accepted,
+                },
+                Some(HandshakeConfig::from_reply(body).into()),
+            );
             // send another sync request
             self.send_sync_request();
         } else {
@@ -2377,6 +2566,14 @@ impl<T: Config> UdpProtocol<T> {
             self.state = ProtocolState::Running;
             // register an event
             self.event_queue.push_back(Event::Synchronized);
+            #[cfg(feature = "trace-validation")]
+            self.record_handshake_trace(
+                HandshakeTraceAction::HandleReply {
+                    request_id: body.random_reply,
+                    disposition: HandshakeReplyDisposition::Accepted,
+                },
+                Some(HandshakeConfig::from_reply(body).into()),
+            );
         }
     }
 
@@ -3670,6 +3867,282 @@ mod tests {
 
         // Should still be in initializing
         assert!(!protocol.is_synchronized());
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_records_exact_handler_and_duplicate_order() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(16).unwrap();
+        protocol.synchronize().unwrap();
+        let first_request = *protocol.sync_random_requests.first().unwrap();
+
+        protocol.on_sync_request(matching_sync_request(&protocol, 77));
+        protocol.on_sync_reply(
+            MessageHeader::new(999),
+            matching_sync_reply(&protocol, first_request),
+        );
+        protocol.on_sync_reply(
+            MessageHeader::new(999),
+            matching_sync_reply(&protocol, first_request),
+        );
+
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(trace.len(), 7);
+        assert_eq!(trace[0].action, HandshakeTraceAction::Activated);
+        assert_eq!(trace[1].action, HandshakeTraceAction::BeginSynchronization);
+        assert_eq!(
+            trace[2].action,
+            HandshakeTraceAction::SendRequest {
+                request_id: first_request,
+                disposition: HandshakeRequestIdDisposition::Fresh,
+            }
+        );
+        assert_eq!(
+            trace[3].action,
+            HandshakeTraceAction::HandleRequest {
+                request_id: 77,
+                disposition: HandshakeRequestDisposition::Observed,
+            }
+        );
+        assert_eq!(trace[3].remote_config, Some(trace[3].local_config));
+        assert_eq!(
+            trace[4].action,
+            HandshakeTraceAction::HandleReply {
+                request_id: first_request,
+                disposition: HandshakeReplyDisposition::Accepted,
+            }
+        );
+        assert!(matches!(
+            trace[5].action,
+            HandshakeTraceAction::SendRequest { .. }
+        ));
+        assert_eq!(
+            trace[6].action,
+            HandshakeTraceAction::HandleReply {
+                request_id: first_request,
+                disposition: HandshakeReplyDisposition::Duplicate,
+            }
+        );
+        assert_eq!(trace[4].sync_remaining_roundtrips, 4);
+        assert_eq!(trace[6].sync_remaining_roundtrips, 4);
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_records_incompatible_request_with_full_config() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(8).unwrap();
+        protocol.synchronize().unwrap();
+        let mut request = matching_sync_request(&protocol, 41);
+        request.config.num_players = 3;
+        let expected_local: HandshakeTraceConfig = protocol.local_handshake.into();
+        let expected_remote: HandshakeTraceConfig = HandshakeConfig::from_request(request).into();
+
+        protocol.on_sync_request(request);
+
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        let event = trace.last().unwrap();
+        assert_eq!(
+            event.action,
+            HandshakeTraceAction::HandleRequest {
+                request_id: 41,
+                disposition: HandshakeRequestDisposition::Incompatible,
+            }
+        );
+        assert_eq!(event.local_config, expected_local);
+        assert_eq!(event.remote_config, Some(expected_remote));
+        assert_eq!(
+            event.incompatibility,
+            Some(IncompatibleSessionReason::NumPlayers { ours: 2, theirs: 3 })
+        );
+
+        protocol.on_sync_request(matching_sync_request(&protocol, 42));
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(
+            trace.last().unwrap().action,
+            HandshakeTraceAction::HandleRequest {
+                request_id: 42,
+                disposition: HandshakeRequestDisposition::AlreadyIncompatible,
+            }
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_marks_request_id_collision_as_ambiguous() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(16).unwrap();
+        protocol.synchronize().unwrap();
+        protocol.sync_random_requests.clear();
+
+        protocol.protocol_rng = Some(Pcg32::seed_from_u64(404));
+        protocol.send_sync_request();
+        let request_id = *protocol.sync_random_requests.first().unwrap();
+        protocol.protocol_rng = Some(Pcg32::seed_from_u64(404));
+        protocol.send_sync_request();
+
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(
+            trace.last().unwrap().action,
+            HandshakeTraceAction::SendRequest {
+                request_id,
+                disposition: HandshakeRequestIdDisposition::Collision,
+            }
+        );
+
+        let reply = matching_sync_reply(&protocol, request_id);
+        protocol.on_sync_reply(MessageHeader::new(999), reply);
+        protocol.on_sync_reply(MessageHeader::new(999), reply);
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(
+            trace.last().unwrap().action,
+            HandshakeTraceAction::HandleReply {
+                request_id,
+                disposition: HandshakeReplyDisposition::AmbiguousRequestIdCollision,
+            }
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_ignores_packets_rejected_before_handler_dispatch() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(8).unwrap();
+        protocol.synchronize().unwrap();
+        let request_id = *protocol.sync_random_requests.first().unwrap();
+        protocol.remote_conn_id = 77;
+        let recorded_before = protocol.handshake_trace().unwrap().unwrap().len();
+
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(88),
+            body: MessageBody::SyncReply(matching_sync_reply(&protocol, request_id)),
+        });
+
+        assert_eq!(
+            protocol.handshake_trace().unwrap().unwrap().len(),
+            recorded_before
+        );
+        assert!(protocol.sync_random_requests.contains(&request_id));
+    }
+
+    #[cfg(all(feature = "trace-validation", feature = "hot-join"))]
+    #[test]
+    fn handshake_trace_survives_hot_join_rearm_and_captures_first_send() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(8).unwrap();
+        protocol.synchronize().unwrap();
+
+        protocol.rearm_for_rejoin().unwrap();
+
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[3].action, HandshakeTraceAction::BeginSynchronization);
+        assert!(matches!(
+            trace[4].action,
+            HandshakeTraceAction::SendRequest {
+                disposition: HandshakeRequestIdDisposition::Fresh,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_records_timeout_before_same_poll_retry() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let sync_config = SyncConfig {
+            sync_timeout: Some(Duration::from_secs(1)),
+            sync_retry_interval: Duration::from_millis(100),
+            ..SyncConfig::default()
+        };
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            sync_config,
+            protocol_config,
+        );
+        protocol.activate_handshake_trace(8).unwrap();
+        protocol.synchronize().unwrap();
+        advance_test_clock(&clock, Duration::from_secs(2));
+
+        let events = protocol.poll(&[]);
+        drop(events);
+
+        let trace = protocol.handshake_trace().unwrap().unwrap();
+        assert_eq!(trace.len(), 5);
+        assert_eq!(
+            trace[3].action,
+            HandshakeTraceAction::ReportTimeout { elapsed_ms: 2_000 }
+        );
+        assert!(trace[3].timeout_event_sent);
+        assert!(matches!(
+            trace[4].action,
+            HandshakeTraceAction::SendRequest { .. }
+        ));
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_overflow_is_terminal_and_explicit() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.activate_handshake_trace(2).unwrap();
+
+        protocol.synchronize().unwrap();
+        let request = *protocol.sync_random_requests.first().unwrap();
+        protocol.on_sync_reply(
+            MessageHeader::new(999),
+            matching_sync_reply(&protocol, request),
+        );
+
+        let overflow = protocol.handshake_trace().unwrap().unwrap_err();
+        assert_eq!(
+            overflow,
+            HandshakeTraceOverflow {
+                capacity: 2,
+                recorded: 2,
+            }
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn handshake_trace_activation_rejects_invalid_capacity_and_late_start() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        assert!(matches!(
+            protocol.activate_handshake_trace(0),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "handshake_trace_capacity",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            protocol.activate_handshake_trace(usize::MAX),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::AllocationFailed {
+                    context: "protocol.handshake_trace",
+                    ..
+                }
+            })
+        ));
+
+        protocol.synchronize().unwrap();
+        assert!(matches!(
+            protocol.activate_handshake_trace(8),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::WrongProtocolState {
+                    current_state: "Synchronizing",
+                    expected_state: "Initializing",
+                }
+            })
+        ));
     }
 
     #[test]

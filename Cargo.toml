@@ -326,6 +326,9 @@ ignored = ["macroquad", "z3"]
 
 [features]
 sync-send = []
+# Enable bounded internal protocol-event recording for TLA+ trace validation.
+# This is an unstable verification surface and compiles out of normal builds.
+trace-validation = []
 # Enable hot-join: a peer can join/rejoin a running session by filling a
 # reserved or gracefully-dropped player slot via a state snapshot. Requires
 # Config::State: Serialize + DeserializeOwned (player count stays fixed).
