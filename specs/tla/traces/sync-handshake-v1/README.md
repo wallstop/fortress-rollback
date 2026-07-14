@@ -1,11 +1,12 @@
 # SyncHandshakeV1 trace contract
 
-This directory is the no-Rust-instrumentation feasibility spike for protocol trace validation. It
-does not consume production logs and is not a runtime refinement proof. It establishes a strict
-NDJSON schema, constrains every row through a real `SyncHandshakeV1` action, and proves that one
-load-bearing impossible update is rejected. Fixtures specify complete deltas for the variables an
-action may update; the wrapper carries the preceding values forward so TLC constrains the entire
-post-action state, including variables that the fixture expects to remain unchanged.
+This directory contains the hand-authored feasibility fixtures for protocol trace validation. The
+same gate now also generates ephemeral traces from real feature-gated `P2PSession` endpoints over
+SimNet. It establishes a strict NDJSON schema, constrains every row through a real
+`SyncHandshakeV1` action, and proves that both the hand-authored and runtime-derived load-bearing
+impossible updates are rejected. Every trace specifies complete deltas for the variables an action
+may update; the wrapper carries preceding values forward so TLC constrains the entire post-action
+state, including variables expected to remain unchanged.
 
 Run it with:
 
@@ -14,6 +15,10 @@ python3 scripts/verification/verify-sync-handshake-traces.py
 ```
 
 `verify-tla.sh SyncHandshakeV1` and the full TLA suite run the same contract automatically.
+
+The runtime files are intentionally ephemeral. The Rust producer emits them into a temporary
+directory on each gate run, and the Python wrapper validates their exact four-file manifest before
+TLC sees them. This prevents stale checked-in output from standing in for current runtime behavior.
 
 ## Trace set
 
@@ -32,9 +37,9 @@ codes fail the check.
 
 ## Runtime-to-spec refinement boundary
 
-The opt-in protocol recorder now supplies the raw runtime observations in this table. The
-normalization/SimNet driver remains pending, so this is still not a claim that a runtime trace
-refines the model.
+The opt-in protocol recorder and two-peer SimNet driver now supply and normalize the runtime
+observations in this table. The result is a narrow refinement check for the modeled handshake
+projection, not a whole-protocol or whole-session refinement proof.
 
 | Runtime observation | Spec variable/action | Required normalization or known gap |
 | ------------------- | -------------------- | ----------------------------------- |
@@ -49,17 +54,21 @@ refines the model.
 | Incompatibility event and reason payload | `incompatibleEventCount`, `reasonField`, `reasonOurs`, `reasonTheirs` | Only the first represented mismatching field is modeled; public event translation remains a Rust-test obligation |
 
 The recorder is opt-in, fixed-capacity, fallibly reserved, and emitted at protocol transition
-points; overflow and raw-ID collisions fail closed. The pending driver must preserve those
-properties while merging endpoint order and normalizing IDs. `TraceSnapshot`, `trace_hash`, and the
-final-64 simulation tail are explicitly not accepted as substitutes for these ordered deltas.
+points; overflow and raw-ID collisions fail closed. The hidden builder caps each endpoint at 64
+fixed records. The driver collects newly appended records after each fixed-order peer poll, maps
+equal raw IDs to equal trace-local ordinals, reconstructs the one observed network duplication,
+and rejects a fourth fresh request beyond the model namespace. Phase, remaining roundtrips,
+timeout, incompatibility, and outstanding-cardinality values are projected from each raw post-state
+rather than recreated from action labels. `TraceSnapshot`, `trace_hash`, and the final-64 simulation
+tail are explicitly not accepted as substitutes for these ordered deltas.
 
 ## Measured spike budget
 
 The wrapper prints each observed duration and enforces a 60-second per-case timeout by default.
 Development runs normally complete each case within a few seconds, but host load changes the total;
 historical sub-second per-case measurements are descriptive, not a strict sub-two-second or
-2.2-second acceptance threshold. The current positives explore 18, 4, and 4 distinct states; the
-expected-reject mutation reaches its `EventuallyTraceConsumed` counterexample after 9 distinct
-states. This bounded gate authorizes design of opt-in protocol trace points; it does not authorize
-claiming runtime refinement until real emitted traces pass this same contract and a runtime mutation
-remains rejected.
+2.2-second acceptance threshold. The hand-authored positives contain 18, 4, and 4 trace rows. The
+runtime positives contain 17, 7, and 6 rows; their generated negative retains all 17 matching rows
+and changes only the ignored duplicate's `syncRemaining.p1`. All eight cases complete in a few
+seconds locally. The gate proves the recorded runtime handshake projection refines these bounded
+`SyncHandshakeV1` actions; fields explicitly listed above remain outside that claim.

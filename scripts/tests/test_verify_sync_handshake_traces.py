@@ -249,6 +249,37 @@ def test_missing_tla_jar_is_a_hard_error(tmp_path: Path, capsys: pytest.CaptureF
     assert "TLA+ tools jar not found" in capsys.readouterr().err
 
 
+def test_runtime_trace_producer_failure_is_a_hard_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        trace_verifier.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=101,
+            stdout="runtime producer stdout\n",
+            stderr="runtime producer stderr\n",
+        ),
+    )
+
+    with pytest.raises(trace_verifier.TraceError, match="producer failed.*exit 101"):
+        trace_verifier.generate_runtime_traces(tmp_path)
+
+
+def test_runtime_trace_producer_requires_complete_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "runtime-matching.ndjson").write_text("incomplete\n", encoding="utf-8")
+    monkeypatch.setattr(
+        trace_verifier.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(trace_verifier.TraceError, match="producer manifest mismatch"):
+        trace_verifier.generate_runtime_traces(tmp_path)
+
+
 def test_default_gate_requires_complete_canonical_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

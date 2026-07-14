@@ -9,6 +9,7 @@ on:
       - '**/Cargo.lock'
       - '.cargo/config.toml'
       - 'specs/**'
+      - 'scripts/verification/verify-sync-handshake-traces.py'
       - 'scripts/verification/verify-*.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - '.tla-tools-version'
@@ -21,6 +22,7 @@ on:
       - '**/Cargo.lock'
       - '.cargo/config.toml'
       - 'specs/**'
+      - 'scripts/verification/verify-sync-handshake-traces.py'
       - 'scripts/verification/verify-*.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - '.tla-tools-version'
@@ -73,6 +75,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: tla-runtime-traces
 
       - name: Cache TLA+ tools
         uses: actions/cache@v6

@@ -44,6 +44,16 @@ DEFAULT_REJECT_MUTATION = {
     "from": 1,
     "to": 0,
 }
+RUNTIME_MANIFEST = {
+    "runtime-matching.ndjson": ("runtime-matching", "accept"),
+    "runtime-mismatch.ndjson": ("runtime-mismatch", "accept"),
+    "runtime-timeout.ndjson": ("runtime-timeout", "accept"),
+    "runtime-duplicate-reply-decrement.ndjson": (
+        "runtime-duplicate-reply-decrement",
+        "reject",
+    ),
+}
+RUNTIME_REJECT_BASELINE = "runtime-matching.ndjson"
 
 INITIAL_VARIABLES = {
     "phase",
@@ -544,6 +554,121 @@ def validate_default_manifest(cases: list[TraceCase]) -> None:
     _validate_timeout_semantics(by_filename["timeout.ndjson"])
 
 
+def generate_runtime_traces(output_dir: Path) -> None:
+    """Run the feature-gated SimNet producer and require its complete output."""
+
+    environment = os.environ.copy()
+    environment["FORTRESS_RUNTIME_TRACE_DIR"] = str(output_dir)
+    environment["CARGO_TERM_COLOR"] = "never"
+    command = [
+        "cargo",
+        "test",
+        "--test",
+        "simulation",
+        "--features",
+        "trace-validation",
+        "simulation::trace_validation::export_runtime_handshake_traces_for_tlc",
+        "--",
+        "--exact",
+        "--nocapture",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise TraceError(f"runtime trace producer failed to execute: {error}") from error
+    if result.returncode != 0:
+        output = result.stdout.rstrip("\n") + "\n" + result.stderr.rstrip("\n")
+        raise TraceError(
+            f"runtime trace producer failed (exit {result.returncode})\n{output}"
+        )
+
+    actual = {path.name for path in output_dir.glob("*.ndjson")}
+    expected = set(RUNTIME_MANIFEST)
+    if actual != expected:
+        raise TraceError(
+            "runtime trace producer manifest mismatch; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+
+def validate_runtime_manifest(cases: list[TraceCase]) -> None:
+    """Require all runtime scenarios and the observed duplicate mutation."""
+
+    by_filename = {case.path.name: case for case in cases}
+    actual = set(by_filename)
+    expected = set(RUNTIME_MANIFEST)
+    if actual != expected:
+        raise TraceError(
+            "runtime trace manifest mismatch; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    for filename, (name, disposition) in RUNTIME_MANIFEST.items():
+        case = by_filename[filename]
+        if (case.name, case.expect) != (name, disposition):
+            raise TraceError(
+                f"runtime trace manifest entry {filename} must be "
+                f"trace={name!r}, expect={disposition!r}"
+            )
+
+    matching = by_filename["runtime-matching.ndjson"]
+    states = expand_trace_states(matching)
+    duplicate_steps = [
+        index
+        for index, row in enumerate(matching.rows)
+        if row["action"] == "HandleSyncReply"
+        and row["peer"] == "p1"
+        and index > 0
+        and states[index]["acceptedTokens"]["p1"]
+        == states[index - 1]["acceptedTokens"]["p1"]
+        and states[index]["syncRemaining"]["p1"]
+        == states[index - 1]["syncRemaining"]["p1"]
+    ]
+    if len(duplicate_steps) != 1:
+        raise TraceError("runtime matching trace must contain exactly one ignored p1 reply")
+    duplicate_step = duplicate_steps[0]
+    if not any(row["action"] == "DuplicateMessage" for row in matching.rows):
+        raise TraceError("runtime matching trace must reconstruct one network duplication")
+    if states[-1]["phase"] != {"p1": "Synced", "p2": "Synced"}:
+        raise TraceError("runtime matching trace must end with both peers synchronized")
+    if states[-1]["acceptedTokens"]["p1"] != [1, 3]:
+        raise TraceError("runtime matching trace must accept fresh C while B stays outstanding")
+    if not any(
+        message["kind"] == "SyncReply"
+        and message["to"] == "p1"
+        and message["token"] == 2
+        for message in states[-1]["network"]
+    ):
+        raise TraceError("runtime matching trace must retain delayed reply B")
+
+    reject = by_filename["runtime-duplicate-reply-decrement.ndjson"]
+    mutation = reject.header.get("mutation")
+    if reject.header.get("derived_from") != RUNTIME_REJECT_BASELINE or mutation != {
+        "step": duplicate_step,
+        "variable": "syncRemaining",
+        "peer": "p1",
+        "from": 1,
+        "to": 0,
+    }:
+        raise TraceError("runtime reject mutation must derive from the observed duplicate row")
+
+    mismatch_states = expand_trace_states(by_filename["runtime-mismatch.ndjson"])
+    if mismatch_states[-1]["phase"] != {"p1": "Failed", "p2": "Failed"}:
+        raise TraceError("runtime mismatch trace must fail both peers")
+    timeout_actions = [
+        row["action"] for row in by_filename["runtime-timeout.ndjson"].rows
+    ]
+    if "ReportSyncTimeout" not in timeout_actions or timeout_actions[-1] != "SendSyncRequest":
+        raise TraceError("runtime timeout trace must report once and then retry")
+
+
 def _tla_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -802,10 +927,19 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no trace files selected", file=sys.stderr)
         return 2
 
+    runtime_temp: tempfile.TemporaryDirectory[str] | None = None
     try:
         cases = [load_trace(path) for path in paths]
         if using_default_manifest:
             validate_default_manifest(cases)
+            runtime_temp = tempfile.TemporaryDirectory(prefix="fortress_runtime_sync_traces_")
+            runtime_dir = Path(runtime_temp.name)
+            generate_runtime_traces(runtime_dir)
+            runtime_cases = [
+                load_trace(runtime_dir / filename) for filename in sorted(RUNTIME_MANIFEST)
+            ]
+            validate_runtime_manifest(runtime_cases)
+            cases.extend(runtime_cases)
         names = [case.name for case in cases]
         if len(names) != len(set(names)):
             raise TraceError("trace names must be unique")
@@ -827,6 +961,9 @@ def main(argv: list[str] | None = None) -> int:
     except TraceError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    finally:
+        if runtime_temp is not None:
+            runtime_temp.cleanup()
     return 0
 
 

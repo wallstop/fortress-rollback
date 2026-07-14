@@ -11,6 +11,8 @@ use crate::network::messages::{
 };
 use crate::network::network_stats::NetworkStats;
 use crate::network::protocol::{DropControlMessage, UdpProtocol};
+#[cfg(feature = "trace-validation")]
+use crate::network::protocol::{HandshakeTraceEvent, HandshakeTraceOverflow};
 use crate::replay::{Replay, ReplayRecorder};
 use crate::safe_frame_sub;
 #[cfg(feature = "hot-join")]
@@ -7628,6 +7630,47 @@ impl<T: Config> P2PSession<T> {
                 }),
             },
             _ => Err(InvalidRequestKind::NotRemotePlayerOrSpectator {
+                handle: player_handle,
+            }
+            .into()),
+        }
+    }
+
+    /// Returns the unstable raw handshake refinement trace for one endpoint.
+    ///
+    /// The outer option is `None` when the builder did not enable tracing. The
+    /// inner result reports terminal fixed-capacity overflow without returning a
+    /// partial trace as if it were complete. This verification-only surface is
+    /// compiled out unless `trace-validation` is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured endpoint lookup error when `player_handle` does not
+    /// identify a registered remote player or spectator endpoint.
+    #[cfg(feature = "trace-validation")]
+    #[doc(hidden)]
+    pub fn handshake_trace(
+        &self,
+        player_handle: PlayerHandle,
+    ) -> Result<Option<Result<&[HandshakeTraceEvent], HandshakeTraceOverflow>>, FortressError> {
+        match self.player_reg.handles.get(&player_handle) {
+            Some(PlayerType::Remote(addr)) => self
+                .player_reg
+                .remotes
+                .get(addr)
+                .map(UdpProtocol::handshake_trace)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForRemote { player_handle },
+                }),
+            Some(PlayerType::Spectator(addr)) => self
+                .player_reg
+                .spectators
+                .get(addr)
+                .map(UdpProtocol::handshake_trace)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::EndpointNotFoundForSpectator { player_handle },
+                }),
+            Some(PlayerType::Local) | None => Err(InvalidRequestKind::NotRemotePlayerOrSpectator {
                 handle: player_handle,
             }
             .into()),
