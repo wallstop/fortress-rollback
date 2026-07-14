@@ -20,6 +20,7 @@ CONSTANTS
     PLAYER_COUNTS,
     INPUT_WIDTHS,
     NUM_SYNC_PACKETS,
+    REQUEST_ID_COUNT,
     TIMEOUT_TICKS,
     MAX_NETWORK,
     DELIVERY_MODE,
@@ -32,9 +33,10 @@ ASSUME Cardinality(PEERS) = 2
 ASSUME PLAYER_COUNTS # {}
 ASSUME INPUT_WIDTHS # {}
 ASSUME NUM_SYNC_PACKETS \in Nat /\ NUM_SYNC_PACKETS > 0
+ASSUME REQUEST_ID_COUNT \in Nat /\ REQUEST_ID_COUNT > NUM_SYNC_PACKETS
 ASSUME TIMEOUT_TICKS \in Nat /\ TIMEOUT_TICKS > 0
 ASSUME MAX_NETWORK \in Nat /\ MAX_NETWORK >= Cardinality(PEERS)
-ASSUME DELIVERY_MODE \in {"ArbitraryLoss", "FairDelivery", "HandlersDisabled"}
+ASSUME DELIVERY_MODE \in {"ArbitraryLoss", "FairDelivery", "HandlersDisabled", "TraceDelivery"}
 ASSUME CONFIG_MODE \in {"All", "Matching", "Mismatching"}
 
 Phases == {"Syncing", "Synced", "Failed"}
@@ -42,7 +44,7 @@ MessageKinds == {"SyncRequest", "SyncReply"}
 ReasonFields == {"None", "NumPlayers", "InputWidth"}
 Configs == [numPlayers: PLAYER_COUNTS, inputWidth: INPUT_WIDTHS]
 ConfigValues == PLAYER_COUNTS \union INPUT_WIDTHS
-Tokens == 1..NUM_SYNC_PACKETS
+RequestIds == 1..REQUEST_ID_COUNT
 
 ASSUME NO_CONFIG \notin Configs
 ASSUME NO_PEER \notin PEERS
@@ -55,14 +57,14 @@ Message == [
     kind: MessageKinds,
     from: PEERS,
     to: PEERS,
-    token: Tokens,
+    token: RequestIds,
     config: Configs
 ]
 
 RemoveAt(seq, index) ==
     SubSeq(seq, 1, index - 1) \o SubSeq(seq, index + 1, Len(seq))
 
-NextToken(token) == IF token = NUM_SYNC_PACKETS THEN 1 ELSE token + 1
+NextToken(token) == token + 1
 
 MismatchField(ours, theirs) ==
     IF ours.numPlayers # theirs.numPlayers THEN "NumPlayers"
@@ -107,8 +109,8 @@ TypeInvariant ==
     /\ learnedConfig \in [PEERS -> (Configs \union {NO_CONFIG})]
     /\ learnedFrom \in [PEERS -> (PEERS \union {NO_PEER})]
     /\ syncRemaining \in [PEERS -> 0..NUM_SYNC_PACKETS]
-    /\ acceptedTokens \in [PEERS -> SUBSET Tokens]
-    /\ nextToken \in [PEERS -> Tokens]
+    /\ acceptedTokens \in [PEERS -> SUBSET RequestIds]
+    /\ nextToken \in [PEERS -> 1..(REQUEST_ID_COUNT + 1)]
     /\ timeoutTicks \in [PEERS -> 0..TIMEOUT_TICKS]
     /\ timeoutEventCount \in [PEERS -> 0..1]
     /\ incompatibleEventCount \in [PEERS -> 0..1]
@@ -142,11 +144,12 @@ Init ==
     /\ network = <<>>
 
 (***************************************************************************)
-(* Requests may overlap and token order may wrap before replies arrive.    *)
-(* acceptedTokens makes reordered and duplicate-token replies idempotent.   *)
+(* Requests may overlap, but each bounded trace-local request ID is fresh.  *)
+(* acceptedTokens makes reordered and duplicated replies idempotent.       *)
 (***************************************************************************)
 SendSyncRequest(p) ==
     /\ phase[p] = "Syncing"
+    /\ nextToken[p] \in RequestIds
     /\ Len(network) < MAX_NETWORK
     /\ network' = Append(network, [
            kind |-> "SyncRequest",
@@ -159,6 +162,18 @@ SendSyncRequest(p) ==
     /\ UNCHANGED <<
         phase, localConfig, learnedConfig, learnedFrom, syncRemaining,
         acceptedTokens, timeoutTicks, timeoutEventCount,
+        incompatibleEventCount, reasonField, reasonOurs, reasonTheirs
+       >>
+
+DuplicateMessage(p) ==
+    /\ DELIVERY_MODE = "TraceDelivery"
+    /\ Len(network) < MAX_NETWORK
+    /\ \E index \in 1..Len(network):
+        /\ network[index].to = p
+        /\ network' = Append(network, network[index])
+    /\ UNCHANGED <<
+        phase, localConfig, learnedConfig, learnedFrom, syncRemaining,
+        acceptedTokens, nextToken, timeoutTicks, timeoutEventCount,
         incompatibleEventCount, reasonField, reasonOurs, reasonTheirs
        >>
 
@@ -271,6 +286,7 @@ Next ==
     \/ \E p \in PEERS: SendSyncRequest(p)
     \/ \E p \in PEERS: HandleSyncRequest(p)
     \/ \E p \in PEERS: HandleSyncReply(p)
+    \/ \E p \in PEERS: DuplicateMessage(p)
     \/ DropMessage
     \/ \E p \in PEERS: TickTimeout(p)
     \/ \E p \in PEERS: ReportSyncTimeout(p)

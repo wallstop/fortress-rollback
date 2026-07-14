@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "verification" / "verify-sync-handshake-traces.py"
 SPEC = ROOT / "specs" / "tla" / "SyncHandshakeV1Trace.tla"
+BASE_SPEC = ROOT / "specs" / "tla" / "SyncHandshakeV1.tla"
 
 module_spec = importlib.util.spec_from_file_location("verify_sync_handshake_traces", SCRIPT)
 assert module_spec is not None and module_spec.loader is not None
@@ -47,23 +48,56 @@ def test_default_traces_are_strict_and_mutation_is_single_field() -> None:
     )
 
     expected = copy.deepcopy(list(baseline.rows))
-    expected[8]["updates"]["syncRemaining"]["p1"] = 0
+    expected[9]["updates"]["syncRemaining"]["p1"] = 0
     assert list(mutation.rows) == expected
-    assert baseline.rows[8]["updates"]["syncRemaining"]["p1"] == 1
+    assert baseline.rows[9]["updates"]["syncRemaining"]["p1"] == 1
 
 
-def test_matching_trace_exercises_duplicate_before_both_sync() -> None:
+def test_matching_trace_exercises_fresh_c_and_genuine_duplicate_before_both_sync() -> None:
     matching = trace_verifier.load_trace(
         trace_verifier.DEFAULT_TRACE_DIR / "matching.ndjson"
     )
-    duplicate = matching.rows[8]
+    states = trace_verifier.expand_trace_states(matching)
+    duplication = matching.rows[5]
+    duplicate = matching.rows[9]
+    assert duplication["action"] == "DuplicateMessage"
+    assert states[5]["network"][0] == states[5]["network"][2]
     assert duplicate["action"] == "HandleSyncReply"
     assert duplicate["updates"]["acceptedTokens"]["p1"] == [1]
     assert duplicate["updates"]["syncRemaining"]["p1"] == 1
+    assert states[7]["nextToken"]["p1"] == 4
+    assert [message["token"] for message in states[8]["network"]] == [2, 1, 3]
+    assert states[10]["acceptedTokens"]["p1"] == [1, 3]
+    assert [message["token"] for message in states[10]["network"]] == [2]
+    assert states[11]["acceptedTokens"]["p1"] == [1, 3]
     assert matching.rows[-1]["updates"]["phase"] == {
         "p1": "Synced",
         "p2": "Synced",
     }
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [True, False, 1.0, "1", None],
+    ids=["bool-true", "bool-false", "float", "string", "null"],
+)
+def test_schema_rejects_non_integer_json_types(tmp_path: Path, schema: object) -> None:
+    path = tmp_path / "bad-schema.ndjson"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": schema,
+                "trace": "bad-schema",
+                "expect": "accept",
+                "description": "bad",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(trace_verifier.TraceError, match="schema must equal 1"):
+        trace_verifier.load_trace(path)
 
 
 def test_unknown_header_key_fails_closed(tmp_path: Path) -> None:
@@ -103,7 +137,7 @@ def test_reject_trace_cannot_supply_hidden_rows(tmp_path: Path) -> None:
         "description": "bad",
         "derived_from": "matching.ndjson",
         "mutation": {
-            "step": 8,
+            "step": 9,
             "variable": "syncRemaining",
             "peer": "p1",
             "from": 1,
@@ -127,7 +161,7 @@ def test_wrong_mutation_source_value_fails_closed(tmp_path: Path) -> None:
         "description": "bad",
         "derived_from": "matching.ndjson",
         "mutation": {
-            "step": 8,
+            "step": 9,
             "variable": "syncRemaining",
             "peer": "p1",
             "from": 2,
@@ -154,7 +188,7 @@ def test_mutation_must_target_a_peer_mapped_variable(tmp_path: Path) -> None:
         "description": "bad",
         "derived_from": "matching.ndjson",
         "mutation": {
-            "step": 8,
+            "step": 9,
             "variable": "network",
             "peer": "p1",
             "from": [],
@@ -175,7 +209,7 @@ def test_mutation_must_change_its_target(tmp_path: Path) -> None:
         "description": "bad",
         "derived_from": "matching.ndjson",
         "mutation": {
-            "step": 8,
+            "step": 9,
             "variable": "syncRemaining",
             "peer": "p1",
             "from": 1,
@@ -196,6 +230,17 @@ def test_trace_spec_invokes_base_actions_and_requires_consumption() -> None:
         assert f"{variable}' = row.{variable}" in source
     assert "WF_traceVars(TraceStep)" in source
     assert "EventuallyTraceConsumed == <> (traceIndex = Len(TRACE))" in source
+
+
+def test_request_identity_namespace_is_bounded_and_independent() -> None:
+    source = BASE_SPEC.read_text(encoding="utf-8")
+    config = trace_verifier.render_config()
+    assert "REQUEST_ID_COUNT > NUM_SYNC_PACKETS" in source
+    assert "RequestIds == 1..REQUEST_ID_COUNT" in source
+    assert "NextToken(token) == token + 1" in source
+    assert "nextToken[p] \\in RequestIds" in source
+    assert "CONSTANT REQUEST_ID_COUNT = 3" in config
+    assert "CONSTANT NUM_SYNC_PACKETS = 2" in config
 
 
 def test_missing_tla_jar_is_a_hard_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

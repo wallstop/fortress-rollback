@@ -26,8 +26,9 @@ PEERS = ("p1", "p2")
 PLAYER_COUNTS = {2, 3}
 INPUT_WIDTHS = {4, 32}
 NUM_SYNC_PACKETS = 2
+REQUEST_ID_COUNT = 3
 TIMEOUT_TICKS = 1
-MAX_NETWORK = 2
+MAX_NETWORK = 3
 
 DEFAULT_MANIFEST = {
     "matching.ndjson": ("matching", "accept"),
@@ -37,7 +38,7 @@ DEFAULT_MANIFEST = {
 }
 DEFAULT_REJECT_BASELINE = "matching.ndjson"
 DEFAULT_REJECT_MUTATION = {
-    "step": 8,
+    "step": 9,
     "variable": "syncRemaining",
     "peer": "p1",
     "from": 1,
@@ -86,6 +87,7 @@ ACTION_UPDATES = {
         "reasonTheirs",
         "network",
     },
+    "DuplicateMessage": {"network"},
     "TickTimeout": {"timeoutTicks"},
     "ReportSyncTimeout": {"timeoutEventCount"},
 }
@@ -182,8 +184,12 @@ def _config_or_null(value: Any, path: Path, line: int, label: str) -> None:
 def _tokens(value: Any, path: Path, line: int, label: str) -> None:
     if not isinstance(value, list) or any(type(item) is not int for item in value):
         raise _fail(path, line, f"{label} must be an integer array")
-    if value != sorted(set(value)) or any(not 1 <= item <= NUM_SYNC_PACKETS for item in value):
-        raise _fail(path, line, f"{label} must be a sorted unique subset of 1..{NUM_SYNC_PACKETS}")
+    if value != sorted(set(value)) or any(not 1 <= item <= REQUEST_ID_COUNT for item in value):
+        raise _fail(
+            path,
+            line,
+            f"{label} must be a sorted unique subset of 1..{REQUEST_ID_COUNT}",
+        )
 
 
 def _reason_value(value: Any, path: Path, line: int, label: str) -> None:
@@ -208,8 +214,8 @@ def _validate_network(value: Any, path: Path, line: int, label: str) -> None:
             raise _fail(path, line, f"{item_label} endpoints must be p1 or p2")
         if message["from"] == message["to"]:
             raise _fail(path, line, f"{item_label} endpoints must differ")
-        if type(message["token"]) is not int or not 1 <= message["token"] <= NUM_SYNC_PACKETS:
-            raise _fail(path, line, f"{item_label}.token must be in 1..{NUM_SYNC_PACKETS}")
+        if type(message["token"]) is not int or not 1 <= message["token"] <= REQUEST_ID_COUNT:
+            raise _fail(path, line, f"{item_label}.token must be in 1..{REQUEST_ID_COUNT}")
         _validate_config(message["config"], path, line, f"{item_label}.config")
 
 
@@ -232,7 +238,7 @@ def _validate_variable(name: str, value: Any, path: Path, line: int) -> None:
         ),
         "acceptedTokens": lambda v, p, n, label: _validate_peer_map(v, p, n, label, _tokens),
         "nextToken": lambda v, p, n, label: _validate_peer_map(
-            v, p, n, label, _int_range_validator(1, NUM_SYNC_PACKETS)
+            v, p, n, label, _int_range_validator(1, REQUEST_ID_COUNT + 1)
         ),
         "timeoutTicks": lambda v, p, n, label: _validate_peer_map(
             v, p, n, label, _int_range_validator(0, TIMEOUT_TICKS)
@@ -287,7 +293,7 @@ def load_trace(path: Path) -> TraceCase:
     for required in ("schema", "trace", "expect", "description"):
         if required not in header:
             raise _fail(path, 1, f"missing header key {required!r}")
-    if header["schema"] != 1:
+    if type(header["schema"]) is not int or header["schema"] != 1:
         raise _fail(path, 1, "schema must equal 1")
     if not isinstance(header["trace"], str) or not TRACE_NAME_RE.fullmatch(header["trace"]):
         raise _fail(path, 1, "trace must be a lowercase hyphenated name")
@@ -404,23 +410,52 @@ def expand_trace_states(case: TraceCase) -> tuple[dict[str, Any], ...]:
 
 def _validate_matching_semantics(case: TraceCase) -> None:
     states = expand_trace_states(case)
-    if len(states) <= 8 or case.rows[8]["action"] != "HandleSyncReply":
-        raise TraceError("default matching trace must exercise a duplicate reply")
-    before_duplicate = states[7]
-    after_duplicate = states[8]
-    queued_reply_tokens = [message["token"] for message in before_duplicate["network"]]
-    remaining_reply_tokens = [message["token"] for message in after_duplicate["network"]]
+    actions = [(row["action"], row.get("peer")) for row in case.rows]
+    expected_prefix = [
+        ("Init", None),
+        ("SendSyncRequest", "p1"),
+        ("HandleSyncRequest", "p2"),
+        ("SendSyncRequest", "p1"),
+        ("HandleSyncRequest", "p2"),
+        ("DuplicateMessage", "p1"),
+        ("HandleSyncReply", "p1"),
+        ("SendSyncRequest", "p1"),
+        ("HandleSyncRequest", "p2"),
+        ("HandleSyncReply", "p1"),
+        ("HandleSyncReply", "p1"),
+        ("HandleSyncReply", "p1"),
+    ]
+    if len(states) <= 11 or actions[:12] != expected_prefix:
+        raise TraceError("default matching trace must exercise a duplicated reply")
+    duplicated = states[5]["network"]
+    before_duplicate_reply = states[8]
+    after_duplicate_reply = states[9]
+    sent_request_ids = [
+        message["token"]
+        for state in states[:9]
+        for message in state["network"]
+        if message["kind"] == "SyncRequest" and message["from"] == "p1"
+    ]
     if (
-        before_duplicate["acceptedTokens"]["p1"] != [1]
-        or before_duplicate["syncRemaining"]["p1"] != 1
-        or queued_reply_tokens != [2, 1]
-        or after_duplicate["acceptedTokens"]["p1"] != [1]
-        or after_duplicate["syncRemaining"]["p1"] != 1
-        or remaining_reply_tokens != [2]
+        sorted(set(sent_request_ids)) != [1, 2, 3]
+        or states[7]["nextToken"]["p1"] != 4
+        or [message["token"] for message in duplicated] != [1, 2, 1]
+        or duplicated[0] != duplicated[2]
+        or before_duplicate_reply["acceptedTokens"]["p1"] != [1]
+        or before_duplicate_reply["syncRemaining"]["p1"] != 1
+        or [message["token"] for message in before_duplicate_reply["network"]] != [2, 1, 3]
+        or after_duplicate_reply["acceptedTokens"]["p1"] != [1]
+        or after_duplicate_reply["syncRemaining"]["p1"] != 1
+        or [message["token"] for message in after_duplicate_reply["network"]] != [2, 3]
+        or states[10]["acceptedTokens"]["p1"] != [1, 3]
+        or states[10]["syncRemaining"]["p1"] != 0
+        or [message["token"] for message in states[10]["network"]] != [2]
+        or states[11]["acceptedTokens"]["p1"] != [1, 3]
         or states[-1]["phase"] != {"p1": "Synced", "p2": "Synced"}
     ):
         raise TraceError(
-            "default matching trace must keep the duplicate idempotent and sync both peers"
+            "default matching trace must preserve fresh request IDs, keep the duplicated "
+            "reply idempotent, and sync both peers"
         )
 
 
@@ -602,9 +637,10 @@ CONSTANT PEERS = {p1, p2}
 CONSTANT PLAYER_COUNTS = {2, 3}
 CONSTANT INPUT_WIDTHS = {4, 32}
 CONSTANT NUM_SYNC_PACKETS = 2
+CONSTANT REQUEST_ID_COUNT = 3
 CONSTANT TIMEOUT_TICKS = 1
-CONSTANT MAX_NETWORK = 2
-CONSTANT DELIVERY_MODE = "FairDelivery"
+CONSTANT MAX_NETWORK = 3
+CONSTANT DELIVERY_MODE = "TraceDelivery"
 CONSTANT CONFIG_MODE = "All"
 CONSTANT NO_CONFIG = NoConfig
 CONSTANT NO_PEER = NoPeer
