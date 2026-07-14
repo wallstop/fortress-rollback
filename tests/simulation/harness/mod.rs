@@ -974,7 +974,8 @@ pub struct RunReport {
     /// High-water direct-receipt spread and retained-range evidence for the
     /// requested target.
     pub receipt_range_probe: Option<ReceiptRangeEvidence>,
-    /// Proof that the configured dishonest socket actually rewrote messages.
+    /// Mutation accounting and receiver diagnostics for a dishonest treatment
+    /// or its zero-delta matched control.
     pub hostile_gossip: Option<HostileGossipEvidence>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,

@@ -34,6 +34,26 @@ See the [determinism model](specs/determinism-model.md) for the complete contrac
 The [telemetry guide](telemetry.md) explains the counters and the
 [desync playbook](desync-playbook.md) covers incident capture.
 
+## Semi-trusted peer policy
+
+- Decide before launch whether a dishonest participant is in scope. If it is, authenticate the
+  transport identity; protocol connection IDs and configuration digests are not authenticators.
+- Define an equivocation policy: quarantine or void at the first proven divergent frame, preserve
+  per-recipient input/packet evidence, and never claim checksum-only attribution.
+- Define a checksum-accusation policy: use `peer_checksum_mismatch_count` as an advisory persistence
+  signal, corroborate with other peers and deterministic replays, and never auto-eject from one
+  peer's report alone.
+- Put flood controls before the socket: rate-limit unauthenticated traffic, monitor kernel drops
+  and unknown-source/cap/queue telemetry, and keep polling and draining events. Do not treat larger
+  receive or queue limits as DDoS protection.
+- With `hot-join`, authenticate and record the coordinator that serves each snapshot. Capture the
+  snapshot frame, the optional peer-supplied checksum, and an application-computed loaded-state
+  fingerprint when available. These preserve evidence but do not prove provenance; abort and
+  choose a separately trusted source when provenance is uncertain. Fortress does not obtain a
+  second-survivor attestation.
+
+The [threat model](threat-model.md) records the complete single-dishonest-peer capability matrix.
+
 ## Network and lifecycle policy
 
 - Configure the same player count, input width, FPS, desync interval, save mode, prediction

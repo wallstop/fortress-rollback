@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `PeerMetrics::average_frame_advantage` exposes the exact per-endpoint rolling frame-advantage
   gauge that `P2PSession` max-aggregates when deciding whether to emit a wait recommendation.
+- The threat model, production checklist, and desync incident playbook now define explicit
+  operator dispositions for single-peer equivocation, false checksum accusations, flooding, and
+  hot-join snapshot poisoning, including the detection-versus-attribution boundary.
 
 ### Fixed
 
