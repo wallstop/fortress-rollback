@@ -414,6 +414,64 @@ pub mod __internal {
         (message.encoded_len(), message.kind())
     }
 
+    /// Rewrites one valid `Input.peer_connect_status[target].last_frame` by a
+    /// signed delta, clamped to the public non-negative frame domain.
+    ///
+    /// Returns the changed `(before, after)` pair, or `None` when the message is
+    /// not an `Input`, the target is absent, the source frame is `NULL`, or the
+    /// clamp leaves it unchanged. This unstable hook exists solely for
+    /// deterministic hostile-message integration tests.
+    #[doc(hidden)]
+    pub fn mutate_input_gossip_frame(
+        message: &mut crate::Message,
+        target: usize,
+        delta: i32,
+    ) -> Option<(crate::Frame, crate::Frame)> {
+        let crate::network::messages::MessageBody::Input(input) = &mut message.body else {
+            return None;
+        };
+        let status = input.peer_connect_status.get_mut(target)?;
+        if !status.last_frame.is_valid() {
+            return None;
+        }
+        let before = status.last_frame;
+        let after = crate::Frame::new(before.as_i32().saturating_add(delta).max(0));
+        if before == after {
+            return None;
+        }
+        status.last_frame = after;
+        Some((before, after))
+    }
+
+    /// Rewrites one valid `FloorReply.floors[target]` entry by a signed delta,
+    /// clamped to the public non-negative frame domain.
+    ///
+    /// Returns the changed `(before, after, round_seq)` tuple, or `None` when
+    /// the message is not a `FloorReply`, the target is absent, the source floor
+    /// is `NULL`, or the clamp leaves it unchanged. This unstable hook exists
+    /// solely for deterministic hostile-message integration tests.
+    #[doc(hidden)]
+    pub fn mutate_floor_reply_frame(
+        message: &mut crate::Message,
+        target: usize,
+        delta: i32,
+    ) -> Option<(crate::Frame, crate::Frame, u32)> {
+        let crate::network::messages::MessageBody::FloorReply(reply) = &mut message.body else {
+            return None;
+        };
+        let floor = reply.floors.get_mut(target)?;
+        if !floor.is_valid() {
+            return None;
+        }
+        let before = *floor;
+        let after = crate::Frame::new(before.as_i32().saturating_add(delta).max(0));
+        if before == after {
+            return None;
+        }
+        *floor = after;
+        Some((before, after, reply.round_seq))
+    }
+
     /// Returns `(event_queue_len, event_queue_limit, local_checksum_history_len)`.
     ///
     /// This unstable hook exists for long-running integration tests that audit

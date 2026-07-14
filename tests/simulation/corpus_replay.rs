@@ -307,6 +307,10 @@ fn reproduce_artifact(artifact: &FailureArtifact) -> Result<(), String> {
             "receipt_range_probe",
             report.receipt_range_probe == artifact.receipt_range_probe,
         ),
+        (
+            "hostile_gossip",
+            report.hostile_gossip == artifact.hostile_gossip,
+        ),
     ] {
         if !matches {
             return Err(format!(

@@ -55,6 +55,7 @@ struct FinalSummary {
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
     pending_output_probe: Option<super::PendingOutputProbe>,
     receipt_range_probe: Option<super::ReceiptRangeEvidence>,
+    hostile_gossip: Option<super::HostileGossipEvidence>,
     net_stats: crate::common::sim_net::SimNetStats,
     blocked_drops_by_link: BTreeMap<(usize, usize), u64>,
     fragmentation_drops_by_link: BTreeMap<(usize, usize), u64>,
@@ -85,6 +86,7 @@ impl From<&RunReport> for FinalSummary {
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
             pending_output_probe: report.pending_output_probe,
             receipt_range_probe: report.receipt_range_probe.clone(),
+            hostile_gossip: report.hostile_gossip,
             net_stats: report.net_stats,
             blocked_drops_by_link: report.blocked_drops_by_link.clone(),
             fragmentation_drops_by_link: report.fragmentation_drops_by_link.clone(),
@@ -151,6 +153,20 @@ fn remap_peer_frame(value: Option<(usize, i32)>, removed: usize) -> Option<(usiz
     value.and_then(|(peer, frame)| remap_index(peer, removed).map(|mapped| (mapped, frame)))
 }
 
+fn remap_hostile_gossip(
+    value: Option<super::HostileGossipOptions>,
+    removed: usize,
+    steps: u32,
+) -> Option<super::HostileGossipOptions> {
+    value.and_then(|mut hostile| {
+        hostile.liar = remap_index(hostile.liar, removed)?;
+        hostile.observer = remap_index(hostile.observer, removed)?;
+        hostile.target = remap_index(hostile.target, removed)?;
+        hostile.until_step = hostile.until_step.min(steps);
+        (hostile.from_step < hostile.until_step).then_some(hostile)
+    })
+}
+
 fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions {
     let pending_output_probe_link = options
         .pending_output_probe_link
@@ -164,6 +180,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         receipt_range_probe_target: options
             .receipt_range_probe_target
             .and_then(|target| remap_index(target, removed)),
+        hostile_gossip: remap_hostile_gossip(options.hostile_gossip, removed, steps),
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
@@ -332,6 +349,16 @@ fn truncate_schedule(
     options.probe_confirmed_at = options
         .probe_confirmed_at
         .filter(|probe| *probe < candidate.config.steps);
+    options.hostile_gossip = match (options.hostile_gossip, options.probe_confirmed_at) {
+        (Some(mut hostile), Some(probe)) => {
+            hostile.until_step = hostile.until_step.min(candidate.config.steps);
+            (hostile.from_step < hostile.until_step
+                && probe >= hostile.from_step
+                && probe < hostile.until_step)
+                .then_some(hostile)
+        },
+        _ => None,
+    };
     (candidate, options)
 }
 
@@ -862,6 +889,9 @@ mod tests {
         AppModel, BackgroundNoise, CpuFeedbackPolicy, FrameModel, SimConfig,
         WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
     };
+    use crate::simulation::harness::{
+        validate_run_options, HostileGossipMode, HostileGossipOptions,
+    };
 
     fn clean_schedule(n_players: usize, steps: u32) -> Schedule {
         let mut config = SimConfig::smoke(n_players);
@@ -933,6 +963,7 @@ mod tests {
             probe_peer_wire_by_link: BTreeMap::new(),
             pending_output_probe: None,
             receipt_range_probe: None,
+            hostile_gossip: None,
             net_stats: crate::common::sim_net::SimNetStats::default(),
             blocked_drops_by_link: BTreeMap::new(),
             fragmentation_drops_by_link: BTreeMap::new(),
@@ -1104,6 +1135,15 @@ mod tests {
             probe_confirmed_at: Some(19),
             pending_output_probe_link: Some((3, 0)),
             receipt_range_probe_target: Some(2),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 3,
+                observer: 0,
+                target: 2,
+                delta: -7,
+                from_step: 10,
+                until_step: 20,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
             phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
@@ -1120,6 +1160,19 @@ mod tests {
         assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.receipt_range_probe_target, Some(1));
+        assert_eq!(
+            mapped.hostile_gossip,
+            Some(HostileGossipOptions {
+                liar: 2,
+                observer: 0,
+                target: 1,
+                delta: -7,
+                from_step: 10,
+                until_step: 20,
+                mode: HostileGossipMode::ConnectionStatus,
+            })
+        );
+        assert_eq!(remap_options(&options, 0, 100).hostile_gossip, None);
         assert_eq!(
             remap_options(&options, 2, 100).receipt_range_probe_target,
             None
@@ -1470,6 +1523,34 @@ mod tests {
 
         assert_eq!(actual_final_heal(&truncated), Some(5));
         assert_eq!(truncated.heal_at, 5);
+    }
+
+    #[test]
+    fn truncation_clips_or_drops_hostile_gossip_with_its_probe() {
+        let schedule = clean_schedule(4, 100);
+        let options = RunOptions {
+            probe_confirmed_at: Some(60),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -12,
+                from_step: 10,
+                until_step: 80,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+
+        let (clipped_schedule, clipped) = truncate_schedule(&schedule, &options, 70);
+        assert_eq!(clipped.probe_confirmed_at, Some(60));
+        assert_eq!(clipped.hostile_gossip.unwrap().until_step, 70);
+        validate_run_options(&clipped_schedule, &clipped)
+            .expect("clipped hostile interval remains replayable");
+
+        let (_, dropped) = truncate_schedule(&schedule, &options, 50);
+        assert_eq!(dropped.probe_confirmed_at, None);
+        assert_eq!(dropped.hostile_gossip, None);
     }
 
     #[test]

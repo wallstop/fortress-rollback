@@ -3,9 +3,9 @@
 use super::oracle::OracleFailure;
 use super::schedule::{validate_schedule, Schedule};
 use super::{
-    phase_control_sample_capacity, CpuFeedbackEvidence, ProgressSample, ReceiptRangeEvidence,
-    RetainedInputRangeEvidence, RunReport, TraceSnapshot, TRACE_STEP_EVENT_CAPACITY,
-    TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
+    phase_control_sample_capacity, CpuFeedbackEvidence, HostileGossipEvidence, ProgressSample,
+    ReceiptRangeEvidence, RetainedInputRangeEvidence, RunReport, TraceSnapshot,
+    TRACE_STEP_EVENT_CAPACITY, TRACE_TAIL_CAPACITY, WAIT_POLICY_CONTROL_SAMPLE_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 6 preserves direct-receipt and retained-input-range high-water
-// evidence. Older artifacts cannot diagnose that stronger trace identity and
-// are rejected explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 6;
+// Version 7 preserves hostile-gossip mutation and receiver-side diagnostic
+// evidence. Older artifacts cannot reproduce that evidence and are rejected
+// explicitly.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 7;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -195,6 +195,91 @@ fn validate_receipt_range_evidence(
     Ok(())
 }
 
+fn validate_hostile_gossip_evidence(
+    evidence: Option<&HostileGossipEvidence>,
+    options: Option<super::HostileGossipOptions>,
+    expected_probe_step: Option<u32>,
+    context: &str,
+) -> Result<(), String> {
+    if evidence.is_some() != options.is_some() {
+        return Err(format!(
+            "{context} hostile_gossip evidence presence does not match replay options"
+        ));
+    }
+    let (Some(evidence), Some(options)) = (evidence, options) else {
+        return Ok(());
+    };
+    let Some(probe) = evidence.probe else {
+        return Err(format!(
+            "{context} hostile_gossip is missing receiver-side probe evidence"
+        ));
+    };
+    if Some(probe.at_step) != expected_probe_step
+        || probe.at_step < options.from_step
+        || probe.at_step >= options.until_step
+        || !probe.endpoint_running
+        || probe.observer_confirmed < fortress_rollback::Frame::NULL.as_i32()
+        || probe.status_frame < fortress_rollback::Frame::NULL.as_i32()
+        || probe.round_floor < fortress_rollback::Frame::NULL.as_i32()
+        || probe.effective_reported_frame < fortress_rollback::Frame::NULL.as_i32()
+        || probe
+            .direct_receipt
+            .is_some_and(|frame| frame < fortress_rollback::Frame::NULL.as_i32())
+        || probe
+            .target_confirmed_bound
+            .is_some_and(|frame| frame < fortress_rollback::Frame::NULL.as_i32())
+        || probe.reply_seq > probe.request_seq
+        || probe.prune_seq > probe.request_seq
+    {
+        return Err(format!(
+            "{context} hostile_gossip receiver-side probe is inconsistent"
+        ));
+    }
+    if evidence.messages_mutated == 0 {
+        if evidence.first_step.is_some()
+            || evidence.last_step.is_some()
+            || evidence.last_before.is_some()
+            || evidence.last_after.is_some()
+            || evidence.last_round_seq.is_some()
+        {
+            return Err(format!(
+                "{context} hostile_gossip has step evidence without a mutation"
+            ));
+        }
+        return Ok(());
+    }
+    let (Some(first), Some(last)) = (evidence.first_step, evidence.last_step) else {
+        return Err(format!(
+            "{context} hostile_gossip mutations are missing step evidence"
+        ));
+    };
+    if first > last || first < options.from_step || last >= options.until_step {
+        return Err(format!(
+            "{context} hostile_gossip mutation steps are outside the configured interval"
+        ));
+    }
+    let (Some(before), Some(after)) = (evidence.last_before, evidence.last_after) else {
+        return Err(format!(
+            "{context} hostile_gossip mutations are missing before/after evidence"
+        ));
+    };
+    if before < 0
+        || after < 0
+        || before == after
+        || after != before.saturating_add(options.delta).max(0)
+    {
+        return Err(format!(
+            "{context} hostile_gossip before/after evidence does not match the configured delta"
+        ));
+    }
+    if (options.mode == super::HostileGossipMode::FloorReply) != evidence.last_round_seq.is_some() {
+        return Err(format!(
+            "{context} hostile_gossip round-sequence evidence does not match its mode"
+        ));
+    }
+    Ok(())
+}
+
 /// Stable serialization identity for every oracle failure variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureClass {
@@ -324,6 +409,9 @@ pub struct FailureArtifact {
     /// Direct-receipt and retained-range high-water evidence, when requested.
     #[serde(default)]
     pub receipt_range_probe: Option<ReceiptRangeEvidence>,
+    /// Captured hostile-gossip mutation and receiver-side diagnostic evidence.
+    #[serde(default)]
+    pub hostile_gossip: Option<HostileGossipEvidence>,
     /// Bounded final step snapshots.
     pub trace_tail: Vec<TraceSnapshot>,
 }
@@ -357,6 +445,7 @@ impl FailureArtifact {
             wait_frames_accepted: report.wait_frames_accepted.clone(),
             cpu_feedback: report.cpu_feedback.clone(),
             receipt_range_probe: report.receipt_range_probe.clone(),
+            hostile_gossip: report.hostile_gossip,
             trace_tail: report.trace_tail.clone(),
         }
     }
@@ -449,6 +538,12 @@ impl FailureArtifact {
             self.replay_options.receipt_range_probe_target,
             n,
             self.schedule.config.steps,
+            "artifact",
+        )?;
+        validate_hostile_gossip_evidence(
+            self.hostile_gossip.as_ref(),
+            self.replay_options.hostile_gossip,
+            self.replay_options.probe_confirmed_at,
             "artifact",
         )?;
         let expected_wait_policy_entries = if self.schedule.schema_version >= 17 {
@@ -975,8 +1070,9 @@ mod tests {
         SCHEDULE_SCHEMA_VERSION,
     };
     use crate::simulation::harness::{
-        run, EndpointControlSample, LinkQueueSample, ProgressSample, RunOptions, TraceGameState,
-        TraceNetStats, TraceSessionState, TRACE_TAIL_CAPACITY,
+        run, EndpointControlSample, HostileGossipMode, HostileGossipOptions, LinkQueueSample,
+        ProgressSample, RunOptions, TraceGameState, TraceNetStats, TraceSessionState,
+        TRACE_TAIL_CAPACITY,
     };
 
     fn temp_artifact_root(label: &str) -> PathBuf {
@@ -1015,6 +1111,7 @@ mod tests {
             wait_frames_accepted: vec![0, 0],
             cpu_feedback: Vec::new(),
             receipt_range_probe: None,
+            hostile_gossip: None,
             trace_tail: (0..TRACE_TAIL_CAPACITY)
                 .map(|step| TraceSnapshot {
                     step: 536 + u32::try_from(step).expect("small trace step"),
@@ -1179,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_failure_builds_a_valid_v6_artifact() {
+    fn legacy_schedule_failure_builds_a_valid_v7_artifact() {
         let mut config = SimConfig::smoke(2);
         config.steps = 60;
         config.noise = BackgroundNoise::Clean;
@@ -1201,40 +1298,79 @@ mod tests {
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
             .validate()
-            .expect("legacy schedule report produces a valid v6 artifact");
+            .expect("legacy schedule report produces a valid v7 artifact");
     }
 
     #[test]
-    fn artifact_v5_without_receipt_range_fields_reaches_explicit_schema_rejection() {
+    fn artifact_v6_without_hostile_gossip_evidence_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(5),
+            serde_json::Value::from(6),
         );
         assert!(
-            object.remove("receipt_range_probe").is_some(),
-            "fixture contains receipt_range_probe"
+            object.remove("hostile_gossip").is_some(),
+            "fixture contains hostile_gossip"
         );
-        let trace_tail = object
-            .get_mut("trace_tail")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("fixture contains trace_tail");
-        for snapshot in trace_tail {
-            let snapshot = snapshot
-                .as_object_mut()
-                .expect("trace snapshot serializes as an object");
-            let _ = snapshot.remove("receipt_range_probe");
-        }
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v5 envelope reaches validation");
-        let error = artifact.validate().expect_err("v5 schema is unsupported");
+            serde_json::from_value(value).expect("v6 envelope reaches validation");
+        let error = artifact.validate().expect_err("v6 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 5"),
+            error.contains("unsupported failure artifact schema 6"),
             "wrong diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn hostile_gossip_artifact_preserves_receiver_side_evidence() {
+        let mut config = SimConfig::smoke(4);
+        config.steps = 320;
+        config.noise = BackgroundNoise::Clean;
+        let schedule = crate::simulation::harness::schedule::generate(0xB2A4, config);
+        let options = RunOptions {
+            corrupt_state_from: Some((0, 220)),
+            probe_confirmed_at: Some(180),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -9,
+                from_step: 100,
+                until_step: 181,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "negative control must fail");
+        let evidence = report.hostile_gossip.expect("hostile evidence");
+        assert!(evidence.messages_mutated > 0);
+        assert!(evidence.probe.is_some());
+
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact.validate().expect("hostile artifact is valid");
+        let encoded = serde_json::to_vec(&artifact).expect("artifact serializes");
+        let decoded: FailureArtifact = serde_json::from_slice(&encoded).expect("artifact decodes");
+        decoded
+            .validate()
+            .expect("decoded hostile artifact is valid");
+        assert_eq!(decoded.hostile_gossip, Some(evidence));
+        assert_eq!(decoded.replay_options, options);
+
+        let mut tampered = decoded;
+        tampered
+            .hostile_gossip
+            .as_mut()
+            .and_then(|evidence| evidence.probe.as_mut())
+            .expect("hostile-gossip probe")
+            .observer_confirmed = fortress_rollback::Frame::NULL.as_i32() - 1;
+        assert!(
+            tampered.validate().is_err(),
+            "artifact validation must reject an out-of-domain confirmed frame"
         );
     }
 

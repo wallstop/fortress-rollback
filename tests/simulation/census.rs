@@ -6,8 +6,8 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationSource},
-    peer_addr, run, run_with_input, PeerEventKey, PeerEventPayload, RunOptions, RunReport,
-    TraceSessionState, WideStubInput,
+    peer_addr, run, run_with_input, HostileGossipMode, HostileGossipOptions, PeerEventKey,
+    PeerEventPayload, RunOptions, RunReport, TraceSessionState, WideStubInput,
 };
 use crate::common::sim_net::{
     BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
@@ -1713,6 +1713,301 @@ fn h_ring_double_failure_relay_schedule() -> Schedule {
         events,
         heal_at: 180,
     }
+}
+
+fn hostile_connection_status_schedule() -> Schedule {
+    const N: usize = 4;
+    let mut config = SimConfig::smoke(N);
+    // Leave a complete recovery window after the step-251 HealAll. The
+    // bounded-liveness oracle requires `steps - heal_at >= B`.
+    config.steps = 502;
+    config.noise = BackgroundNoise::Clean;
+    config.input_delay = 0;
+    config.max_prediction = 32;
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_B200,
+        link_seed: 0xCE45_B201,
+        config,
+        initial_links: clean_initial_links(N),
+        events: vec![(251, ScheduleEvent::HealAll)],
+        heal_at: 251,
+    }
+}
+
+fn hostile_floor_reply_schedule() -> Schedule {
+    const N: usize = 4;
+    const PRUNED_ORIGIN: usize = 0;
+    let mut config = SimConfig::smoke(N);
+    config.steps = 650;
+    config.noise = BackgroundNoise::Clean;
+    config.disconnect_behavior = DropPolicy::ContinueWithout;
+    config.input_delay = 0;
+    config.max_prediction = 32;
+
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 0xCE45_B400,
+        link_seed: 0xCE45_B401,
+        config,
+        initial_links: clean_initial_links(N),
+        events: vec![
+            (
+                50,
+                ScheduleEvent::PeerKill {
+                    peer: PRUNED_ORIGIN,
+                },
+            ),
+            (300, ScheduleEvent::HealAll),
+        ],
+        heal_at: 300,
+    }
+}
+
+fn hostile_options(
+    mode: HostileGossipMode,
+    delta: i32,
+    from_step: u32,
+    until_step: u32,
+) -> RunOptions {
+    RunOptions {
+        probe_confirmed_at: until_step.checked_sub(1),
+        hostile_gossip: Some(HostileGossipOptions {
+            liar: 1,
+            observer: 3,
+            target: 2,
+            delta,
+            from_step,
+            until_step,
+            mode,
+        }),
+        ..RunOptions::default()
+    }
+}
+
+/// B2: one peer's valid but false third-party connection-status frame can only
+/// lower the selected observer's minimum by the lie magnitude. An inflated
+/// claim cannot lift the bound because the honest direct/witness terms remain.
+#[test]
+fn hostile_connection_status_lie_has_bounded_single_observer_effect() {
+    const OBSERVER: usize = 3;
+    const DELTA: i32 = 12;
+    let schedule = hostile_connection_status_schedule();
+    let control_options = hostile_options(HostileGossipMode::ConnectionStatus, 0, 150, 251);
+    let control = run(&schedule, &control_options);
+    let low = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::ConnectionStatus, -DELTA, 150, 251),
+    );
+    let high = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::ConnectionStatus, DELTA, 150, 251),
+    );
+    control.expect_pass(&schedule);
+    low.expect_pass(&schedule);
+    high.expect_pass(&schedule);
+
+    let control_confirmed = control.probe_confirmed[OBSERVER];
+    let control_evidence = control.hostile_gossip.expect("matched B2 control evidence");
+    assert_eq!(control_evidence.messages_mutated, 0);
+    let control_probe = control_evidence.probe.expect("matched B2 control probe");
+    assert!(!control_probe.status_disconnected);
+    assert_eq!(
+        control_probe.effective_reported_frame,
+        control_probe.status_frame
+    );
+    assert_eq!(
+        control_probe.target_confirmed_bound,
+        Some(control_confirmed)
+    );
+    for (name, report, delta) in [("low", &low, -DELTA), ("high", &high, DELTA)] {
+        let evidence = report
+            .hostile_gossip
+            .expect("hostile B2 run must preserve mutation evidence");
+        let probe = evidence
+            .probe
+            .expect("hostile B2 run must preserve receiver evidence");
+        assert!(evidence.messages_mutated > 0, "{name}: {evidence:?}");
+        assert_eq!(evidence.last_step, Some(250), "{name}: {evidence:?}");
+        assert_eq!(probe.at_step, 250, "{name}: {probe:?}");
+        assert_eq!(probe.status_frame, evidence.last_after.unwrap_or(i32::MIN));
+        assert_eq!(probe.effective_reported_frame, probe.status_frame);
+        assert!(!probe.status_disconnected, "{name}: {probe:?}");
+        assert_eq!(probe.direct_receipt, control_probe.direct_receipt);
+        assert_eq!(evidence.last_before, Some(control_probe.status_frame));
+        assert!(evidence.last_before.is_some_and(|before| before >= DELTA));
+        assert!(
+            !probe.relay_topology,
+            "{name}: B2 must use the ordinary fold"
+        );
+        assert_eq!(evidence.last_round_seq, None);
+        assert_eq!(
+            evidence.last_after,
+            evidence
+                .last_before
+                .map(|before| before.saturating_add(delta).max(0))
+        );
+        assert!(
+            report.probe_confirmed[OBSERVER].abs_diff(control_confirmed) <= DELTA.unsigned_abs(),
+            "{name}: a ±{DELTA} lie exceeded its exact magnitude bound: control={}, hostile={}, evidence={evidence:?}",
+            control_confirmed,
+            report.probe_confirmed[OBSERVER]
+        );
+    }
+    let low_probe = low
+        .hostile_gossip
+        .and_then(|evidence| evidence.probe)
+        .expect("low B2 probe");
+    let high_probe = high
+        .hostile_gossip
+        .and_then(|evidence| evidence.probe)
+        .expect("high B2 probe");
+    assert_eq!(
+        low.probe_confirmed[OBSERVER],
+        control_confirmed - DELTA,
+        "the low treatment must non-vacuously pin confirmation by the exact lie"
+    );
+    assert_eq!(
+        low_probe.target_confirmed_bound,
+        Some(control_confirmed - DELTA)
+    );
+    assert_eq!(
+        high.probe_confirmed[OBSERVER], control_confirmed,
+        "an inflated single-peer claim must not raise the honest mesh minimum"
+    );
+    assert_eq!(high_probe.target_confirmed_bound, Some(control_confirmed));
+    assert_eq!(
+        low.final_confirmed, control.final_confirmed,
+        "the observer must recover exactly after the bounded lie stops"
+    );
+    assert_eq!(high.final_confirmed, control.final_confirmed);
+    assert_eq!(control.recovered_within_b, Some(true));
+    assert_eq!(low.recovered_within_b, Some(true));
+    assert_eq!(high.recovered_within_b, Some(true));
+}
+
+/// B4: after a genuine prune engages the floor-round topology, a low valid
+/// floor conservatively wedges one observer; a high valid floor can prematurely
+/// release it, but the truthful status and other honest terms bound both effects.
+#[test]
+fn hostile_floor_reply_lie_has_bounded_wedge_and_release_effects() {
+    const OBSERVER: usize = 3;
+    const DELTA: i32 = 12;
+    let schedule = hostile_floor_reply_schedule();
+    let control_options = hostile_options(HostileGossipMode::FloorReply, 0, 150, 300);
+    let control = run(&schedule, &control_options);
+    let low = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::FloorReply, -DELTA, 150, 300),
+    );
+    let high = run(
+        &schedule,
+        &hostile_options(HostileGossipMode::FloorReply, DELTA, 150, 300),
+    );
+    control.expect_pass(&schedule);
+    low.expect_pass(&schedule);
+    high.expect_pass(&schedule);
+
+    let control_confirmed = control.probe_confirmed[OBSERVER];
+    let control_evidence = control.hostile_gossip.expect("matched B4 control evidence");
+    assert_eq!(control_evidence.messages_mutated, 0);
+    let control_probe = control_evidence.probe.expect("matched B4 control probe");
+    assert!(control_probe.relay_topology && control_probe.round_fresh);
+    assert!(!control_probe.status_disconnected);
+    assert!(
+        control_probe.round_floor < control_probe.status_frame,
+        "the truthful floor must be a live, binding term: {control_probe:?}"
+    );
+    assert_eq!(
+        control_probe.effective_reported_frame,
+        control_probe.round_floor
+    );
+    assert_eq!(
+        control_probe.target_confirmed_bound,
+        Some(control_confirmed)
+    );
+    for (name, report, delta) in [("low", &low, -DELTA), ("high", &high, DELTA)] {
+        let evidence = report
+            .hostile_gossip
+            .expect("hostile B4 run must preserve mutation evidence");
+        let probe = evidence
+            .probe
+            .expect("hostile B4 run must preserve receiver evidence");
+        assert!(evidence.messages_mutated > 0, "{name}: {evidence:?}");
+        assert!(
+            evidence
+                .last_step
+                .is_some_and(|step| (150..300).contains(&step)),
+            "{name}: {evidence:?}"
+        );
+        assert!(
+            probe.relay_topology,
+            "{name}: floor consumption must be live"
+        );
+        assert!(
+            probe.endpoint_running && probe.round_fresh,
+            "{name}: {probe:?}"
+        );
+        assert!(!probe.status_disconnected, "{name}: {probe:?}");
+        assert_eq!(probe.status_frame, control_probe.status_frame);
+        assert_eq!(probe.direct_receipt, control_probe.direct_receipt);
+        assert_eq!(evidence.last_before, Some(control_probe.round_floor));
+        assert!(evidence.last_before.is_some_and(|before| before >= DELTA));
+        assert_eq!(probe.round_floor, evidence.last_after.unwrap_or(i32::MIN));
+        assert_eq!(Some(probe.reply_seq), evidence.last_round_seq);
+        assert!(probe.reply_seq > probe.prune_seq && probe.reply_seq <= probe.request_seq);
+        assert_eq!(
+            evidence.last_after,
+            evidence
+                .last_before
+                .map(|before| before.saturating_add(delta).max(0))
+        );
+        assert!(
+            report.probe_confirmed[OBSERVER].abs_diff(control_confirmed) <= DELTA.unsigned_abs(),
+            "{name}: a ±{DELTA} floor exceeded its exact magnitude bound: control={}, hostile={}, evidence={evidence:?}",
+            control_confirmed,
+            report.probe_confirmed[OBSERVER]
+        );
+    }
+    let low_evidence = low.hostile_gossip.expect("low B4 evidence");
+    let low_probe = low_evidence.probe.expect("low B4 receiver evidence");
+    let high_evidence = high.hostile_gossip.expect("high B4 evidence");
+    let high_probe = high_evidence.probe.expect("high B4 receiver evidence");
+    assert_eq!(
+        low_probe.effective_reported_frame,
+        control_probe.round_floor - DELTA
+    );
+    assert_eq!(
+        low.probe_confirmed[OBSERVER],
+        control_confirmed - DELTA,
+        "the low floor must non-vacuously wedge by the exact lie: {low_evidence:?}"
+    );
+    assert_eq!(
+        high_probe.effective_reported_frame, high_probe.status_frame,
+        "an inflated floor must remain capped by the truthful status term: {high_evidence:?}"
+    );
+    assert!(
+        high_probe
+            .target_confirmed_bound
+            .is_some_and(|bound| bound <= high_probe.status_frame),
+        "the aggregate bound must not exceed the liar's truthful status term: {high_evidence:?}"
+    );
+    assert!(
+        high.probe_confirmed[OBSERVER] > control_confirmed,
+        "the high treatment must non-vacuously exercise bounded premature release: {high_evidence:?}"
+    );
+    assert!(
+        high_probe
+            .target_confirmed_bound
+            .is_some_and(|bound| bound > control_confirmed),
+        "the high floor must raise the live aggregate target bound: {high_evidence:?}"
+    );
+    assert_eq!(low.final_confirmed, control.final_confirmed);
+    assert_eq!(high.final_confirmed, control.final_confirmed);
+    assert_eq!(control.recovered_within_b, Some(true));
+    assert_eq!(low.recovered_within_b, Some(true));
+    assert_eq!(high.recovered_within_b, Some(true));
 }
 
 fn sparse_graceful_drop_rollback_schedule() -> Schedule {

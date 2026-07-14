@@ -2888,6 +2888,15 @@ impl<T: Config> UdpProtocol<T> {
         self.floor_reply_seq > self.floor_prune_seq
     }
 
+    /// Hidden diagnostics for deterministic hostile-gossip integration tests.
+    pub(crate) fn floor_round_diagnostic(&self) -> (u32, u32, u32) {
+        (
+            self.floor_request_seq,
+            self.floor_reply_seq,
+            self.floor_prune_seq,
+        )
+    }
+
     /// Resets this endpoint's floor freshness on a prune: snapshots the current
     /// request sequence as the threshold, so only a reply to a request issued
     /// AFTER this prune counts as fresh again (the spec's `ackFresh` reset). The

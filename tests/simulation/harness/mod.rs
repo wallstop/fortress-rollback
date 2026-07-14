@@ -28,9 +28,9 @@ use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
     Config, DesyncDetection, EventKind, FortressError, FortressEvent, FortressRequest, Frame,
-    GameStateCell, InputStatus, InputVec, Message, MessageKind, P2PSession, PeerMetrics,
-    PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState,
-    SpectatorSession,
+    GameStateCell, InputStatus, InputVec, Message, MessageKind, NonBlockingSocket, P2PSession,
+    PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder,
+    SessionState, SpectatorSession,
 };
 use oracle::{
     validate_violation_allowlist, HealLiveness, InputFingerprint, Oracle, OracleFailure, Verdict,
@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::hash::Hasher as _;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Input contract used by the deterministic simulation harness.
@@ -154,8 +155,76 @@ impl SimInput for WideStubInput {
     }
 }
 
+/// Which valid, peer-controlled gossip field one simulated dishonest endpoint
+/// rewrites on its outbound messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum HostileGossipMode {
+    /// Rewrite `Input.peer_connect_status[target].last_frame`.
+    ConnectionStatus,
+    /// Rewrite `FloorReply.floors[target]`.
+    FloorReply,
+}
+
+pub const MAX_HOSTILE_GOSSIP_DELTA: u32 = 1_024;
+
+/// Deterministic single-dishonest-peer message mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipOptions {
+    /// Logical peer whose socket rewrites its own outbound messages.
+    pub liar: usize,
+    /// Sole logical recipient of the rewritten messages.
+    pub observer: usize,
+    /// Third-party slot about which the liar reports a false frame/floor.
+    pub target: usize,
+    /// Signed offset applied to each valid frame in the selected field. Zero
+    /// selects a diagnostic-only matched control without rewriting messages.
+    pub delta: i32,
+    /// First outer simulation step on which mutation is enabled.
+    pub from_step: u32,
+    /// Exclusive outer simulation step at which mutation stops.
+    pub until_step: u32,
+    /// Message field to rewrite.
+    pub mode: HostileGossipMode,
+}
+
+/// Mutation accounting plus receiver-side diagnostics for a hostile-gossip
+/// treatment or its zero-delta matched control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipEvidence {
+    pub messages_mutated: u64,
+    pub first_step: Option<u32>,
+    pub last_step: Option<u32>,
+    pub last_before: Option<i32>,
+    pub last_after: Option<i32>,
+    pub last_round_seq: Option<u32>,
+    pub probe: Option<HostileGossipProbeEvidence>,
+}
+
+/// Receiver-side cache and fold state sampled at the configured probe cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostileGossipProbeEvidence {
+    pub at_step: u32,
+    pub observer_confirmed: i32,
+    pub direct_receipt: Option<i32>,
+    pub endpoint_running: bool,
+    pub status_disconnected: bool,
+    pub status_frame: i32,
+    pub relay_topology: bool,
+    pub round_floor: i32,
+    pub round_fresh: bool,
+    pub request_seq: u32,
+    pub reply_seq: u32,
+    pub prune_seq: u32,
+    pub effective_reported_frame: i32,
+    pub target_confirmed_bound: Option<i32>,
+}
+
 /// Options for fault-injection *inside the harness itself* — used by the
-/// oracle's negative controls to prove the invariants actually fire.
+/// oracle's negative controls and focused hostile-message census rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunOptions {
@@ -185,6 +254,11 @@ pub struct RunOptions {
     /// range at that exact cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_range_probe_target: Option<usize>,
+    /// If set, one peer rewrites a valid third-party gossip field for a bounded
+    /// step interval, or records a diagnostic-only matched control when the
+    /// delta is zero. `None` preserves every historical run and trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostile_gossip: Option<HostileGossipOptions>,
     /// Preserve a bounded, phase-resolved controller time series instead of
     /// the ordinary twelve-or-fewer progress samples. The denser series is
     /// intended for focused clock-skew/control-loop experiments. H-SKEW mode
@@ -841,6 +915,8 @@ struct TraceFinalSummary {
     pending_output_probe: Option<PendingOutputProbe>,
     #[serde(skip_serializing_if = "Option::is_none")]
     receipt_range_probe: Option<ReceiptRangeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostile_gossip: Option<HostileGossipEvidence>,
     confirmed_at_heal: Vec<i32>,
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
@@ -898,6 +974,8 @@ pub struct RunReport {
     /// High-water direct-receipt spread and retained-range evidence for the
     /// requested target.
     pub receipt_range_probe: Option<ReceiptRangeEvidence>,
+    /// Proof that the configured dishonest socket actually rewrote messages.
+    pub hostile_gossip: Option<HostileGossipEvidence>,
     /// Network delivery/drop counters.
     pub net_stats: crate::common::sim_net::SimNetStats,
     /// Blocked-drop counts split by directed peer index pair `(from, to)`.
@@ -1384,6 +1462,106 @@ impl<I: SimInput> SimGameStub<I> {
             }
         }
         self.recorded.insert(self.gs.frame, self.gs);
+    }
+}
+
+struct HostileGossipCounters {
+    messages_mutated: AtomicU64,
+    first_step: AtomicU32,
+    last_step: AtomicU32,
+    last_before: AtomicI32,
+    last_after: AtomicI32,
+    last_round_seq: AtomicU32,
+}
+
+impl HostileGossipCounters {
+    const NO_STEP: u32 = u32::MAX;
+
+    fn new() -> Self {
+        Self {
+            messages_mutated: AtomicU64::new(0),
+            first_step: AtomicU32::new(Self::NO_STEP),
+            last_step: AtomicU32::new(0),
+            last_before: AtomicI32::new(Frame::NULL.as_i32()),
+            last_after: AtomicI32::new(Frame::NULL.as_i32()),
+            last_round_seq: AtomicU32::new(0),
+        }
+    }
+
+    fn record(&self, step: u32, before: Frame, after: Frame, round_seq: Option<u32>) {
+        self.messages_mutated.fetch_add(1, Ordering::Relaxed);
+        self.first_step.fetch_min(step, Ordering::Relaxed);
+        self.last_step.fetch_max(step, Ordering::Relaxed);
+        self.last_before.store(before.as_i32(), Ordering::Relaxed);
+        self.last_after.store(after.as_i32(), Ordering::Relaxed);
+        self.last_round_seq
+            .store(round_seq.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    fn evidence(&self, probe: Option<HostileGossipProbeEvidence>) -> HostileGossipEvidence {
+        let messages_mutated = self.messages_mutated.load(Ordering::Relaxed);
+        let first_step = self.first_step.load(Ordering::Relaxed);
+        let last_step = self.last_step.load(Ordering::Relaxed);
+        HostileGossipEvidence {
+            messages_mutated,
+            first_step: (messages_mutated != 0).then_some(first_step),
+            last_step: (messages_mutated != 0).then_some(last_step),
+            last_before: (messages_mutated != 0).then(|| self.last_before.load(Ordering::Relaxed)),
+            last_after: (messages_mutated != 0).then(|| self.last_after.load(Ordering::Relaxed)),
+            last_round_seq: (messages_mutated != 0
+                && self.last_round_seq.load(Ordering::Relaxed) != 0)
+                .then(|| self.last_round_seq.load(Ordering::Relaxed)),
+            probe,
+        }
+    }
+}
+
+struct HostileGossipSocket {
+    inner: SimSocket<Message>,
+    options: HostileGossipOptions,
+    observer_addr: SocketAddr,
+    current_step: Arc<AtomicU32>,
+    counters: Arc<HostileGossipCounters>,
+}
+
+impl NonBlockingSocket<SocketAddr> for HostileGossipSocket {
+    fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
+        let step = self.current_step.load(Ordering::Relaxed);
+        let active = self.options.from_step <= step && step < self.options.until_step;
+        if !active || *addr != self.observer_addr {
+            self.inner.send_to(msg, addr);
+            return;
+        }
+
+        let mut rewritten = msg.clone();
+        let changed = match self.options.mode {
+            HostileGossipMode::ConnectionStatus => {
+                fortress_rollback::__internal::mutate_input_gossip_frame(
+                    &mut rewritten,
+                    self.options.target,
+                    self.options.delta,
+                )
+                .map(|(before, after)| (before, after, None))
+            },
+            HostileGossipMode::FloorReply => {
+                fortress_rollback::__internal::mutate_floor_reply_frame(
+                    &mut rewritten,
+                    self.options.target,
+                    self.options.delta,
+                )
+                .map(|(before, after, round_seq)| (before, after, Some(round_seq)))
+            },
+        };
+        if let Some((before, after, round_seq)) = changed {
+            self.counters.record(step, before, after, round_seq);
+            self.inner.send_to(&rewritten, addr);
+        } else {
+            self.inner.send_to(msg, addr);
+        }
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        self.inner.receive_all_messages()
     }
 }
 
@@ -1973,6 +2151,69 @@ pub(super) fn validate_run_options(
             schedule.config.steps
         ));
     }
+    if let Some(hostile) = options.hostile_gossip {
+        if n < 3
+            || hostile.liar >= n
+            || hostile.observer >= n
+            || hostile.target >= n
+            || hostile.liar == hostile.observer
+            || hostile.liar == hostile.target
+            || hostile.observer == hostile.target
+        {
+            return Err(format!(
+                "hostile_gossip liar {}, observer {}, and target {} must name distinct peers within 0..{n}, with at least three peers",
+                hostile.liar, hostile.observer, hostile.target
+            ));
+        }
+        if hostile.mode == HostileGossipMode::FloorReply && n < 4 {
+            return Err("FloorReply hostile_gossip requires at least four peers".to_owned());
+        }
+        if hostile.delta.unsigned_abs() > MAX_HOSTILE_GOSSIP_DELTA {
+            return Err(format!(
+                "hostile_gossip delta magnitude must be <= {MAX_HOSTILE_GOSSIP_DELTA}"
+            ));
+        }
+        if hostile.from_step >= hostile.until_step || hostile.until_step > schedule.config.steps {
+            return Err(format!(
+                "hostile_gossip interval must be non-empty and within 0..{}",
+                schedule.config.steps
+            ));
+        }
+        if options
+            .probe_confirmed_at
+            .is_none_or(|probe| probe < hostile.from_step || probe >= hostile.until_step)
+        {
+            return Err(
+                "hostile_gossip requires probe_confirmed_at inside its active interval".to_owned(),
+            );
+        }
+        let endpoint_retires = schedule.events.iter().any(|(step, event)| {
+            if *step >= hostile.until_step {
+                return false;
+            }
+            let retired = match event {
+                ScheduleEvent::GracefulRemove { target, .. }
+                | ScheduleEvent::LegacyDisconnect { target, .. } => Some(*target),
+                ScheduleEvent::PeerKill { peer } => Some(*peer),
+                ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+                #[cfg(feature = "hot-join")]
+                ScheduleEvent::HotJoin { slot } => Some(*slot),
+                _ => None,
+            };
+            retired.is_some_and(|peer| {
+                peer == hostile.liar
+                    || peer == hostile.observer
+                    || (hostile.mode == HostileGossipMode::ConnectionStatus
+                        && peer == hostile.target)
+            })
+        });
+        if endpoint_retires {
+            return Err(
+                "hostile_gossip liar and observer must remain live throughout its active interval; a ConnectionStatus target must also remain live"
+                    .to_owned(),
+            );
+        }
+    }
     if options.phase_resolved_control_samples
         && (schedule.schema_version < 16
             || schedule.config.frame_model != FrameModel::SkewGated60Hz)
@@ -2088,6 +2329,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // numbers/sync tokens are reproducible.
     let spectator_addr = peer_addr(n);
     let spectator_handle = PlayerHandle::new(n);
+    let hostile_current_step = Arc::new(AtomicU32::new(0));
+    let hostile_counters = Arc::new(HostileGossipCounters::new());
     let mut peers: Vec<PeerSlot<I>> = (0..n)
         .map(|i| {
             let socket: SimSocket<Message> = net.attach(addrs[i]);
@@ -2134,7 +2377,23 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     .add_player(PlayerType::Spectator(spectator_addr), spectator_handle)
                     .expect("valid spectator registration");
             }
-            let session = builder.start_p2p_session(socket).expect("session starts");
+            let session = if options
+                .hostile_gossip
+                .is_some_and(|hostile| hostile.liar == i)
+            {
+                let hostile = options.hostile_gossip.expect("checked above");
+                builder
+                    .start_p2p_session(HostileGossipSocket {
+                        inner: socket,
+                        options: hostile,
+                        observer_addr: addrs[hostile.observer],
+                        current_step: Arc::clone(&hostile_current_step),
+                        counters: Arc::clone(&hostile_counters),
+                    })
+                    .expect("session starts")
+            } else {
+                builder.start_p2p_session(socket).expect("session starts")
+            };
 
             let mut game = SimGameStub::<I>::new();
             if let Some((peer, from)) = options.corrupt_state_from {
@@ -2307,6 +2566,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
     let mut probe_confirmed: Vec<i32> = Vec::new();
     let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
+    let mut hostile_gossip_probe = None;
     let mut pending_output_probe =
         options
             .pending_output_probe_link
@@ -2377,6 +2637,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let mut spectator_required_min_frame: Option<i32> = None;
 
     for step in 0..schedule.config.steps {
+        hostile_current_step.store(step, Ordering::Relaxed);
         let mut step_confirmed = Vec::with_capacity(n);
         let mut scheduled_events = Vec::new();
         let mut scheduled_events_truncated = 0u32;
@@ -2954,6 +3215,31 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         // cut rather than a mixture of before/after states across peers.
         if options.probe_confirmed_at == Some(step) {
             probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
+            if let Some(hostile) = options.hostile_gossip {
+                let diagnostic = peers[hostile.observer].session.diagnostic_hostile_gossip(
+                    PlayerHandle::new(hostile.liar),
+                    PlayerHandle::new(hostile.target),
+                );
+                hostile_gossip_probe = diagnostic.map(|diagnostic| HostileGossipProbeEvidence {
+                    at_step: step,
+                    observer_confirmed: peers[hostile.observer].session.confirmed_frame().as_i32(),
+                    direct_receipt: peers[hostile.observer]
+                        .session
+                        .diagnostic_player_receipt_frame(PlayerHandle::new(hostile.target))
+                        .map(Frame::as_i32),
+                    endpoint_running: diagnostic.endpoint_running,
+                    status_disconnected: diagnostic.status_disconnected,
+                    status_frame: diagnostic.status_frame.as_i32(),
+                    relay_topology: diagnostic.relay_topology,
+                    round_floor: diagnostic.round_floor.as_i32(),
+                    round_fresh: diagnostic.round_fresh,
+                    request_seq: diagnostic.request_seq,
+                    reply_seq: diagnostic.reply_seq,
+                    prune_seq: diagnostic.prune_seq,
+                    effective_reported_frame: diagnostic.effective_reported_frame.as_i32(),
+                    target_confirmed_bound: diagnostic.target_confirmed_bound.map(Frame::as_i32),
+                });
+            }
         }
         if let Some(probe) = pending_output_probe.as_mut() {
             let value = peers[probe.from]
@@ -3210,6 +3496,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .map_or_else(Vec::new, |_| first_synchronized_step);
     let progress_samples: Vec<_> = progress_samples.into();
     let cpu_feedback = cpu_feedback_evidence(&cpu_drives);
+    let hostile_gossip = options
+        .hostile_gossip
+        .map(|_| hostile_counters.evidence(hostile_gossip_probe));
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -3229,6 +3518,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         link_stats_by_link: trace_link_stats(schedule.schema_version, &link_stats_by_link),
         pending_output_probe,
         receipt_range_probe: receipt_range_probe.clone(),
+        hostile_gossip,
         confirmed_at_heal: confirmed_at_heal.clone(),
         confirmed_after_recovery: confirmed_after_recovery.clone(),
         recovered_within_b,
@@ -3288,6 +3578,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         probe_peer_wire_by_link,
         pending_output_probe,
         receipt_range_probe,
+        hostile_gossip,
         net_stats: net.stats(),
         blocked_drops_by_link,
         fragmentation_drops_by_link,
@@ -3341,6 +3632,34 @@ mod tests {
     #[cfg(feature = "hot-join")]
     use crate::simulation::harness::oracle::OracleFailure;
     use fortress_rollback::network::codec;
+
+    #[test]
+    fn hostile_gossip_only_requires_live_endpoints_while_active() {
+        let mut config = schedule::SimConfig::smoke(4);
+        config.steps = 100;
+        config.noise = schedule::BackgroundNoise::Clean;
+        let mut schedule = schedule::generate(0xB2B4_11FE, config);
+        schedule.events = vec![(40, schedule::ScheduleEvent::PeerKill { peer: 1 })];
+        schedule.heal_at = schedule.config.steps;
+        let options = RunOptions {
+            probe_confirmed_at: Some(20),
+            hostile_gossip: Some(HostileGossipOptions {
+                liar: 1,
+                observer: 3,
+                target: 2,
+                delta: -12,
+                from_step: 10,
+                until_step: 30,
+                mode: HostileGossipMode::ConnectionStatus,
+            }),
+            ..RunOptions::default()
+        };
+
+        validate_run_options(&schedule, &options)
+            .expect("retirement after the hostile interval is irrelevant");
+        schedule.events[0].0 = 29;
+        assert!(validate_run_options(&schedule, &options).is_err());
+    }
 
     #[test]
     fn cpu_feedback_actuator_has_exact_poll_boundaries() {

@@ -269,6 +269,23 @@ impl<A> Default for CoordinatedDropState<A> {
     }
 }
 
+/// Receiver-side evidence for deterministic hostile-gossip integration tests.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostileGossipDiagnostic {
+    pub endpoint_running: bool,
+    pub status_disconnected: bool,
+    pub status_frame: Frame,
+    pub relay_topology: bool,
+    pub round_floor: Frame,
+    pub round_fresh: bool,
+    pub request_seq: u32,
+    pub reply_seq: u32,
+    pub prune_seq: u32,
+    pub effective_reported_frame: Frame,
+    pub target_confirmed_bound: Option<Frame>,
+}
+
 /// A [`P2PSession`] provides all functionality to connect to remote clients in a peer-to-peer fashion, exchange inputs and handle the gamestate by saving, loading and advancing.
 ///
 /// This type implements the [`Session`] trait, enabling it to be used in generic
@@ -7950,6 +7967,71 @@ impl<T: Config> P2PSession<T> {
         self.local_connect_status
             .get(handle.as_usize())
             .map(|status| status.last_frame)
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns the exact receiver-side cache and fold contribution for
+    /// one remote endpoint's report about a third-party slot.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_hostile_gossip(
+        &self,
+        endpoint_handle: PlayerHandle,
+        target: PlayerHandle,
+    ) -> Option<HostileGossipDiagnostic> {
+        let PlayerType::Remote(addr) = self.player_reg.handles.get(&endpoint_handle)? else {
+            return None;
+        };
+        let endpoint = self.player_reg.remotes.get(addr)?;
+        let status = endpoint.peer_connect_status(target);
+        let relay_topology = self.pessimistic_floor_relay_topology();
+        let round_floor = endpoint.round_floor(target);
+        let round_fresh = endpoint.floor_round_is_fresh();
+        let reported = if relay_topology
+            && !status.disconnected
+            && round_fresh
+            && round_floor != Frame::NULL
+        {
+            std::cmp::min(status.last_frame, round_floor)
+        } else {
+            status.last_frame
+        };
+        #[cfg(feature = "hot-join")]
+        let effective_reported_frame = if status.disconnected {
+            self.hot_join
+                .pending_reactivation
+                .as_ref()
+                .filter(|pending| pending.reopened && pending.handle == target)
+                .map_or(reported, |pending| {
+                    safe_frame_sub!(
+                        pending.frame,
+                        1,
+                        "P2PSession::diagnostic_hostile_gossip pending clamp"
+                    )
+                })
+        } else {
+            reported
+        };
+        #[cfg(not(feature = "hot-join"))]
+        let effective_reported_frame = reported;
+        let (request_seq, reply_seq, prune_seq) = endpoint.floor_round_diagnostic();
+        let target_confirmed_bound = self
+            .local_connect_status
+            .get(target.as_usize())
+            .and_then(|local| self.remote_slot_confirmed_bound(target, local));
+        Some(HostileGossipDiagnostic {
+            endpoint_running: endpoint.is_running(),
+            status_disconnected: status.disconnected,
+            status_frame: status.last_frame,
+            relay_topology,
+            round_floor,
+            round_fresh,
+            request_seq,
+            reply_seq,
+            prune_seq,
+            effective_reported_frame,
+            target_confirmed_bound,
+        })
     }
 
     /// Diagnostics/testing surface (hidden; **not** part of the stable public
