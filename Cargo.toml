@@ -426,6 +426,10 @@ harness = false
 name = "compression"
 harness = false
 
+[[bench]]
+name = "h16p_mesh"
+harness = false
+
 # Profile for benchmarks
 [profile.bench]
 debug = true

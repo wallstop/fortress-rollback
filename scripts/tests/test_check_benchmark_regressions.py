@@ -188,6 +188,19 @@ def test_workflow_has_no_dependabot_benchmark_bypass() -> None:
     assert jobs["benchmark-quick"]["steps"][0]["with"]["persist-credentials"] is False
 
 
+def test_h16p_mesh_benchmark_is_informational_only_during_bootstrap() -> None:
+    jobs = _workflow_jobs()
+    paired = _step(jobs["benchmark"], "Run paired Criterion regression gate")["run"]
+    history = _step(
+        jobs["benchmark-history"], "Run benchmarks for historical tracking"
+    )["run"]
+    quick = _step(jobs["benchmark-quick"], "Smoke test benchmarks")["run"]
+
+    assert "cargo bench --bench h16p_mesh" not in paired
+    assert "cargo bench --bench h16p_mesh" in history
+    assert "cargo bench --bench h16p_mesh" in quick
+
+
 def test_workflow_compares_base_with_tested_merge_and_guards_harnesses() -> None:
     gate = _workflow_jobs()["benchmark"]
     paired = _step(gate, "Run paired Criterion regression gate")

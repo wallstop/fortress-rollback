@@ -217,6 +217,7 @@ jobs:
           cargo bench --bench input_queue -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee benchmark-informational-results.txt
           cargo bench --bench compression -- --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
           cargo bench --bench p2p_session -- 'SyncTestSession|P2PSession|Message/' --output-format bencher --warm-up-time 1 --measurement-time 2 | tee -a benchmark-informational-results.txt
+          cargo bench --bench h16p_mesh -- --output-format bencher --warm-up-time 1 --measurement-time 2 --sample-size 20 | tee -a benchmark-informational-results.txt
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -352,6 +353,7 @@ jobs:
           cargo bench --bench p2p_session -- --sample-size 10 --warm-up-time 1 --measurement-time 1
           cargo bench --bench sync_layer -- --sample-size 10 --warm-up-time 1 --measurement-time 1
           cargo bench --bench compression -- --sample-size 10 --warm-up-time 1 --measurement-time 1
+          cargo bench --bench h16p_mesh -- --sample-size 10 --warm-up-time 1 --measurement-time 1
         timeout-minutes: 10
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
