@@ -72,6 +72,10 @@ The [threat model](Threat-Model) records the complete single-dishonest-peer capa
 
 - Size the event queue, input queue, checksum history, and prediction window from measured load.
   Confirm their high-water marks plateau during a release soak.
+- For custom asynchronous sockets, compare `PeerMetrics::packets_sent` protocol-queue deltas with
+  adapter admission/service rate, queue depth, and oldest-message age. A normal session update can
+  submit multiple packets; requiring the transport buffer to empty after each packet is an unstable
+  stop-and-wait design.
 - Keep encoded input packets below the path budget. `PeerMetrics` separately counts messages at
   or above the portable 1,200-byte warning and common 1,472-byte IPv4 fragmentation threshold.
 - `Frame` uses a signed 32-bit counter. At 60 FPS, `i32::MAX` is about 414 days (1.14 years) from
@@ -90,7 +94,7 @@ The [threat model](Threat-Model) records the complete single-dishonest-peer capa
 ## Release evidence
 
 - Run the repository's full local validation command from `.llm/context.md`.
-- Run the deterministic baseline sweep and compare bandwidth, rollback depth, confirmation lag,
-  and stalls against the checked-in ledger.
+- Run the deterministic baseline sweep and compare encoded byte/message demand, rollback depth,
+  confirmation lag, and stalls against the checked-in ledger.
 - Run release-mode nightly chaos/soak lanes on every supported OS and keep their artifacts.
 - Verify that every changelog behavior claim points to a regression test or measured artifact.

@@ -1015,9 +1015,10 @@ pub struct RunReport {
     /// Final deterministic CPU-feedback evidence, indexed by peer. Empty when
     /// the schedule uses fixed poll cadence.
     pub cpu_feedback: Vec<CpuFeedbackEvidence>,
-    /// Each peer's wire-traffic totals, aggregated over all of that peer's
-    /// remote links from the always-on `PeerMetrics` counters (indexed by peer).
-    /// This is the per-player bandwidth ledger the M2 baseline sweep consumes.
+    /// Each peer's protocol-traffic counters, aggregated over all remote links
+    /// from the always-on `PeerMetrics` counters (indexed by peer). Sent values
+    /// are enqueue demand; received values are messages delivered to the
+    /// endpoint. This is the per-player cost ledger the M2 sweep consumes.
     pub peer_wire: Vec<PeerWireTotals>,
     /// (c) each peer's confirmed frame sampled at the heal anchor — the step of
     /// the last actual `ScheduleEvent::HealAll` (derived from the event stream,
@@ -1062,13 +1063,14 @@ pub struct RunReport {
     pub spectator_final_hosts: Option<usize>,
 }
 
-/// One peer's cumulative wire traffic, summed across every remote link it holds.
+/// One peer's cumulative protocol traffic counters across every remote link.
 ///
 /// The mesh runner reads each peer session's per-remote [`PeerMetrics`] at
-/// end-of-run and folds them into these totals, so a single value describes how
-/// much a player put on / took off the wire regardless of mesh size. Byte counts
-/// are wire-exact and payload-only (they match `PeerMetrics`, excluding UDP/IP
-/// headers). The `messages_{sent,received}_by_kind` arrays are positional in
+/// end-of-run and folds them into these totals. Byte counts are exact encoded
+/// Fortress payload sizes and exclude UDP/IP headers. Sent counters record
+/// protocol enqueue demand before socket flushing, not adapter or downstream
+/// transport acceptance; received counters record endpoint delivery. The
+/// `messages_{sent,received}_by_kind` arrays are positional in
 /// [`MessageKind::ALL`] order; read them by category with
 /// [`sent_by_kind`](Self::sent_by_kind) / [`received_by_kind`](Self::received_by_kind).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -3371,7 +3373,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .collect();
     let final_confirmed: Vec<i32> = end_confirmed.iter().map(|frame| frame.as_i32()).collect();
 
-    // Aggregate each peer's per-remote wire metrics into one per-player total.
+    // Aggregate each peer's per-remote protocol metrics into one per-player total.
     // Peer `i` holds a remote handle `PlayerHandle::new(j)` for every `j != i`
     // (see the builder loop above); `peer_metrics` succeeds for any remote
     // handle regardless of sync state.

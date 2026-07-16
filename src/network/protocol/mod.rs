@@ -1094,13 +1094,16 @@ impl<T: Config> UdpProtocol<T> {
         let total_bytes_sent = self
             .bytes_sent
             .saturating_add(self.packets_sent.saturating_mul(UDP_HEADER_SIZE as u64));
-        // `kbps_sent` is documented and named as **kilobits per second**. The
+        // The `kbps_sent` field is documented and named as **kilobits per
+        // second**. The
         // previous `bytes / seconds / 1024` produced kibibytes/sec — wrong by the
         // 8× byte<->bit factor against the field's own unit. Correct it to bits
         // (x8) over elapsed seconds, per SI kilo (/1000, the standard base for
-        // network bit-rates). Now that D1 makes `bytes_sent` wire-exact this rate
-        // is finally meaningful. Saturating multiply avoids overflow on long
-        // sessions; the divisions then bring it back into `usize` range.
+        // network bit-rates). `bytes_sent` is exact encoded protocol enqueue
+        // demand, so this is a UDP-equivalent offered rate rather than adapter
+        // acceptance or observed network throughput. Saturating multiply avoids
+        // overflow on long sessions; the divisions then bring it back into
+        // `usize` range.
         let kbps_sent = usize::try_from(total_bytes_sent.saturating_mul(8) / seconds / 1000)
             .unwrap_or(usize::MAX);
 
@@ -2269,7 +2272,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.packets_sent = self.packets_sent.saturating_add(1);
         self.last_send_time = self.now();
-        // Wire-exact payload bytes (D1 fix): the previous `size_of_val(&msg)`
+        // Exact encoded payload bytes (D1 fix): the previous `size_of_val(&msg)`
         // measured the constant in-memory `Message` enum size, not what the
         // socket serializes, so `kbps_sent` was fiction. `Message::encoded_len`
         // matches `codec::encode(&msg).len()` exactly (property-tested).
@@ -2291,11 +2294,12 @@ impl<T: Config> UdpProtocol<T> {
     pub(crate) fn handle_message(&mut self, msg: &Message) {
         trace!("Handling message from {:?}: {:?}", self.peer_addr, msg);
 
-        // Per-peer receive accounting (always-on, wire-exact). Counted for every
-        // message delivered to this endpoint *before* any protocol-state filter
-        // below, so `bytes_received` reflects all traffic that arrived from this
-        // peer and `packets_received == messages_received_by_kind.total()` holds
-        // by construction (the send-side mirror of `queue_message`). Saturating so
+        // Per-peer receive accounting (always-on, exact encoded Fortress
+        // payload size). Counted for every message delivered to this endpoint
+        // *before* any protocol-state filter below, so `bytes_received` reflects
+        // all traffic that arrived from this peer and
+        // `packets_received == messages_received_by_kind.total()` holds by
+        // construction (the send-side mirror of `queue_message`). Saturating so
         // the lifetime counters degrade to a ceiling rather than wrapping.
         self.packets_received = self.packets_received.saturating_add(1);
         self.bytes_received = self.bytes_received.saturating_add(msg.encoded_len() as u64);

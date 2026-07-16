@@ -13,10 +13,12 @@ pub struct NetworkStats {
     /// [`ProtocolConfig::quality_report_interval`](crate::ProtocolConfig::quality_report_interval)
     /// (200 ms by default), not on every packet.
     pub ping: u128,
-    /// The estimated outbound bandwidth to this peer, in **kilobits per second**
-    /// (bits ÷ 1000). Computed from the wire-exact serialized size of every sent
-    /// packet plus an estimated per-packet UDP/IP header, averaged over the time
-    /// since synchronization.
+    /// The estimated outbound protocol demand for this peer, expressed as
+    /// UDP-equivalent **kilobits per second** (bits ÷ 1000). Computed from the
+    /// exact encoded size of every packet enqueued for socket submission plus an
+    /// estimated per-packet UDP/IP header, averaged over the time since
+    /// synchronization. This is offered demand, not socket-adapter acceptance or
+    /// observed network throughput.
     pub kbps_sent: usize,
 
     /// The number of frames Fortress Rollback calculates that the local client is behind the remote client at this instant in time.

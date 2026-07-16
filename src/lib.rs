@@ -2430,6 +2430,13 @@ pub trait Config: 'static + Send + Sync {
 /// designed to tolerate those omissions; adapters must not turn this method
 /// into a blocking delivery guarantee.
 ///
+/// One session update may call [`send_to`](Self::send_to) several times for
+/// input, acknowledgement, and control traffic. An asynchronous adapter must
+/// return promptly and either admit a bounded burst or apply an explicit
+/// freshness-preserving batch/drop policy. Waiting for a socket-wide outbound
+/// buffer to become empty after every message creates stop-and-wait behavior
+/// and can make the adapter's service rate lower than Fortress's offered rate.
+///
 /// # Allocation contract
 ///
 /// [`NonBlockingSocket::receive_all_messages`] returns an owned batch, so custom
@@ -2530,6 +2537,13 @@ pub trait Config: 'static {
 /// congestion control. The protocol's redundant unacknowledged-input window is
 /// designed to tolerate those omissions; adapters must not turn this method
 /// into a blocking delivery guarantee.
+///
+/// One session update may call [`send_to`](Self::send_to) several times for
+/// input, acknowledgement, and control traffic. An asynchronous adapter must
+/// return promptly and either admit a bounded burst or apply an explicit
+/// freshness-preserving batch/drop policy. Waiting for a socket-wide outbound
+/// buffer to become empty after every message creates stop-and-wait behavior
+/// and can make the adapter's service rate lower than Fortress's offered rate.
 ///
 /// # Allocation contract
 ///

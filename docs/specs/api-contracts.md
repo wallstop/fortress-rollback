@@ -509,7 +509,7 @@ Each API is documented with:
 
 **Pre:** `handle` is a remote player or spectator
 
-**Post:** Returns stats (ping, bandwidth, etc.)
+**Post:** Returns stats (ping, send queue length, UDP-equivalent offered demand, etc.)
 
 **Errors:**
 
@@ -959,6 +959,9 @@ datagram bytes, rollback determinism, or the `Message` body format.
 **Post:** Best-effort submission only. The adapter may drop or delay the message locally, including
 inside a congestion-controlled QUIC sender stack. Fortress Rollback's redundant unacknowledged-input
 window repairs ordinary omissions through later messages; this call is not a delivery guarantee.
+One session update may invoke this method multiple times. Asynchronous adapters return promptly and
+either admit a bounded burst or apply an explicit freshness-preserving batch/drop policy; they do
+not wait for a socket-wide outbound buffer to empty after each message.
 
 ## Cross-Cutting Invariants
 
