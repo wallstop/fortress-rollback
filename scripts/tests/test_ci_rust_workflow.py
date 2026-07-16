@@ -22,8 +22,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
-ROOT_CARGO_MANIFEST = REPO_ROOT / "Cargo.toml"
 NETWORK_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
+NETWORK_DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 EMSCRIPTEN_DEPENDENCY_CHECK = "scripts/ci/check-emscripten-dependencies.sh"
 EMSCRIPTEN_DEPENDENCY_CHECK_PATH = REPO_ROOT / EMSCRIPTEN_DEPENDENCY_CHECK
 GODOT_FIXTURE = "tests/godot-emscripten"
@@ -168,34 +168,19 @@ def test_cargo_network_config_hardens_registry_fetches(
     assert config[section][key] == expected
 
 
-def test_network_docker_cache_build_covers_workspace_manifests_and_fails_closed() -> None:
-    """The cache build must include every member and surface preparation errors."""
-    if tomllib is None:
-        pytest.skip("tomllib/tomli not available")
-
-    cargo_manifest = tomllib.loads(ROOT_CARGO_MANIFEST.read_text(encoding="utf-8"))
-    required_sources = {
-        Path("Cargo.toml"),
-        Path("Cargo.lock"),
-    }
-    required_sources.update(
-        Path(member) / "Cargo.toml"
-        for member in cargo_manifest["workspace"]["members"]
-        if member != "."
-    )
+def test_network_docker_build_copies_complete_context_and_fails_closed() -> None:
+    """Cargo target declarations and sources must enter the image atomically."""
     dockerfile = NETWORK_DOCKERFILE.read_text(encoding="utf-8")
-    cache_context, separator, cache_build_tail = dockerfile.partition("RUN cargo build")
-    assert separator, "Dockerfile is missing its dependency-cache Cargo build"
-    copy_sources = _docker_copy_sources(cache_context)
+    build_context, separator, build_tail = dockerfile.partition("RUN cargo build")
+    assert separator, "Dockerfile is missing its fail-closed Cargo build"
+    assert _docker_copy_sources(build_context) == (Path("."),)
+    assert dockerfile.count("RUN cargo build") == 1
+    assert "prepare-cargo-cache" not in dockerfile
+    assert "RUN touch" not in dockerfile
+    assert ".cargo/" in NETWORK_DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
 
-    assert set(copy_sources) == required_sources, (
-        "Docker cache build must copy only Cargo.lock and workspace manifests; "
-        f"expected {sorted(map(str, required_sources))}, "
-        f"found {sorted(map(str, copy_sources))}"
-    )
-
-    cache_build = ["cargo", "build", *shlex.split(cache_build_tail.splitlines()[0])]
-    assert cache_build == [
+    build = ["cargo", "build", *shlex.split(build_tail.splitlines()[0])]
+    assert build == [
         "cargo",
         "build",
         "--locked",
@@ -203,6 +188,11 @@ def test_network_docker_cache_build_covers_workspace_manifests_and_fails_closed(
         "-p",
         "network-test-peer",
     ]
+
+    workflow_path = REPO_ROOT / ".github" / "workflows" / "ci-network.yml"
+    workflow = _load_workflow(workflow_path)
+    for event in ("push", "pull_request"):
+        assert ".dockerignore" in _workflow_paths(workflow, event)
 
 
 def test_semver_failure_summary_distinguishes_infra_from_api_breaks() -> None:

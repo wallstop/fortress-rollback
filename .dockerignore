@@ -2,6 +2,10 @@
 target/
 test-results/
 
+# Host Cargo configuration selects clang/lld, which the slim builder does not
+# install. The image deliberately uses the Rust base image's default linker.
+.cargo/
+
 # Git
 .git/
 .gitignore
