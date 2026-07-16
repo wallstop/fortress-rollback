@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784175806376,
+  "lastUpdate": 1784178494898,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "87196ccbfb60f3863723b179d49480a2f8c05e06",
-          "message": "feat: Fix Multiple Distributed Systems Problems on Multi-Peer Sessions for Connect/Reconnect (#182)\n\n## Description\n\nThis PR closes critical gaps in multi-peer disconnect/drop convergence,\nadds a sequence-numbered floor-round to prevent divergence in relay\ntopologies, and hardens codec/protocol handling against stale signals.\nThe biggest practical impact is in sessions with 3+ peers.\n\n### User-Facing Changes\n\n- **Fixes divergence after peer drop**: Survivors no longer confirm past\nan agreed freeze point in staggered-detection and relay scenarios.\n- **Closes double-failure-relay corner**: Introduces\n`FloorRequest`/`FloorReply` messages to establish a pessimistic per-slot\nfloor from relay peers, preventing silent divergence when an origin\nsurvivor dies mid-relay.\n- **Wire-format change**: All peers in a session must run a compatible\nbuild. Mixed old/new builds cannot exchange the new floor-round\nmessages.\n- **Prevents mesh agreement stalls**: Idle endpoints now emit periodic\nconnect-status nudges while a drop awaits mesh agreement, fixing a\ndeadlock at 3+ players.\n- **Expanded TLA+ validation**: Multiple new specifications and\nconfigurations validate safety properties under double-failure relay,\nasync ack, and reorder scenarios.\n\n### Technical Details\n\n- Prediction queue now always begins at the first missing frame, fixing\nsilent divergence when re-simulation requests land above missing\nwindows.\n- Connect-status gossip now carries the fold of local-received and\nremote-gossiped views, matching GGPO semantics for freeze barriers.\n- Codec and message decoding hardened against denial-of-service from\nhostile length prefixes.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/peer_drop.rs` (peer-drop convergence scenarios)\n\n**Manual testing performed:**\n\n- TLA+ spec/config scenario expansion under\n`specs/tla/DoubleFailureRelay*`\n- (No additional manual runtime testing documented in this draft)\n\n## Related Issues\n\n- (None linked)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Medium Risk**\n> Changes are mostly docs, TLA+, and CI, but they encode a wire-format\nand API narrative (floor-round vs legacy gossip) that must stay aligned\nwith production; mis-synced docs or TLA pairing could hide real protocol\ndrift.\n> \n> **Overview**\n> Aligns **user-facing and internal docs** with the S55 floor-round\ndesign: **CHANGELOG** now describes the double-failure-relay fix as\nclosed by **`FloorRequest`/`FloorReply`** (replacing per-`Input`\npessimistic-floor gossip), and **doc-code-sync** points canonical\nreferences at **`FloorReply::floors`**, **`UdpProtocol::round_floor`**,\nand **`P2PSession::pessimistic_floors`**.\n> \n> Adds **CI guards** so removed identifiers (`peer_pessimistic_floor`,\n`Input::pessimistic_floor`) cannot reappear in tracked docs as current\nproduction without historical qualifiers (`check-doc-claims.sh` +\ntests). **TLA FIX_MODE consistency** is generalized:\n**`check-tla-config-consistency.py`** discovers every spec with an\n`ASSUME FIX_MODE` set, pairs `.cfg` files by filename stem, and\nvalidates README counts against any spec’s mode count (not only\n`DoubleFailureRelay`).\n> \n> **Formal verification** expands materially:\n**`DoubleFailureRelay.tla`** gains the S52 **`REORDER`** corner and\nthree new modes (**`AsyncAckSoundEpoch`**, **`AsyncAckSoundRound`**,\n**`AsyncAckSoundRoundSeq`**) with matching demo/live/witness `.cfg`\nfiles; **`SpectatorReactivationEpoch`** is registered in\n**`verify-tla.sh`** with a default `.cfg` and a large\n**`specs/tla/README.md`** write-up. Existing DoubleFailureRelay configs\npick up **`CONSTANT REORDER = FALSE`** for backward-compatible runs.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nffb856bf1e4989b971ed1f2c11caf09eacad4ccd. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-20T16:09:57-07:00",
-          "tree_id": "79e7a6ecb02e914ab9104d5bb9ce2c1934f13256",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/87196ccbfb60f3863723b179d49480a2f8c05e06"
-        },
-        "date": 1781997264561,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 108,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 448,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 696,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1014,
-            "range": "± 31",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 132447,
-            "range": "± 1020",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45601,
-            "range": "± 426",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 96",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5771,6 +5645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3133,
             "range": "± 202",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bc8bdc792bc4d7bcb9f7f0a0afa0a30578bd3303",
+          "message": "Harden simulation coverage, cost evidence, and guidance (#241)\n\n- add deterministic Swarm simulation coverage with materialized replay\n- document tested topology, pacing semantics, relay limits, and operational misuse guidance\n- add the isolated H-16P confirmation-fold benchmark and informational CI tracking",
+          "timestamp": "2026-07-15T21:59:13-07:00",
+          "tree_id": "c204cc3f833af6399f8fda189fb0fc0723fa555c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/bc8bdc792bc4d7bcb9f7f0a0afa0a30578bd3303"
+        },
+        "date": 1784178493304,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 127195,
+            "range": "± 2461",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 47136,
+            "range": "± 908",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1245,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1558,
+            "range": "± 109",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3136,
+            "range": "± 212",
             "unit": "ns/iter"
           }
         ]
