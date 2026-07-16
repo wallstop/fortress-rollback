@@ -14,6 +14,9 @@ pub struct ConnectionStatus {
     /// Whether this peer has disconnected.
     pub disconnected: bool,
     /// The last frame received from this peer.
+    ///
+    /// The bounded wire decoder accepts [`Frame::NULL`] or any non-negative
+    /// frame through `i32::MAX`, matching [`Frame`]'s complete value domain.
     pub last_frame: Frame,
     /// Per-slot connection-status **generation**, incremented by the owning peer
     /// on every `connected <-> disconnected` transition (a drop or a
@@ -197,6 +200,10 @@ pub(crate) struct QualityReply {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct ChecksumReport {
     pub checksum: u128,
+    /// The confirmed frame whose state produced `checksum`.
+    ///
+    /// The bounded wire decoder accepts every non-negative [`Frame`] through
+    /// `i32::MAX`; unlike status and floor fields, the null sentinel is invalid.
     pub frame: Frame,
 }
 
@@ -255,6 +262,9 @@ pub(crate) struct FloorReply {
     /// The originating [`FloorRequest::round_seq`], echoed verbatim.
     pub round_seq: u32,
     /// The relay's per-slot pessimistic floors at reply time (handle-indexed).
+    ///
+    /// Each bounded wire value may be [`Frame::NULL`] or any non-negative frame
+    /// through `i32::MAX`, matching [`Frame`]'s complete value domain.
     pub floors: Vec<Frame>,
 }
 
