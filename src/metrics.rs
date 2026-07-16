@@ -7,7 +7,7 @@
 //! them is deterministic and WASM-safe.
 //!
 //! [`PeerMetrics`] is the per-peer analogue, returned by
-//! [`P2PSession::peer_metrics`]: wire-exact byte and packet counters, a
+//! [`P2PSession::peer_metrics`]: wire-format byte and protocol-message counters, a
 //! per-[`MessageKind`] breakdown of traffic in each direction, input-compression
 //! totals, and a few instantaneous connection gauges for one remote endpoint.
 //!
@@ -868,13 +868,17 @@ impl Serialize for MessageKindCounts {
 /// [`average_frame_advantage`](Self::average_frame_advantage) — are
 /// **instantaneous gauges** sampled at the moment of the snapshot.
 ///
-/// Byte counts are wire-exact (the same arithmetic as the bandwidth accounting
-/// behind [`NetworkStats`](crate::NetworkStats)) and count payload bytes only —
-/// they exclude the per-packet UDP/IP header that
+/// Byte counts are exact encoded Fortress payload sizes (the same arithmetic as
+/// the demand estimate behind [`NetworkStats`](crate::NetworkStats)) and exclude
+/// the per-packet UDP/IP header that
 /// [`NetworkStats::kbps_sent`](crate::NetworkStats::kbps_sent) folds into its
 /// estimate. Sent bytes/packets are tallied when a message is enqueued for the
-/// socket (mirroring the pre-existing `bytes_sent` accounting), received ones
-/// when a message is delivered to the endpoint.
+/// protocol's socket-bound queue (mirroring the pre-existing `bytes_sent`
+/// accounting), received ones when a message is delivered to the endpoint. A
+/// queued message can still be discarded during shutdown, and the counter does
+/// not mean a socket adapter, downstream WebSocket, relay, or network accepted
+/// it. Compare sent counter deltas with adapter service rate, queue depth, and
+/// oldest-message age when diagnosing transport backpressure.
 ///
 /// # Per-endpoint attribution
 ///
@@ -903,16 +907,18 @@ impl Serialize for MessageKindCounts {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[must_use = "PeerMetrics should be inspected after being queried"]
 pub struct PeerMetrics {
-    /// Total wire-exact payload bytes sent to this peer over the life of the
-    /// endpoint (payload only; see the type docs).
+    /// Total encoded payload bytes enqueued for eventual socket submission to
+    /// this peer over the endpoint's life (payload only; see the type docs).
     pub bytes_sent: u64,
 
-    /// Total wire-exact payload bytes received from this peer, counted for every
-    /// message delivered to the endpoint before any protocol-state filtering.
+    /// Total exact encoded Fortress payload bytes received from this peer,
+    /// counted for every message delivered to the endpoint before any
+    /// protocol-state filtering.
     pub bytes_received: u64,
 
-    /// Total packets (messages) sent to this peer — equal to the
-    /// [`messages_sent_by_kind`](Self::messages_sent_by_kind) total.
+    /// Total packets (messages) enqueued for eventual socket submission to this
+    /// peer — equal to the [`messages_sent_by_kind`](Self::messages_sent_by_kind)
+    /// total. This does not measure socket or downstream transport acceptance.
     pub packets_sent: u64,
 
     /// Total packets (messages) received from this peer — equal to the
@@ -933,7 +939,7 @@ pub struct PeerMetrics {
     /// input is sent).
     pub input_bytes_pre_compression: u64,
 
-    /// Cumulative encoded input bytes placed on the wire in `Input` packets
+    /// Cumulative encoded input bytes placed in socket-bound `Input` packets
     /// **after** delta/RLE compression.
     pub input_bytes_post_compression: u64,
 

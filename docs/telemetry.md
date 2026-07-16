@@ -170,7 +170,7 @@ impl SessionTelemetry for MetricsTelemetry {
 
 `P2PSession::metrics()` returns an always-on `SessionMetrics` snapshot. It complements the
 callback API with cumulative counters and high-water marks that remain available without a
-telemetry observer. `peer_metrics(handle)` returns wire-exact traffic and gauges for
+telemetry observer. `peer_metrics(handle)` returns encoded protocol counters and gauges for
 one remote player or spectator. Both snapshots are cheap to copy and support JSON serialization
 with the `json` feature.
 
@@ -189,10 +189,12 @@ with the `json` feature.
 | `portability_risk_messages_sent` | Messages at or above the conservative 1,200-byte path budget |
 | `fragmentation_risk_messages_sent` | Messages at or above the common 1,472-byte IPv4/UDP payload ceiling |
 
-`PeerMetrics::bytes_sent` and `bytes_received` are exact Fortress wire payload sizes. They exclude
+`PeerMetrics::bytes_sent` and `bytes_received` are exact encoded Fortress payload sizes. Sent
+values count protocol enqueue demand rather than observed transport throughput. Both exclude
 IP/UDP headers. `NetworkStats::kbps_sent` uses those serialized sizes plus an estimated header and
-reports decimal kilobits per second. Its ping and latest remote frame-advantage gauges refresh on
-the configured `ProtocolConfig::quality_report_interval` (200 ms by default). The rolling-average
+reports UDP-equivalent offered demand in decimal kilobits per second, not adapter acceptance or
+observed transport throughput. Its ping and latest remote frame-advantage gauges refresh on the
+configured `ProtocolConfig::quality_report_interval` (200 ms by default). The rolling-average
 gauge advances when a local input is successfully queued, using that latest remote sample.
 `P2PSession` takes the maximum `average_frame_advantage` across connected endpoints when deciding
 whether to emit a wait recommendation.

@@ -545,11 +545,11 @@ fn session_metrics_are_wired_across_smoke_fleet() {
 
 /// M2 §5.3 prep: the mesh runner now folds each peer's per-remote
 /// [`PeerMetrics`](fortress_rollback::PeerMetrics) into a per-player
-/// `PeerWireTotals` — the bandwidth ledger the baseline sweep consumes. This
+/// `PeerWireTotals` — the protocol-cost ledger the baseline sweep consumes. This
 /// asserts, per peer, the by-kind/packet identities that hold by construction
-/// (the aggregation preserves them), and mesh-wide that real wire traffic
-/// flowed — exercising `P2PSession::peer_metrics` end-to-end under randomized
-/// simulation, not just the direct-call unit tests.
+/// (the aggregation preserves them), and mesh-wide that encoded enqueue demand
+/// and endpoint delivery were recorded — exercising `P2PSession::peer_metrics`
+/// end-to-end under randomized simulation, not just the direct-call unit tests.
 #[test]
 fn peer_wire_metrics_are_wired_across_smoke_fleet() {
     use fortress_rollback::MessageKind;
@@ -586,16 +586,16 @@ fn peer_wire_metrics_are_wired_across_smoke_fleet() {
                     "received by-kind total != packets_received — {}",
                     ctx()
                 );
-                // Every peer in a live mesh both puts bytes on and takes bytes
-                // off the wire.
+                // Every peer in a live mesh both enqueues encoded output and
+                // receives encoded input at its protocol endpoint.
                 assert!(
                     w.packets_sent > 0 && w.bytes_sent > 0,
-                    "no outbound wire traffic — {}",
+                    "no encoded protocol enqueue demand — {}",
                     ctx()
                 );
                 assert!(
                     w.packets_received > 0 && w.bytes_received > 0,
-                    "no inbound wire traffic — {}",
+                    "no encoded protocol delivery — {}",
                     ctx()
                 );
                 // The gameplay stream rides Input packets in both directions —
@@ -619,7 +619,10 @@ fn peer_wire_metrics_are_wired_across_smoke_fleet() {
         }
     }
 
-    assert!(total_bytes_sent > 0, "fleet put no bytes on the wire");
+    assert!(
+        total_bytes_sent > 0,
+        "fleet recorded no encoded protocol enqueue demand"
+    );
     assert!(total_input_msgs > 0, "fleet sent no Input packets");
     // The input-compression hook is wired on the send path: both pre- and
     // post-compression byte totals are recorded for the gameplay stream.

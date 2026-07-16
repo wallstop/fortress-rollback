@@ -1,16 +1,17 @@
-//! M2 §5.3 baseline sweep: deterministic, virtual-time bandwidth/rollback
+//! M2 §5.3 baseline sweep: deterministic, virtual-time protocol-cost/rollback
 //! measurement over a controlled loss × RTT × jitter grid.
 //!
 //! Unlike the fleet (which layers randomized storyline faults to *find* bugs),
 //! the sweep holds each cell's link conditions constant to *measure* steady-state
-//! cost: per-player wire bandwidth, rollback rate/depth, confirmation lag, and
-//! pacing pressure (stalls / wait-recommendations). Every cell is a thin wrapper
-//! over the mesh runner ([`run`]) with a uniform per-link [`LinkPolicy`], so the
-//! output is a pure function of `(seed, cell params)` — zero runner noise.
+//! cost: per-player encoded payload and protocol-message enqueue demand,
+//! rollback rate/depth, confirmation lag, and pacing pressure (stalls /
+//! wait-recommendations). Every cell is a thin wrapper over the mesh runner
+//! ([`run`]) with a uniform per-link [`LinkPolicy`], so the output is a pure
+//! function of `(seed, cell params)` — zero runner noise.
 //!
 //! One [`CellReport`] is produced per cell; the PR gate ([`sweep_pr_gate`])
 //! checks a handful of representative cells for the load-bearing invariant
-//! (`desync_incidents == 0`), liveness, and non-zero bandwidth, and that a cell
+//! (`desync_incidents == 0`), liveness, and non-zero protocol demand, and that a cell
 //! is bit-for-bit reproducible. `FORTRESS_SWEEP_OUT`, if set, receives the
 //! reports as JSON Lines for offline analysis.
 //!
@@ -131,10 +132,15 @@ pub struct CellReport {
     pub seed: u64,
     /// Lowest final confirmed frame across peers (liveness floor).
     pub min_final_confirmed: i32,
-    /// Mean per-player payload bytes sent per virtual second (pre-header). Each
-    /// player's figure is summed across its `n_players - 1` remote links, so this
-    /// grows ~linearly with mesh size — it is per-player, not per-link.
+    /// Mean per-player encoded payload bytes enqueued per virtual second
+    /// (pre-network-header). Each player's figure is summed across its
+    /// `n_players - 1` remote links, so this grows ~linearly with mesh size — it
+    /// is per-player, not per-link or observed transport throughput.
     pub bytes_sent_per_player_per_sec: f64,
+    /// Mean Fortress protocol messages enqueued per player per virtual second.
+    /// This measures offered demand before socket flushing, not downstream
+    /// adapter or transport service.
+    pub protocol_messages_enqueued_per_player_per_sec: f64,
     /// Mean per-player pre/post-compression input bytes per virtual second.
     pub input_bytes_pre_compression_per_player_per_sec: f64,
     pub input_bytes_post_compression_per_player_per_sec: f64,
@@ -246,6 +252,11 @@ fn run_cell_with_input<I: SimInput>(params: CellParams) -> CellReport {
         .iter()
         .map(|w| w.bytes_sent)
         .fold(0u64, u64::saturating_add);
+    let total_packets_sent: u64 = report
+        .peer_wire
+        .iter()
+        .map(|w| w.packets_sent)
+        .fold(0u64, u64::saturating_add);
     let total_input_pre: u64 = report
         .peer_wire
         .iter()
@@ -324,7 +335,7 @@ fn run_cell_with_input<I: SimInput>(params: CellParams) -> CellReport {
         .unwrap_or(i32::MIN);
 
     CellReport {
-        schema: 2,
+        schema: 3,
         label: format!("{}-{}b", params.label, I::WIDTH_BYTES),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         git_sha: std::env::var("FORTRESS_SWEEP_GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
@@ -337,6 +348,11 @@ fn run_cell_with_input<I: SimInput>(params: CellParams) -> CellReport {
         seed: params.seed,
         min_final_confirmed,
         bytes_sent_per_player_per_sec: sum_to_rate_per_sec(total_bytes_sent, n, virtual_secs),
+        protocol_messages_enqueued_per_player_per_sec: sum_to_rate_per_sec(
+            total_packets_sent,
+            n,
+            virtual_secs,
+        ),
         input_bytes_pre_compression_per_player_per_sec: sum_to_rate_per_sec(
             total_input_pre,
             n,
@@ -378,7 +394,7 @@ fn write_jsonl(reports: &[CellReport]) {
     file.write_all(buf.as_bytes()).expect("sweep output writes");
 }
 
-/// A checked-in baseline snapshot of one gate cell — the M5 wire-cost ledger.
+/// A checked-in baseline snapshot of one gate cell — the protocol-cost ledger.
 /// Stores the cell's identity plus its measured cost/behavior metrics; the
 /// volatile `version`/`git_sha` and the per-kind map are intentionally omitted
 /// so the JSON stays a stable, reviewable diff. Regenerate with
@@ -393,6 +409,7 @@ struct BaselineCell {
     input_width_bytes: u32,
     steps: u32,
     bytes_sent_per_player_per_sec: f64,
+    protocol_messages_enqueued_per_player_per_sec: f64,
     input_bytes_post_compression_per_player_per_sec: f64,
     rollbacks_per_100_frames: f64,
     rollback_depth_p50: u32,
@@ -416,6 +433,8 @@ impl BaselineCell {
             input_width_bytes: r.input_width_bytes,
             steps: r.steps,
             bytes_sent_per_player_per_sec: r.bytes_sent_per_player_per_sec,
+            protocol_messages_enqueued_per_player_per_sec: r
+                .protocol_messages_enqueued_per_player_per_sec,
             input_bytes_post_compression_per_player_per_sec: r
                 .input_bytes_post_compression_per_player_per_sec,
             rollbacks_per_100_frames: r.rollbacks_per_100_frames,
@@ -434,7 +453,7 @@ impl BaselineCell {
 /// Path to the checked-in gate baseline.
 fn baseline_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/simulation/baselines/sweep-v2.json")
+        .join("tests/simulation/baselines/sweep-v3.json")
 }
 
 /// Asserts `actual` is within `rel` (relative) plus `abs_floor` (absolute) of
@@ -527,6 +546,14 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             "bytes_sent_per_player_per_sec",
             cur.bytes_sent_per_player_per_sec,
             base.bytes_sent_per_player_per_sec,
+            0.05,
+            0.5,
+        );
+        assert_close(
+            &cur.label,
+            "protocol_messages_enqueued_per_player_per_sec",
+            cur.protocol_messages_enqueued_per_player_per_sec,
+            base.protocol_messages_enqueued_per_player_per_sec,
             0.05,
             0.5,
         );
@@ -760,10 +787,16 @@ fn assert_cell_health(r: &CellReport) {
         "cell made too little progress — {}",
         ctx()
     );
-    // Real wire traffic flowed, and the per-kind map covers every kind.
+    // Real encoded protocol demand was recorded, and the per-kind map covers
+    // every kind.
     assert!(
         r.bytes_sent_per_player_per_sec > 0.0,
-        "no bandwidth recorded — {}",
+        "no encoded payload demand recorded — {}",
+        ctx()
+    );
+    assert!(
+        r.protocol_messages_enqueued_per_player_per_sec > 0.0,
+        "no protocol message demand recorded — {}",
         ctx()
     );
     assert_eq!(

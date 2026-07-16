@@ -1522,7 +1522,7 @@ for handle in session.remote_player_handles() {
 | ---------------------- | --------------- | --------------------------------------------------------------- |
 | `ping`                 | `u128`          | Round-trip time in milliseconds                                 |
 | `send_queue_len`       | `usize`         | Number of unacknowledged packets (connection quality indicator) |
-| `kbps_sent`            | `usize`         | Estimated bandwidth usage in kilobits per second                |
+| `kbps_sent`            | `usize`         | UDP-equivalent offered demand in kilobits per second            |
 | `local_frames_behind`  | `i32`           | How many frames behind the local client is compared to remote   |
 | `remote_frames_behind` | `i32`           | How many frames behind the remote client is compared to local   |
 | `last_compared_frame`  | `Option<Frame>` | Most recent frame where checksums were compared                 |
@@ -1538,7 +1538,7 @@ fn display_network_debug(session: &P2PSession<MyConfig>) {
         if let Ok(stats) = session.network_stats(handle) {
             println!("Player {:?}:", handle);
             println!("  RTT: {}ms", stats.ping);
-            println!("  Bandwidth: {} kbps", stats.kbps_sent);
+            println!("  Offered demand: {} kbps UDP-equivalent", stats.kbps_sent);
             println!("  Send queue: {} packets", stats.send_queue_len);
             println!("  Frame diff: local {} behind, remote {} behind",
                      stats.local_frames_behind, stats.remote_frames_behind);
@@ -2455,6 +2455,14 @@ delay a message in its local sender path; QUIC datagrams, in particular, remain 
 sender stack's congestion controller. Do not block awaiting delivery. The protocol repeatedly
 includes its unacknowledged input window, so a later packet repairs ordinary local or network
 omissions.
+
+One session update can submit several messages for input, acknowledgements, and control traffic.
+An asynchronous adapter must return promptly and either admit a bounded burst or apply an explicit
+freshness-preserving batch/drop policy. Do not wait for a socket-wide outbound buffer to become
+empty after every message: that creates stop-and-wait behavior and can make service slower than
+Fortress's offered packet rate. `PeerMetrics::packets_sent` counts messages entering Fortress's
+socket-bound protocol queue; compare its rate with adapter admission/service counters, queue depth,
+and oldest-message age.
 
 The built-in protocol applies two inclusive size diagnostics. Messages at least 1,200 bytes
 increment `PeerMetrics::portability_risk_messages_sent` and trigger one warning per endpoint era;

@@ -7553,7 +7553,8 @@ impl<T: Config> P2PSession<T> {
     /// Returns a [`NetworkStats`] struct that gives information about the quality of the network connection.
     ///
     /// The returned struct includes:
-    /// - Network quality metrics (ping, send queue length, bandwidth)
+    /// - Network quality metrics (ping, send queue length, and UDP-equivalent
+    ///   offered demand)
     /// - Frame advantage/disadvantage relative to the peer
     /// - **Checksum comparison data** for desync detection
     ///
@@ -7604,12 +7605,14 @@ impl<T: Config> P2PSession<T> {
     /// Returns a [`PeerMetrics`] snapshot of protocol-level traffic and
     /// connection metrics for one remote peer or spectator.
     ///
-    /// This complements [`network_stats`](Self::network_stats) with wire-exact,
-    /// always-on per-peer counters: cumulative bytes and packets sent/received, a
-    /// per-[`MessageKind`](crate::metrics::MessageKind) breakdown of traffic in
-    /// each direction, input pre/post-compression totals, plus a few
-    /// instantaneous connection gauges. Unlike `network_stats`, it does not
-    /// require the peer to be synchronized — the counters are valid from
+    /// This complements [`network_stats`](Self::network_stats) with always-on
+    /// per-peer counters: exact encoded bytes and protocol messages enqueued for
+    /// socket submission or delivered from the endpoint, a
+    /// per-[`MessageKind`](crate::metrics::MessageKind) breakdown in each
+    /// direction, input pre/post-compression totals, plus a few instantaneous
+    /// connection gauges. Sent counters are offered demand, not downstream
+    /// adapter or network acceptance. Unlike `network_stats`, this method does
+    /// not require the peer to be synchronized — the counters are valid from
     /// endpoint construction.
     ///
     /// # Errors
