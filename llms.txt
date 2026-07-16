@@ -44,7 +44,7 @@ Key information:
 - [Formal Spec](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/formal-spec.md): Core formal specifications in TLA+ notation
 - [Determinism Model](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/determinism-model.md): Determinism requirements and verification approach
 - [Spec Divergences](https://github.com/wallstop/fortress-rollback/blob/main/docs/specs/spec-divergences.md): Documented differences between formal spec and implementation
-- [LLM Development Context](https://github.com/wallstop/fortress-rollback/blob/main/.llm/context.md): Comprehensive development guide for AI assistants
+- [Agent Skills Development Context](https://github.com/wallstop/fortress-rollback/blob/main/.agents/skills/fortress-development/SKILL.md): Comprehensive development guide for agentic coding assistants
 
 ## Historical
 

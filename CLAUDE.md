@@ -1,8 +1,8 @@
 # Claude Instructions for Fortress Rollback
 
-**Read and follow [`.llm/context.md`](.llm/context.md)** — the canonical source of truth for all project context, development policies, testing guidelines, and coding standards. You must read it before making any changes.
+**Read and follow [`.agents/skills/fortress-development/SKILL.md`](.agents/skills/fortress-development/SKILL.md)** — the canonical source of truth for all project context, development policies, testing guidelines, and coding standards. You must read it before making any changes.
 
-When clarifying questions are needed, follow [`.llm/templates/ask-user-question.md`](.llm/templates/ask-user-question.md) to keep questions concise and actionable.
+When clarifying questions are needed, follow [`.agents/skills/fortress-development/assets/ask-user-question.md`](.agents/skills/fortress-development/assets/ask-user-question.md) to keep questions concise and actionable.
 
 ## Git and GitHub Tool Preference
 

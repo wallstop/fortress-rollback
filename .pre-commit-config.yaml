@@ -233,26 +233,20 @@ repos:
         pass_filenames: false
         always_run: true
 
-      - id: llm-line-limit
-        name: check .llm file line limit (300)
-        entry: python scripts/hooks/check-llm-line-limit.py
+      - id: validate-agent-skills
+        name: validate Agent Skills open format
+        entry: python scripts/hooks/validate-agent-skills.py
         language: python
+        additional_dependencies: [pyyaml==6.0.3]
         pass_filenames: false
-        files: '^\.llm/.*\.md$'
+        files: '^\.agents/skills/.*$'
 
-      - id: regenerate-skills-index
-        name: regenerate skills index
-        entry: python scripts/hooks/regenerate-skills-index.py
-        language: python
-        pass_filenames: false
-        files: '^\.llm/skills/.*\.md$'
-
-      - id: check-llm-skills
-        name: check .llm/skills code quality
-        entry: bash scripts/docs/check-llm-skills.sh
+      - id: check-agent-skills
+        name: check Agent Skills code examples
+        entry: bash scripts/docs/check-agent-skills.sh
         language: system
         pass_filenames: false
-        files: '^\.llm/.*\.md$'
+        files: '^\.agents/skills/.*\.md$'
         stages: [manual]
 
       # ══════════════════════════════════════════════════════════════════════

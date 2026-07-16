@@ -8,7 +8,7 @@ permissions:
   contents: read
   pull-requests: read
 
-# Dependabot auto-merge policy is defined in .llm/context.md and locked in by
+# Dependabot auto-merge policy is defined in .agents/skills/fortress-development/SKILL.md and locked in by
 # scripts/tests/test_enable_dependabot_automerge.py. Do NOT add a one-shot
 # bypass, do NOT wrap the script in a sub-job-level `timeout`, and do NOT
 # lower `timeout-minutes` below 32 — the polling loop needs ~32 minutes

@@ -40,7 +40,7 @@
 // Direct peer config tests that use significant packet loss or burst loss must
 // set an explicit robust sync preset.
 //
-// See: `.llm/skills/testing/network-chaos-testing.md` for chaos testing best practices
+// See: `.agents/skills/network-chaos-testing/SKILL.md` for chaos testing best practices
 // =============================================================================
 
 // Allow test-specific patterns that are appropriate for test code

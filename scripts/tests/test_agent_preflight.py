@@ -31,9 +31,8 @@ def _ids(checks: list[PlannedCheck]) -> list[str]:
 
 CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("sync-version-check", "README.md"),
-    ("llm-line-limit", ".llm/context.md"),
-    ("llm-skills-quality", ".llm/context.md"),
-    ("skills-index-check", ".llm/skills/workflows/dev-pipeline.md"),
+    ("validate-agent-skills", ".agents/skills/fortress-development/SKILL.md"),
+    ("agent-skills-quality", ".agents/skills/dev-pipeline/SKILL.md"),
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
     ("wire-golden-immutable", "src/network/wire_golden_v1.rs"),
@@ -103,22 +102,12 @@ def test_plan_checks_python_file_triggers_tomllib_and_typos_only() -> None:
     assert _ids(checks) == ["tomllib-fallback", "typos"]
 
 
-def test_plan_checks_runs_llm_checks_for_llm_markdown() -> None:
-    checks = plan_checks({".llm/context.md"})
+def test_plan_checks_runs_agent_skill_checks_for_skill_markdown() -> None:
+    checks = plan_checks({".agents/skills/fortress-development/SKILL.md"})
     check_ids = _ids(checks)
     assert "sync-version-check" in check_ids
-    assert "llm-line-limit" in check_ids
-    assert "llm-skills-quality" in check_ids
-    assert "skills-index-check" not in check_ids
-
-
-def test_plan_checks_runs_skills_index_check_for_skill_files() -> None:
-    checks = plan_checks({".llm/skills/workflows/dev-pipeline.md"})
-    check_ids = _ids(checks)
-    assert "sync-version-check" in check_ids
-    assert "llm-line-limit" in check_ids
-    assert "llm-skills-quality" in check_ids
-    assert "skills-index-check" in check_ids
+    assert "validate-agent-skills" in check_ids
+    assert "agent-skills-quality" in check_ids
 
 
 def test_plan_checks_runs_actionlint_for_workflow_files() -> None:
@@ -131,7 +120,6 @@ def test_plan_checks_runs_actionlint_for_workflow_files() -> None:
     assert actionlint_check.command == [
         PYTHON_EXECUTABLE,
         "scripts/hooks/actionlint.py",
-        ".github/workflows/ci.yml",
     ]
 
 
@@ -151,28 +139,80 @@ def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> Non
     assert timing_check.fix_hint is not None
 
 
-def test_plan_checks_passes_multiple_workflow_files_to_actionlint() -> None:
+def test_plan_checks_lints_complete_workflow_set_for_multiple_changes() -> None:
     checks = plan_checks({".github/workflows/ci.yml", ".github/workflows/lint.yaml"})
     actionlint_check = next(check for check in checks if check.check_id == "actionlint")
     assert actionlint_check.command == [
         PYTHON_EXECUTABLE,
         "scripts/hooks/actionlint.py",
-        ".github/workflows/ci.yml",
-        ".github/workflows/lint.yaml",
     ]
+
+
+def test_plan_checks_does_not_pass_deleted_workflow_path_to_actionlint() -> None:
+    checks = plan_checks(
+        {".github/workflows/deleted.yml"},
+        existing_files=set(),
+    )
+    actionlint_check = next(check for check in checks if check.check_id == "actionlint")
+    assert actionlint_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/actionlint.py",
+    ]
+
+
+def test_plan_checks_does_not_pass_deleted_python_paths_to_scanner() -> None:
+    checks = plan_checks(
+        {"scripts/hooks/deleted.py"},
+        existing_files=set(),
+    )
+
+    assert "tomllib-fallback" not in _ids(checks)
+    assert _ids(checks) == ["typos"]
+
+
+def test_plan_checks_does_not_pass_deleted_rust_paths_to_scanners() -> None:
+    checks = plan_checks(
+        {"src/deleted.rs"},
+        existing_files=set(),
+    )
+
+    advance_check = next(
+        check for check in checks if check.check_id == "advance-frame-error-handling"
+    )
+    unbounded_check = next(
+        check for check in checks if check.check_id == "unbounded-alloc"
+    )
+    assert advance_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-advance-frame-error-handling.py",
+    ]
+    assert unbounded_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-unbounded-alloc.py",
+    ]
+
+
+def test_plan_checks_validates_collection_when_agent_skill_is_deleted() -> None:
+    checks = plan_checks(
+        {".agents/skills/deleted/SKILL.md"},
+        existing_files=set(),
+    )
+
+    assert "validate-agent-skills" in _ids(checks)
+    assert "agent-skills-quality" in _ids(checks)
 
 
 def test_normalize_paths_preserves_leading_dot_segments() -> None:
     normalized = normalize_paths(
         {
             "./docs/index.md",
-            ".llm/context.md",
+            ".agents/skills/fortress-development/SKILL.md",
             ".github/workflows/ci.yml",
         }
     )
 
     assert "docs/index.md" in normalized
-    assert ".llm/context.md" in normalized
+    assert ".agents/skills/fortress-development/SKILL.md" in normalized
     assert ".github/workflows/ci.yml" in normalized
 
 
@@ -360,8 +400,13 @@ def test_main_falls_back_to_all_checks_when_git_detection_fails(
 
     observed: dict[str, bool] = {}
 
-    def fake_plan(_changed_files: set[str], run_all: bool = False) -> list[PlannedCheck]:
+    def fake_plan(
+        _changed_files: set[str],
+        run_all: bool = False,
+        existing_files: set[str] | None = None,
+    ) -> list[PlannedCheck]:
         observed["run_all"] = run_all
+        assert existing_files == set()
         return []
 
     monkeypatch.setattr(agent_preflight, "collect_changed_files", raise_detection_error)
@@ -440,7 +485,7 @@ def test_execute_checks_manual_fix_label_for_non_autofixable_checks(
     capsys,
 ) -> None:
     check = PlannedCheck(
-        check_id="llm-line-limit",
+        check_id="validate-agent-skills",
         description="llm limit",
         command=["tool", "check"],
         fix_hint="split long file",

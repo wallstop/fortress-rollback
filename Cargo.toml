@@ -39,7 +39,7 @@ exclude = [
     ".claude/",
     ".cursorrules",
     ".dockerignore",
-    ".llm/",
+    ".agents/",
     ".markdown-link-check.json",
     ".markdownlint.json",
     ".pre-commit-config.yaml",

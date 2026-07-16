@@ -100,7 +100,7 @@ def test_added_plus_non_breaking_changed_fails(
     assert ":12: offending Changed entry:" not in err
     # Remedy and reference are present.
     assert "remedy:" in err
-    assert ".llm/context.md" in err
+    assert ".agents/skills/fortress-development/SKILL.md" in err
 
 
 def test_no_unreleased_section_passes(tmp_path: Path) -> None:

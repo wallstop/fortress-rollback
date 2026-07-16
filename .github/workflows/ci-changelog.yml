@@ -72,7 +72,7 @@ jobs:
             // Patterns for files that don't require changelog updates
             const internalPatterns = [
               /^\.github\//,           // CI workflows and GitHub config
-              /^\.llm\//,              // LLM context files
+              /^\.agents\/skills\//,   // Agent Skills files
               /^progress\//,           // Session progress files
               /^scripts\//,            // Internal scripts
               /^docker\//,             // Docker config
