@@ -78,14 +78,9 @@ def is_sync_version_surface_file(path: str) -> bool:
     return Path(path).suffix in SYNC_VERSION_EXTENSIONS
 
 
-def is_llm_markdown_file(path: str) -> bool:
-    """Return True for markdown files under .llm/."""
-    return path.startswith(".llm/") and path.endswith(".md")
-
-
-def is_llm_skill_markdown_file(path: str) -> bool:
-    """Return True for markdown files under .llm/skills/."""
-    return path.startswith(".llm/skills/") and path.endswith(".md")
+def is_agent_skill_markdown_file(path: str) -> bool:
+    """Return True for Markdown files in the project Agent Skills tree."""
+    return path.startswith(".agents/skills/") and path.endswith(".md")
 
 
 def is_workflow_file(path: str) -> bool:
@@ -213,19 +208,27 @@ def collect_changed_files(repo_root: Path) -> set[str]:
     return normalize_paths(changed)
 
 
-def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedCheck]:
-    """Select checks based on changed files."""
+def plan_checks(
+    changed_files: set[str],
+    run_all: bool = False,
+    existing_files: set[str] | None = None,
+) -> list[PlannedCheck]:
+    """Select checks, passing only extant changed files to path-based tools."""
     checks: list[PlannedCheck] = []
+    extant_files = changed_files if existing_files is None else existing_files
 
-    llm_files = sorted(path for path in changed_files if is_llm_markdown_file(path))
-    llm_skill_files = sorted(
-        path for path in changed_files if is_llm_skill_markdown_file(path)
+    agent_skill_changed = any(
+        is_agent_skill_markdown_file(path) for path in changed_files
     )
-    workflow_files = sorted(path for path in changed_files if is_workflow_file(path))
-    docs_files = sorted(path for path in changed_files if is_docs_markdown_file(path))
-    rust_files = sorted(path for path in changed_files if is_rust_file(path))
+    workflow_changed = any(is_workflow_file(path) for path in changed_files)
+    docs_files = sorted(path for path in extant_files if is_docs_markdown_file(path))
+    rust_changed = any(is_rust_file(path) for path in changed_files)
+    rust_files = sorted(path for path in extant_files if is_rust_file(path))
+    rust_source_changed = any(
+        is_rust_source_file(path) for path in changed_files
+    )
     rust_source_files = sorted(
-        path for path in changed_files if is_rust_source_file(path)
+        path for path in extant_files if is_rust_source_file(path)
     )
     link_check_changed = any(
         is_link_check_surface_file(path) for path in changed_files
@@ -240,7 +243,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
         is_network_timing_surface_file(path) for path in changed_files
     )
     changelog_changed = any(is_changelog_file(path) for path in changed_files)
-    python_files = sorted(path for path in changed_files if is_python_file(path))
+    python_files = sorted(path for path in extant_files if is_python_file(path))
     spellcheck_changed = any(
         is_spellcheck_surface_file(path) for path in changed_files
     )
@@ -256,47 +259,30 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
             )
         )
 
-    if run_all or llm_files:
+    if run_all or agent_skill_changed:
         checks.append(
             PlannedCheck(
-                check_id="llm-line-limit",
-                description="validate .llm markdown line limits",
-                command=[PYTHON_EXECUTABLE, "scripts/hooks/check-llm-line-limit.py"],
-                fix_hint="Split large .llm files so each stays within the line limit.",
+                check_id="validate-agent-skills",
+                description="validate the Agent Skills open-format contract",
+                command=[PYTHON_EXECUTABLE, "scripts/hooks/validate-agent-skills.py"],
+                fix_hint="Fix the reported SKILL.md metadata or layout violation.",
             )
         )
         checks.append(
             PlannedCheck(
-                check_id="llm-skills-quality",
-                description="validate .llm skills quality constraints",
-                command=["bash", "scripts/docs/check-llm-skills.sh"],
-                fix_hint="Fix reported .llm formatting or code-sample issues.",
-            )
-        )
-
-    if run_all or llm_skill_files:
-        checks.append(
-            PlannedCheck(
-                check_id="skills-index-check",
-                description="ensure .llm skills index is synchronized",
-                command=[
-                    PYTHON_EXECUTABLE,
-                    "scripts/hooks/regenerate-skills-index.py",
-                    "--check",
-                ],
-                fix_hint="Run 'python scripts/hooks/regenerate-skills-index.py' and commit the regenerated index.",
-                fix_command=[PYTHON_EXECUTABLE, "scripts/hooks/regenerate-skills-index.py"],
+                check_id="agent-skills-quality",
+                description="validate Agent Skills code-example quality constraints",
+                command=["bash", "scripts/docs/check-agent-skills.sh"],
+                fix_hint="Fix the reported Agent Skills code-sample issue.",
             )
         )
 
-    if run_all or workflow_files:
-        actionlint_command = [PYTHON_EXECUTABLE, "scripts/hooks/actionlint.py"]
-        actionlint_command.extend(workflow_files)
+    if run_all or workflow_changed:
         checks.append(
             PlannedCheck(
                 check_id="actionlint",
-                description="validate modified GitHub Actions workflows",
-                command=actionlint_command,
+                description="validate GitHub Actions workflows",
+                command=[PYTHON_EXECUTABLE, "scripts/hooks/actionlint.py"],
                 fix_hint="Fix workflow syntax and actionlint diagnostics.",
             )
         )
@@ -307,7 +293,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 check_id="changelog-unreleased-rule",
                 description=(
                     "enforce the [Unreleased] code rule in CHANGELOG.md "
-                    "(see .llm/context.md \"Unreleased code rule\")"
+                    "(see .agents/skills/fortress-development/SKILL.md \"Unreleased code rule\")"
                 ),
                 command=[
                     PYTHON_EXECUTABLE,
@@ -318,7 +304,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "'### Fixed' under [Unreleased] must be folded into the "
                     "matching '### Added' entry. Only '**Breaking:**' entries "
                     "(for already-released types) belong in '### Changed'. "
-                    "See .llm/skills/publishing-organization/changelog.md."
+                    "See .agents/skills/changelog/SKILL.md."
                 ),
                 # Semantic merge -- no safe auto-fix.
                 fix_command=None,
@@ -350,7 +336,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                 check_id="vale-advisory",
                 description=(
                     "advisory prose linting for docs/ (always passes; "
-                    "see .llm/skills/workflows/user-facing-docs.md "
+                    "see .agents/skills/user-facing-docs/SKILL.md "
                     "'Prose Conventions')"
                 ),
                 command=vale_command,
@@ -372,7 +358,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "validate local file/anchor links and rustdoc intra-doc "
                     "links, including text-vs-target mismatches where backticked "
                     "link text names an item the crate-internal path does not "
-                    "(see .llm/skills/ci-cd-tooling/doc-code-sync.md)"
+                    "(see .agents/skills/doc-code-sync/SKILL.md)"
                 ),
                 # check-links.py scans the whole tree (no per-file args), matching
                 # the `pass_filenames: false` `check-links` pre-commit hook.
@@ -449,7 +435,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
             )
         )
 
-    if run_all or rust_files:
+    if run_all or rust_changed:
         command = [
             PYTHON_EXECUTABLE,
             "scripts/hooks/check-advance-frame-error-handling.py",
@@ -470,7 +456,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
             )
         )
 
-    if run_all or rust_source_files:
+    if run_all or rust_source_changed:
         unbounded_alloc_command = [
             PYTHON_EXECUTABLE,
             "scripts/hooks/check-unbounded-alloc.py",
@@ -483,7 +469,7 @@ def plan_checks(changed_files: set[str], run_all: bool = False) -> list[PlannedC
                     "require an '// alloc-bound:' justification on "
                     "dynamically-sized allocations and a '// reserve-in-loop:' "
                     "justification on per-iteration fallible reserves in src/ "
-                    "(see .llm/skills/rust-language/defensive-programming.md)"
+                    "(see .agents/skills/defensive-programming/SKILL.md)"
                 ),
                 command=unbounded_alloc_command,
                 fix_hint=(
@@ -673,7 +659,14 @@ def main(argv: list[str] | None = None) -> int:
         print("No changed files detected; skipping preflight checks.")
         return 0
 
-    planned_checks = plan_checks(changed_files, run_all=args.all)
+    existing_files = {
+        path for path in changed_files if (repo_root / path).is_file()
+    }
+    planned_checks = plan_checks(
+        changed_files,
+        run_all=args.all,
+        existing_files=existing_files,
+    )
 
     if args.verbose:
         if changed_files:

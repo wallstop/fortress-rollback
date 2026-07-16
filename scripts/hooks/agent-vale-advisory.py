@@ -33,7 +33,7 @@ from pathlib import Path
 # Path to the prose-conventions cheat-sheet (relative to repo root).
 # Kept as a string here so this script has no dependency on the file
 # existing at runtime -- it is only used in the printed hint.
-_PROSE_REFERENCE = ".llm/skills/workflows/user-facing-docs.md \"Prose Conventions\""
+_PROSE_REFERENCE = ".agents/skills/user-facing-docs/SKILL.md \"Prose Conventions\""
 
 
 # Vale `--output=line` format: ``path:line:col:RuleID:Severity:Message``.

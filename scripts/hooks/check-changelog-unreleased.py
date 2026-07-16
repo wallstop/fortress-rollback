@@ -18,8 +18,8 @@ marker is the author's self-declaration, mirroring '**Breaking:**').
 Each accepted entry is surfaced with a non-failing 'note:' line on stdout
 for reviewer visibility; the exit code is unaffected.
 
-See `.llm/context.md` (section "Changelog Policy", "Unreleased code rule")
-and `.llm/skills/publishing-organization/changelog.md` for the canonical
+See `.agents/skills/fortress-development/SKILL.md` (section "Changelog Policy", "Unreleased code rule")
+and `.agents/skills/changelog/SKILL.md` for the canonical
 specification.
 
 Assumes a single `## [Unreleased]` section; multiple Unreleased headers in
@@ -40,8 +40,8 @@ from pathlib import Path
 _SUMMARY_WIDTH = 80
 
 _RULE_REFERENCE = (
-    ".llm/context.md \"Unreleased code rule\" / "
-    ".llm/skills/publishing-organization/changelog.md"
+    ".agents/skills/fortress-development/SKILL.md \"Unreleased code rule\" / "
+    ".agents/skills/changelog/SKILL.md"
 )
 
 

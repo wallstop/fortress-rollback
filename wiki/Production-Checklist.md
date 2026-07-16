@@ -120,7 +120,7 @@ The [threat model](Threat-Model) records the complete single-dishonest-peer capa
 
 ## Release evidence
 
-- Run the repository's full local validation command from `.llm/context.md`.
+- Run the repository's full local validation command from `.agents/skills/fortress-development/SKILL.md`.
 - Record the supported player tier honestly. The deterministic simulation fleet validates
   full-mesh correctness and liveness through `N=16` under documented profiles, but that is not a
   production endorsement. Full meshes above eight players exceed attested industry practice;

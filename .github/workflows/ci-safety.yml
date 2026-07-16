@@ -512,7 +512,7 @@ jobs:
               echo "| \`todo!()\` | Implement the functionality or return error |"
               echo "| \`vec[i]\` | \`vec.get(i)\`, \`vec.first()\`, \`vec.last()\` |"
               echo ""
-              echo "See \`.llm/context.md\` 'Defensive Programming' section for detailed patterns."
+              echo "See \`.agents/skills/fortress-development/SKILL.md\` 'Defensive Programming' section for detailed patterns."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

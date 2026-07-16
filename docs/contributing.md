@@ -83,7 +83,7 @@ pre-commit run --hook-stage manual rustdoc-links --all-files
 pre-commit run --hook-stage manual check-links --all-files
 pre-commit run --hook-stage manual cargo-hack-check --all-files
 pre-commit run --hook-stage manual sync-wiki --all-files
-pre-commit run --hook-stage manual check-llm-skills --all-files
+pre-commit run --hook-stage manual check-agent-skills --all-files
 pre-commit run --hook-stage manual check-shell-portability --all-files
 pre-commit run --hook-stage manual sync-version-check --all-files
 pre-commit run --hook-stage manual check-doc-claims --all-files

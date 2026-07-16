@@ -26,4 +26,4 @@ examples/
 
 # Other
 .github/
-.llm/
+.agents/

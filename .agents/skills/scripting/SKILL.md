@@ -1,0 +1,303 @@
+---
+name: scripting
+description: "Scripting Guide (Python & Shell) guidance for Fortress Rollback. Use when Writing build scripts, Python helpers, shell portability."
+---
+
+# Scripting Guide (Python & Shell)
+
+## Python Script Rules
+
+### Required Practices
+
+- **Remove unused imports** -- linters flag as errors
+- **Prefix unused variables** with `_` (e.g., `_link_text = match.group(1)`)
+- **Type hints** on all function signatures
+- **`pathlib.Path`** for all path operations (not `os.path`)
+- **f-strings** for formatting (not `%` or `.format()`)
+- **Meaningful exit codes** via `sys.exit(main())`
+- **Errors to stderr**: `print("ERROR: ...", file=sys.stderr)`
+- **No `shell=True`** in subprocess calls
+- **UTF-8 for both stdout and stderr** -- When wrapping `sys.stdout` with `io.TextIOWrapper` for UTF-8, always wrap `sys.stderr` too (Check 8 enforces this)
+
+### Error Reporting in Lint Scripts
+
+Lint hooks must use `{path}:{line_number}: {message}` format so editors
+hyperlink to the correct location. When a violation spans multiple lines
+(e.g., attribute on line A, target on line B), the `path:line` prefix
+must point to the **violation site** (where the fix is needed), not the
+trigger/detection line. Mention the trigger line in the message body:
+
+```python
+# Multi-line: prefix → async fn line, body → attribute line
+f"{path}:{fn_line}: #[track_caller] (line {attr_line}) on async fn ..."
+```
+
+Never prefix issue lines with leading whitespace in `main()` summary
+output -- leading spaces break the `path:line:` prefix that editors rely
+on for hyperlinking.  This includes both f-string whitespace (e.g.,
+`print(f"  {issue}")`) and string concatenation (e.g.,
+`print("  " + f"{prefix} {issue}")`).  **Check 1b** in
+`check-hook-output-format.py` detects the concatenation variant.
+
+For file-level errors where no specific line number exists (e.g., cannot
+read file), use a synthetic line number `:0:` to maintain the format:
+
+```python
+# File-level error: use :0: as synthetic line number
+f"{path}:0: cannot read file: {exc}"
+```
+
+### Path Handling in Lint Output
+
+**Rule**: All user-facing path output must use **relative paths** (relative to
+project root). Absolute paths break `{path}:{line}:` parsing on Windows
+(drive letter colon `C:\...:0:`).
+
+**glob/rglob/iterdir scripts** produce absolute `Path` objects -- convert first:
+
+```python
+try:
+    rel = filepath.relative_to(project_root)
+except ValueError:
+    rel = filepath
+```
+
+**argv-based scripts** receive string paths -- use a `_display_path()` helper:
+
+```python
+def _display_path(filepath: str | Path) -> str:
+    """Convert a file path to a relative display path."""
+    try:
+        return str(Path(filepath).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(filepath)
+```
+
+**Check 6** in `check-hook-output-format.py` flags raw path variables (like
+`{filepath}`) in f-string error output when the file uses glob/rglob/iterdir.
+Safe variable names that pass Check 6: `rel`, `display_path`, `rel_path`,
+`relative`, `rel_index`. Function calls like `{_display_path(filepath)}`
+also pass because the regex only matches simple `{var_name}:` patterns.
+
+### Exception Handling
+
+#### read\_text() Exceptions
+
+`path.read_text(encoding="utf-8")` can raise both `OSError` (missing/locked file)
+and `UnicodeDecodeError` (non-UTF-8 bytes). Always catch both:
+
+```python
+# WRONG                              # CORRECT
+except OSError as e:                  except (OSError, UnicodeDecodeError) as e:
+    ...                                   ...
+```
+
+Alternative: `errors="replace"` for best-effort reading (grep-like hooks).
+
+#### Read Error Propagation
+
+Hooks that cannot read a file must **fail**, not silently pass.
+
+For **list-returning** hooks (`check_file() -> list[str]`), return the error
+in the issues list so `main()` sees it. Do **not** also print -- `main()`
+prints returned issues, so printing here causes duplicate output:
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    return [f"{path}:0: cannot read file: {exc}"]  # NOT return [] -- that silently passes
+```
+
+For **fixer hooks** (`fix_file() -> bool | None`), print to stderr and return
+`None` to signal an error (distinct from `False` = no change needed):
+
+```python
+except (OSError, UnicodeDecodeError) as exc:
+    print(f"{path}:0: cannot read file: {exc}", file=sys.stderr)
+    return None  # NOT return False -- that silently passes
+```
+
+#### Parse Error Line Numbers
+
+Extract the real line number from parse exceptions instead of hard-coding `:1:`:
+
+```python
+line = getattr(e, "lineno", 1) or 1  # fallback to 1
+print(f"{path}:{line}: TOML error: {e}", file=sys.stderr)
+```
+
+Line number attributes: `tomllib.TOMLDecodeError.lineno`,
+`json.JSONDecodeError.lineno`, `yaml.YAMLError.problem_mark.line` (0-based).
+
+#### Fixer Hook Pattern
+
+Fixer hooks modify files in-place. They must use `bool | None` return type
+so `main()` can distinguish "unchanged" from "error":
+
+```python
+def fix_file(filepath: str) -> bool | None:
+    """Fix something. Returns True if modified, False if unchanged, None on error."""
+    try:
+        content = Path(filepath).read_bytes()
+        # ... fix logic ...
+        return True  # or False
+    except OSError as exc:  # Use (OSError, UnicodeDecodeError) for read_text()
+        print(f"{filepath}:0: cannot read file: {exc}", file=sys.stderr)
+        return None  # NOT False -- False means "no change", None means "error"
+
+def main() -> int:
+    had_error = False
+    modified = False
+    for filepath in sys.argv[1:]:
+        result = fix_file(filepath)
+        if result is True:
+            modified = True
+        elif result is None:
+            had_error = True
+    return 1 if modified or had_error else 0
+```
+
+### Regex Patterns for f-string Detection
+
+Handle both quote styles and the `r` prefix (the only prefix that combines with `f`):
+
+```python
+# WRONG: only matches double-quoted f-strings
+re.search(r'f"\{(\w+)\}: cannot read', line)
+
+# CORRECT: both quotes + optional r prefix (rf/fr)
+re.search(r'''r?fr?["']\{(\w+)\}:\s+cannot\s+read''', line)
+```
+
+The `check-hook-output-format.py` pre-commit hook enforces these patterns.
+
+### Subprocess Best Practices
+
+```python
+# For linters: let output flow to terminal (no capture needed)
+result = subprocess.run(["actionlint"], check=False)
+return result.returncode
+
+# Validate tool existence, then run without redundant handlers
+def run_tool(tool_name: str, args: list[str]) -> int:
+    tool_path = shutil.which(tool_name)
+    if tool_path is None:
+        print(f"Warning: {tool_name} not found, skipping", file=sys.stderr)
+        return 0
+    result = subprocess.run([tool_path, *args], check=False)
+    return result.returncode
+```
+
+Do NOT catch `FileNotFoundError` after `shutil.which()` already validated existence.
+
+### Script Template
+
+```python
+#!/usr/bin/env python3
+"""Brief description. Works on Windows, macOS, and Linux."""
+import io
+import sys
+from pathlib import Path
+
+# Wrap BOTH streams for cross-platform Unicode (CP1252 safety)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+def get_project_root() -> Path:
+    return Path(__file__).parent.parent.resolve()
+
+def main() -> int:
+    project_root = get_project_root()
+    if not (project_root / "Cargo.toml").exists():
+        print("ERROR: Must run from project root", file=sys.stderr)
+        return 1
+    # Logic here...
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+### Test Naming
+
+| Function | Test Class |
+|----------|------------|
+| `convert_admonitions` | `TestConvertAdmonitions` |
+| `path_to_wiki_name` | `TestPathToWikiName` |
+
+Methods: `test_empty_input_returns_empty_string`, `test_unclosed_div_is_handled_gracefully`
+
+### Common Linter Codes
+
+| Code | Issue | Fix |
+|------|-------|-----|
+| F401 | Unused import | Remove it |
+| F841 | Unused variable | Prefix with `_` |
+| E722 | Bare `except:` | Specify exception type |
+
+---
+
+## Shell Script Portability
+
+### Portable Patterns Quick Reference
+
+| Task | Non-Portable | Portable |
+|------|-------------|----------|
+| In-place sed | `sed -i 's/.../g' f` | `sed -i.bak 's/.../g' f && rm f.bak` |
+| Newlines | `echo -e "a\nb"` | `printf "a\nb\n"` |
+| Pattern match | `[[ $x == p* ]]` | `case "$x" in p*) ... ;; esac` |
+| Source script | `source file` | `. file` |
+| Process sub | `diff <(a) <(b)` | Use temp files |
+| grep file filter | `grep -rl 'pat' --include='*.rs'` | `find . -name '*.rs' -exec grep -l 'pat' {} +` |
+| Perl regex | `grep -oP 'fn \K\w+'` | `grep -o 'fn [a-zA-Z_]*' \| sed 's/^fn //'` |
+| Timeout | `timeout 300 cmd` | Wrapper with `timeout`/`gtimeout` fallback |
+| Canonical path | `readlink -f path` | `realpath path` |
+| Binary path | `/bin/sed 's/.../g'` | `sed 's/.../g'` (rely on PATH) |
+
+### GNU grep Extensions (Avoid)
+
+`--include`, `--exclude`, `-P` (Perl regex) are GNU-only. Use `find` + `grep` and `sed` instead.
+
+### Best Practices
+
+- `set -euo pipefail` at the top of every script
+- `command -v tool >/dev/null 2>&1 || { echo "Error" >&2; exit 1; }` for deps
+- Always quote variables: `rm "$file"`
+- Use `$()` not backticks
+- Platform detection: `case "$(uname -s)" in Linux*) ... ;; Darwin*) ... ;; esac`
+- GitHub Actions: always set `shell: bash` and `set -euo pipefail`
+
+---
+
+## Dockerfile Best Practices
+
+### Quick Reference
+
+| Task | Wrong | Right |
+|------|-------|-------|
+| pip install | `pip install pkg` | `pip install --no-cache-dir pkg` |
+| Silent detection | `command -v tool >&2` | `command -v tool >/dev/null 2>&1` |
+| Multi-tool install | `pip install a b c` | Install individually with fallback |
+| Layer cleanup | Separate `RUN rm ...` | Clean up in the same `RUN` layer |
+
+### Key Rules
+
+- `pip install --no-cache-dir` always (no wheel cache in image layers)
+- `command -v tool >/dev/null 2>&1` for silent detection (not `>&2`)
+- Install optional tools individually with `|| echo "failed"` fallback
+- Guard `.bashrc` aliases/`eval` with `command -v` when tools are optional
+- Clean up caches in the **same** `RUN` layer (otherwise bytes persist)
+
+```dockerfile
+# CORRECT: single layer, cleanup at the end
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+```bash
+# Guard optional tool aliases (check-dockerfile enforces unguarded eval)
+command -v eza >/dev/null 2>&1 && alias ls="eza"
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
+```
+
+Mandatory apt-installed tools do not need guards.

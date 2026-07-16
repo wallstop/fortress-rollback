@@ -939,7 +939,7 @@ These specifications model the key algorithms from:
 
 ## Best Practices for TLA+ Development
 
-> **See also:** [/.llm/skills/formal-verification/verification.md](../../.llm/skills/formal-verification/verification.md) — TLA+ and Z3 verification guide
+> **See also:** [/.agents/skills/verification/SKILL.md](../../.agents/skills/verification/SKILL.md) — TLA+ and Z3 verification guide
 
 ### Specification Design
 

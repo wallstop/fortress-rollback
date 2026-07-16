@@ -1,0 +1,37 @@
+name: Agent Skills Lint
+
+on:
+  push:
+    paths:
+      - '.agents/skills/**'
+      - 'scripts/hooks/validate-agent-skills.py'
+      - 'scripts/docs/check-agent-skills.sh'
+      - 'scripts/tests/test_validate_agent_skills.py'
+      - 'scripts/tests/test_check_agent_skills.sh'
+  pull_request:
+    paths:
+      - '.agents/skills/**'
+      - 'scripts/hooks/validate-agent-skills.py'
+      - 'scripts/docs/check-agent-skills.sh'
+      - 'scripts/tests/test_validate_agent_skills.py'
+      - 'scripts/tests/test_check_agent_skills.sh'
+
+jobs:
+  agent-skills-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Install test and validator dependencies
+        run: pip install --disable-pip-version-check --no-cache-dir pytest pyyaml==6.0.3
+      - name: Test Agent Skills validators
+        run: |
+          python -m pytest scripts/tests/test_validate_agent_skills.py -q
+          bash scripts/tests/test_check_agent_skills.sh
+      - name: Validate Agent Skills open format
+        run: python scripts/hooks/validate-agent-skills.py
+      - name: Check skill code example quality
+        run: bash scripts/docs/check-agent-skills.sh

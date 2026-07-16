@@ -13,7 +13,7 @@ DEVCONTAINER_JSON = REPO_ROOT / ".devcontainer" / "devcontainer.json"
 BOOTSTRAP_SCRIPT = REPO_ROOT / ".devcontainer" / "codex-bootstrap.sh"
 TLA_VERSION_FILE = REPO_ROOT / ".tla-tools-version"
 GITHUB_TOOL_GUIDANCE_FILES = (
-    REPO_ROOT / ".llm" / "context.md",
+    REPO_ROOT / ".agents" / "skills" / "fortress-development" / "SKILL.md",
     REPO_ROOT / "AGENTS.md",
     REPO_ROOT / ".github" / "copilot-instructions.md",
     REPO_ROOT / "CLAUDE.md",
