@@ -622,8 +622,9 @@ impl<T: Config> SpectatorSession<T> {
         self.metrics
     }
 
-    /// Returns a wire-exact [`PeerMetrics`] snapshot for the host at
-    /// `host_index`, or `None` if the index is out of range.
+    /// Returns an exact encoded [`PeerMetrics`] snapshot for the host at
+    /// `host_index`, or `None` if the index is out of range. Sent counters are
+    /// protocol enqueue demand, not socket-adapter or network acceptance.
     ///
     /// Hosts are addressed by dense index below
     /// [`num_hosts()`](Self::num_hosts),
