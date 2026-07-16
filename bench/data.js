@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784223604876,
+  "lastUpdate": 1784230911622,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "505d631f9357be3964f3ae24b076043957c7bac0",
-          "message": "Doc Upgrades + Release Target Fixes (#184)\n\n## Description\n\nThis PR finalizes the `0.9.0` release-targeted docs and release tooling\nupdates.\n\nUser-facing highlights:\n\n- Refreshes project positioning text across README/docs/wiki\n(correctness-first messaging, formal-verification emphasis, and updated\nsupport/contact guidance).\n- Consolidates and promotes unreleased changelog content into a dated\n`0.9.0` section so release notes are emitted from the right section.\n- Fixes release automation so publish now also stamps the changelog date\nand syncs bug-report version options on the default branch.\n- Adds guardrail tests to prevent future regressions in changelog\nconsolidation, issue-template version wiring, sync-version stamping\nbehavior, and unaffiliated community links.\n\nCompatibility note:\n\n- No runtime/protocol behavior changes are introduced in this branch.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `scripts/tests/test_changelog_release_consolidation.py`\n- `scripts/tests/test_issue_template_versions_wiring.py`\n- `scripts/tests/test_no_unaffiliated_links.py`\n- `scripts/tests/test_sync_version.py` (new `--stamp-release-date`\ncoverage)\n\n**Manual testing performed:**\n\n- Verified release-workflow wiring updates in\n`.github/workflows/publish.yml` and\n`.github/workflows/sync-issue-template.yml`.\n- Verified changelog/version consistency updates in `CHANGELOG.md` and\n`scripts/sync-version.sh`.\n\n## Related Issues\n\n- Addresses release-note and issue-template sync regressions (issues\n#167 and #168 references in tests/comments).\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Low Risk**\n> Changes are documentation, changelog, CI/config, and release scripts\nonly; no production Rust networking or protocol code is modified.\n> \n> **Overview**\n> **Release and changelog:** In-flight `0.9.0` content is moved out of\n`## [Unreleased]` into a dated `## [0.9.0]` section (placeholder date\nfor dev; real date stamped at publish). Several `### Fixed` items drop\nthe `**Pre-existing:**` prefix.\n> \n> **Publish automation:** After `cargo publish` and the GitHub release,\n`publish.yml` now commits to the default branch (with retries): stamps\nthe changelog header via `sync-version.sh --stamp-release-date\n--release-version`, and refreshes the bug-report version dropdown via\n`sync-issue-template-versions.py --ensure-version`—because token-created\nreleases do not fire the standalone `release` workflow.\n> \n> **Tooling & CI:** `sync-version.sh` gains release stamping and fails\non unresolved metadata; legacy `pre-commit` refuses version bumps with a\ndirty tree; Cargo registry settings (`http.multiplexing = false`,\n`net.retry = 10`) and narrower `.cargo/config.toml` path filters are\nadded across workflows; semver failure messaging distinguishes API\nbreaks from crates.io flakes.\n> \n> **Docs & guardrails:** README, `lib.rs`, and docs/wiki shift to\ncorrectness-first positioning, drop the GGPO Discord link, and point\nsupport to GitHub Issues. New tests cover changelog consolidation,\npublish wiring, sync stamping, and unaffiliated links.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na573327cd38cb66610a1e1f7efcd4709276d1406. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-22T14:37:57-07:00",
-          "tree_id": "19091f35b85839ed1d5f098ce22ef49c3a75b0fc",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/505d631f9357be3964f3ae24b076043957c7bac0"
-        },
-        "date": 1782164545194,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 119,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 165,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 472,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 727,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1089,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 118527,
-            "range": "± 258",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 47890,
-            "range": "± 433",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5627,6 +5501,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3148,
             "range": "± 224",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f19f384aac0547eb63eb991e9510da7301c175f0",
+          "message": "Document D12 frame-domain boundary (#247)\n\n## Summary\n\n- document the exact bounded-wire domain for D12 frame fields\n- pin `i32::MAX` compatibility across connection status, floor replies,\nand checksum reports\n- retain the existing rejection of invalid negative frames without\nintroducing a narrower protocol cap\n\n## Why\n\n`Frame` deliberately supports the complete non-negative `i32` range. D12\nhad already closed the negative-domain validation gap, but its\nupper-bound disposition remained implicit. An arbitrary smaller cap\nwould reject values supported by the public type and change protocol\ncompatibility.\n\n## Impact\n\nThis is a test and documentation clarification only. It changes no wire\nbytes, production branches, allocation bounds, public API, or\ndeterministic behavior.\n\n## Validation\n\n- negative-control mutation proved the new regression is load-bearing\n- `cargo nextest run --no-capture` — 2,875 passed\n- `cargo nextest run --features hot-join --no-capture` — 3,131 passed\n- `cargo test --doc -- --nocapture` — 160 passed\n- Clippy, rustdoc, rustfmt, markdownlint, and `git diff --check`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- main-thread adversarial review found no high- or critical-severity\nissue\n\n## Changelog\n\nNo changelog entry: no public or user-observable behavior changes.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Documentation and test-only changes with no modifications to decode\nlogic or wire compatibility.\n> \n> **Overview**\n> Clarifies the **D12** bounded-wire contract for frame fields: decoders\naccept the full public [`Frame`] domain (non-negative values through\n`i32::MAX`, plus [`Frame::NULL`] only where semantics allow), with\n**no** narrower protocol cap in `read_frame`.\n> \n> Docs on `read_frame` and on `ConnectionStatus::last_frame`,\n`ChecksumReport::frame`, and `FloorReply::floors` spell out that rule\nand note that checksum frames reject the null sentinel.\n> \n> Adds **`decode_message_accepts_maximum_frame_for_all_d12_fields`**,\nwhich round-trips `i32::MAX` through Input connect status, floor\nreplies, and checksum reports via `decode_message`. **No wire format,\ndecode branches, or public API behavior change**—only documentation and\na regression test.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n576855c235f49d59851fe0232268d51a2c368165. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-16T12:33:09-07:00",
+          "tree_id": "54ef2ed57ca64f5e186a414062d14298f5cc0511",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f19f384aac0547eb63eb991e9510da7301c175f0"
+        },
+        "date": 1784230911129,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 139595,
+            "range": "± 8053",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 50218,
+            "range": "± 255",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1604,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3127,
+            "range": "± 239",
             "unit": "ns/iter"
           }
         ]
