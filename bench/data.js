@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784178494898,
+  "lastUpdate": 1784223604876,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "f9d3b6b636f486e75f65ec026f7d0fd36e362c67",
-          "message": "bugfix: Stability in 3+ Player Sessions + Docs Overhaul (#183)\n\n## Description\n\nThis PR improves stability and convergence in 3+ player sessions,\nespecially during peer drops and relay-heavy topologies.\n\nUser-facing highlights:\n\n- Fixes silent divergence after staggered peer-drop detection by\nenforcing a safer shared freeze barrier.\n- Adds a floor-round (`FloorRequest` / `FloorReply`) so survivors do not\nconfirm past relay-agreed freeze floors.\n- Prevents mesh-agreement stalls by sending periodic connect-status\nnudges while waiting for drop agreement.\n- Fixes prediction-window behavior so rollback starts at the first\nmissing frame, avoiding missed resimulation windows.\n- Restores per-session violation observer routing across `P2PSession`,\n`SyncTestSession`, and `SpectatorSession`.\n- Expands formal verification coverage with new TLA+ n-peer\nfreeze-convergence specs/configs.\n- Updates user and architecture docs to match the new behavior.\n\nCompatibility note:\n\n- Protocol wire format now includes new floor-round messages, so peers\nin the same live session must run compatible builds.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [x] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [ ] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [ ] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [ ] I have added tests that prove my fix is effective or my feature\nworks\n- [ ] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [ ] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [ ] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `tests/sessions/peer_drop.rs` (multi-peer drop convergence and relay\nscenarios)\n\n**Manual testing performed:**\n\n- Added and checked TLA+ n-peer serve/freeze convergence models under\n`specs/tla/NPeerServeFreezeConvergence*`.\n- Verified spec registration updates in `specs/tla/README.md` and script\ncoverage.\n\n## Related Issues\n\n- (None linked)\n\n---\n\n<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> Changes touch core rollback networking (confirmed-frame barrier, wire\nprotocol, input-queue prediction) where bugs cause silent desync or\nsession stalls; violation routing is lower risk but spans all session\nentry points.\n> \n> **Overview**\n> **3+ player stability** tightens how survivors agree on freeze floors\nand confirmed frames after staggered drops: `confirmed_frame()` follows\nmesh gossip (with connect-status nudges when idle), prediction episodes\nstart at the **first missing** input frame (avoiding silent divergence),\nand the protocol adds **`FloorRequest` / `FloorReply`** for relay floor\nrounds — **peers in one session need compatible builds**.\n> \n> **Violation observers** now match the documented API:\n`push_violation_observer` / `ScopedObserverGuard` make\n`report_violation!` use a thread-local stack; P2P, sync-test, and\nspectator sessions install the configured observer on public entry\npoints (including construction), with tests that fail if scoping is\nremoved.\n> \n> **Verification & tooling:** new **`NPeerServeFreezeConvergence.tla`**\n(and GateBlind/Witness cfgs) models the hot-join serve gate vs\nper-survivor freeze convergence; `verify-tla.sh` registers it;\nintegration tests gain **`create_filtered_channel_mesh`** for N≥5\nasymmetric loss; docs/specs/changelog/README align with hot-join,\nepochs, and structured errors; minor CI/doc fixes (lychee URL pattern,\nshared `CARGO_TARGET_DIR` in markdown-code tests).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n49406793792a777a3e3a16306d399a32790b4fb5. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-06-21T19:37:19-07:00",
-          "tree_id": "cd5478a0078233f09ddad5dfc2f748893c978087",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/f9d3b6b636f486e75f65ec026f7d0fd36e362c67"
-        },
-        "date": 1782096137363,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 118,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 165,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 465,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 735,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1082,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 114080,
-            "range": "± 5451",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 47751,
-            "range": "± 277",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5699,6 +5573,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3136,
             "range": "± 212",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "42935ad490c85e49f3654aa66a02ce49cd0cca70",
+          "message": "Migrate project guidance to Agent Skills (#246)\n\n## Summary\n\n- migrate the canonical development guide and 48 focused guides from\n`.llm/` into discoverable open-format skills under `.agents/skills/`\n- move the question template and design history into skill-local\n`assets/` and `references/`\n- replace the bespoke index/line-limit tooling with fail-closed YAML\nvalidation, code-example checks, pre-commit integration, and dedicated\nCI regression coverage\n- update every live repository reference, packaging exclusion, workflow,\nhook, and test for the new layout\n- make agent preflight robust to deleted workflow, Python, and Rust\npaths found during adversarial review\n\n## Why\n\nThe legacy `.llm/` hierarchy required custom discovery and index\nmaintenance and was not directly discoverable by Agent Skills-compatible\ntools. The new layout uses the portable `SKILL.md` contract while\npreserving the repository's complete policy and specialist guidance.\n\n## Validation\n\n- 49 skills and 51 skill Markdown resources validated\n- 1,670 script tests passed\n- 2,874 default Rust tests passed; 74 skipped\n- 3,130 hot-join Rust tests passed; 75 skipped\n- strict all-target Clippy with `tokio,json` passed\n- warning-denied workspace docs and formatting passed\n- agent preflight, actionlint, YAML, markdownlint, links, wiki\nconsistency, shell portability, typos, package contents, and hook-output\nchecks passed\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Large documentation and CI migration with broad reference updates;\nincorrect links or preflight gaps could misroute agents or miss\nvalidation until CI runs, but no production Rust networking logic\nchanges.\n> \n> **Overview**\n> This PR **replaces the `.llm/` tree** with **49 discoverable skills**\nunder `.agents/skills/`, each as `SKILL.md` with YAML frontmatter\n(`name`, `description`, etc.). The former canonical `context.md` becomes\n**`fortress-development`**; workflow guides link sibling skills via\n`../other-skill/SKILL.md` instead of category paths. **Design history**\nmoves into `design-decisions/references/`; the **ask-user template**\ninto `fortress-development/assets/`.\n> \n> **Tooling and gates change:** `check-llm-line-limit`,\n`regenerate-skills-index`, and `ci-llm-lint.yml` are **removed** in\nfavor of `validate-agent-skills.py`, `check-agent-skills.sh` (500-line\ncap on skill markdown), pre-commit hooks, and **`ci-agent-skills.yml`**.\nThe validator **fails if `.llm/` still exists** and enforces open-format\nrules (directory name match, required fields, duplicate YAML keys).\n> \n> **References and packaging** now point agents and humans at\n`.agents/skills/fortress-development/SKILL.md` (`AGENTS.md`,\n`CLAUDE.md`, `.cursorrules`, Copilot, `llms.txt`, changelog internal\npatterns, `Cargo.toml`/`.dockerignore` excludes). **Agent preflight**\nruns agent-skill checks instead of LLM line/index checks, lints **all\nworkflows** when any workflow changes (not only changed paths), and\n**skips deleted paths** when passing file lists to scanners.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n755ee4fc5c22c4d95c3a4a81cb620af51593e03d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-16T10:30:37-07:00",
+          "tree_id": "7a1bf63087abb9c09ccdb290271ca74c53470e8b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/42935ad490c85e49f3654aa66a02ce49cd0cca70"
+        },
+        "date": 1784223603253,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 143845,
+            "range": "± 4218",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 48211,
+            "range": "± 1734",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 105",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3148,
+            "range": "± 224",
             "unit": "ns/iter"
           }
         ]
