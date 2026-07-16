@@ -293,7 +293,7 @@ When spawning sub-agents or using Task tools: the sub-agent MUST run `cargo fmt`
 
 ### GitHub Access in Devcontainers
 
-When callable VS Code integrations are exposed, prefer the built-in Git extension for source control and GitHub Pull Requests and Issues (`GitHub.vscode-pull-request-github`) for GitHub work; UI presence alone is not callable access. Otherwise use local `git`, then the connected GitHub app, then authenticated `gh` when required. Do not treat `gh auth status` as a universal publish prerequisite: first check reads with `git ls-remote origin HEAD` and writes with `git push --dry-run origin HEAD:<branch>`; SSH usually uses VS Code-forwarded `SSH_AUTH_SOCK` and HTTPS its credential helper. An unavailable integration or unauthenticated `gh` is not blocking when another supported path covers the operation. Never print or persist credentials.
+Use callable VS Code integrations first: the built-in Git extension for source control and GitHub Pull Requests and Issues (`GitHub.vscode-pull-request-github`) for GitHub operations; UI presence alone is not callable access. If they cannot perform the operation, use local `git` for repository work and the connected GitHub connector/app for platform work. `gh` is an absolute fallback, allowed only when the VS Code connector, local Git, and connected GitHub connector/app are unavailable or incapable. `gh auth status` is not a prerequisite when another supported path exists: probe Git reads with `git ls-remote origin HEAD` and writes with `git push --dry-run origin HEAD:<branch>`; SSH usually uses VS Code-forwarded `SSH_AUTH_SOCK` and HTTPS its credential helper. Never print or persist credentials.
 
 ---
 
