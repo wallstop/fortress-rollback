@@ -495,6 +495,7 @@ let frame_duration = Duration::from_secs_f64(1.0 / FPS);
 
 let mut last_update = Instant::now();
 let mut accumulator = Duration::ZERO;
+let mut event_policy = EventPolicy::default();
 
 loop {
     // 1. Network polling (do this frequently)
@@ -502,7 +503,14 @@ loop {
 
     // 2. Handle events
     for event in session.events() {
-        handle_event(event);
+        handle_event(event, &mut event_policy);
+    }
+
+    if event_policy.match_quarantined {
+        render_quarantine_notice();
+        // Keep the transport alive only to continue polling and draining events.
+        std::thread::sleep(Duration::from_millis(1));
+        continue;
     }
 
     // 3. Fixed timestep accumulator
@@ -521,6 +529,13 @@ loop {
         accumulator -= adjusted_duration;
 
         if session.current_state() == SessionState::Running {
+            // Treat WaitRecommendation as bounded simulation backpressure.
+            if event_policy.recommended_skips > 0 {
+                event_policy.recommended_skips =
+                    event_policy.recommended_skips.saturating_sub(1);
+                continue;
+            }
+
             // Add input for all local players
             for handle in session.local_player_handles() {
                 let input = get_local_input(handle);
@@ -540,6 +555,10 @@ loop {
     std::thread::sleep(Duration::from_millis(1));
 }
 ```
+
+Quarantine stops authoritative simulation after a desync while the outer loop continues polling
+and draining events. A wait recommendation consumes only bounded simulation opportunities; it
+must not pause network polling or event draining.
 
 ### Important: Order Matters
 
@@ -740,7 +759,13 @@ Events notify you of network conditions:
 ```rust
 use fortress_rollback::FortressEvent;
 
-fn handle_event(event: FortressEvent<GameConfig>) {
+#[derive(Default)]
+struct EventPolicy {
+    recommended_skips: u32,
+    match_quarantined: bool,
+}
+
+fn handle_event(event: FortressEvent<GameConfig>, policy: &mut EventPolicy) {
     match event {
         FortressEvent::Synchronizing {
             addr,
@@ -782,7 +807,8 @@ fn handle_event(event: FortressEvent<GameConfig>) {
 
         FortressEvent::WaitRecommendation { skip_frames } => {
             println!("Recommendation: wait {} frames", skip_frames);
-            // Optionally slow down to let others catch up
+            // A fresh recommendation replaces any residual bounded simulation backpressure.
+            policy.recommended_skips = skip_frames;
         }
 
         FortressEvent::DesyncDetected {
@@ -795,7 +821,8 @@ fn handle_event(event: FortressEvent<GameConfig>) {
                 "DESYNC at frame {} with {}! Local: {}, Remote: {}",
                 frame, addr, local_checksum, remote_checksum
             );
-            // This is bad! Debug your determinism.
+            preserve_desync_evidence(frame, addr, local_checksum, remote_checksum);
+            policy.match_quarantined = true;
         }
 
         FortressEvent::SyncTimeout { addr, elapsed_ms } => {
@@ -944,7 +971,7 @@ Rollback networking works best under certain network conditions. Understanding t
 | -------------------- | ------------------------------------- | --------------------------------------- |
 | Packet loss >15%     | Frequent sync failures, desyncs       | Use wired connection, improve network   |
 | Jitter >50ms         | Prediction failures, stuttering       | QoS settings, reduce network congestion |
-| Asymmetric routes    | One player experiences more rollbacks | Cannot mitigate at application level    |
+| Asymmetric routes    | RTT/2 frame estimate may be biased     | Qualify both route orientations; bound pacing |
 | NAT traversal issues | Connection failures                   | Use STUN/TURN, port forwarding          |
 | Mobile networks      | High variability                      | WiFi recommended over cellular          |
 
@@ -2761,6 +2788,14 @@ for handle in session.local_player_handles() {
 
 ### Frame Pacing
 
+`frames_ahead()` is a signed local estimate: a positive value means the local session is ahead and
+should slow, while a negative value means the local session is behind. In a mesh it is the maximum
+across connected remote endpoints. It is advisory rather than an authoritative frame difference;
+the underlying remote-frame estimate assumes symmetric one-way delay (`RTT/2`), so asymmetric
+paths can bias either sign. Zero means no nonzero signed aggregate is currently visible at
+integer-frame precision; zero does not prove peer alignment. Prefer bounded slowdown or
+`WaitRecommendation` handling over automatically speeding up for every negative sample.
+
 Slow down when ahead to reduce rollbacks:
 
 ```rust
@@ -2769,8 +2804,6 @@ let frame_time = 1.0 / base_fps;
 
 let adjusted_time = if session.frames_ahead() > 2 {
     frame_time * 1.1 // Slow down 10%
-} else if session.frames_ahead() < -2 {
-    frame_time * 0.9 // Speed up 10% (be careful!)
 } else {
     frame_time
 };
@@ -3354,9 +3387,10 @@ match session.sync_health(peer_handle) {
         show_desync_error_to_user(frame);
         disconnect_and_return_to_menu();
 
-        // Strategy 2: Log and continue (debugging)
-        log::error!("Desync detected at frame {}", frame);
-        // Continue running to gather more diagnostic data
+        // Strategy 2: Run an isolated diagnostic reproduction.
+        // Preserve the live-match evidence and never resume its authoritative simulation.
+        preserve_desync_evidence(peer_handle, frame);
+        run_isolated_diagnostic_reproduction();
 
         // Strategy 3: Competitive anti-cheat
         report_to_server(peer_handle, frame);

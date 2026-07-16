@@ -45,7 +45,29 @@ cost before shipping them.
 | Typical Wi-Fi, RTT around 50 ms and ~1% loss | 2 | 8 | defaults / `TimeSyncConfig::smooth()` | Rollback p99 around 4 in the zero-delay baseline |
 | Mobile, RTT around 100 ms and ~5% loss | 3 | 12–15 | `SyncConfig::lossy()` | Baseline reaches the prediction limit and begins stalling |
 | Four-player mixed Wi-Fi | 3 | 12 | defaults / `TimeSyncConfig::smooth()` | Slowest link dominates; watch per-peer queues and lag |
+| Transparent relay fallback, +20–80 ms additional RTT | Re-measure | Re-measure | Start from the direct-path preset, then tune against total RTT | Research-derived sensitivity range, not a measured Fortress baseline; include relayed sessions in qualification |
 | Sustained 15% loss / 200 ms RTT | Do not silently accept | N/A | matchmaking warning or alternate topology | Default baseline spends much of the run stalled |
+
+The relay fallback row models a transport transparently relaying the same peer-to-peer datagrams;
+it is not the future server-star input topology. Its latency range is a research-derived
+sensitivity assumption. Measure the direct and relayed populations separately and select input
+delay and prediction windows from the relayed path's observed total RTT and receipt-gap tail.
+
+## Frame-advantage measurement limits
+
+Each endpoint estimates the remote frame by aging the last received frame with `RTT/2`. That
+assumes symmetric one-way delay: a ping-pong exchange cannot identify how the RTT divides between
+directions. Smoothing reduces short-term jitter, but it cannot remove a persistent asymmetric-path
+bias. This `RTT/2` packet-age estimate is separate from the controller's later division by two,
+which damps the two-sided frame-advantage signal.
+
+The bounded H-ASYM experiment compared constant 10 ms / 200 ms one-way delays against a matched
+105 ms / 105 ms control at equal 210 ms RTT (`N=2`, 900 steps). The asymmetric run ended seven
+visual frames apart and recorded stalls of 18 versus 11, but produced zero `WaitRecommendation`
+events or obeyed skips; endpoint gauges stayed in `[-1, +1]`, below the three-frame dead band.
+That row demonstrates transport/prediction asymmetry without the hypothesized chronic pacing
+correction. Jitter, `N>2`, and other asymmetry ratios remain outside that result, so qualify them
+separately instead of treating timestamp-based one-way estimation as implemented.
 
 ## Measurement loop
 

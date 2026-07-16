@@ -113,6 +113,11 @@ Alpha / experimental only.
 | Packet Loss | <15% | <5% |
 | Jitter | <50ms | <20ms |
 
+The deterministic simulation fleet validates full-mesh correctness and liveness through `N=16`
+under its documented profiles. That is not a production endorsement of a 16-player mesh: full
+meshes above eight players exceed attested industry practice. Measure your own game-state cost,
+input width, topology, bandwidth, stalls, and target hardware before choosing a supported tier.
+
 For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#network-requirements).
 
 ### Feature Flags

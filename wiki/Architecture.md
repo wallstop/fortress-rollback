@@ -610,7 +610,7 @@ The problem: `confirmed_frame()` reaching your target does NOT mean:
 use fortress_rollback::SyncHealth;
 
 // Continue until sync verified
-loop {
+'session: loop {
     session.poll_remote_clients();
 
     // Check if synchronized (sync_health only works for remote players)
@@ -628,7 +628,10 @@ loop {
     for handle in session.remote_player_handles() {
         if let Some(SyncHealth::DesyncDetected { frame, .. }) = session.sync_health(handle) {
             eprintln!("Desync detected at frame {}!", frame);
-            break;
+            preserve_desync_evidence(handle, frame, &state);
+            quarantine_match();
+            // Stop authoritative simulation; diagnostics use an isolated reproduction.
+            break 'session;
         }
     }
 
@@ -790,13 +793,26 @@ Tags 10–16 are reserved for join-lifecycle bodies (`JoinRequest`, `StateSnapsh
 
 ### Time Synchronization
 
-The `TimeSync` component tracks frame advantage:
+Each endpoint first records a raw packet-age estimate:
 
 ```
+estimated_remote_frame = last_received_remote_frame + frames(RTT/2)
 local_frame_advantage = estimated_remote_frame - local_frame
 ```
 
-If you're ahead of your opponent (positive advantage), you receive `WaitRecommendation` events suggesting you slow down.
+A positive raw value means the local endpoint is behind; a negative raw value means it is ahead.
+The peer sends its corresponding raw value in the quality reply. `TimeSync` then derives the
+signed local pacing estimate with a separate damping operation:
+
+```
+endpoint_pacing_estimate = (remote_advantage - local_advantage) / 2
+```
+
+The public `frames_ahead()` value is the maximum of those pacing estimates across connected
+remote endpoints. A positive public value means the local session is ahead and may produce a
+`WaitRecommendation` to slow or skip bounded simulation opportunities; a negative public value
+means it is behind. The packet-age `RTT/2` assumes symmetric one-way delay and is distinct from
+the controller's later division by two.
 
 ---
 

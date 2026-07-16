@@ -68,6 +68,33 @@ The [threat model](threat-model.md) records the complete single-dishonest-peer c
 - Treat `WaitRecommendation` as bounded backpressure: skip the requested number of application
   simulation opportunities while continuing to poll the network and drain events.
 
+## Application misuse surface
+
+- **U1 — ignored pacing:** handle every `WaitRecommendation` as bounded simulation backpressure.
+  Smear the skipped opportunities when appropriate, but keep polling the network and draining
+  events while the simulation slows.
+- **U2 — slow event draining:** drain `events()` after every network poll. Alert on the event-queue
+  high-water mark and every per-kind discard counter; the retained advisory history may be
+  incomplete after any discard.
+- **U3 — log-and-continue desync:** treat `DesyncDetected` as a reason to stop or quarantine the
+  affected match and preserve replay, input, checksum, build, and authenticated-packet evidence.
+  A checksum disagreement proves divergence, not state correctness or culprit identity; never
+  auto-eject solely from one peer's accusation.
+- **U4 — unfaithful sparse saves:** when using `SaveMode::Sparse`, exercise a save/load round-trip
+  in CI. Restore the recorded frame and assert canonical game state and checksum equality before
+  trusting later replay or desync evidence.
+- **U5 — inverted pacing direction:** a positive `frames_ahead()` means the local session is
+  estimated ahead and should slow; a negative value means it is estimated behind. The estimate is
+  advisory and assumes symmetric one-way delay, so do not turn a negative value into unbounded
+  catch-up.
+- **U6 — variable-width input:** require every input value to serialize to the same non-zero width
+  as `Config::Input::default()`. Fortress rejects the transmission and reports an Error violation
+  at send time, after a session may already be running; exercise representative values before
+  shipping.
+- **U7 — incomplete couch-co-op input:** call `add_local_input` for every local handle before each
+  `advance_frame`. `MissingLocalInput` currently does not name the omitted handles, so compare and
+  log `local_player_handles()` when diagnosing it.
+
 ## Capacity and frame lifetime
 
 - Size the event queue, input queue, checksum history, and prediction window from measured load.
@@ -94,6 +121,10 @@ The [threat model](threat-model.md) records the complete single-dishonest-peer c
 ## Release evidence
 
 - Run the repository's full local validation command from `.llm/context.md`.
+- Record the supported player tier honestly. The deterministic simulation fleet validates
+  full-mesh correctness and liveness through `N=16` under documented profiles, but that is not a
+  production endorsement. Full meshes above eight players exceed attested industry practice;
+  measure your own game, topology, input width, state cost, bandwidth, stalls, and hardware.
 - Run the deterministic baseline sweep and compare encoded byte/message demand, rollback depth,
   confirmation lag, and stalls against the checked-in ledger.
 - Run release-mode nightly chaos/soak lanes on every supported OS and keep their artifacts.

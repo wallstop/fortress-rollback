@@ -8711,7 +8711,19 @@ impl<T: Config> P2PSession<T> {
         self.player_reg.handles_by_address(addr)
     }
 
-    /// Returns the number of frames this session is estimated to be ahead of other sessions
+    /// Returns the estimated local frame advantage used for pacing.
+    ///
+    /// A positive value means the local session is ahead and should slow or skip
+    /// bounded simulation opportunities. A negative value means the local
+    /// session is behind. Zero means no nonzero signed aggregate is currently
+    /// visible at integer-frame precision; zero does not prove peer alignment.
+    /// In a mesh this is the maximum across connected remote endpoints, not an
+    /// authoritative peer-frame difference.
+    ///
+    /// Each endpoint ages its last received remote frame using `RTT/2`, which
+    /// assumes symmetric one-way delay. Asymmetric paths can therefore bias this
+    /// advisory estimate; measure and bound pacing behavior rather than treating
+    /// a negative value as an instruction for unbounded catch-up.
     #[must_use]
     pub fn frames_ahead(&self) -> i32 {
         self.frames_ahead
