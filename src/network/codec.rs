@@ -397,6 +397,12 @@ fn read_i32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> CodecResul
     Ok(i32::from_le_bytes(read_array(bytes, cursor, field)?))
 }
 
+/// Reads one wire frame using the complete public [`Frame`] value domain.
+///
+/// Every non-negative `i32` through `i32::MAX` is valid. `Frame::NULL` is
+/// additionally accepted only for fields whose protocol semantics explicitly
+/// allow the sentinel. There is deliberately no smaller "sane" upper bound:
+/// imposing one here would reject frame values that the public type supports.
 fn read_frame(
     bytes: &[u8],
     cursor: &mut usize,
@@ -3112,6 +3118,43 @@ mod tests {
             let bytes = encode(&message).unwrap();
             let result = decode_message(&bytes);
             assert_eq!(result, Ok((message, bytes.len())));
+        }
+    }
+
+    #[test]
+    fn decode_message_accepts_maximum_frame_for_all_d12_fields() {
+        let maximum = Frame::new(i32::MAX);
+        let messages = [
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::Input(Input {
+                    peer_connect_status: vec![ConnectionStatus {
+                        disconnected: false,
+                        last_frame: maximum,
+                        epoch: 0,
+                    }],
+                    ..Input::default()
+                }),
+            },
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::FloorReply(FloorReply {
+                    round_seq: 1,
+                    floors: vec![maximum],
+                }),
+            },
+            Message {
+                header: MessageHeader::new(0xABCD),
+                body: MessageBody::ChecksumReport(ChecksumReport {
+                    checksum: 7,
+                    frame: maximum,
+                }),
+            },
+        ];
+
+        for message in messages {
+            let bytes = encode(&message).unwrap();
+            assert_eq!(decode_message(&bytes), Ok((message, bytes.len())));
         }
     }
 
