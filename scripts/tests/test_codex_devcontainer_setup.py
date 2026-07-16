@@ -12,6 +12,13 @@ DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEVCONTAINER_JSON = REPO_ROOT / ".devcontainer" / "devcontainer.json"
 BOOTSTRAP_SCRIPT = REPO_ROOT / ".devcontainer" / "codex-bootstrap.sh"
 TLA_VERSION_FILE = REPO_ROOT / ".tla-tools-version"
+GITHUB_TOOL_GUIDANCE_FILES = (
+    REPO_ROOT / ".llm" / "context.md",
+    REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / ".github" / "copilot-instructions.md",
+    REPO_ROOT / "CLAUDE.md",
+    REPO_ROOT / ".cursorrules",
+)
 
 
 def _write_codex_stub(tmp_path: Path) -> Path:
@@ -95,6 +102,20 @@ class TestCodexDevcontainerConfiguration:
         assert ".devcontainer/setup-tla-tools.sh" in devcontainer
         assert f"releases/download/v{version}/tla2tools.jar" not in dockerfile
         assert f"releases/download/v{version}/tla2tools.jar" not in devcontainer
+
+    def test_agent_guidance_makes_gh_an_absolute_fallback(self) -> None:
+        """Every agent entrypoint must prefer VS Code connectors and Git."""
+        for guidance_file in GITHUB_TOOL_GUIDANCE_FILES:
+            text = guidance_file.read_text(encoding="utf-8")
+            normalized = " ".join(text.split())
+            assert "callable VS Code" in normalized, guidance_file
+            assert "GitHub Pull Requests and Issues" in normalized, guidance_file
+            assert "local `git`" in normalized, guidance_file
+            assert "`gh` is an absolute fallback" in normalized, guidance_file
+            assert "`gh auth status` is not a prerequisite" in normalized, guidance_file
+            assert normalized.index("callable VS Code") < normalized.index(
+                "`gh` is an absolute fallback"
+            ), guidance_file
 
 
 class TestCodexBootstrapScript:
