@@ -134,7 +134,10 @@ jobs:
             echo "Version: \`${CURRENT_VERSION}\` → \`${PREPARED_VERSION}\`"
             echo
             echo "Workspace roots:"
-            sed -n 's/^workspace_root=/- `&`/p' "${RUNNER_TEMP}/prepare-release.txt"
+            sed -n 's/^workspace_root=//p' "${RUNNER_TEMP}/prepare-release.txt" |
+              while IFS= read -r workspace_root; do
+                printf -- "- \`%s\`\n" "${workspace_root}"
+              done
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Push release branch and open PR

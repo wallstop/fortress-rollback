@@ -52,6 +52,9 @@ reviewed hardening pull request before repairing the blocked v0.10.1 release.
   missing, and release sandbox construction rejects missing tracked inputs instead of rebuilding
   a falsely smaller topology. Regressions cover both fail-closed paths with repository-relative
   diagnostics.
+- The first PR CI pass exposed a ShellCheck-only summary-rendering defect that local actionlint
+  could not see without ShellCheck installed. The corrected workflow strips the key before safely
+  formatting each discovered root, and its semantic contract now asserts that exact behavior.
 - No Rust production path, public API, wire behavior, or deterministic simulation behavior changes.
 - No high- or critical-severity finding remains in the current main-thread adversarial pass.
 

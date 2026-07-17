@@ -41,6 +41,8 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
     assert "current_version=" in text
     assert "prepared_version=" in text
     assert "workspace_root=" in text
+    assert "s/^workspace_root=//p" in text
+    assert 'printf -- "- \\`%s\\`\\n" "${workspace_root}"' in text
     assert "--dry-run" in text
 
 
