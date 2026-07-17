@@ -33,6 +33,13 @@ def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
 def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
     text = PREPARE.read_text(encoding="utf-8")
 
+    tooling_tests = (
+        "python3 -m pytest scripts/tests/test_workspace_locks.py "
+        "scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py"
+    )
+    assert text.index(tooling_tests) < text.index(
+        "python3 scripts/release/prepare_release.py"
+    )
     assert "scripts/release/workspace_locks.py sync" in text
     assert "scripts/release/workspace_locks.py check" in text
     assert "--no-deps" not in text

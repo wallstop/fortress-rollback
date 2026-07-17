@@ -55,6 +55,10 @@ reviewed hardening pull request before repairing the blocked v0.10.1 release.
 - The first PR CI pass exposed a ShellCheck-only summary-rendering defect that local actionlint
   could not see without ShellCheck installed. The corrected workflow strips the key before safely
   formatting each discovered root, and its semantic contract now asserts that exact behavior.
+- Cursor Bugbot found that the workflow ran a live-repository release preservation test after the
+  real bump had emptied `Unreleased`, making successful non-dry preparation fail in its validation
+  step. Release-tool tests now gate the workflow before mutation, while post-bump canonical lock,
+  changelog, and package validation remains in place; a workflow-order contract guards the fix.
 - No Rust production path, public API, wire behavior, or deterministic simulation behavior changes.
 - No high- or critical-severity finding remains in the current main-thread adversarial pass.
 

@@ -75,6 +75,12 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Test release tooling before mutation
+        run: |
+          set -euo pipefail
+          pip install pytest --quiet
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
+
       - name: Prepare release files
         id: prepare
         env:
@@ -106,11 +112,9 @@ jobs:
       - name: Validate prepared release
         run: |
           set -euo pipefail
-          pip install pytest --quiet
           python3 scripts/release/workspace_locks.py check
           bash scripts/sync-version.sh --check
           python3 scripts/hooks/check-changelog-unreleased.py
-          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
 
       - name: Validate release package
         if: ${{ !inputs.dry_run }}
