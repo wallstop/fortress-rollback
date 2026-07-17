@@ -12,6 +12,8 @@ on:
       - "**.sh"
       - "**.txt"
       - "**.json"
+      - "**/Cargo.lock"
+      - "scripts/release/**"
       - "scripts/sync-version.sh"
       - "scripts/hooks/check-wire-golden-immutable.py"
       - ".github/workflows/ci-version-sync.yml"
@@ -26,6 +28,8 @@ on:
       - "**.sh"
       - "**.txt"
       - "**.json"
+      - "**/Cargo.lock"
+      - "scripts/release/**"
       - "scripts/sync-version.sh"
       - "scripts/hooks/check-wire-golden-immutable.py"
       - ".github/workflows/ci-version-sync.yml"
@@ -38,12 +42,18 @@ jobs:
   version-sync:
     name: Version Sync Check
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check every Cargo workspace lock
+        run: python3 scripts/release/workspace_locks.py check
 
       - name: Check Cargo/changelog/version references
         run: bash scripts/sync-version.sh --check

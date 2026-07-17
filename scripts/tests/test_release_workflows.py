@@ -6,6 +6,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE = REPO_ROOT / ".github" / "workflows" / "release-prepare.yml"
 PUBLISH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+VERSION_SYNC = REPO_ROOT / ".github" / "workflows" / "ci-version-sync.yml"
+VERIFICATION = REPO_ROOT / ".github" / "workflows" / "ci-verification.yml"
+RUST_CI = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
+DOCS_CI = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
+PUBLISHING_SKILL = REPO_ROOT / ".agents" / "skills" / "publishing" / "SKILL.md"
 
 
 def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
@@ -23,6 +28,20 @@ def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
     assert "credential.https://github.com.username" in text
     assert "http.https://github.com/.extraheader" not in text
     assert "gh pr create" in text
+
+
+def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
+    text = PREPARE.read_text(encoding="utf-8")
+
+    assert "scripts/release/workspace_locks.py sync" in text
+    assert "scripts/release/workspace_locks.py check" in text
+    assert "--no-deps" not in text
+    assert "git --no-pager diff -- ." in text
+    assert "GITHUB_STEP_SUMMARY" in text
+    assert "current_version=" in text
+    assert "prepared_version=" in text
+    assert "workspace_root=" in text
+    assert "--dry-run" in text
 
 
 def test_publish_workflow_has_one_manual_entrypoint() -> None:
@@ -45,6 +64,9 @@ def test_publish_workflow_packages_and_verifies_release_artifact() -> None:
     assert "gh release create" in text
     assert 'package_path="target/package/${CRATE_NAME}-${CARGO_VERSION}.crate"' in text
     assert "${{ steps.package.outputs.path }}.sha256" in text
+    assert text.index("scripts/release/workspace_locks.py check") < text.index(
+        "cargo package --locked"
+    )
 
 
 def test_publish_workflow_is_safe_to_retry_after_crates_io_publish() -> None:
@@ -64,3 +86,53 @@ def test_publish_workflow_updates_existing_github_release() -> None:
     assert "gh release upload" in text
     assert "--clobber" in text
     assert "gh release edit" in text
+
+
+def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
+    text = VERSION_SYNC.read_text(encoding="utf-8")
+
+    assert "name: Version Sync Check" in text
+    assert '"**/Cargo.lock"' in text
+    assert '"scripts/release/**"' in text
+    assert "dtolnay/rust-toolchain@stable" in text
+    assert "scripts/release/workspace_locks.py check" in text
+    assert "--no-deps" not in text
+
+
+def test_loom_ci_enforces_locked_release_test() -> None:
+    text = VERIFICATION.read_text(encoding="utf-8")
+
+    assert "run: cargo test --release --locked" in text
+
+
+def test_godot_ci_retains_locked_clippy_gate() -> None:
+    text = RUST_CI.read_text(encoding="utf-8")
+
+    assert (
+        "cargo +nightly-2026-07-08 clippy --manifest-path "
+        "tests/godot-emscripten/Cargo.toml --locked --all-targets "
+        "--all-features -- -D warnings"
+    ) in text
+
+
+def test_release_changes_trigger_existing_script_test_lane() -> None:
+    text = DOCS_CI.read_text(encoding="utf-8")
+
+    assert text.count('"scripts/release/**"') == 2
+    for workflow in (
+        "release-prepare.yml",
+        "publish.yml",
+        "ci-version-sync.yml",
+        "ci-verification.yml",
+    ):
+        assert text.count(f'".github/workflows/{workflow}"') == 2
+
+
+def test_publishing_skill_matches_reviewed_workflow_contract() -> None:
+    skill = PUBLISHING_SKILL.read_text(encoding="utf-8")
+
+    assert "Release - Prepare PR" in skill
+    assert "Release - Publish Crate" in skill
+    assert "green CI" in skill
+    assert "sole manual publication entrypoint" in skill
+    assert "workspace_locks.py check" in skill

@@ -243,6 +243,12 @@ Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also ru
 
 **Version sync rule:** If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be `## [X.Y.Z] - YYYY-MM-DD` (ISO date required). Keep `## [Unreleased]` undated. Validate with `bash scripts/sync-version.sh --check`; auto-fix with `bash scripts/sync-version.sh --changelog-only`.
 
+**Workspace lock rule:** Cargo owns one checked-in lock per discovered workspace
+root. Use `python3 scripts/release/workspace_locks.py sync` after manifest
+version changes and `python3 scripts/release/workspace_locks.py check` for full
+freshness validation. Never bypass `--locked` or use `--no-deps` as a lock
+oracle. Generator fixes made on release branches must also land on `main`.
+
 ## Mandatory Linting
 
 - **After Rust changes:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json` (or `cargo c`)

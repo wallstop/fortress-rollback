@@ -31,6 +31,9 @@ def _ids(checks: list[PlannedCheck]) -> list[str]:
 
 CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("sync-version-check", "README.md"),
+    ("workspace-lock-check", "Cargo.toml"),
+    ("workspace-lock-check", "fuzz/Cargo.lock"),
+    ("workspace-lock-check", "scripts/release/prepare_release.py"),
     ("validate-agent-skills", ".agents/skills/fortress-development/SKILL.md"),
     ("agent-skills-quality", ".agents/skills/dev-pipeline/SKILL.md"),
     ("actionlint", ".github/workflows/ci.yml"),
@@ -121,6 +124,22 @@ def test_plan_checks_runs_actionlint_for_workflow_files() -> None:
         PYTHON_EXECUTABLE,
         "scripts/hooks/actionlint.py",
     ]
+
+
+@pytest.mark.parametrize(
+    "changed_file",
+    ["Cargo.toml", "loom-tests/Cargo.lock", "scripts/release/workspace_locks.py"],
+)
+def test_plan_checks_runs_full_workspace_lock_check(changed_file: str) -> None:
+    checks = plan_checks({changed_file})
+    lock_check = next(check for check in checks if check.check_id == "workspace-lock-check")
+
+    assert lock_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/release/workspace_locks.py",
+        "check",
+    ]
+    assert "--no-deps" not in " ".join(lock_check.command)
 
 
 def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> None:

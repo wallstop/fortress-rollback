@@ -79,32 +79,63 @@ jobs:
         id: prepare
         env:
           BUMP: ${{ inputs.bump }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          python3 scripts/release/prepare_release.py --bump "${BUMP}" | tee "${RUNNER_TEMP}/prepare-release.txt"
+          prepare_args=(--bump "${BUMP}")
+          if [ "${DRY_RUN}" = "true" ]; then
+            prepare_args+=(--dry-run)
+          fi
+          python3 scripts/release/prepare_release.py "${prepare_args[@]}" | tee "${RUNNER_TEMP}/prepare-release.txt"
+          current_version="$(sed -n 's/^current_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
           prepared_version="$(sed -n 's/^prepared_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
           if ! printf '%s\n' "${prepared_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
             echo "::error::Release preparation did not produce a strict X.Y.Z version."
             exit 1
           fi
+          echo "current_version=${current_version}" >> "${GITHUB_OUTPUT}"
           echo "version=${prepared_version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Synchronize version references
-        run: bash scripts/sync-version.sh
+      - name: Synchronize workspace locks and version references
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/workspace_locks.py sync
+          bash scripts/sync-version.sh
 
       - name: Validate prepared release
         run: |
           set -euo pipefail
           pip install pytest --quiet
-          cargo metadata --locked --no-deps --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          python3 scripts/release/workspace_locks.py check
           bash scripts/sync-version.sh --check
           python3 scripts/hooks/check-changelog-unreleased.py
-          python3 -m pytest scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
+
+      - name: Validate release package
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
           cargo publish --dry-run --locked --allow-dirty
 
-      - name: Show dry-run diff
-        if: ${{ inputs.dry_run }}
-        run: git --no-pager diff -- Cargo.toml Cargo.lock CHANGELOG.md README.md docs examples src
+      - name: Show prepared working-tree diff
+        if: ${{ !inputs.dry_run }}
+        run: git --no-pager diff -- .
+
+      - name: Summarize release lock synchronization
+        env:
+          CURRENT_VERSION: ${{ steps.prepare.outputs.current_version }}
+          PREPARED_VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Release lock synchronization"
+            echo
+            echo "Version: \`${CURRENT_VERSION}\` → \`${PREPARED_VERSION}\`"
+            echo
+            echo "Workspace roots:"
+            sed -n 's/^workspace_root=/- `&`/p' "${RUNNER_TEMP}/prepare-release.txt"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Push release branch and open PR
         if: ${{ !inputs.dry_run }}

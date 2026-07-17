@@ -5,11 +5,18 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import os
 import re
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+import workspace_locks
 
 try:
     import tomllib
@@ -88,38 +95,6 @@ def rewrite_manifest(path: Path, content: str, target: str) -> tuple[str, str]:
     return current, rewritten
 
 
-def rewrite_lockfile(content: str, current: str, target: str) -> str:
-    """Rewrite exactly the root package entry in Cargo.lock."""
-    try:
-        lockfile = tomllib.loads(content)
-    except tomllib.TOMLDecodeError as error:
-        raise PreparationError(f"invalid Cargo.lock: {error}") from error
-    packages = lockfile.get("package")
-    matches = [
-        package
-        for package in packages if isinstance(package, dict) and package.get("name") == PACKAGE_NAME
-    ] if isinstance(packages, list) else []
-    if len(matches) != 1:
-        raise PreparationError(f"Cargo.lock must contain exactly one {PACKAGE_NAME} package")
-    lock_version = matches[0].get("version")
-    if lock_version != current:
-        raise PreparationError(
-            f"Cargo.lock package version {lock_version} does not match Cargo.toml {current}"
-        )
-
-    blocks = list(re.finditer(r"(?ms)^\[\[package\]\]\s*$.*?(?=^\[\[package\]\]|\Z)", content))
-    matching_blocks = [block for block in blocks if re.search(rf'(?m)^name = "{re.escape(PACKAGE_NAME)}"$', block.group(0))]
-    if len(matching_blocks) != 1:
-        raise PreparationError(f"Cargo.lock text must contain exactly one {PACKAGE_NAME} package")
-    block = matching_blocks[0]
-    rewritten_block, count = re.subn(
-        rf'(?m)^version = "{re.escape(current)}"$', f'version = "{target}"', block.group(0)
-    )
-    if count != 1:
-        raise PreparationError("Cargo.lock root package version could not be rewritten exactly once")
-    return content[: block.start()] + rewritten_block + content[block.end() :]
-
-
 def rewrite_changelog(content: str, current: str, target: str, release_date: str) -> str:
     """Rotate Unreleased notes into a dated release and add its compare link."""
     if len(re.findall(r"(?m)^## \[Unreleased\]\s*$", content)) != 1:
@@ -151,36 +126,185 @@ def rewrite_changelog(content: str, current: str, target: str, release_date: str
     return unreleased_link.sub(lambda match: f"{match.group(0)}\n{release_link}", rewritten)
 
 
-def prepare(repo_root: Path, bump: str, release_date: str) -> tuple[str, list[PreparedFile]]:
-    """Validate every input and calculate the complete release rewrite."""
+def _run_git(repo_root: Path, args: list[str], description: str) -> str:
+    """Run Git for sandbox construction with concise diagnostics."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, UnicodeError) as error:
+        raise PreparationError(f"{description} could not start: {error}") from error
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout).strip()
+        raise PreparationError(
+            f"{description} failed with exit code {result.returncode}: {details}"
+        )
+    return result.stdout
+
+
+def _copy_tracked_sandbox(repo_root: Path, sandbox: Path) -> None:
+    """Copy the current tracked-file state and create an isolated Git index."""
+    tracked_output = _run_git(
+        repo_root, ["ls-files", "-z", "--"], "tracked-file discovery"
+    )
+    tracked = [Path(raw) for raw in tracked_output.split("\0") if raw]
+    for relative in tracked:
+        source = repo_root / relative
+        if not source.exists():
+            raise PreparationError(
+                f"tracked file {relative.as_posix()} is missing from the working tree"
+            )
+        destination = sandbox / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source.is_symlink():
+                destination.symlink_to(source.readlink())
+            else:
+                shutil.copy2(source, destination)
+        except OSError as error:
+            raise PreparationError(
+                f"cannot copy {relative.as_posix()} into sandbox: {error}"
+            ) from error
+    _run_git(sandbox, ["init", "--quiet"], "sandbox Git initialization")
+    _run_git(sandbox, ["add", "--all"], "sandbox tracked-file indexing")
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Replace one file atomically while preserving its permission mode."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=path.parent,
+            prefix=f".{path.name}.release-",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_name = temporary.name
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+    except OSError:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
+def apply_prepared(prepared_files: list[PreparedFile]) -> None:
+    """Apply all prepared files as one rollback-capable transaction."""
+    for prepared in prepared_files:
+        current = load_text(prepared.path)
+        if current != prepared.before:
+            raise PreparationError(
+                f"{prepared.path}: changed during release preparation; no files applied"
+            )
+
+    applied: list[PreparedFile] = []
+    try:
+        for prepared in prepared_files:
+            _atomic_write(prepared.path, prepared.after)
+            applied.append(prepared)
+    except OSError as error:
+        rollback_errors: list[str] = []
+        for prepared in reversed(applied):
+            try:
+                _atomic_write(prepared.path, prepared.before)
+            except OSError as rollback_error:
+                rollback_errors.append(f"{prepared.path.name}: {rollback_error}")
+        suffix = (
+            f"; rollback failures: {', '.join(rollback_errors)}"
+            if rollback_errors
+            else ""
+        )
+        raise PreparationError(
+            f"could not apply prepared release files: {error}{suffix}"
+        ) from error
+
+
+def prepare(
+    repo_root: Path, bump: str, release_date: str
+) -> tuple[str, str, list[PreparedFile], tuple[Path, ...]]:
+    """Calculate and validate the complete release rewrite in a sandbox."""
     try:
         date.fromisoformat(release_date)
     except ValueError as error:
         raise PreparationError(f"date {release_date!r} must be YYYY-MM-DD") from error
 
-    manifest_path = repo_root / "Cargo.toml"
-    lockfile_path = repo_root / "Cargo.lock"
-    changelog_path = repo_root / "CHANGELOG.md"
-    manifest_before = load_text(manifest_path)
-    lockfile_before = load_text(lockfile_path)
-    changelog_before = load_text(changelog_path)
+    repo_root = repo_root.resolve()
+    with tempfile.TemporaryDirectory(prefix="fortress-release-") as temporary_directory:
+        sandbox = Path(temporary_directory).resolve()
+        _copy_tracked_sandbox(repo_root, sandbox)
+        try:
+            precheck_roots = workspace_locks.check(sandbox)
+        except workspace_locks.WorkspaceLockError as error:
+            raise PreparationError(f"workspace-lock precheck failed: {error}") from error
 
-    current_manifest = tomllib.loads(manifest_before)
-    package = current_manifest.get("package")
-    current = package.get("version") if isinstance(package, dict) else None
-    if not isinstance(current, str):
-        raise PreparationError("Cargo.toml [package].version is missing")
-    target = bump_version(current, bump)
-    validated_current, manifest_after = rewrite_manifest(manifest_path, manifest_before, target)
-    lockfile_after = rewrite_lockfile(lockfile_before, validated_current, target)
-    changelog_after = rewrite_changelog(
-        changelog_before, validated_current, target, release_date
-    )
-    return target, [
-        PreparedFile(manifest_path, manifest_before, manifest_after),
-        PreparedFile(lockfile_path, lockfile_before, lockfile_after),
-        PreparedFile(changelog_path, changelog_before, changelog_after),
-    ]
+        manifest_path = sandbox / "Cargo.toml"
+        changelog_path = sandbox / "CHANGELOG.md"
+        manifest_before = load_text(manifest_path)
+        changelog_before = load_text(changelog_path)
+        relative_outputs = [Path("Cargo.toml"), Path("CHANGELOG.md")]
+        relative_outputs.extend(
+            root.lock.relative_to(sandbox) for root in precheck_roots
+        )
+        ordered_outputs = sorted(set(relative_outputs), key=lambda path: path.as_posix())
+        output_snapshots = {
+            relative: load_text(sandbox / relative) for relative in ordered_outputs
+        }
+        current_manifest = tomllib.loads(manifest_before)
+        package = current_manifest.get("package")
+        current = package.get("version") if isinstance(package, dict) else None
+        if not isinstance(current, str):
+            raise PreparationError("Cargo.toml [package].version is missing")
+        target = bump_version(current, bump)
+        validated_current, manifest_after = rewrite_manifest(
+            manifest_path, manifest_before, target
+        )
+        changelog_after = rewrite_changelog(
+            changelog_before, validated_current, target, release_date
+        )
+        try:
+            manifest_path.write_text(manifest_after, encoding="utf-8")
+            changelog_path.write_text(changelog_after, encoding="utf-8")
+        except OSError as error:
+            raise PreparationError(f"cannot write release sandbox: {error}") from error
+
+        try:
+            roots = workspace_locks.sync(sandbox)
+            workspace_locks.check(sandbox)
+        except workspace_locks.WorkspaceLockError as error:
+            raise PreparationError(f"workspace-lock validation failed: {error}") from error
+
+        synchronized_roots = {
+            root.lock.relative_to(sandbox) for root in roots
+        }
+        prechecked_roots = {
+            root.lock.relative_to(sandbox) for root in precheck_roots
+        }
+        if synchronized_roots != prechecked_roots:
+            raise PreparationError(
+                "workspace topology changed during release preparation"
+            )
+        prepared_files: list[PreparedFile] = []
+        for relative in ordered_outputs:
+            prepared_files.append(
+                PreparedFile(
+                    path=repo_root / relative,
+                    before=output_snapshots[relative],
+                    after=load_text(sandbox / relative),
+                )
+            )
+        workspace_roots = tuple(
+            root.manifest.parent.relative_to(sandbox) for root in roots
+        )
+        return current, target, prepared_files, workspace_roots
 
 
 def main() -> int:
@@ -193,29 +317,40 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        target, prepared_files = prepare(args.repo_root.resolve(), args.bump, args.date)
+        current, target, prepared_files, workspace_roots = prepare(
+            args.repo_root.resolve(), args.bump, args.date
+        )
     except (PreparationError, tomllib.TOMLDecodeError) as error:
         print(f"prepare-release: error: {error}", file=sys.stderr)
         return 1
 
-    if args.dry_run:
-        for prepared in prepared_files:
-            relative = prepared.path.relative_to(args.repo_root.resolve())
-            print(
-                "".join(
-                    difflib.unified_diff(
-                        prepared.before.splitlines(keepends=True),
-                        prepared.after.splitlines(keepends=True),
-                        fromfile=str(relative),
-                        tofile=str(relative),
-                    )
-                ),
-                end="",
-            )
-    else:
-        for prepared in prepared_files:
-            prepared.path.write_text(prepared.after, encoding="utf-8")
+    try:
+        if args.dry_run:
+            for prepared in prepared_files:
+                relative = prepared.path.relative_to(args.repo_root.resolve())
+                print(
+                    "".join(
+                        difflib.unified_diff(
+                            prepared.before.splitlines(keepends=True),
+                            prepared.after.splitlines(keepends=True),
+                            fromfile=str(relative),
+                            tofile=str(relative),
+                        )
+                    ),
+                    end="",
+                )
+        else:
+            apply_prepared(prepared_files)
+    except PreparationError as error:
+        print(f"prepare-release: error: {error}", file=sys.stderr)
+        return 1
+    print(f"current_version={current}")
     print(f"prepared_version={target}")
+    for workspace_root in workspace_roots:
+        print(
+            "workspace_root="
+            f"{workspace_root.as_posix() if workspace_root != Path('.') else '.'}"
+        )
     return 0
 
 
