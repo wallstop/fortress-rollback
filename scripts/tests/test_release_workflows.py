@@ -17,6 +17,7 @@ RELEASE_STATE_CI = REPO_ROOT / ".github" / "workflows" / "ci-release-state.yml"
 CARGO_MANIFEST = REPO_ROOT / "Cargo.toml"
 RELEASE_TOOLCHAIN = REPO_ROOT / ".github" / "actions" / "install-pinned-release" / "toolchain"
 RELEASE_REQUIREMENTS = REPO_ROOT / "scripts" / "release" / "requirements.txt"
+AGENT_PREFLIGHT = REPO_ROOT / "scripts" / "ci" / "agent-preflight.py"
 
 
 def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
@@ -52,11 +53,18 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
         "test_release_checkpoint.py",
         "test_publish_state.py",
         "test_release_branch.py",
+        "test_main_ruleset.py",
         "test_sync_issue_template_versions.py",
         "test_issue_template_versions_wiring.py",
         "test_release_workflows.py",
     ):
         assert text.count(test_file) == 2
+    assert (
+        AGENT_PREFLIGHT.read_text(encoding="utf-8").count(
+            '"scripts/tests/test_main_ruleset.py"'
+        )
+        == 2
+    )
     assert "scripts/release/workspace_locks.py sync" in text
     assert "scripts/release/workspace_locks.py check" in text
     assert "git diff --binary -- ." in text
@@ -240,6 +248,16 @@ def test_release_branch_state_check_has_no_path_filter_escape() -> None:
         "github.event.merge_group.head_sha }}" in text
     )
     assert "candidate/scripts/" not in text
+
+
+def test_publishing_guidance_uses_supported_strict_ruleset_policy() -> None:
+    text = PUBLISHING_SKILL.read_text(encoding="utf-8")
+
+    assert ".github/rulesets/main-protection.json" in text
+    assert "do not require or recommend a merge queue" in text
+    assert "bound to the GitHub Actions integration" in text
+    assert "main_ruleset.py check --repo wallstop/fortress-rollback" in text
+    assert "merge queue (preferred)" not in text
 
 
 def test_issue_template_sync_is_manual_repair_only() -> None:

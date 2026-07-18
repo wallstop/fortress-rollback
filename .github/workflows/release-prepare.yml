@@ -90,7 +90,7 @@ jobs:
             --only-binary=:all: \
             --requirement scripts/release/requirements.txt \
             --quiet
-          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_main_ruleset.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
 
       - name: Plan release version
         id: plan
@@ -203,7 +203,7 @@ jobs:
       - name: Test release tooling after preparation
         run: |
           set -euo pipefail
-          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_main_ruleset.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
 
       - name: Validate release package
         run: |

@@ -35,9 +35,10 @@ retry-safe, semver-aware, and self-enforcing, then open a fully reviewed green P
   findings with strict raw-byte parsing and exact restore-prefix regressions.
 - [x] Resolve all four actionable Cursor review threads and make all 14 GitHub
   workflow runs green on implementation commit `1e8cf5fc`.
-- [ ] Repository administrator: require the stable `Verify prepared release
-  state` check on `main` and enable merge queue (preferred) or strict
-  up-to-date required checks; GitHub does not expose this setting to repo code.
+- [x] Apply and verify the active `Main Protection` repository ruleset with the
+  stable `Verify prepared release state` check and strict up-to-date semantics.
+- [x] Check in the declarative ruleset plus a tested drift check/repair helper;
+  merge queues are neither available nor required for this repository.
 
 ## Verification
 

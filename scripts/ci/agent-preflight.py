@@ -104,6 +104,7 @@ def is_release_automation_surface_file(path: str) -> bool:
         or path
         in {
             ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/rulesets/main-protection.json",
             ".github/workflows/release-prepare.yml",
             ".github/workflows/ci-release-state.yml",
             ".github/workflows/publish.yml",
@@ -122,6 +123,7 @@ def is_release_automation_surface_file(path: str) -> bool:
             "scripts/tests/test_release_workflows.py",
             "scripts/ci/sync-issue-template-versions.py",
             "scripts/tests/test_issue_template_versions_wiring.py",
+            "scripts/tests/test_main_ruleset.py",
             "scripts/tests/test_sync_issue_template_versions.py",
         }
     )
@@ -359,6 +361,7 @@ def plan_checks(
                     "scripts/tests/test_release_checkpoint.py",
                     "scripts/tests/test_publish_state.py",
                     "scripts/tests/test_release_branch.py",
+                    "scripts/tests/test_main_ruleset.py",
                     "scripts/tests/test_sync_issue_template_versions.py",
                     "scripts/tests/test_issue_template_versions_wiring.py",
                     "scripts/tests/test_release_workflows.py",
