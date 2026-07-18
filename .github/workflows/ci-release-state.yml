@@ -63,12 +63,12 @@ jobs:
             --github-output "${GITHUB_OUTPUT}"
 
       - name: Install trusted release toolchain
-        if: steps.gate.outputs.release_state_changed == 'true'
+        if: steps.gate.outputs.reconstruction_required == 'true'
         id: release-rust
         uses: ./verifier/.github/actions/install-pinned-release
 
       - name: Reconstruct and verify prepared release
-        if: steps.gate.outputs.release_state_changed == 'true'
+        if: steps.gate.outputs.reconstruction_required == 'true'
         env:
           EVENT_KIND: ${{ github.event_name == 'merge_group' && 'merge-group' || 'pull-request' }}
         run: |

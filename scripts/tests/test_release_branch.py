@@ -218,9 +218,14 @@ def test_resolve_rejects_advanced_default_branch(branch_fixture) -> None:
         _resolve(module, work)
 
 
-def test_resolve_rejects_existing_release_tag(branch_fixture) -> None:
+@pytest.mark.parametrize("annotated", [False, True])
+def test_resolve_rejects_existing_release_tag(branch_fixture, annotated: bool) -> None:
     work, _base_sha, _publish_release = branch_fixture
-    _git(work, "tag", "v1.3.0")
+    tag_arguments = ["tag"]
+    if annotated:
+        tag_arguments.extend(["--annotate", "--message", "release v1.3.0"])
+    tag_arguments.append("v1.3.0")
+    _git(work, *tag_arguments)
     _git(work, "push", "origin", "v1.3.0")
     module = _load_module("release_branch_existing_tag", HELPER)
 

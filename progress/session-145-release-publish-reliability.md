@@ -29,6 +29,8 @@ retry-safe, semver-aware, and self-enforcing, then open a fully reviewed green P
 - [x] Complete local verification and adversarial review.
 - [x] Open draft PR #254 and trigger Cursor Bugbot and Copilot review on the
   first pushed commit.
+- [x] Address Cursor's release-branch trust-gate and annotated-tag review
+  findings with reserved-namespace and peeled-ref regressions.
 - [ ] Resolve CI/reviewer feedback and make every required PR check green.
 - [ ] Repository administrator: require the stable `Verify prepared release
   state` check on `main` and enable merge queue (preferred) or strict
@@ -36,9 +38,9 @@ retry-safe, semver-aware, and self-enforcing, then open a fully reviewed green P
 
 ## Verification
 
-- Focused integrated release/toolchain/preflight contracts: 372 tests passed.
-- Complete Python/script suite: 1,946 tests passed.
-- Complete agent preflight passed, including 266 release automation tests, 66
+- Focused integrated release/toolchain/preflight contracts: 379 tests passed.
+- Complete Python/script suite: 1,953 tests passed.
+- Complete agent preflight passed, including 273 release automation tests, 66
   toolchain tests, 49 Agent Skills, all 5,138 local files and 1,392 links,
   changelog policy, workflow linting, fallback imports, and spelling.
 - Toolchain installers have executable Bash 3.2 success, empty-list parsing,

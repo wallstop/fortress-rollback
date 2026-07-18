@@ -32,7 +32,7 @@ class ReleaseStateCiError(RuntimeError):
 class GateDecision:
     """Whether the pull request needs complete trusted reconstruction."""
 
-    release_state_changed: bool
+    reconstruction_required: bool
     target_version: str | None = None
 
 
@@ -163,17 +163,21 @@ def evaluate(
     base_entry = _manifest_tree_entry(
         trusted_base_root, "trusted base release-state lookup"
     )
-    if candidate_entry == base_entry:
-        return GateDecision(release_state_changed=False)
-
     branch_match = RELEASE_BRANCH.fullmatch(head_ref)
+    reserved_release_ref = not prospective_merge and head_ref.startswith("release/v")
+    # Every pull-request head in the reserved release/v namespace crosses the
+    # full-tree trust boundary. Do not let canonical or malformed release refs
+    # bypass reconstruction by retaining the base manifest blob.
+    if candidate_entry == base_entry and not reserved_release_ref:
+        return GateDecision(reconstruction_required=False)
+
     if not prospective_merge and branch_match is None:
         raise ReleaseStateCiError(
-            f"a {MANIFEST_NAME} change requires a canonical release/vX.Y.Z head; "
-            f"got {head_ref!r}"
+            f"a {MANIFEST_NAME} change or reserved release/v* head requires a "
+            f"canonical release/vX.Y.Z head; got {head_ref!r}"
         )
     if candidate_entry is None:
-        raise ReleaseStateCiError(f"a release PR cannot delete {MANIFEST_NAME}")
+        raise ReleaseStateCiError(f"a release PR cannot delete {MANIFEST_NAME} or omit it")
     try:
         state = load(candidate_root)
     except ReleaseStateError as error:
@@ -187,15 +191,15 @@ def evaluate(
                 f"release branch version {branch_version} does not match candidate "
                 f"target_version {state.target_version}"
             )
-    return GateDecision(release_state_changed=True, target_version=state.target_version)
+    return GateDecision(reconstruction_required=True, target_version=state.target_version)
 
 
 def _append_github_output(path: Path, decision: GateDecision) -> None:
     try:
         with path.open("a", encoding="utf-8", newline="") as output:
             output.write(
-                "release_state_changed="
-                f"{'true' if decision.release_state_changed else 'false'}\n"
+                "reconstruction_required="
+                f"{'true' if decision.reconstruction_required else 'false'}\n"
             )
             if decision.target_version is not None:
                 output.write(f"target_version={decision.target_version}\n")
@@ -230,10 +234,9 @@ def main() -> int:
     except ReleaseStateCiError as error:
         print(f"release-state-ci: error: {error}", file=sys.stderr)
         return 1
-    if decision.release_state_changed:
+    if decision.reconstruction_required:
         print(
-            f"{MANIFEST_NAME} changed; trusted reconstruction is required for "
-            f"v{decision.target_version}"
+            f"trusted reconstruction is required for v{decision.target_version}"
         )
     else:
         print(f"{MANIFEST_NAME} is unchanged; no candidate code will run")

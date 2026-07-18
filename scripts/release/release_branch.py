@@ -97,7 +97,7 @@ def _remote_ref(
 ) -> str | None:
     result = _run_git_result(
         repo_root,
-        ["ls-remote", "--exit-code", f"--{kind}", remote, ref],
+        ["ls-remote", "--exit-code", "--refs", f"--{kind}", remote, ref],
     )
     if result.returncode == 2:
         return None

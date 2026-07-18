@@ -215,7 +215,7 @@ def test_release_branch_state_check_has_no_path_filter_escape() -> None:
     )
     assert "repository: ${{ github.repository }}" in text
     assert "name: Verify prepared release state" in text
-    assert text.count("steps.gate.outputs.release_state_changed == 'true'") == 2
+    assert text.count("steps.gate.outputs.reconstruction_required == 'true'") == 2
     assert "verifier/scripts/release/release_state.py" in text
     assert "verify-candidate" in text
     assert "verify-prospective" in text

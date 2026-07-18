@@ -103,7 +103,7 @@ def test_ordinary_pr_with_unchanged_state_skips_candidate_execution(
 
     decision = _evaluate(base, candidate, "feature/ordinary")
 
-    assert decision == release_state_ci.GateDecision(release_state_changed=False)
+    assert decision == release_state_ci.GateDecision(reconstruction_required=False)
     assert not sentinel.exists()
 
 
@@ -119,9 +119,76 @@ def test_changed_state_on_matching_release_branch_requires_verification(
     decision = _evaluate(base, candidate, "release/v1.3.0")
 
     assert decision == release_state_ci.GateDecision(
-        release_state_changed=True,
+        reconstruction_required=True,
         target_version="1.3.0",
     )
+
+
+def test_matching_release_branch_with_unchanged_state_requires_verification(
+    tmp_path: Path,
+) -> None:
+    base, candidate = _repos(tmp_path, base_state=_state())
+    (candidate / "untrusted-change.txt").write_text(
+        "must not bypass reconstruction\n", encoding="utf-8"
+    )
+    _commit_candidate(candidate)
+
+    decision = _evaluate(base, candidate, "release/v1.3.0")
+
+    assert decision == release_state_ci.GateDecision(
+        reconstruction_required=True,
+        target_version="1.3.0",
+    )
+
+
+def test_matching_release_branch_cannot_omit_state(tmp_path: Path) -> None:
+    base, candidate = _repos(tmp_path)
+    (candidate / "untrusted-change.txt").write_text(
+        "must not bypass reconstruction\n", encoding="utf-8"
+    )
+    _commit_candidate(candidate)
+
+    with pytest.raises(
+        release_state_ci.ReleaseStateCiError,
+        match="cannot delete release-state.json or omit it",
+    ):
+        _evaluate(base, candidate, "release/v1.3.0")
+
+
+@pytest.mark.parametrize(
+    "head_ref",
+    ["release/v01.3.0", "release/v1.3", "release/v1.3.0/extra"],
+)
+def test_reserved_release_ref_with_unchanged_state_must_be_canonical(
+    tmp_path: Path, head_ref: str
+) -> None:
+    base, candidate = _repos(tmp_path, base_state=_state())
+    (candidate / "untrusted-change.txt").write_text(
+        "must not bypass reconstruction\n", encoding="utf-8"
+    )
+    _commit_candidate(candidate)
+
+    with pytest.raises(
+        release_state_ci.ReleaseStateCiError,
+        match="requires a canonical release/vX.Y.Z head",
+    ):
+        _evaluate(base, candidate, head_ref)
+
+
+def test_matching_release_ref_with_unchanged_state_validates_version(
+    tmp_path: Path,
+) -> None:
+    base, candidate = _repos(tmp_path, base_state=_state())
+    (candidate / "untrusted-change.txt").write_text(
+        "must not bypass reconstruction\n", encoding="utf-8"
+    )
+    _commit_candidate(candidate)
+
+    with pytest.raises(
+        release_state_ci.ReleaseStateCiError,
+        match="branch version 1.4.0 does not match candidate target_version 1.3.0",
+    ):
+        _evaluate(base, candidate, "release/v1.4.0")
 
 
 def test_merge_group_changed_state_uses_prospective_tree_without_branch_name(
@@ -283,5 +350,5 @@ def test_cli_writes_bounded_github_outputs(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert github_output.read_text(encoding="utf-8") == (
-        "release_state_changed=true\ntarget_version=1.3.0\n"
+        "reconstruction_required=true\ntarget_version=1.3.0\n"
     )
