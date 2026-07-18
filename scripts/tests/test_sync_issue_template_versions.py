@@ -256,6 +256,39 @@ class TestFetchVersions:
 
 
 class TestMain:
+    def test_unbounded_ensured_version_fails_without_traceback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["prog", "--ensure-version", f"v{'9' * 4_301}.0.0"],
+        )
+
+        assert sync_mod.main() == 1
+
+    def test_local_only_ensure_version_does_not_use_network(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        template_file = tmp_path / "bug_report.yml"
+        template_file.write_text(_make_template(["v1.0.0", "v0.9.0"]))
+        monkeypatch.setattr(sync_mod, "TEMPLATE_PATH", str(template_file))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["prog", "--local-only", "--ensure-version", "v1.1.0"],
+        )
+        fetch = MagicMock(side_effect=AssertionError("network must not be used"))
+        monkeypatch.setattr(sync_mod, "fetch_versions", fetch)
+
+        result = sync_mod.main()
+
+        assert result == 0
+        fetch.assert_not_called()
+        assert _make_template(["v1.1.0", "v1.0.0", "v0.9.0"]) == (
+            template_file.read_text()
+        )
+
     def test_already_up_to_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         versions = ["v1.0.0", "v0.9.0"]
         template_file = tmp_path / "bug_report.yml"

@@ -16,6 +16,7 @@ repository = "https://github.com/wallstop/fortress-rollback"
 keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
 documentation = "https://docs.rs/fortress-rollback"
+publish = ["crates-io"]
 exclude = [
     # Build/CI artifacts
     ".tla-tools/",
@@ -61,6 +62,8 @@ exclude = [
     ".pytest_cache/",
     # Session progress tracking files
     "progress/",
+    # Reviewed release-state proof is repository automation metadata
+    "release-state.json",
     # GitHub wiki mirror
     "wiki/",
     # LLM instruction files (for contributing to this project, not for users)

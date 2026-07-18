@@ -1,0 +1,33 @@
+name: "Install pinned Rust nightly"
+description: "Installs the repository-pinned generic nightly with bounded retries"
+
+inputs:
+  pin-file:
+    description: "Repository pin file to install (generic nightly or Miri)"
+    required: false
+    default: "toolchain"
+  components:
+    description: "Comma-separated rustup components to install"
+    required: false
+    default: ""
+  targets:
+    description: "Comma-separated rustup targets to install"
+    required: false
+    default: ""
+
+outputs:
+  toolchain:
+    description: "The dated nightly toolchain selected by the repository pin"
+    value: ${{ steps.install.outputs.toolchain }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install repository-pinned nightly
+      id: install
+      shell: bash
+      env:
+        PIN_FILE_NAME: ${{ inputs.pin-file }}
+        REQUESTED_COMPONENTS: ${{ inputs.components }}
+        REQUESTED_TARGETS: ${{ inputs.targets }}
+      run: bash "${GITHUB_ACTION_PATH}/install.sh"

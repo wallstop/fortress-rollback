@@ -22,9 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator dispositions for single-peer equivocation, false checksum accusations, flooding, and
   hot-join snapshot poisoning, including the detection-versus-attribution boundary.
 
+### Changed
+
+- **Breaking:** the exact-match wire protocol advances to v2 for canonical hot-join membership
+  generations. Version 2 deliberately rejects released v1 peers; all participants in a session
+  must upgrade together.
+
 ### Fixed
 
-- **Pre-existing:** repeated N-player graceful-drop/hot-join generations now retain a canonical connected-era membership generation across committed drops, successful reactivations, and replacement snapshots. Retry-local spectator epochs remain non-decreasing until their documented `u16` wrap but can no longer produce incompatible generation-fenced certificates; fresh N-peer joiners import canonical live and dead slot membership, and the four-player nightly soak now exercises periodic churn through all 40 generations. The semantic snapshot boundary bumps the exact-match wire protocol to v2, which deliberately rejects released v1 peers.
+- **Pre-existing:** repeated N-player graceful-drop/hot-join generations now retain a canonical connected-era membership generation across committed drops, successful reactivations, and replacement snapshots. Retry-local spectator epochs remain non-decreasing until their documented `u16` wrap but can no longer produce incompatible generation-fenced certificates; fresh N-peer joiners import canonical live and dead slot membership, and the four-player nightly soak now exercises periodic churn through all 40 generations.
 - **Pre-existing:** repeated two-player hot-joins under packet loss no longer strand the joiner one input frame behind. A serving host now defers pre-commit input packets and reliably backfills the activation frame before accepting the new generation's stream; an uncaptured N-player serve whose saved-state frame moves during an honest rollback repair aborts immediately and retries at a fresh frame instead of emitting an Error on every poll until timeout.
 
 ## [0.10.0] - 2026-07-13

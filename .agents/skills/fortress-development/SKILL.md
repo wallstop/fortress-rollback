@@ -239,6 +239,17 @@ For protocol tests that poll in loops or assert timer effects, always inject `Te
 
 Never add separate `### Fixed` entries, or non-`**Breaking:**` `### Changed` entries, for code that has not yet been released. Fixes and tweaks to unreleased features must be folded into the existing `### Added` entry describing that feature. Only `**Breaking:**` entries (for already-released types -- e.g., new variants on a non-`#[non_exhaustive]` enum) belong in `### Changed` of `[Unreleased]`. A fix to behavior that already shipped in a released version DOES get its own `### Fixed` entry, prefixed `**Pre-existing:**` (the self-declaration the hook accepts, mirroring `**Breaking:**`). The changelog describes the final shipped state, not intermediate development history.
 
+### Release bump floor (enforced)
+
+Release preparation derives a minimum semantic-version bump from the complete
+`[Unreleased]` section and refuses a smaller operator selection. `Added`,
+`Deprecated`, and non-breaking `Changed` entries require at least a minor bump.
+`**Breaking:**` and `Removed` entries require a minor bump before 1.0 and a major
+bump at or after 1.0. A patch is valid only when the release contains
+`Fixed`/`Security` entries. An empty `[Unreleased]` section is not releasable.
+Wire-version changes belong in `Changed` with `**Breaking:**`, even when they
+accompany a pre-existing behavioral fix.
+
 Validate locally: `python3 scripts/hooks/check-changelog-unreleased.py`. Also runs automatically in `scripts/ci/agent-preflight.py` whenever `CHANGELOG.md` is in the changed set, and as the `changelog-unreleased-rule` pre-commit hook.
 
 **Version sync rule:** If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be `## [X.Y.Z] - YYYY-MM-DD` (ISO date required). Keep `## [Unreleased]` undated. Validate with `bash scripts/sync-version.sh --check`; auto-fix with `bash scripts/sync-version.sh --changelog-only`.

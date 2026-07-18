@@ -17,14 +17,19 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import workspace_locks
+from release_policy import (
+    ReleasePolicyError,
+    parse_stable_version,
+    validate_requested_bump,
+)
 
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib
 
-STRICT_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACKAGE_NAME = "fortress-rollback"
+MAX_SEMVER_COMPONENT = (1 << 64) - 1
 
 
 class PreparationError(ValueError):
@@ -41,22 +46,29 @@ class PreparedFile:
 
 
 def parse_version(value: str) -> tuple[int, int, int]:
-    """Parse strict stable semver without accepting ambiguous leading zeroes."""
-    match = STRICT_VERSION.fullmatch(value)
-    if match is None:
-        raise PreparationError(f"version {value!r} is not strict X.Y.Z semver")
-    return tuple(int(component) for component in match.groups())  # type: ignore[return-value]
+    """Parse strict stable SemVer without unbounded integer conversion."""
+    try:
+        return parse_stable_version(value)
+    except ReleasePolicyError as error:
+        raise PreparationError(str(error)) from error
+
+
+def _increment_version_component(value: int, name: str) -> int:
+    """Increment one bounded SemVer component or fail before u64 overflow."""
+    if value == MAX_SEMVER_COMPONENT:
+        raise PreparationError(f"cannot bump {name} version component beyond u64")
+    return value + 1
 
 
 def bump_version(current: str, bump: str) -> str:
     """Return the next stable version for a semver bump kind."""
     major, minor, patch = parse_version(current)
     if bump == "major":
-        return f"{major + 1}.0.0"
+        return f"{_increment_version_component(major, 'major')}.0.0"
     if bump == "minor":
-        return f"{major}.{minor + 1}.0"
+        return f"{major}.{_increment_version_component(minor, 'minor')}.0"
     if bump == "patch":
-        return f"{major}.{minor}.{patch + 1}"
+        return f"{major}.{minor}.{_increment_version_component(patch, 'patch')}"
     raise PreparationError(f"unsupported bump kind {bump!r}")
 
 
@@ -312,6 +324,10 @@ def prepare(
         changelog_after = rewrite_changelog(
             changelog_before, validated_current, target, release_date
         )
+        try:
+            validate_requested_bump(changelog_before, validated_current, bump)
+        except ReleasePolicyError as error:
+            raise PreparationError(str(error)) from error
         try:
             manifest_path.write_text(manifest_after, encoding="utf-8")
             changelog_path.write_text(changelog_after, encoding="utf-8")

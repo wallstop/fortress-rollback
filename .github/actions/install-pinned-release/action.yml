@@ -1,0 +1,15 @@
+name: "Install pinned Rust release toolchain"
+description: "Installs the repository-pinned release compiler with bounded retries"
+
+outputs:
+  toolchain:
+    description: "The exact stable Rust release compiler selected by the repository pin"
+    value: ${{ steps.install.outputs.toolchain }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install repository-pinned release compiler
+      id: install
+      shell: bash
+      run: bash "${GITHUB_ACTION_PATH}/install.sh"

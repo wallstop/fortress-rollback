@@ -21,6 +21,7 @@ on:
       - 'Cargo.lock'
       - '.cargo/config.toml'
       - 'clippy.toml'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-safety.yml'
   pull_request:
     branches: [main]
@@ -31,6 +32,7 @@ on:
       - 'Cargo.lock'
       - '.cargo/config.toml'
       - 'clippy.toml'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-safety.yml'
   schedule:
     # Run weekly on Sundays at 3 AM UTC for thorough analysis
@@ -60,7 +62,8 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
         with:
           components: rust-src
 
@@ -72,8 +75,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: careful-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: careful-${{ runner.os }}-cargo-
+          key: careful-${{ steps.nightly.outputs.toolchain }}-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: careful-${{ steps.nightly.outputs.toolchain }}-${{ runner.os }}-cargo-
 
       - name: Install cargo-careful
         run: cargo install cargo-careful --locked

@@ -3,7 +3,11 @@
 #
 # Run this after setting up the devcontainer to verify all tools are working
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -18,6 +22,54 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 ERRORS=0
+PIN_DIRECTORY="$REPO_ROOT/.github/actions/install-pinned-nightly"
+PIN_VALUE=""
+
+read_dated_nightly_pin() {
+    local pin_file="$1"
+    local label="$2"
+    local pin_value=""
+    local extra_line=""
+
+    PIN_VALUE=""
+    if [ ! -f "$pin_file" ]; then
+        echo -e "${RED}ERROR: $label pin is missing: $pin_file${NC}" >&2
+        ((ERRORS += 1))
+        return 1
+    fi
+
+    {
+        # Avoid Bash-4-only bulk line readers because macOS ships Bash 3.2.
+        if ! IFS= read -r pin_value && [ -z "$pin_value" ]; then
+            echo -e "${RED}ERROR: $label pin must contain exactly one line: $pin_file${NC}" >&2
+            ((ERRORS += 1))
+            return 1
+        fi
+        if IFS= read -r extra_line || [ -n "$extra_line" ]; then
+            echo -e "${RED}ERROR: $label pin must contain exactly one line: $pin_file${NC}" >&2
+            ((ERRORS += 1))
+            return 1
+        fi
+    } < "$pin_file"
+
+    PIN_VALUE="${pin_value%$'\r'}"
+    if [[ ! "$PIN_VALUE" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo -e "${RED}ERROR: $label pin must be exactly nightly-YYYY-MM-DD: $pin_file${NC}" >&2
+        ((ERRORS += 1))
+        PIN_VALUE=""
+        return 1
+    fi
+}
+
+PINNED_NIGHTLY_TOOLCHAIN=""
+if read_dated_nightly_pin "$PIN_DIRECTORY/toolchain" "generic nightly"; then
+    PINNED_NIGHTLY_TOOLCHAIN="$PIN_VALUE"
+fi
+
+PINNED_MIRI_TOOLCHAIN=""
+if read_dated_nightly_pin "$PIN_DIRECTORY/miri-toolchain" "Miri"; then
+    PINNED_MIRI_TOOLCHAIN="$PIN_VALUE"
+fi
 
 check_tool() {
     local name="$1"
@@ -31,8 +83,7 @@ check_tool() {
     else
         if [ "$required" = "true" ]; then
             echo -e "${RED}✗ missing (required)${NC}"
-            ((ERRORS++))
-            return 1
+            ((ERRORS += 1))
         else
             echo -e "${YELLOW}○ missing (optional)${NC}"
             return 0
@@ -40,11 +91,32 @@ check_tool() {
     fi
 }
 
+# Execute dynamic arguments directly. In particular, toolchain pins must never
+# be interpolated into a command string evaluated as shell code.
+check_tool_args() {
+    local name="$1"
+    local required="$2"
+    shift 2
+
+    printf "  %-25s" "$name"
+    if "$@" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ installed${NC}"
+    elif [ "$required" = "true" ]; then
+        echo -e "${RED}✗ missing (required)${NC}"
+        ((ERRORS += 1))
+    else
+        echo -e "${YELLOW}○ missing (optional)${NC}"
+    fi
+}
+
 echo "Rust Toolchain:"
 check_tool "rustc" "rustc --version"
 check_tool "cargo" "cargo --version"
 check_tool "rustup" "rustup --version"
-check_tool "rust-nightly" "rustup run nightly rustc --version"
+if [ -n "$PINNED_NIGHTLY_TOOLCHAIN" ]; then
+    check_tool_args "rust-nightly ($PINNED_NIGHTLY_TOOLCHAIN)" true \
+        rustup run "$PINNED_NIGHTLY_TOOLCHAIN" rustc --version
+fi
 check_tool "rust-analyzer" "which rust-analyzer" "false"
 echo ""
 
@@ -52,7 +124,10 @@ echo "Formal Verification:"
 check_tool "TLA+ (tla2tools.jar)" "test -f /opt/tla/tla2tools.jar || test -f .tla-tools/tla2tools.jar || test -f ~/.tla-tools/tla2tools.jar"
 check_tool "Java (for TLA+)" "java -version"
 check_tool "Kani" "cargo kani --version" "false"
-check_tool "Miri" "rustup +nightly which miri" "false"
+if [ -n "$PINNED_MIRI_TOOLCHAIN" ]; then
+    check_tool_args "Miri ($PINNED_MIRI_TOOLCHAIN)" false \
+        rustup run "$PINNED_MIRI_TOOLCHAIN" cargo miri --version
+fi
 echo ""
 
 echo "Testing & Coverage:"

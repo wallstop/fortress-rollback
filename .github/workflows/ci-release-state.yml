@@ -1,0 +1,82 @@
+name: CI - Release State
+
+on:
+  # Base-branch ownership keeps the workflow and every executable verifier
+  # trusted. Candidate source is checked out only as inert, unprivileged data.
+  pull_request_target:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-state-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  verify-release-state:
+    name: Verify prepared release state
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout candidate tree
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          # Merge-group verification proves that its exact base is an ancestor.
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+
+      - name: Checkout trusted base verifier
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          path: verifier
+          persist-credentials: false
+
+      - name: Install pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0
+        with:
+          python-version: "3.13.5"
+
+      - name: Classify release-state change with trusted base logic
+        id: gate
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          EVENT_KIND: ${{ github.event_name == 'merge_group' && 'merge-group' || 'pull-request' }}
+        run: |
+          python3 verifier/scripts/release/release_state_ci.py \
+            --candidate-root "${GITHUB_WORKSPACE}/candidate" \
+            --trusted-base-root "${GITHUB_WORKSPACE}/verifier" \
+            --head-ref "${HEAD_REF}" \
+            --expected-head-sha "${HEAD_SHA}" \
+            --expected-base-sha "${BASE_SHA}" \
+            --event-kind "${EVENT_KIND}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Install trusted release toolchain
+        if: steps.gate.outputs.release_state_changed == 'true'
+        id: release-rust
+        uses: ./verifier/.github/actions/install-pinned-release
+
+      - name: Reconstruct and verify prepared release
+        if: steps.gate.outputs.release_state_changed == 'true'
+        env:
+          EVENT_KIND: ${{ github.event_name == 'merge_group' && 'merge-group' || 'pull-request' }}
+        run: |
+          command="verify-candidate"
+          if [ "${EVENT_KIND}" = "merge-group" ]; then
+            command="verify-prospective"
+          fi
+          python3 verifier/scripts/release/release_state.py \
+            "${command}" \
+            --candidate-root "${GITHUB_WORKSPACE}/candidate" \
+            --trusted-base-root "${GITHUB_WORKSPACE}/verifier"

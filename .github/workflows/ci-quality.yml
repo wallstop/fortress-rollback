@@ -119,7 +119,7 @@ jobs:
               cat shear-output.txt
               echo "\`\`\`"
               echo ""
-              echo "Note: cargo-shear may have false positives. Verify with \`cargo +nightly udeps\` if needed."
+              echo "Note: cargo-shear may have false positives. Verify with cargo-udeps under the repository-pinned nightly if needed."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

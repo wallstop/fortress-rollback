@@ -128,6 +128,17 @@ env:
   CARGO_NET_RETRY: 10
 ```
 
+## Rust Toolchain Reproducibility
+
+Required jobs must not install a floating Rust nightly. Use the repository's
+canonical dated nightly pin through its local retrying installer. Keep
+component-sensitive Miri and Godot pins separate and dated. Release preparation
+and publication likewise use the exact repository-pinned release compiler.
+
+The installer owns bounded retries and emits the selected version; workflows
+must not duplicate version literals or add ad hoc retry wrappers. Update a pin
+only in a reviewed PR that exercises every consuming job.
+
 ## Timeout Guidelines
 
 | Job Type | Timeout | Rationale |

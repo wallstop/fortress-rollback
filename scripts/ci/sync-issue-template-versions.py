@@ -9,7 +9,7 @@ Usage:
     python scripts/ci/sync-issue-template-versions.py
     python scripts/ci/sync-issue-template-versions.py --dry-run
     python scripts/ci/sync-issue-template-versions.py --check
-    python scripts/ci/sync-issue-template-versions.py --ensure-version v1.2.3
+    python scripts/ci/sync-issue-template-versions.py --local-only --ensure-version v1.2.3
 """
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ GIT_TIMEOUT = 10
 # Maximum bytes of a response body included in error messages to aid debugging.
 _ERROR_BODY_SNIPPET_LEN = 200
 VERSION_TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+MAX_SEMVER_COMPONENT = (1 << 64) - 1
+MAX_SEMVER_COMPONENT_DIGITS = len(str(MAX_SEMVER_COMPONENT))
+MAX_VERSION_TAG_LENGTH = 1 + (3 * MAX_SEMVER_COMPONENT_DIGITS) + 2
 
 
 def _repo_from_git_remote() -> str | None:
@@ -169,28 +172,39 @@ def validate_version_tags(versions: list[str]) -> list[str]:
     valid: list[str] = []
     seen: set[str] = set()
     for tag in versions:
-        if VERSION_TAG_RE.match(tag):
+        try:
+            _semver_key(tag)
+        except (TypeError, ValueError):
+            print(
+                f"warning: skipping tag {tag!r} — does not match bounded "
+                "vMAJOR.MINOR.PATCH format",
+                file=sys.stderr,
+            )
+        else:
             if tag in seen:
                 continue
             seen.add(tag)
             valid.append(tag)
-        else:
-            print(
-                f"warning: skipping tag {tag!r} — does not match "
-                "vMAJOR.MINOR.PATCH format",
-                file=sys.stderr,
-            )
     valid.sort(key=_semver_key, reverse=True)
     return valid
 
 
 def _semver_key(tag: str) -> tuple[int, int, int]:
     """Return the numeric sort key for a tag already validated by VERSION_TAG_RE."""
-    match = VERSION_TAG_RE.match(tag)
+    if not isinstance(tag, str) or len(tag) > MAX_VERSION_TAG_LENGTH:
+        raise ValueError(f"invalid release tag: {tag!r}")
+    match = VERSION_TAG_RE.fullmatch(tag)
     if match is None:
         raise ValueError(f"invalid release tag: {tag}")
-    major, minor, patch = (int(part) for part in match.groups())
-    return major, minor, patch
+    parsed: list[int] = []
+    for component in match.groups():
+        if len(component) > MAX_SEMVER_COMPONENT_DIGITS:
+            raise ValueError(f"release tag component is larger than u64: {tag!r}")
+        numeric = int(component)
+        if numeric > MAX_SEMVER_COMPONENT:
+            raise ValueError(f"release tag component is larger than u64: {tag!r}")
+        parsed.append(numeric)
+    return parsed[0], parsed[1], parsed[2]
 
 
 def build_version_block(versions: list[str], indent: str) -> str:
@@ -242,6 +256,35 @@ def update_template(content: str, versions: list[str]) -> tuple[str, bool]:
     return new_content, new_content != content
 
 
+def extract_template_versions(content: str) -> list[str]:
+    """Read strict version entries from the managed template block."""
+    lines = content.splitlines()
+    begin_lines = [
+        index for index, line in enumerate(lines) if line.strip() == BEGIN_SENTINEL
+    ]
+    end_lines = [
+        index for index, line in enumerate(lines) if line.strip() == END_SENTINEL
+    ]
+    if len(begin_lines) != 1 or len(end_lines) != 1:
+        raise RuntimeError(
+            f"{TEMPLATE_PATH}:0: expected exactly one managed version sentinel pair"
+        )
+    begin, end = begin_lines[0], end_lines[0]
+    if begin >= end:
+        raise RuntimeError(
+            f"{TEMPLATE_PATH}:0: {BEGIN_SENTINEL} must appear before {END_SENTINEL}"
+        )
+    versions: list[str] = []
+    for line_number, line in enumerate(lines[begin + 1 : end], start=begin + 2):
+        entry = re.fullmatch(r"\s*-\s+(\S+)\s*", line)
+        if entry is None or VERSION_TAG_RE.fullmatch(entry.group(1)) is None:
+            raise RuntimeError(
+                f"{TEMPLATE_PATH}:{line_number}: invalid managed version entry {line!r}"
+            )
+        versions.append(entry.group(1))
+    return versions
+
+
 def main() -> int:
     """Entry point."""
     parser = argparse.ArgumentParser(
@@ -264,15 +307,26 @@ def main() -> int:
         metavar="TAG",
         help=(
             "Force TAG into the synced list before sorting/deduping. "
-            "Used by publish.yml so the just-created release is present even "
-            "if the GitHub releases API has not listed it yet."
+            "Used by release preparation so the reviewed target version is "
+            "present before its GitHub release exists."
+        ),
+    )
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help=(
+            "Preserve the committed managed versions instead of querying GitHub. "
+            "Release preparation uses this deterministic offline mode."
         ),
     )
     args = parser.parse_args()
     ensured_versions: list[str] = args.ensure_version
-    invalid_ensured = [
-        tag for tag in ensured_versions if VERSION_TAG_RE.match(tag) is None
-    ]
+    invalid_ensured: list[str] = []
+    for tag in ensured_versions:
+        try:
+            _semver_key(tag)
+        except ValueError:
+            invalid_ensured.append(tag)
     if invalid_ensured:
         joined = ", ".join(repr(tag) for tag in invalid_ensured)
         print(
@@ -298,7 +352,12 @@ def main() -> int:
 
     versions: list[str] = []
     try:
-        versions = validate_version_tags(fetch_versions(api_url) + ensured_versions)
+        if args.local_only:
+            versions = validate_version_tags(
+                extract_template_versions(original) + ensured_versions
+            )
+        else:
+            versions = validate_version_tags(fetch_versions(api_url) + ensured_versions)
     except NetworkError as exc:
         if args.check:
             print(f"Skipping issue template version check: {exc}", file=sys.stderr)

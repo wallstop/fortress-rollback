@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Version to publish (must match Cargo.toml)"
+        description: "Version to publish (must match reviewed release state)"
         required: true
 
 permissions:
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -35,22 +35,47 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      - name: Checkout trusted dispatch helpers
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          toolchain: stable
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: trusted
+          persist-credentials: false
+
+      - name: Install pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0
+        with:
+          python-version: "3.13.5"
+
+      - name: Resolve trusted candidate source
+        id: checkpoint
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.release_version }}
+          TRUSTED_DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 trusted/scripts/release/release_checkpoint.py \
+            --repo trusted \
+            --candidate "${GITHUB_WORKSPACE}/candidate" \
+            --state-file "${RUNNER_TEMP}/release-checkpoint.json" \
+            resolve \
+            --version "$INPUT_VERSION" \
+            --trusted-sha "$TRUSTED_DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned release Rust
+        id: release-rust
+        uses: ./trusted/.github/actions/install-pinned-release
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         continue-on-error: true
 
       - name: Verify sccache is working
         id: sccache-check
         if: steps.sccache.outcome == 'success'
-        run: ./scripts/ci/verify-sccache.sh
+        run: ./trusted/scripts/ci/verify-sccache.sh
         continue-on-error: true
 
       - name: Clear sccache env on failure
@@ -60,58 +85,62 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
         continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: publish-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            candidate/target
+          key: publish-${{ runner.os }}-rust-${{ steps.release-rust.outputs.toolchain }}-cargo-${{ hashFiles('candidate/**/Cargo.lock') }}
           restore-keys: |
             publish-${{ runner.os }}-cargo-
 
-      - name: Verify release input and source metadata
+      - name: Verify immutable reviewed release state
+        id: release
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.release_version }}
         run: |
           set -euo pipefail
-          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
-          INPUT_VERSION="${{ github.event.inputs.release_version }}"
-          if ! printf '%s\n' "$INPUT_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-            echo "release_version must use strict X.Y.Z semver; got $INPUT_VERSION" >&2
-            exit 1
-          fi
-          if [ "$INPUT_VERSION" != "$CARGO_VERSION" ]; then
-            echo "workflow_dispatch input release_version=$INPUT_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+          python3 trusted/scripts/release/release_state.py \
+            --repo-root "${GITHUB_WORKSPACE}/candidate" verify \
+            --expected-version "$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify previous release tag exists
+        env:
+          PREVIOUS_VERSION: ${{ steps.release.outputs.previous_version }}
+        run: |
+          set -euo pipefail
+          if ! git -C trusted ls-remote --exit-code --tags origin \
+            "refs/tags/v${PREVIOUS_VERSION}" > "${RUNNER_TEMP}/previous-release-tag.txt"; then
+            echo "Previous release tag v${PREVIOUS_VERSION} does not exist on origin." >&2
             exit 1
           fi
 
-      - name: Auto-fix CHANGELOG release metadata (must already be committed)
-        run: |
-          bash ./scripts/sync-version.sh --changelog-only
-
-      - name: Verify CHANGELOG release metadata
-        run: |
-          bash ./scripts/sync-version.sh --changelog-only --check
-
-      - name: Fail if CHANGELOG sync produced uncommitted changes
-        run: |
-          if [ -n "$(git status --porcelain -- CHANGELOG.md)" ]; then
-            echo "CHANGELOG.md is not synchronized in the committed source. Run 'bash ./scripts/sync-version.sh --changelog-only' and commit the result before publishing." >&2
-            git --no-pager diff -- CHANGELOG.md
-            exit 1
-          fi
+      - name: Verify synchronized release metadata
+        env:
+          FORTRESS_PROJECT_ROOT: ${{ github.workspace }}/candidate
+        run: bash ./trusted/scripts/sync-version.sh --check
 
       - name: Check every Cargo workspace lock
-        run: python3 scripts/release/workspace_locks.py check
+        run: |
+          python3 trusted/scripts/release/workspace_locks.py \
+            --repo-root "${GITHUB_WORKSPACE}/candidate" check
 
       - name: Package release artifact
         id: package
+        env:
+          CARGO_VERSION: ${{ steps.release.outputs.target_version }}
+          CRATE_NAME: ${{ steps.release.outputs.crate_name }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
         run: |
           set -euo pipefail
-          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
-          CRATE_NAME=$(awk -F '"' '/^name = "/ { print $2; exit }' Cargo.toml)
           cargo package --locked
-          package_path="target/package/${CRATE_NAME}-${CARGO_VERSION}.crate"
+          package_path="${GITHUB_WORKSPACE}/candidate/target/package/${CRATE_NAME}-${CARGO_VERSION}.crate"
           if [ ! -f "$package_path" ]; then
             echo "Packaged crate is missing: $package_path" >&2
             exit 1
@@ -124,15 +153,10 @@ jobs:
             echo "path=$package_path"
             echo "checksum=$local_checksum"
           } >> "$GITHUB_OUTPUT"
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
+        working-directory: candidate
 
       - name: Upload packaged crate
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: fortress-rollback-${{ steps.package.outputs.version }}
           path: |
@@ -140,98 +164,88 @@ jobs:
             ${{ steps.package.outputs.path }}.sha256
           if-no-files-found: error
 
-      - name: Check crates.io publication state
-        id: registry
+      - name: Create immutable release checkpoint
         env:
-          CRATE_NAME: ${{ steps.package.outputs.crate_name }}
-          CARGO_VERSION: ${{ steps.package.outputs.version }}
-          local_checksum: ${{ steps.package.outputs.checksum }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          response="${RUNNER_TEMP}/crates-io-version.json"
-          status=$(curl --silent --show-error --location --output "$response" --write-out '%{http_code}' \
-            --header "User-Agent: fortress-rollback-release-workflow/${CARGO_VERSION}" \
-            "https://crates.io/api/v1/crates/${CRATE_NAME}/${CARGO_VERSION}")
-          if [ "$status" = "404" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$status" != "200" ]; then
-            echo "crates.io returned HTTP $status while checking ${CRATE_NAME} ${CARGO_VERSION}" >&2
-            sed -n '1,20p' "$response"
-            exit 1
-          fi
-          published_checksum=$(jq -r '.version.checksum // empty' "$response")
-          if [ -z "$published_checksum" ] || [ "$published_checksum" != "$local_checksum" ]; then
-            echo "Existing crates.io artifact checksum does not match the packaged crate." >&2
-            echo "local=$local_checksum published=$published_checksum" >&2
-            exit 1
-          fi
-          echo "${CRATE_NAME} ${CARGO_VERSION} already exists on crates.io with the packaged checksum; publish will be skipped."
-          echo "publish=false" >> "$GITHUB_OUTPUT"
+          askpass="${RUNNER_TEMP}/release-git-askpass.sh"
+          trap 'rm -f "$askpass"' EXIT
+          # These variables intentionally expand only when Git invokes askpass.
+          # shellcheck disable=SC2016
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\\n" "$GITHUB_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$askpass"
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            python3 trusted/scripts/release/release_checkpoint.py \
+              --repo trusted \
+              --candidate "${GITHUB_WORKSPACE}/candidate" \
+              --state-file "${RUNNER_TEMP}/release-checkpoint.json" \
+              create
 
-      - name: Publish to crates.io
-        if: steps.registry.outputs.publish == 'true'
+      - name: Revalidate checkpoint immediately before crates.io
+        run: |
+          python3 trusted/scripts/release/release_checkpoint.py \
+            --repo trusted \
+            --candidate "${GITHUB_WORKSPACE}/candidate" \
+            --state-file "${RUNNER_TEMP}/release-checkpoint.json" \
+            verify
+
+      - name: Publish or reconcile crates.io state
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish --locked
-
-      - name: Create and push git tag
+          CRATE_NAME: ${{ steps.package.outputs.crate_name }}
+          CARGO_VERSION: ${{ steps.package.outputs.version }}
+          LOCAL_CHECKSUM: ${{ steps.package.outputs.checksum }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
         run: |
           set -euo pipefail
-          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
-          TAG_NAME="v${CARGO_VERSION}"
-          SOURCE_SHA=$(git rev-parse HEAD)
-          existing_target=$(git ls-remote origin "refs/tags/${TAG_NAME}^{}" | awk '{ print $1 }')
-          if [ -z "$existing_target" ]; then
-            existing_target=$(git ls-remote origin "refs/tags/${TAG_NAME}" | awk '{ print $1 }')
-          fi
-          if [ -n "$existing_target" ]; then
-            if [ "$existing_target" != "$SOURCE_SHA" ]; then
-              echo "Tag ${TAG_NAME} already exists at ${existing_target}, expected ${SOURCE_SHA}." >&2
-              exit 1
-            fi
-            echo "Tag ${TAG_NAME} already points at ${SOURCE_SHA}."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
-          git push origin "$TAG_NAME"
-
-      - name: Get version for release
-        id: get_version
-        run: |
-          VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          python3 ../trusted/scripts/release/publish_state.py \
+            --crate "${CRATE_NAME}" \
+            --version "${CARGO_VERSION}" \
+            --checksum "${LOCAL_CHECKSUM}"
+        working-directory: candidate
 
       - name: Extract changelog for release
-        id: changelog
+        env:
+          VERSION: ${{ steps.release.outputs.target_version }}
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
-          # Extract the section for this version from CHANGELOG.md
-          # Matches from "## [X.Y.Z]" until the next "## [" or end of file
-          CHANGELOG_CONTENT=$(awk -v ver="$VERSION" '
-            BEGIN { found=0; printing=0 }
+          set -euo pipefail
+          changelog_content=$(awk -v ver="$VERSION" '
+            BEGIN { printing=0 }
             /^## \[/ {
               if (printing) { exit }
-              if ($0 ~ "\\[" ver "\\]") { found=1; printing=1; next }
+              if ($0 ~ "\\[" ver "\\]") { printing=1; next }
             }
             printing { print }
-          ' CHANGELOG.md)
-
-          if [ -z "$CHANGELOG_CONTENT" ]; then
-            CHANGELOG_CONTENT="Release $VERSION"
+          ' candidate/CHANGELOG.md)
+          if [ -z "$changelog_content" ]; then
+            echo "CHANGELOG.md has no release notes for ${VERSION}." >&2
+            exit 1
           fi
+          printf '%s\n' "$changelog_content" > "${RUNNER_TEMP}/release_notes.md"
 
-          # Write to file to preserve newlines
-          echo "$CHANGELOG_CONTENT" > "${RUNNER_TEMP}/release_notes.md"
+      - name: Revalidate checkpoint immediately before GitHub Release
+        run: |
+          python3 trusted/scripts/release/release_checkpoint.py \
+            --repo trusted \
+            --candidate "${GITHUB_WORKSPACE}/candidate" \
+            --state-file "${RUNNER_TEMP}/release-checkpoint.json" \
+            verify
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.get_version.outputs.tag }}
+          TAG: v${{ steps.release.outputs.target_version }}
           PACKAGE_PATH: ${{ steps.package.outputs.path }}
         run: |
           set -euo pipefail
@@ -257,67 +271,3 @@ jobs:
           fi
           gh release create "$TAG" "${assets[@]}" --title "$TAG" \
             --notes-file "${RUNNER_TEMP}/release_notes.md" --verify-tag
-
-      - name: Finalize release metadata on default branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          RELEASE_TAG: ${{ steps.get_version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.get_version.outputs.version }}
-        run: |
-          set -euo pipefail
-          # Runs AFTER cargo publish + tag + GitHub release so the working tree
-          # can safely switch to the default branch. Two post-release fixups,
-          # committed together to avoid racing pushes:
-          #
-          #  1. Stamp the changelog's '## [VERSION]' header with today's real
-          #     release date (the committed source carries a dated placeholder so
-          #     the routine sync-version --check gate passes during development).
-          #  2. Sync the bug-report version dropdown. The standalone
-          #     sync-issue-template workflow triggers on `release: [released]`,
-          #     but a release created here with the default GITHUB_TOKEN does NOT
-          #     emit that event (GitHub suppresses triggers from the default
-          #     token to prevent recursion), so we sync inline instead.
-          #
-          # Note: this refreshes the *default branch* only. The published crate
-          # and the git tag are made from the tag tree (above) and keep whatever
-          # date the committed source had — acceptable because the changelog's
-          # placeholder is normally set close to release; the release notes never
-          # include the header date (see the awk extraction above).
-          #
-          # The loop re-derives both fixups from a freshly fetched tip on each
-          # attempt, so a concurrent push to the default branch is handled by a
-          # clean retry rather than a non-fast-forward failure.
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          RELEASE_DATE="$(date -u +%Y-%m-%d)"
-          export FORTRESS_RELEASE_DATE="$RELEASE_DATE"
-          for attempt in 1 2 3; do
-            git fetch --depth=1 origin "$DEFAULT_BRANCH"
-            git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
-            bash ./scripts/sync-version.sh --stamp-release-date --release-version "$RELEASE_VERSION"
-            python3 scripts/ci/sync-issue-template-versions.py --ensure-version "$RELEASE_TAG"
-            if ! grep -qF "## [$RELEASE_VERSION] - $RELEASE_DATE" CHANGELOG.md; then
-              echo "CHANGELOG.md does not contain stamped release header: ## [$RELEASE_VERSION] - $RELEASE_DATE" >&2
-              exit 1
-            fi
-            if ! grep -qF "        - $RELEASE_TAG" .github/ISSUE_TEMPLATE/bug_report.yml; then
-              echo "bug_report.yml does not contain released version option: $RELEASE_TAG" >&2
-              exit 1
-            fi
-            git add CHANGELOG.md .github/ISSUE_TEMPLATE/bug_report.yml
-            if git diff --staged --quiet; then
-              echo "Release metadata already up to date on ${DEFAULT_BRANCH}"
-              exit 0
-            fi
-            git commit -m "chore: finalize release metadata for ${RELEASE_TAG}"
-            if git push origin "HEAD:${DEFAULT_BRANCH}"; then
-              echo "Pushed release metadata to ${DEFAULT_BRANCH} (attempt ${attempt})"
-              exit 0
-            fi
-            echo "Push rejected (attempt ${attempt}); retrying on a fresh tip" >&2
-            git reset --hard "HEAD~1"
-          done
-          echo "Failed to push release metadata after 3 attempts" >&2
-          exit 1

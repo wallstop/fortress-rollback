@@ -97,6 +97,55 @@ def is_workspace_lock_surface_file(path: str) -> bool:
     )
 
 
+def is_release_automation_surface_file(path: str) -> bool:
+    """Return True for reviewed-release state-machine inputs and contracts."""
+    return (
+        path.startswith("scripts/release/")
+        or path
+        in {
+            ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/workflows/release-prepare.yml",
+            ".github/workflows/ci-release-state.yml",
+            ".github/workflows/publish.yml",
+            ".agents/skills/changelog/SKILL.md",
+            ".agents/skills/fortress-development/SKILL.md",
+            ".agents/skills/publishing/SKILL.md",
+            ".agents/skills/design-decisions/references/release.txt",
+            "CHANGELOG.md",
+            "scripts/tests/test_prepare_release.py",
+            "scripts/tests/test_release_checkpoint.py",
+            "scripts/tests/test_publish_state.py",
+            "scripts/tests/test_release_branch.py",
+            "scripts/tests/test_release_policy.py",
+            "scripts/tests/test_release_state.py",
+            "scripts/tests/test_release_state_ci.py",
+            "scripts/tests/test_release_workflows.py",
+            "scripts/ci/sync-issue-template-versions.py",
+            "scripts/tests/test_issue_template_versions_wiring.py",
+            "scripts/tests/test_sync_issue_template_versions.py",
+        }
+    )
+
+
+def is_ci_toolchain_surface_file(path: str) -> bool:
+    """Return True for canonical nightly pin consumers and their contract."""
+    return path.startswith(
+        (
+            ".github/actions/install-pinned-nightly/",
+            ".github/actions/install-pinned-release/",
+        )
+    ) or path in {
+        ".agents/skills/github-actions/SKILL.md",
+        ".github/workflows/ci-docs.yml",
+        ".github/workflows/ci-rust.yml",
+        ".github/workflows/ci-safety.yml",
+        ".github/workflows/ci-security.yml",
+        ".github/workflows/ci-verification.yml",
+        "scripts/ci/check-tools.sh",
+        "scripts/tests/test_ci_toolchains.py",
+    }
+
+
 def is_docs_markdown_file(path: str) -> bool:
     """Return True for markdown files under docs/ (vale targets)."""
     return path.startswith("docs/") and path.endswith(".md")
@@ -231,6 +280,12 @@ def plan_checks(
     workspace_lock_changed = any(
         is_workspace_lock_surface_file(path) for path in changed_files
     )
+    release_automation_changed = any(
+        is_release_automation_surface_file(path) for path in changed_files
+    )
+    ci_toolchain_changed = any(
+        is_ci_toolchain_surface_file(path) for path in changed_files
+    )
     docs_files = sorted(path for path in extant_files if is_docs_markdown_file(path))
     rust_changed = any(is_rust_file(path) for path in changed_files)
     rust_files = sorted(path for path in extant_files if is_rust_file(path))
@@ -283,6 +338,56 @@ def plan_checks(
                     "Run 'python3 scripts/release/workspace_locks.py sync', then "
                     "rerun the full check; never bypass --locked or use --no-deps "
                     "as a lock-freshness oracle."
+                ),
+            )
+        )
+
+    if run_all or release_automation_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="release-automation-tests",
+                description="exercise release policy, prepared state, and publish retries",
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "-m",
+                    "pytest",
+                    "scripts/tests/test_workspace_locks.py",
+                    "scripts/tests/test_prepare_release.py",
+                    "scripts/tests/test_release_policy.py",
+                    "scripts/tests/test_release_state.py",
+                    "scripts/tests/test_release_state_ci.py",
+                    "scripts/tests/test_release_checkpoint.py",
+                    "scripts/tests/test_publish_state.py",
+                    "scripts/tests/test_release_branch.py",
+                    "scripts/tests/test_sync_issue_template_versions.py",
+                    "scripts/tests/test_issue_template_versions_wiring.py",
+                    "scripts/tests/test_release_workflows.py",
+                    "--no-header",
+                    "-q",
+                ],
+                fix_hint=(
+                    "Fix the release state-machine regression; do not bypass a "
+                    "semantic-version, digest, lock, or checksum invariant."
+                ),
+            )
+        )
+
+    if run_all or ci_toolchain_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="ci-toolchain-contract",
+                description="enforce dated Rust toolchains and canonical retry installation",
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "-m",
+                    "pytest",
+                    "scripts/tests/test_ci_toolchains.py",
+                    "--no-header",
+                    "-q",
+                ],
+                fix_hint=(
+                    "Use the canonical pinned-nightly installer; required workflows "
+                    "must not use floating nightly channels or duplicate the pin."
                 ),
             )
         )

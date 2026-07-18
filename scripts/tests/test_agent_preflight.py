@@ -34,6 +34,14 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("workspace-lock-check", "Cargo.toml"),
     ("workspace-lock-check", "fuzz/Cargo.lock"),
     ("workspace-lock-check", "scripts/release/prepare_release.py"),
+    ("release-automation-tests", "scripts/release/prepare_release.py"),
+    ("release-automation-tests", "scripts/tests/test_release_branch.py"),
+    ("release-automation-tests", ".github/workflows/publish.yml"),
+    ("release-automation-tests", ".github/workflows/ci-release-state.yml"),
+    ("ci-toolchain-contract", ".github/actions/install-pinned-nightly/toolchain"),
+    ("ci-toolchain-contract", ".github/actions/install-pinned-release/toolchain"),
+    ("ci-toolchain-contract", ".github/workflows/ci-rust.yml"),
+    ("ci-toolchain-contract", ".github/workflows/ci-security.yml"),
     ("validate-agent-skills", ".agents/skills/fortress-development/SKILL.md"),
     ("agent-skills-quality", ".agents/skills/dev-pipeline/SKILL.md"),
     ("actionlint", ".github/workflows/ci.yml"),
@@ -140,6 +148,48 @@ def test_plan_checks_runs_full_workspace_lock_check(changed_file: str) -> None:
         "check",
     ]
     assert "--no-deps" not in " ".join(lock_check.command)
+
+
+def test_plan_checks_runs_release_state_machine_regressions() -> None:
+    checks = plan_checks({"scripts/release/release_state.py"})
+    release_check = next(
+        check for check in checks if check.check_id == "release-automation-tests"
+    )
+
+    assert release_check.command == [
+        PYTHON_EXECUTABLE,
+        "-m",
+        "pytest",
+        "scripts/tests/test_workspace_locks.py",
+        "scripts/tests/test_prepare_release.py",
+        "scripts/tests/test_release_policy.py",
+        "scripts/tests/test_release_state.py",
+        "scripts/tests/test_release_state_ci.py",
+        "scripts/tests/test_release_checkpoint.py",
+        "scripts/tests/test_publish_state.py",
+        "scripts/tests/test_release_branch.py",
+        "scripts/tests/test_sync_issue_template_versions.py",
+        "scripts/tests/test_issue_template_versions_wiring.py",
+        "scripts/tests/test_release_workflows.py",
+        "--no-header",
+        "-q",
+    ]
+
+
+def test_plan_checks_runs_ci_toolchain_contract_for_pin_changes() -> None:
+    checks = plan_checks({".github/actions/install-pinned-nightly/toolchain"})
+    toolchain_check = next(
+        check for check in checks if check.check_id == "ci-toolchain-contract"
+    )
+
+    assert toolchain_check.command == [
+        PYTHON_EXECUTABLE,
+        "-m",
+        "pytest",
+        "scripts/tests/test_ci_toolchains.py",
+        "--no-header",
+        "-q",
+    ]
 
 
 def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> None:
