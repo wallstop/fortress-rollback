@@ -152,7 +152,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.10", features = ["tokio"] }
+/// fortress-rollback = { version = "0.11", features = ["tokio"] }
 /// ```
 ///
 /// # Example

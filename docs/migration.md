@@ -29,7 +29,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.10"  # current version
+fortress-rollback = "0.11"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
