@@ -244,7 +244,10 @@ def test_absent_tag_accepts_previous_checkpoint_older_than_search_bound(
             f"intervening main commit {index}",
         )
     _git(trusted, "cherry-pick", prepared)
-    _git(trusted, "push", "--force", "origin", "main")
+    # This fixture deliberately replaces a long local-bare history. Send a
+    # self-contained pack so receive-pack never depends on an object advertised
+    # from the history being replaced.
+    _git(trusted, "push", "--force", "--no-thin", "origin", "main")
 
     checkpoint = _resolve(trusted, tmp_path)
 
