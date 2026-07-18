@@ -63,7 +63,7 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
         AGENT_PREFLIGHT.read_text(encoding="utf-8").count(
             '"scripts/tests/test_main_ruleset.py"'
         )
-        == 1
+        == 2
     )
     assert "scripts/release/workspace_locks.py sync" in text
     assert "scripts/release/workspace_locks.py check" in text

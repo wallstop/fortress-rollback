@@ -36,6 +36,8 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("workspace-lock-check", "scripts/release/prepare_release.py"),
     ("release-automation-tests", "scripts/release/prepare_release.py"),
     ("release-automation-tests", "scripts/tests/test_release_branch.py"),
+    ("release-automation-tests", "scripts/tests/test_main_ruleset.py"),
+    ("release-automation-tests", ".github/rulesets/main-protection.json"),
     ("release-automation-tests", ".github/workflows/publish.yml"),
     ("release-automation-tests", ".github/workflows/ci-release-state.yml"),
     ("ci-toolchain-contract", ".github/actions/install-pinned-nightly/toolchain"),
