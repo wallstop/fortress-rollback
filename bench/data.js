@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784339745093,
+  "lastUpdate": 1784392098406,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "56db89d456c26258ea01499db2e5837fdc2a96d3",
-          "message": "Hardening M2 §5.4: SessionMetrics + D9 event-discard telemetry (#190)\n\n## Summary\n\nAdds an always-on, pull-based **session metrics layer**\n(`src/metrics.rs`) and uses its first counter surface to fix defect\n**D9**: event-queue overflow no longer discards undrained events\nsilently.\n\nThis is the next increment of the M2 milestone (metrics + baseline\nsweep) after M2 §5.1 (D1, #189). It ships the metrics-module foundation\nplus the event-queue-overflow accounting that closes D9's telemetry gap.\n`PeerMetrics`, the rollback/stall/confirmation-lag counters, and the\nbaseline sweep are follow-up PRs — every field lands with a consuming\nsite so nothing is dead code under `deny(warnings)`, and\n`SessionMetrics` is `#[non_exhaustive]` so those are additive.\n\n## The defect (D9)\n\nBoth session types bounded the event queue with `while event_queue.len()\n> max { pop_front() }` — dropping the **oldest** event with **zero**\ntelemetry (no violation, no counter). A slow-draining app during a churn\nburst could silently lose a safety-critical `Disconnected` or\n`DesyncDetected`. A red-doc test pinned the silence; this PR flips it\ngreen.\n\n## What's new\n\n- **`SessionMetrics`** — `#[non_exhaustive]`, `Copy`,\n`serde::Serialize`, `to_json()`/`to_json_pretty()` under `json`. First\nfields: `events_discarded_total` + `events_discarded_by_kind`\n(per-`EventKind`). Plain integers updated inline — no timers, no alloc,\nno `Instant` — so reads are deterministic and WASM-safe.\n- **`EventKind`** — a payload-free mirror of every `FortressEvent`\nvariant (`as_str()`/`ALL`/`COUNT`), plus **`FortressEvent::kind()`**.\nThe events analogue of the planned `MessageKind`.\n- **`P2PSession::metrics()` / `SpectatorSession::metrics()`** accessors.\n`trim_event_queue` now records every discarded event's kind and emits\n**one** rate-limited `Warning`/`NetworkProtocol` violation per overflow\n**episode** — re-armed on each `events()` drain, so a churn burst warns\nonce, not once per message. **Retention is unchanged** (still drops\noldest); the policy change is deferred to M4.\n\n## Red → green\n\n- Rewrote the red-doc test →\n`event_queue_overflow_records_discard_telemetry`.\n- Verified RED by temporarily neutralizing the fix (silent trim):\n`overflow must count discarded events; got 0`.\n- GREEN: the `Disconnected` canary is attributed to its kind,\n`events_discarded_total >= 1`, and a rate-limited `Warning` fires.\n- New regressions: P2P + spectator rate-limit-per-drain-gap tests,\nspectator discard test, and `metrics::tests` (index↔ALL↔as_str\nbijection, exhaustive `kind()` mapping over all variants, labeled-map\nJSON).\n\n## Validation\n\n- `cargo fmt` + `cargo clippy --workspace --all-targets` clean under\n`tokio,json` and `tokio,json,hot-join`.\n- `cargo nextest run`: **2349** passed (`tokio,json`), **2587** passed\n(`+hot-join`).\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps` clean (both feature\nsets).\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nAn adversarial review pass verified the core (index/ALL/as_str\nbijection, `kind()` totality, custom-Serialize stability) and confirmed\nthe counter has no bypass: the only `pop_front` on the event queue is in\n`trim_event_queue`, and the only `drain(..)` is in `events()` (which\nre-arms the rate limiter).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches all event-queue emission paths in P2P and spectator sessions;\nmiscounted or missed trims could still hide lost\nDisconnected/DesyncDetected events, though regressions target that\nbehavior.\n> \n> **Overview**\n> Introduces **`SessionMetrics`** (`src/metrics.rs`) with\n**`P2PSession::metrics()`** and **`SpectatorSession::metrics()`**, plus\n**`EventKind`**, **`EventKindCounts`**, and **`FortressEvent::kind()`**\nso overflow drops can be counted by category. Optional **`to_json()`** /\n**`to_json_pretty()`** when the `json` feature is enabled.\n> \n> **D9 fix:** bounded event-queue overflow still drops oldest events,\nbut each discard increments **`events_discarded_total`** and\n**`events_discarded_by_kind`**, and emits one rate-limited\n**`Warning`/`NetworkProtocol`** violation per overflow episode (re-armed\nwhen **`events()`** drains). **`handle_event`** is split so\n**`trim_event_queue`** runs after every emission path—including\n**`advance_frame`**, disconnect/hot-join, and early returns—not only\ninbound protocol handling.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n216e135095895b2b1af686d029057b136906415a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-04T19:43:49-07:00",
-          "tree_id": "c32a03069576a8b1d1b047b3da4b724d55778c4e",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/56db89d456c26258ea01499db2e5837fdc2a96d3"
-        },
-        "date": 1783219707035,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 120,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 177,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 519,
-            "range": "± 44",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 830,
-            "range": "± 68",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1174,
-            "range": "± 103",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128188,
-            "range": "± 2030",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 49203,
-            "range": "± 649",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5483,6 +5357,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3108,
             "range": "± 239",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9ae76e1cbce0a47e8bd1da734c4bbefdb1ced4b3",
+          "message": "Harden release and publish automation (#254)\n\n## Summary\n\nHardens the complete release path after PR #253 and Actions job\n88030023204 exposed two independent failure classes:\nrelease-state-dependent tests after preparation and floating Rust\nchannel manifest races.\n\n- derives the minimum SemVer bump from curated changelog categories (the\ncurrent release is correctly planned as 0.11.0, not 0.10.1);\n- reconstructs generated release PRs from trusted base code and compares\nthe exact tracked tree;\n- makes preparation reruns/stale branches recoverable with exact leases\nand an atomic main/release-branch CAS;\n- records a reviewed source manifest and resolves first publication from\nthe unique valid prepared commit, even after main advances or the prior\ntag is older than 256 commits;\n- creates/revalidates exact annotated-tag checkpoints before crates.io\nand GitHub mutations;\n- reconciles ambiguous Cargo failures against the crates.io checksum for\nidempotent retries;\n- pins stable, nightly, Miri, Python, actions, and hash-locked Python\ntest dependencies;\n- runs trusted release-state checks on every PR and on merge-group\nprospective trees;\n- adds executable regressions, agent preflight coverage, LLM/skill\npolicy, and an architectural decision trail.\n\n## Evidence\n\n- 1,955 complete Python/script tests pass.\n- Agent preflight passes: 275 release tests, 66 toolchain contracts, 49\nskills, actionlint, changelog, 5,138-file/1,392-link validation,\nfallback-import and spelling gates.\n- Full Rust fmt, workspace Clippy with `-D warnings`, and\nworkspace/all-targets tests and benchmarks pass with `tokio,json`.\n- A `--bump minor` dry run deterministically produces 0.10.0 → 0.11.0\nacross all locks/docs/wiki.\n- Cursor Bugbot reviewed exact final commit `596a162` with no new\nissues; all four earlier actionable threads are fixed and resolved.\nCopilot was requested after every push but reports an account quota\nlimit.\n\n## Required repository rollout\n\nBefore merging a generated `release/v*` PR, an administrator must\nrequire the stable **Verify prepared release state** check on `main` and\nenable merge queue (preferred) or strict “require branches to be up to\ndate” checks. GitHub owns this repository setting; the workflow now\nsupplies both PR and `merge_group` checks but repository code cannot\nactivate the protection itself.\n\n## Follow-up\n\nOnce this hardening PR is merged, close/supersede #253 and run **Release\n- Prepare PR** with a minor bump to generate the reviewed v0.11.0\nrelease PR.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes irreversible release and publish automation, annotated-tag\ntrust boundaries, and semver classification; misconfiguration could\nblock releases or allow publishing the wrong tree without the required\n**Verify prepared release state** branch protection.\n> \n> **Overview**\n> Hardens the full **prepare → review → publish** path so the merged\ntree is the only source of truth for crates.io and GitHub releases, with\nstricter semver and reproducible CI toolchains.\n> \n> **Release policy and changelog:** Preparation now derives a **minimum\nSemVer bump** from `[Unreleased]` categories (`release_policy.py`,\nenforced in `prepare_release.py` and agent skills). Wire-protocol v2 is\ndocumented under `### Changed` with `**Breaking:**` instead of a `Fixed`\nentry. Release dates and issue-template versions are finalized in the\npreparation PR; post-publish default-branch metadata commits are\nremoved.\n> \n> **Immutable prepared state:** New `release-state.json` / digest\nverification, `ci-release-state.yml` (trusted base + candidate checkout\non PRs and merge groups), branch recovery (`release_branch.py`), and\npublish-time candidate resolution (`release_checkpoint.py`) with\nannotated-tag checkpoints revalidated before registry and GitHub\nmutations. `publish_state.py` reconciles crates.io by checksum for\nidempotent retries. `publish.yml` no longer auto-fixes changelog or\npushes tags from `main` alone.\n> \n> **Tooling pins:** Composite actions install **dated nightly**,\nseparate Miri nightly, and **pinned stable** release Rust with bounded\nretries; required workflows switch off floating\n`dtolnay/rust-toolchain@nightly`. Release workflows use Python 3.13.5\nand hash-locked `requirements.txt`.\n> \n> **Docs and preflight:** Publishing/changelog/fortress-development\nskills and `agent-preflight.py` expand release and toolchain contract\ntests.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n596a162c12f24dbcb2233dbc6efac6e1cb5591fd. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-18T09:20:04-07:00",
+          "tree_id": "d8bab669f11681637798bdf78062ee70620e695b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9ae76e1cbce0a47e8bd1da734c4bbefdb1ced4b3"
+        },
+        "date": 1784392097828,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 131494,
+            "range": "± 2230",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 50908,
+            "range": "± 387",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1603,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3125,
+            "range": "± 356",
             "unit": "ns/iter"
           }
         ]
