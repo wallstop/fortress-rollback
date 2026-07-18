@@ -183,7 +183,11 @@ def _copy_tracked_sandbox(repo_root: Path, sandbox: Path) -> tuple[Path, ...]:
                 f"cannot copy {relative.as_posix()} into sandbox: {error}"
             ) from error
     _run_git(sandbox, ["init", "--quiet"], "sandbox Git initialization")
-    _run_git(sandbox, ["add", "--all"], "sandbox tracked-file indexing")
+    _run_git(
+        sandbox,
+        ["add", "--force", "--all", "--", "."],
+        "sandbox tracked-file indexing",
+    )
     return tuple(tracked)
 
 

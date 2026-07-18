@@ -270,6 +270,23 @@ def test_prepare_release_rejects_tracked_symlink_escaping_sandbox(
     assert outside.read_text(encoding="utf-8") == 'fortress-rollback = "1.2"\n'
 
 
+def test_prepare_release_preserves_force_tracked_ignored_outputs(tmp_path: Path) -> None:
+    repo = _write_fixture(tmp_path)
+    (repo / ".gitignore").write_text("progress/\n", encoding="utf-8")
+    ignored_output = repo / "progress" / "release-note.md"
+    ignored_output.parent.mkdir()
+    ignored_output.write_text('fortress-rollback = "1.2"\n', encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", "--force", "progress/release-note.md"], cwd=repo, check=True
+    )
+
+    result = _run(repo, "minor")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ignored_output.read_text(encoding="utf-8") == 'fortress-rollback = "1.3"\n'
+
+
 def test_prepare_release_rejects_existing_target_section(tmp_path: Path) -> None:
     repo = _write_fixture(tmp_path)
     changelog_path = repo / "CHANGELOG.md"

@@ -66,6 +66,10 @@ reviewed hardening pull request before repairing the blocked v0.10.1 release.
   and makes the workflow prove subsequent canonical synchronization is idempotent. Patch, minor,
   and major regressions cover the comparison link and dependency-reference behavior; a subprocess
   failure regression proves the live repository remains byte-for-byte unchanged.
+- Cursor Bugbot then found that ordinary `git add --all` in the fresh sandbox index omitted
+  force-tracked ignored files. Sandbox indexing now force-adds the already-vetted copied tracked
+  set, and a regression proves ignored `progress/**` outputs participate in minor-version
+  synchronization.
 - No Rust production path, public API, wire behavior, or deterministic simulation behavior changes.
 - No high- or critical-severity finding remains in the current main-thread adversarial pass.
 
@@ -73,8 +77,8 @@ reviewed hardening pull request before repairing the blocked v0.10.1 release.
 
 - Initial full `scripts/tests` Python suite: 1,698 passed.
 - Focused release/hook/workflow/preflight suite: 115 passed.
-- Follow-up full `scripts/tests` Python suite after the dry-run completeness fix: 1,702 passed;
-  the final focused release suite passed 37 tests. Actionlint, Python compilation, shell
+- Follow-up full `scripts/tests` Python suite after the dry-run completeness fix: 1,703 passed;
+  the final focused release suite passed 38 tests. Actionlint, Python compilation, shell
   portability, markdownlint, and agent preflight passed.
 - Canonical `workspace_locks.py check`: root, Fuzz, Loom, and Godot roots passed.
 - Release dry-run: unchanged worktree and complete diffs for all four authoritative locks.
