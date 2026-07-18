@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784392098406,
+  "lastUpdate": 1784398805082,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "c48bfa296a9734c68cb13c87d1b919543ed9d7c2",
-          "message": "Hardening M2 §5.2: SessionMetrics rollback + pacing counters (#191)\n\nAdds the always-on session-level rollback and pacing counters to SessionMetrics,\nwired to the P2PSession paths they measure, plus the public RollbackDepthHistogram.\n\n- New SessionMetrics fields: frames_advanced / visual_frames / resimulated_frames\n  (identity frames_advanced == visual + resimulated), rollback_count,\n  rollback_depth_histogram, max_rollback_depth, prediction_miss_count,\n  stall_count (rollback-mode only), wait_recommendations,\n  confirmation_lag_current/_max/_sum, checksums_compared/_matched/_mismatched,\n  event_queue_high_water, checksum_history_high_water.\n- Allocation-free always-on prediction-miss count; the allocating list is built\n  only when a telemetry sink is installed.\n- RunReport exposes per-peer SessionMetrics; fleet test asserts the structural\n  identities and non-zero activity across the smoke fleet with zero mismatches.\n\nReview consensus: Copilot findings (allocation, depth-0 guard) and Cursor Bugbot\nfinding (lockstep stall_count) all addressed; Bugbot re-review SUCCESS.",
-          "timestamp": "2026-07-04T20:50:06-07:00",
-          "tree_id": "7667aefb4830062ac7c7dc8646e00e78fd9f9fdc",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/c48bfa296a9734c68cb13c87d1b919543ed9d7c2"
-        },
-        "date": 1783223679832,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 120,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 166,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 494,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 771,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1116,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 127293,
-            "range": "± 523",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48462,
-            "range": "± 2487",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5411,6 +5285,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3125,
             "range": "± 356",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "304587157+wallstop-auto-releaser[bot]@users.noreply.github.com",
+            "name": "wallstop-auto-releaser[bot]",
+            "username": "wallstop-auto-releaser[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "082c53e9170a631795e113864570e59370a935ba",
+          "message": "Prepare v0.11.0 release (#257)\n\nPrepare the reviewed v0.11.0 release state.",
+          "timestamp": "2026-07-18T11:11:59-07:00",
+          "tree_id": "158676f5a48ef61271beec16e34da0ea5690a275",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/082c53e9170a631795e113864570e59370a935ba"
+        },
+        "date": 1784398803841,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 133248,
+            "range": "± 361",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 51472,
+            "range": "± 568",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1601,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3109,
+            "range": "± 238",
             "unit": "ns/iter"
           }
         ]
