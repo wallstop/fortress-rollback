@@ -52,6 +52,7 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
         "test_release_checkpoint.py",
         "test_publish_state.py",
         "test_release_branch.py",
+        "test_main_ruleset.py",
         "test_sync_issue_template_versions.py",
         "test_issue_template_versions_wiring.py",
         "test_release_workflows.py",
@@ -240,6 +241,15 @@ def test_release_branch_state_check_has_no_path_filter_escape() -> None:
         "github.event.merge_group.head_sha }}" in text
     )
     assert "candidate/scripts/" not in text
+
+
+def test_publishing_guidance_uses_supported_strict_ruleset_policy() -> None:
+    text = PUBLISHING_SKILL.read_text(encoding="utf-8")
+
+    assert ".github/rulesets/main-protection.json" in text
+    assert "do not require or recommend\n   a merge queue" in text
+    assert "main_ruleset.py check --repo wallstop/fortress-rollback" in text
+    assert "merge queue (preferred)" not in text
 
 
 def test_issue_template_sync_is_manual_repair_only() -> None:

@@ -163,12 +163,14 @@ Fortress Rollback has one reviewed release path:
    with Cargo; do not hand-edit locks. The PR also finalizes its release date,
    issue-template version, semantic-version classification, and prepared-source
    digest so the reviewed tree is the tree that will be tagged and published.
-   Protect `main` with the stable required check **Verify prepared release
-   state** and either require GitHub's merge queue (preferred) or enable strict
-   up-to-date required checks. The workflow handles `merge_group` and rebuilds
-   the exact prospective tree from the event's trusted base SHA. A release PR
-   grouped with another change intentionally fails and must be regenerated or
-   queued alone.
+   Protect `main` with the repository ruleset in
+   `.github/rulesets/main-protection.json`. Its stable **Verify prepared release
+   state** check must remain required with strict up-to-date checking enabled.
+   This is the supported policy for this repository; do not require or recommend
+   a merge queue. The workflow's `merge_group` support is forward-compatible
+   defense in depth, not an enforcement dependency. A release PR combined with
+   another change intentionally fails and must be regenerated from current
+   `main`.
 3. Merge the prepared PR to `main`.
 4. Dispatch **Release - Publish Crate** from `main` with the exact committed
    version. This is the sole manual publication entrypoint. It checks locks,
@@ -191,10 +193,14 @@ state fails closed. Every `release/v*` pull request runs the unfiltered release
 state CI guard, so changing an otherwise unrelated tracked path cannot evade
 the full-tree digest check.
 
-Workflow code cannot enable branch protection or a merge queue. Repository
-administrators must keep the required-check/up-to-date policy enabled; without
-one of those GitHub settings, a previously green but stale PR could bypass the
-prospective-tree run by merging outside the queue.
+GitHub does not grant ordinary workflow tokens repository-administration access,
+so workflow code cannot repair its own ruleset. Check drift with
+`python3 scripts/release/main_ruleset.py check --repo wallstop/fortress-rollback`
+and a `GH_TOKEN` that can read repository administration. An administrator can
+repair drift by changing `check` to `apply`; the helper creates or updates only
+the exactly named declarative ruleset and never prints the token. Without the
+required strict check, a previously green but stale PR could bypass the
+prospective-tree run.
 
 Publication must not edit or push the default branch. All release metadata is
 part of the reviewed preparation PR. Retries reconcile the locally packaged
