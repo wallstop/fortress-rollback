@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784230911622,
+  "lastUpdate": 1784339745093,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "70938662471d747b299b203a22437f060398ab18",
-          "message": "Hardening: DST simulation fleet (M0/M1) + wire-exact bandwidth accounting (D1) (#189)\n\n## Summary\n\nDistributed-systems hardening for the rollback netcode, in two coherent\nparts.\n\n### M0/M1 — deterministic whole-mesh simulation fleet (commit `b3c1b67`)\n- **M0 (D6):** ping/RTT round-trip timing virtualized onto the\ninjectable protocol clock (`ping_epoch_base`/`ping_millis`) —\nquality-report RTT can no longer be corrupted by wall-clock steps\n(NTP/VM restore) and is exactly reproducible under a virtual clock.\n`js-sys` dropped as a `wasm32` dependency.\n- **M1:** a seeded virtual-time whole-mesh simulation harness — `SimNet`\nmessage switch (per-link drop/dup/delay/jitter/partition/hold), a\nstoryline schedule generator, and an invariant oracle (confirmed-prefix\nagreement, end-state agreement, in-band desync consistency, liveness),\neach with a negative control; PR smoke fleet of 8 seeds × N∈{2,3,4}.\n- **Real bug found & fixed by the fleet on its first 4-player run\n(D8):** a permanent whole-mesh confirmation deadlock at N≥3.\nConnect-status gossip rides only `Input` packets; once every peer\nexhausted its prediction window with acked send queues, stale\n`Frame::NULL` caches never refreshed and the mesh froze permanently on a\nhealed network with every session `Running`. Fixed by arming the\nconnect-status nudge on the deadlock signature (window exhausted AND\ngossip-bound below receipts), with reserved hot-join endpoints excluded.\n\n### M2 §5.1 — wire-exact bandwidth accounting (D1, commit `6ace99e`)\n- `NetworkStats::kbps_sent` accounted `std::mem::size_of_val(&Message)`\n— the constant in-memory enum size, identical for every packet\nregardless of payload — so reported send bandwidth was fiction. Sends\nare now metered with a new alloc-free arithmetic\n`Message::encoded_len()` that is byte-exact against the codec.\n- Regression: proptest `encoded_len == codec::encode(&msg).len()` for\narbitrary messages of every variant (hot-join under `cfg`); plus a test\ndocumenting the `size_of_val` divergence.\n\n## Validation\n- `cargo fmt` + `cargo clippy --workspace --all-targets` (`tokio,json`\nand `…,hot-join`) — clean.\n- `cargo nextest run` — 2336 passed (default) / 2574 passed (hot-join),\n55 skipped.\n- `python3 scripts/ci/agent-preflight.py` — all checks pass.\n\nChangelog carries `**Pre-existing:** ### Fixed` entries for D6, D8, and\nD1.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes P2P confirmation liveness logic and alters reported\nbandwidth/ping semantics; incorrect nudge timing could affect production\nmesh behavior or hot-join.\n> \n> **Overview**\n> Fixes **network telemetry** and a **multi-player liveness deadlock**,\nand adds a **deterministic whole-mesh simulation** test stack.\n> \n> **Bandwidth and ping:** Outbound metering now uses alloc-free\n`Message::encoded_len()` (proptest vs `codec::encode`) instead of\n`size_of_val(&Message)`. `kbps_sent` is corrected to kilobits/sec (×8,\n÷1000). Quality-report RTT uses the injectable protocol clock via\n`ping_epoch_base`/`ping_millis`, not wall time; **`js-sys` is removed**\non `wasm32`. Send counters use **`u64`** to avoid wrap on 32-bit\ntargets.\n> \n> **N≥3 confirmation deadlock (D8):** Connect-status gossip only rides\non `Input`. When every peer exhausted its prediction window with\nfully-acked queues, stale gossip could freeze confirmation forever. The\nconnect-status nudge now also arms when the prediction window is\nexhausted **and** mesh gossip binds confirmation below local receipts\n(`gossip_holds_confirmation_below_receipts`); reserved hot-join\nendpoints are never nudged.\n> \n> **Simulation fleet (M0/M1):** New `SimNet` (seeded per-link faults,\nvirtual clock), schedule generator, harness oracle, PR smoke tests for\n2–4 players, pinned regression for seed 1 / 4 players, integration tests\nfor deterministic ping, and hidden `diagnostic_connect_status` for stall\ndebugging. `serde_json` gains **`float_roundtrip`** for schedule corpus\nartifacts.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n822e944145b55daf2e1ee14bbf60b48eb776723a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-04T11:21:34-07:00",
-          "tree_id": "a289c07fbaf20a6b573655fcec0ac043b561e713",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/70938662471d747b299b203a22437f060398ab18"
-        },
-        "date": 1783189595748,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 111,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 459,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 716,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1028,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 126051,
-            "range": "± 2462",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45147,
-            "range": "± 146",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5554,6 +5428,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3127,
+            "range": "± 239",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ce340e676f329009177dd487118c34cebc23dc51",
+          "message": "Harden release workspace lock synchronization (#252)\n\n## Summary\n\nPermanently repairs the release-lock synchronization failure behind PR\n#251 by making Cargo authoritative for every tracked workspace root.\n\n- dynamically discovers root, `fuzz`, Loom, Godot, and future standalone\nworkspaces\n- rejects missing, malformed, orphan, and member-local locks\n- synchronizes locks with `cargo update --workspace` and validates them\nwith full `cargo metadata --locked --all-features`\n- makes release preparation sandboxed, rollback-capable, topology-aware,\nand dry-run immutable\n- enforces the invariant in prepare, version-sync, publish, Loom CI,\nhooks, agent preflight, and maintainer guidance\n- removes obsolete `tests/network-peer/Cargo.lock`, because that member\nshares the root lock\n\n## Red evidence\n\n- The structural checker rejected the obsolete network-peer member lock.\n- A realistic root-version bump with only the root lock updated leaves\nall three standalone locks stale and fails.\n- A dependency-only stale fixture passes structural inspection but fails\nfull locked metadata, guarding against the former vacuous `--no-deps`\noracle.\n- Post-merge recovery simulation proved dry-run omitted the updated\n`[Unreleased]` comparison link and minor/major version-reference changes\nwhile `sync-version.sh` ran outside the sandbox.\n- Cursor’s force-tracked ignored-path fixture proved ordinary sandbox\nindexing could silently shrink the tracked set.\n- Failure injection proved rollback must recreate a lock deleted by a\nfailed Cargo subprocess.\n- Adversarial review found and fixed concurrent-output overwrite and\nmissing-tracked-input topology shrinkage.\n\n## Green verification\n\n- `python3 -m pytest -q scripts/tests`: **1,703 passed**\n- focused release/hook/workflow/preflight tests: **115 passed**\n- canonical checker: all four workspace roots passed\n- real patch dry run: byte-for-byte immutable; all four lock diffs and\nthe updated `[Unreleased]` link emitted\n- non-dry release simulation: full checks passed and both canonical\nsynchronizers were idempotent\n- Loom exact gate: **19 passed** with `--release --locked`\n- Godot pinned-nightly `clippy --locked --all-targets --all-features`:\npassed\n- `cargo fmt --all -- --check`: passed\n- workspace Clippy with `tokio,json`: passed\n- `cargo nextest run --no-capture`: **2,875 passed, 74 skipped**\n- warning-free workspace docs, actionlint, Agent Skill validators, shell\nportability, Markdown, links, doc claims, and agent preflight: passed\n\n## Review readiness\n\n- [x] No Rust public API or runtime behavior change\n- [x] No changelog entry required (internal release/CI tooling)\n- [x] Main-thread adversarial review completed; no high/critical finding\nremains\n- [x] Progress record:\n`progress/session-144-release-lock-synchronization.md`\n- [x] Hardening is isolated from the later minimal v0.10.1 repair to PR\n#251\n\nThis intentionally does not cherry-pick closed PR #237, whose validator\nretained the proven-vacuous `--no-deps` behavior.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes release preparation, publication gates, and lock validation\nacross CI—mistakes could block releases or pass stale locks, but scope\nis tooling-only with heavy regression coverage and no production Rust\nchanges.\n> \n> **Overview**\n> Hardens release and CI tooling so **every tracked Cargo workspace\nroot** gets an authoritative `Cargo.lock`, replacing root-only textual\nlock edits and the vacuous `cargo metadata --locked --no-deps` check.\n> \n> **New `scripts/release/workspace_locks.py`** dynamically discovers\nworkspace roots via `cargo locate-project`, rejects orphan/member-local\nlocks, syncs with `cargo update --workspace`, and validates with full\n`cargo metadata --locked --all-features`. **`prepare_release.py`** now\nruns in a tracked-file Git sandbox: bumps manifest/changelog, runs lock\nsync and `sync-version.sh` inside the transaction, validates topology,\nand applies outputs atomically with rollback; dry-runs leave the live\ntree unchanged.\n> \n> **Workflow and gate wiring:** `release-prepare.yml` runs release-tool\ntests before mutation, proves canonical sync is idempotent, and drops\n`--no-deps`; `publish.yml` and `ci-version-sync.yml` run the full lock\nchecker; Loom CI uses `cargo test --release --locked`.\n**Hooks/preflight:** pre-commit `check-structure` on Cargo/release\nsurfaces; agent preflight adds `workspace-lock-check`. **Docs/skills**\ndocument the workspace lock rule and reviewed release path. **Removes**\nobsolete `tests/network-peer/Cargo.lock` and updates the network-peer\nmanifest comment to reflect root lock sharing.\n> \n> Extensive regressions in `test_workspace_locks.py`,\n`test_prepare_release.py`, and workflow contract tests; no Rust public\nAPI or runtime behavior changes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n60228694644309bccb64cfb14292b3393c466143. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-17T18:47:13-07:00",
+          "tree_id": "4fc4caf288934819c0735939d9da6f1bbdc3ca5d",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ce340e676f329009177dd487118c34cebc23dc51"
+        },
+        "date": 1784339744171,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 131543,
+            "range": "± 480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 50872,
+            "range": "± 357",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1603,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3108,
             "range": "± 239",
             "unit": "ns/iter"
           }
