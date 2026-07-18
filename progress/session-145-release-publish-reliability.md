@@ -33,7 +33,8 @@ retry-safe, semver-aware, and self-enforcing, then open a fully reviewed green P
   findings with reserved-namespace and peeled-ref regressions.
 - [x] Address Cursor's historical non-UTF-8 manifest and pinned publish-cache
   findings with strict raw-byte parsing and exact restore-prefix regressions.
-- [ ] Resolve CI/reviewer feedback and make every required PR check green.
+- [x] Resolve all four actionable Cursor review threads and make all 14 GitHub
+  workflow runs green on implementation commit `1e8cf5fc`.
 - [ ] Repository administrator: require the stable `Verify prepared release
   state` check on `main` and enable merge queue (preferred) or strict
   up-to-date required checks; GitHub does not expose this setting to repo code.
