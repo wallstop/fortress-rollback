@@ -26,7 +26,8 @@
       "parameters": {
         "required_status_checks": [
           {
-            "context": "Verify prepared release state"
+            "context": "Verify prepared release state",
+            "integration_id": 15368
           }
         ],
         "strict_required_status_checks_policy": true,

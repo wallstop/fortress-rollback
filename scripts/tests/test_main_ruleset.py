@@ -45,7 +45,10 @@ def test_checked_in_config_requires_exact_strict_release_check() -> None:
     }
     assert status_rule["parameters"] == {
         "required_status_checks": [
-            {"context": "Verify prepared release state"}
+            {
+                "context": "Verify prepared release state",
+                "integration_id": 15368,
+            }
         ],
         "strict_required_status_checks_policy": True,
         "do_not_enforce_on_create": False,

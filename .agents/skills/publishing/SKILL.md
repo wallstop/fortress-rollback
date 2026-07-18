@@ -165,12 +165,12 @@ Fortress Rollback has one reviewed release path:
    digest so the reviewed tree is the tree that will be tagged and published.
    Protect `main` with the repository ruleset in
    `.github/rulesets/main-protection.json`. Its stable **Verify prepared release
-   state** check must remain required with strict up-to-date checking enabled.
-   This is the supported policy for this repository; do not require or recommend
-   a merge queue. The workflow's `merge_group` support is forward-compatible
-   defense in depth, not an enforcement dependency. A release PR combined with
-   another change intentionally fails and must be regenerated from current
-   `main`.
+   state** check must remain required, bound to the GitHub Actions integration,
+   and configured with strict up-to-date checking. This is the supported policy
+   for this repository; do not require or recommend a merge queue. The
+   workflow's `merge_group` support is forward-compatible defense in depth, not
+   an enforcement dependency. A release PR combined with another change
+   intentionally fails and must be regenerated from current `main`.
 3. Merge the prepared PR to `main`.
 4. Dispatch **Release - Publish Crate** from `main` with the exact committed
    version. This is the sole manual publication entrypoint. It checks locks,

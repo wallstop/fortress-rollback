@@ -78,7 +78,10 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     status_rule = rules[-1]
     required_parameters = {
         "required_status_checks": [
-            {"context": "Verify prepared release state"}
+            {
+                "context": "Verify prepared release state",
+                "integration_id": 15368,
+            }
         ],
         "strict_required_status_checks_policy": True,
         "do_not_enforce_on_create": False,

@@ -247,7 +247,8 @@ def test_publishing_guidance_uses_supported_strict_ruleset_policy() -> None:
     text = PUBLISHING_SKILL.read_text(encoding="utf-8")
 
     assert ".github/rulesets/main-protection.json" in text
-    assert "do not require or recommend\n   a merge queue" in text
+    assert "do not require or recommend a merge queue" in text
+    assert "bound to the GitHub Actions integration" in text
     assert "main_ruleset.py check --repo wallstop/fortress-rollback" in text
     assert "merge queue (preferred)" not in text
 
