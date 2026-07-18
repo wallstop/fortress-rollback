@@ -168,6 +168,7 @@ def test_plan_checks_runs_release_state_machine_regressions() -> None:
         "scripts/tests/test_release_checkpoint.py",
         "scripts/tests/test_publish_state.py",
         "scripts/tests/test_release_branch.py",
+        "scripts/tests/test_main_ruleset.py",
         "scripts/tests/test_sync_issue_template_versions.py",
         "scripts/tests/test_issue_template_versions_wiring.py",
         "scripts/tests/test_release_workflows.py",
