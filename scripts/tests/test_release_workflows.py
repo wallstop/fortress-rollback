@@ -42,6 +42,9 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
     )
     assert "scripts/release/workspace_locks.py sync" in text
     assert "scripts/release/workspace_locks.py check" in text
+    assert "git diff --binary -- ." in text
+    assert "cmp -s" in text
+    assert "Release preparation omitted canonical synchronizer output" in text
     assert "--no-deps" not in text
     assert "git --no-pager diff -- ." in text
     assert "GITHUB_STEP_SUMMARY" in text

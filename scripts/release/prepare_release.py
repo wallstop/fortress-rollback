@@ -116,14 +116,20 @@ def rewrite_changelog(content: str, current: str, target: str, release_date: str
     rewritten = content.replace(
         "## [Unreleased]", f"## [Unreleased]\n\n## [{target}] - {release_date}", 1
     )
-    unreleased_link = re.compile(r"(?m)^\[Unreleased\]:.*$")
-    if len(unreleased_link.findall(rewritten)) != 1:
+    unreleased_link_pattern = re.compile(r"(?m)^\[Unreleased\]:.*$")
+    if len(unreleased_link_pattern.findall(rewritten)) != 1:
         raise PreparationError("CHANGELOG.md must contain exactly one Unreleased link footer")
+    unreleased_link = (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/"
+        f"v{target}...HEAD"
+    )
     release_link = (
         f"[{target}]: https://github.com/wallstop/fortress-rollback/compare/"
         f"v{current}...v{target}"
     )
-    return unreleased_link.sub(lambda match: f"{match.group(0)}\n{release_link}", rewritten)
+    return unreleased_link_pattern.sub(
+        lambda _match: f"{unreleased_link}\n{release_link}", rewritten
+    )
 
 
 def _run_git(repo_root: Path, args: list[str], description: str) -> str:
@@ -145,7 +151,7 @@ def _run_git(repo_root: Path, args: list[str], description: str) -> str:
     return result.stdout
 
 
-def _copy_tracked_sandbox(repo_root: Path, sandbox: Path) -> None:
+def _copy_tracked_sandbox(repo_root: Path, sandbox: Path) -> tuple[Path, ...]:
     """Copy the current tracked-file state and create an isolated Git index."""
     tracked_output = _run_git(
         repo_root, ["ls-files", "-z", "--"], "tracked-file discovery"
@@ -162,14 +168,54 @@ def _copy_tracked_sandbox(repo_root: Path, sandbox: Path) -> None:
         try:
             if source.is_symlink():
                 destination.symlink_to(source.readlink())
+                try:
+                    destination.resolve(strict=False).relative_to(sandbox)
+                except ValueError as error:
+                    raise PreparationError(
+                        f"tracked symlink {relative.as_posix()} escapes release sandbox"
+                    ) from error
             else:
                 shutil.copy2(source, destination)
+        except PreparationError:
+            raise
         except OSError as error:
             raise PreparationError(
                 f"cannot copy {relative.as_posix()} into sandbox: {error}"
             ) from error
     _run_git(sandbox, ["init", "--quiet"], "sandbox Git initialization")
     _run_git(sandbox, ["add", "--all"], "sandbox tracked-file indexing")
+    return tuple(tracked)
+
+
+def _run_version_sync(sandbox: Path, release_date: str, *, check: bool) -> None:
+    """Run the canonical version-reference synchronizer inside the sandbox."""
+    script = sandbox / "scripts" / "sync-version.sh"
+    if not script.is_file():
+        raise PreparationError("tracked file scripts/sync-version.sh is missing")
+    command = ["bash", str(script)]
+    if check:
+        command.append("--check")
+    environment = os.environ.copy()
+    environment["FORTRESS_PROJECT_ROOT"] = str(sandbox)
+    environment["FORTRESS_RELEASE_DATE"] = release_date
+    try:
+        result = subprocess.run(
+            command,
+            cwd=sandbox,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, UnicodeError) as error:
+        raise PreparationError(f"version synchronization could not start: {error}") from error
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout).strip().replace(str(sandbox), ".")
+        mode = "check" if check else "update"
+        raise PreparationError(
+            f"version synchronization {mode} failed with exit code "
+            f"{result.returncode}: {details}"
+        )
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -240,7 +286,7 @@ def prepare(
     repo_root = repo_root.resolve()
     with tempfile.TemporaryDirectory(prefix="fortress-release-") as temporary_directory:
         sandbox = Path(temporary_directory).resolve()
-        _copy_tracked_sandbox(repo_root, sandbox)
+        tracked_files = set(_copy_tracked_sandbox(repo_root, sandbox))
         try:
             precheck_roots = workspace_locks.check(sandbox)
         except workspace_locks.WorkspaceLockError as error:
@@ -250,14 +296,6 @@ def prepare(
         changelog_path = sandbox / "CHANGELOG.md"
         manifest_before = load_text(manifest_path)
         changelog_before = load_text(changelog_path)
-        relative_outputs = [Path("Cargo.toml"), Path("CHANGELOG.md")]
-        relative_outputs.extend(
-            root.lock.relative_to(sandbox) for root in precheck_roots
-        )
-        ordered_outputs = sorted(set(relative_outputs), key=lambda path: path.as_posix())
-        output_snapshots = {
-            relative: load_text(sandbox / relative) for relative in ordered_outputs
-        }
         current_manifest = tomllib.loads(manifest_before)
         package = current_manifest.get("package")
         current = package.get("version") if isinstance(package, dict) else None
@@ -278,7 +316,9 @@ def prepare(
 
         try:
             roots = workspace_locks.sync(sandbox)
+            _run_version_sync(sandbox, release_date, check=False)
             workspace_locks.check(sandbox)
+            _run_version_sync(sandbox, release_date, check=True)
         except workspace_locks.WorkspaceLockError as error:
             raise PreparationError(f"workspace-lock validation failed: {error}") from error
 
@@ -292,15 +332,59 @@ def prepare(
             raise PreparationError(
                 "workspace topology changed during release preparation"
             )
-        prepared_files: list[PreparedFile] = []
-        for relative in ordered_outputs:
-            prepared_files.append(
-                PreparedFile(
-                    path=repo_root / relative,
-                    before=output_snapshots[relative],
-                    after=load_text(sandbox / relative),
-                )
+        deleted_output = _run_git(
+            sandbox,
+            ["diff", "--name-only", "--diff-filter=D", "-z", "--"],
+            "release-output deletion check",
+        )
+        deleted = sorted(Path(raw) for raw in deleted_output.split("\0") if raw)
+        if deleted:
+            rendered = ", ".join(path.as_posix() for path in deleted)
+            raise PreparationError(f"release preparation deleted tracked files: {rendered}")
+        untracked_output = _run_git(
+            sandbox,
+            ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+            "release-output untracked-file check",
+        )
+        untracked = sorted(Path(raw) for raw in untracked_output.split("\0") if raw)
+        if untracked:
+            rendered = ", ".join(path.as_posix() for path in untracked)
+            raise PreparationError(
+                f"release preparation created untracked files: {rendered}"
             )
+        changed_output = _run_git(
+            sandbox,
+            ["diff", "--name-only", "-z", "--"],
+            "release-output discovery",
+        )
+        changed = sorted(
+            (Path(raw) for raw in changed_output.split("\0") if raw),
+            key=lambda path: path.as_posix(),
+        )
+        unexpected = [relative for relative in changed if relative not in tracked_files]
+        if unexpected:
+            rendered = ", ".join(path.as_posix() for path in unexpected)
+            raise PreparationError(f"release preparation changed untracked files: {rendered}")
+        changed_symlinks = [
+            relative for relative in changed if (repo_root / relative).is_symlink()
+        ]
+        if changed_symlinks:
+            rendered = ", ".join(path.as_posix() for path in changed_symlinks)
+            raise PreparationError(
+                f"release preparation cannot replace tracked symlink outputs: {rendered}"
+            )
+        prepared_files = [
+            PreparedFile(
+                path=repo_root / relative,
+                before=_run_git(
+                    sandbox,
+                    ["show", f":{relative.as_posix()}"],
+                    f"release-output baseline read for {relative.as_posix()}",
+                ),
+                after=load_text(sandbox / relative),
+            )
+            for relative in changed
+        ]
         workspace_roots = tuple(
             root.manifest.parent.relative_to(sandbox) for root in roots
         )

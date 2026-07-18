@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,12 @@ def _write_fixture(tmp_path: Path, *, notes: str = "### Added\n\n- A feature.\n"
         '[package]\nname = "fortress-rollback"\nversion = "1.2.3"\n',
         encoding="utf-8",
     )
+    (repo / "README.md").write_text(
+        'fortress-rollback = "1.2"\n', encoding="utf-8"
+    )
+    sync_script = repo / "scripts" / "sync-version.sh"
+    sync_script.parent.mkdir()
+    shutil.copy2(REPO_ROOT / "scripts" / "sync-version.sh", sync_script)
     (repo / "src").mkdir()
     (repo / "src" / "lib.rs").write_text(
         "pub fn fixture() {}\n", encoding="utf-8"
@@ -112,11 +119,15 @@ def _run(repo: Path, bump: str, *extra: str) -> subprocess.CompletedProcess[str]
 
 
 @pytest.mark.parametrize(
-    ("bump", "expected"),
-    [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")],
+    ("bump", "expected", "expected_dependency"),
+    [
+        ("patch", "1.2.4", "1.2"),
+        ("minor", "1.3.0", "1.3"),
+        ("major", "2.0.0", "2.0"),
+    ],
 )
 def test_prepare_release_bumps_manifest_all_locks_and_changelog(
-    tmp_path: Path, bump: str, expected: str
+    tmp_path: Path, bump: str, expected: str, expected_dependency: str
 ) -> None:
     repo = _write_fixture(tmp_path)
 
@@ -139,6 +150,14 @@ def test_prepare_release_bumps_manifest_all_locks_and_changelog(
         f"v1.2.3...v{expected}"
     )
     assert expected_link in changelog
+    expected_unreleased_link = (
+        "[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/"
+        f"v{expected}...HEAD"
+    )
+    assert expected_unreleased_link in changelog
+    assert (
+        repo / "README.md"
+    ).read_text() == f'fortress-rollback = "{expected_dependency}"\n'
     assert f"prepared_version={expected}" in result.stdout
 
 
@@ -150,7 +169,7 @@ def test_prepare_release_dry_run_does_not_write(tmp_path: Path) -> None:
         if path.is_file() and ".git" not in path.parts
     }
 
-    result = _run(repo, "patch", "--dry-run")
+    result = _run(repo, "minor", "--dry-run")
 
     assert result.returncode == 0, result.stdout + result.stderr
     after = {
@@ -163,7 +182,13 @@ def test_prepare_release_dry_run_does_not_write(tmp_path: Path) -> None:
     assert "--- fuzz/Cargo.lock" in result.stdout
     assert "--- loom-tests/Cargo.lock" in result.stdout
     assert "--- tests/godot-emscripten/Cargo.lock" in result.stdout
-    assert "prepared_version=1.2.4" in result.stdout
+    assert "--- README.md" in result.stdout
+    assert "+fortress-rollback = \"1.3\"" in result.stdout
+    assert (
+        "+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/"
+        "v1.3.0...HEAD"
+    ) in result.stdout
+    assert "prepared_version=1.3.0" in result.stdout
 
 
 def test_prepare_release_rejects_empty_unreleased_notes(tmp_path: Path) -> None:
@@ -194,6 +219,30 @@ def test_prepare_release_rejects_lockfile_version_mismatch(tmp_path: Path) -> No
     assert 'version = "1.2.3"' in (repo / "Cargo.toml").read_text()
 
 
+def test_prepare_release_version_sync_failure_leaves_repository_unchanged(
+    tmp_path: Path,
+) -> None:
+    repo = _write_fixture(tmp_path)
+    sync_script = repo / "scripts" / "sync-version.sh"
+    sync_script.write_text("#!/bin/bash\nexit 7\n", encoding="utf-8")
+    before = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+
+    result = _run(repo, "patch")
+
+    assert result.returncode != 0
+    assert "version synchronization update failed with exit code 7" in result.stderr
+    after = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+    assert after == before
+
+
 def test_prepare_release_rejects_missing_tracked_sandbox_input(tmp_path: Path) -> None:
     repo = _write_fixture(tmp_path)
     (repo / "fuzz" / "Cargo.toml").unlink()
@@ -203,6 +252,22 @@ def test_prepare_release_rejects_missing_tracked_sandbox_input(tmp_path: Path) -
     assert result.returncode != 0
     assert "tracked file fuzz/Cargo.toml is missing" in result.stderr
     assert str(repo) not in result.stderr
+
+
+def test_prepare_release_rejects_tracked_symlink_escaping_sandbox(
+    tmp_path: Path,
+) -> None:
+    repo = _write_fixture(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text('fortress-rollback = "1.2"\n', encoding="utf-8")
+    (repo / "escape.md").symlink_to(outside)
+    subprocess.run(["git", "add", "--all"], cwd=repo, check=True)
+
+    result = _run(repo, "minor", "--dry-run")
+
+    assert result.returncode != 0
+    assert "tracked symlink escape.md escapes release sandbox" in result.stderr
+    assert outside.read_text(encoding="utf-8") == 'fortress-rollback = "1.2"\n'
 
 
 def test_prepare_release_rejects_existing_target_section(tmp_path: Path) -> None:
@@ -265,6 +330,39 @@ def test_apply_rejects_concurrent_change_before_any_write(tmp_path: Path) -> Non
 
     assert first.read_text(encoding="utf-8") == "first-before\n"
     assert second.read_text(encoding="utf-8") == "second-concurrent-change\n"
+
+
+def test_prepare_dynamic_output_keeps_pre_sandbox_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _write_fixture(tmp_path)
+    readme = repo / "README.md"
+    real_run_version_sync = prepare_release._run_version_sync
+
+    def run_version_sync_with_concurrent_edit(
+        sandbox: Path, release_date: str, *, check: bool
+    ) -> None:
+        real_run_version_sync(sandbox, release_date, check=check)
+        if not check:
+            readme.write_text("concurrent edit\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        prepare_release, "_run_version_sync", run_version_sync_with_concurrent_edit
+    )
+
+    _current, _target, prepared_files, _roots = prepare_release.prepare(
+        repo, "minor", "2026-07-12"
+    )
+    readme_output = next(
+        prepared for prepared in prepared_files if prepared.path == readme
+    )
+
+    assert readme_output.before == 'fortress-rollback = "1.2"\n'
+    assert readme_output.after == 'fortress-rollback = "1.3"\n'
+    with pytest.raises(prepare_release.PreparationError, match="changed during"):
+        prepare_release.apply_prepared(prepared_files)
+    assert readme.read_text(encoding="utf-8") == "concurrent edit\n"
+    assert 'version = "1.2.3"' in (repo / "Cargo.toml").read_text()
 
 
 def test_real_release_sync_preserves_unrelated_lock_packages() -> None:

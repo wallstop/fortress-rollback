@@ -106,8 +106,17 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
+          before_sync="${RUNNER_TEMP}/release-before-canonical-sync.diff"
+          after_sync="${RUNNER_TEMP}/release-after-canonical-sync.diff"
+          git diff --binary -- . > "${before_sync}"
           python3 scripts/release/workspace_locks.py sync
           bash scripts/sync-version.sh
+          git diff --binary -- . > "${after_sync}"
+          if ! cmp -s "${before_sync}" "${after_sync}"; then
+            echo "::error::Release preparation omitted canonical synchronizer output."
+            git --no-pager diff --no-index -- "${before_sync}" "${after_sync}" || true
+            exit 1
+          fi
 
       - name: Validate prepared release
         run: |

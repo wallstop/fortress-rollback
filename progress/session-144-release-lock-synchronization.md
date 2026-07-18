@@ -59,13 +59,23 @@ reviewed hardening pull request before repairing the blocked v0.10.1 release.
   real bump had emptied `Unreleased`, making successful non-dry preparation fail in its validation
   step. Release-tool tests now gate the workflow before mutation, while post-bump canonical lock,
   changelog, and package validation remains in place; a workflow-order contract guards the fix.
+- A post-merge recovery simulation exposed a second false-green contract: dry-run omitted the
+  updated `[Unreleased]` comparison link and any minor/major dependency-reference changes because
+  `sync-version.sh` still ran outside the sandbox transaction. Release preparation now runs and
+  validates that canonical synchronizer inside the sandbox, discovers all changed tracked outputs,
+  and makes the workflow prove subsequent canonical synchronization is idempotent. Patch, minor,
+  and major regressions cover the comparison link and dependency-reference behavior; a subprocess
+  failure regression proves the live repository remains byte-for-byte unchanged.
 - No Rust production path, public API, wire behavior, or deterministic simulation behavior changes.
 - No high- or critical-severity finding remains in the current main-thread adversarial pass.
 
 ## Local verification
 
-- Full `scripts/tests` Python suite: 1,698 passed.
+- Initial full `scripts/tests` Python suite: 1,698 passed.
 - Focused release/hook/workflow/preflight suite: 115 passed.
+- Follow-up full `scripts/tests` Python suite after the dry-run completeness fix: 1,702 passed;
+  the final focused release suite passed 37 tests. Actionlint, Python compilation, shell
+  portability, markdownlint, and agent preflight passed.
 - Canonical `workspace_locks.py check`: root, Fuzz, Loom, and Godot roots passed.
 - Release dry-run: unchanged worktree and complete diffs for all four authoritative locks.
 - Loom exact gate: 19 passed with `--release --locked` and `RUSTFLAGS="--cfg loom"`.
@@ -82,4 +92,8 @@ public API or user-observable runtime behavior change.
 
 ## Publication and review convergence
 
-Pending commit, push, pull request, CI, Cursor Bugbot review, and GitHub Copilot review.
+PR #252 was opened as a focused hardening change. Its first three commits reached 14/14 successful
+workflow groups, a clean exact-head Cursor Bugbot review, no unresolved threads, and a Copilot
+quota response with no actionable feedback. The post-merge recovery simulation then found the
+dry-run completeness defect described above; that follow-up must repeat the push, review, and CI
+convergence loop before merge.
