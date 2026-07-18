@@ -142,7 +142,9 @@ def _request_json(
 
 def _find_ruleset(repository: str, token: str, name: str) -> int | None:
     document = _request_json(
-        "GET", f"/repos/{repository}/rulesets?per_page=100", token=token
+        "GET",
+        f"/repos/{repository}/rulesets?per_page=100&includes_parents=false",
+        token=token,
     )
     if not isinstance(document, list):
         raise RulesetError("GitHub ruleset listing must be an array")

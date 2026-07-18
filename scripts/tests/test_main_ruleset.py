@@ -89,7 +89,9 @@ def test_check_accepts_matching_live_ruleset(monkeypatch: pytest.MonkeyPatch) ->
 
     def urlopen(request: object, timeout: int) -> MagicMock:
         calls.append((request.get_method(), request.full_url))
-        if request.full_url.endswith("rulesets?per_page=100"):
+        if request.full_url.endswith(
+            "rulesets?per_page=100&includes_parents=false"
+        ):
             return _response([{"id": 16185604, "name": "Main Protection"}])
         return _response(_live_config())
 
@@ -124,7 +126,9 @@ def test_apply_repairs_drift_with_exact_config(monkeypatch: pytest.MonkeyPatch) 
 
     def urlopen(request: object, timeout: int) -> MagicMock:
         requests.append(request)
-        if request.full_url.endswith("rulesets?per_page=100"):
+        if request.full_url.endswith(
+            "rulesets?per_page=100&includes_parents=false"
+        ):
             return _response([{"id": 16185604, "name": "Main Protection"}])
         if request.get_method() == "GET":
             return _response(_live_config(enforcement="evaluate"))
@@ -160,3 +164,25 @@ def test_apply_creates_missing_ruleset(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert outcome == "created"
     assert [request.get_method() for request in requests] == ["GET", "POST"]
+
+
+def test_lookup_explicitly_excludes_inherited_rulesets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[object] = []
+
+    def urlopen(request: object, timeout: int) -> MagicMock:
+        requests.append(request)
+        if len(requests) == 1:
+            return _response([{"id": 16185604, "name": "Main Protection"}])
+        return _response(_live_config())
+
+    monkeypatch.setattr(main_ruleset.urllib.request, "urlopen", urlopen)
+
+    assert (
+        main_ruleset.synchronize("wallstop/fortress-rollback", "token")
+        == "current"
+    )
+    assert requests[0].full_url.endswith(
+        "/rulesets?per_page=100&includes_parents=false"
+    )

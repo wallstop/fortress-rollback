@@ -17,6 +17,7 @@ RELEASE_STATE_CI = REPO_ROOT / ".github" / "workflows" / "ci-release-state.yml"
 CARGO_MANIFEST = REPO_ROOT / "Cargo.toml"
 RELEASE_TOOLCHAIN = REPO_ROOT / ".github" / "actions" / "install-pinned-release" / "toolchain"
 RELEASE_REQUIREMENTS = REPO_ROOT / "scripts" / "release" / "requirements.txt"
+AGENT_PREFLIGHT = REPO_ROOT / "scripts" / "ci" / "agent-preflight.py"
 
 
 def test_prepare_workflow_opens_ci_capable_release_pr() -> None:
@@ -58,6 +59,12 @@ def test_prepare_workflow_uses_canonical_lock_transaction_and_summary() -> None:
         "test_release_workflows.py",
     ):
         assert text.count(test_file) == 2
+    assert (
+        AGENT_PREFLIGHT.read_text(encoding="utf-8").count(
+            '"scripts/tests/test_main_ruleset.py"'
+        )
+        == 1
+    )
     assert "scripts/release/workspace_locks.py sync" in text
     assert "scripts/release/workspace_locks.py check" in text
     assert "git diff --binary -- ." in text
