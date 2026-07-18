@@ -117,6 +117,20 @@ def test_release_workflows_pin_external_actions_and_rust_compiler() -> None:
     assert "steps.release-rust.outputs.toolchain" in publish
 
 
+def test_publish_cache_is_scoped_to_pinned_release_toolchain() -> None:
+    publish = PUBLISH.read_text(encoding="utf-8")
+    prefix = (
+        "publish-${{ runner.os }}-rust-"
+        "${{ steps.release-rust.outputs.toolchain }}-cargo-"
+    )
+
+    assert f"key: {prefix}${{{{ hashFiles('candidate/**/Cargo.lock') }}}}" in publish
+    assert f"restore-keys: |\n            {prefix}\n" in publish
+    assert publish.count(prefix) == 2
+    assert "publish-${{ runner.os }}-cargo-" not in publish
+    assert "candidate/target" in publish
+
+
 def test_prepare_uses_exact_python_and_hash_locked_test_dependencies() -> None:
     text = PREPARE.read_text(encoding="utf-8")
     requirements = RELEASE_REQUIREMENTS.read_text(encoding="utf-8")

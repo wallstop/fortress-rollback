@@ -94,7 +94,7 @@ jobs:
             candidate/target
           key: publish-${{ runner.os }}-rust-${{ steps.release-rust.outputs.toolchain }}-cargo-${{ hashFiles('candidate/**/Cargo.lock') }}
           restore-keys: |
-            publish-${{ runner.os }}-cargo-
+            publish-${{ runner.os }}-rust-${{ steps.release-rust.outputs.toolchain }}-cargo-
 
       - name: Verify immutable reviewed release state
         id: release

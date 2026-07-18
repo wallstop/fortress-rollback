@@ -94,6 +94,27 @@ def _run(
     return result
 
 
+def _run_bytes(
+    repo: Path, arguments: list[str], *, check: bool = True
+) -> subprocess.CompletedProcess[bytes]:
+    """Run Git without decoding untrusted object contents."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *arguments],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise CheckpointError(f"could not start git: {error}") from error
+    if check and result.returncode != 0:
+        details = (result.stderr or result.stdout).decode(errors="replace").strip()
+        raise CheckpointError(
+            f"git {' '.join(arguments)} failed with exit code "
+            f"{result.returncode}: {details}"
+        )
+    return result
+
+
 def _validate_oid(value: str, field: str) -> str:
     if OBJECT_ID.fullmatch(value) is None:
         raise CheckpointError(f"{field} must be a lowercase 40-character Git object ID")
@@ -273,7 +294,11 @@ def _commit_release_metadata(
     size = int(size_text)
     if size > MAX_RELEASE_STATE_BYTES:
         return None
-    content = _run(repo, ["cat-file", "blob", object_name]).stdout
+    content_bytes = _run_bytes(repo, ["cat-file", "blob", object_name]).stdout
+    try:
+        content = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
     try:
         document = json.loads(content)
     except json.JSONDecodeError:

@@ -181,6 +181,25 @@ def test_absent_tag_uses_prepared_commit_after_main_advances(
     assert checkpoint.direct_oid is None
 
 
+def test_absent_tag_skips_historical_non_utf8_manifest(
+    repository: tuple[Path, Path], tmp_path: Path
+) -> None:
+    trusted, _remote = repository
+    prepared = _git(trusted, "rev-parse", "HEAD")
+    (trusted / release_checkpoint.release_state.MANIFEST_NAME).write_bytes(
+        b"{\"target_version\":\"1.2.3\",\"invalid\":\xff}\n"
+    )
+    _git(trusted, "add", release_checkpoint.release_state.MANIFEST_NAME)
+    _git(trusted, "commit", "-m", "historical invalid release metadata")
+    _git(trusted, "push", "origin", "main")
+
+    checkpoint = _resolve(trusted, tmp_path)
+
+    assert checkpoint.candidate_sha == prepared
+    assert checkpoint.trusted_sha == _git(trusted, "rev-parse", "HEAD")
+    assert checkpoint.direct_oid is None
+
+
 def test_absent_tag_rejects_multiple_digest_valid_prepared_commits(
     repository: tuple[Path, Path], tmp_path: Path
 ) -> None:
