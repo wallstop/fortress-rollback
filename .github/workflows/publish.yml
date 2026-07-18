@@ -101,6 +101,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check every Cargo workspace lock
+        run: python3 scripts/release/workspace_locks.py check
+
       - name: Package release artifact
         id: package
         run: |

@@ -65,6 +65,7 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "wiki/**",
     "scripts/docs/**",
     "scripts/tests/**",
+    "scripts/release/**",
     "scripts/ci/check-doc-claims.sh",
     "scripts/hooks/check-wire-golden-immutable.py",
     "scripts/ci/check-derive-bounds.sh",
@@ -76,6 +77,10 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     ".github/actions/install-cargo-tool/**",
     ".github/workflows/ci-docs.yml",
     ".github/workflows/ci-rust.yml",
+    ".github/workflows/release-prepare.yml",
+    ".github/workflows/publish.yml",
+    ".github/workflows/ci-version-sync.yml",
+    ".github/workflows/ci-verification.yml",
 }
 DOCS_WORKFLOW_FORBIDDEN_PATHS = {
     "scripts/**",
@@ -97,6 +102,8 @@ VERSION_SYNC_REQUIRED_PATH_GLOBS = {
     "**.json",
 }
 VERSION_SYNC_REQUIRED_PATHS = {
+    "**/Cargo.lock",
+    "scripts/release/**",
     "scripts/sync-version.sh",
     "scripts/hooks/check-wire-golden-immutable.py",
     ".github/workflows/ci-version-sync.yml",
@@ -182,6 +189,20 @@ def test_wire_golden_hook_checks_the_staged_diff_every_commit(
     )
     assert hook["pass_filenames"] is False
     assert hook["always_run"] is True
+
+
+def test_workspace_lock_structure_hook_is_fast_and_surface_scoped(
+    pre_commit_config: dict,
+) -> None:
+    hook = _hook_by_id(pre_commit_config, "workspace-lock-structure")
+
+    assert hook["entry"] == (
+        "python scripts/release/workspace_locks.py check-structure"
+    )
+    assert hook["pass_filenames"] is False
+    assert "Cargo\\.(toml|lock)" in hook["files"]
+    assert "scripts/release/" in hook["files"]
+    assert hook.get("stages", ["pre-commit"]) == ["pre-commit"]
 
 
 @pytest.mark.parametrize("path", [DOCS_CONTRIBUTING, WIKI_CONTRIBUTING])

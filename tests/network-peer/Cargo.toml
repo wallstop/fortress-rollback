@@ -6,8 +6,8 @@ publish = false
 description = "Headless network test peer for multi-process testing of fortress-rollback"
 
 # This is an internal test tool, not published to crates.io
-# It exists as a separate crate to avoid forcing Cargo.lock inclusion
-# in the main fortress-rollback crate (binaries force Cargo.lock inclusion)
+# It is a separate binary crate for multi-process tests, but it remains a member
+# of the root workspace and therefore shares the root Cargo.lock.
 
 [lints.clippy]
 # Allow print macros for test output and error reporting. This headless peer

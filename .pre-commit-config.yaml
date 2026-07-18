@@ -233,6 +233,13 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: workspace-lock-structure
+        name: check Cargo workspace lock ownership
+        entry: python scripts/release/workspace_locks.py check-structure
+        language: python
+        pass_filenames: false
+        files: '(^|/)Cargo\.(toml|lock)$|^scripts/release/'
+
       - id: validate-agent-skills
         name: validate Agent Skills open format
         entry: python scripts/hooks/validate-agent-skills.py

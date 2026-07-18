@@ -4,8 +4,9 @@
 # This hook runs before each commit to ensure code quality and consistency.
 # It performs the following checks:
 #   1. Version synchronization (if Cargo.toml version changed)
-#   2. Code formatting (cargo fmt --check)
-#   3. Linting (cargo clippy)
+#   2. Cargo workspace lock ownership and version structure
+#   3. Code formatting (cargo fmt --check)
+#   4. Linting (cargo clippy)
 #
 # ⚠️ NOTE: This is a STANDALONE script that uses --check mode (fails on unformatted code).
 # If you use the pre-commit framework (recommended), it uses run-cargo-fmt.py instead,
@@ -107,7 +108,25 @@ fi
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Check 2: Rust Formatting
+# Check 2: Cargo Workspace Lock Structure
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CARGO_LOCK_SURFACE=$(git diff --cached --name-only | grep -E '(^|/)Cargo\.(toml|lock)$|^scripts/release/' || true)
+
+if [[ -n "$CARGO_LOCK_SURFACE" ]]; then
+    echo -e "${BLUE}Checking Cargo workspace lock ownership...${NC}"
+    if ! python3 "$PROJECT_ROOT/scripts/release/workspace_locks.py" check-structure; then
+        echo -e "${RED}✗ Cargo workspace lock structure is invalid${NC}"
+        echo -e "${YELLOW}Run 'python3 scripts/release/workspace_locks.py sync' after fixing ownership errors.${NC}"
+        FAILED=true
+    else
+        echo -e "${GREEN}✓${NC} Cargo workspace lock structure valid"
+    fi
+    echo ""
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 3: Rust Formatting
 # ═══════════════════════════════════════════════════════════════════════════════
 
 echo -e "${BLUE}Checking code formatting...${NC}"
@@ -130,7 +149,7 @@ fi
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Check 3: Clippy Lints (optional, can be slow)
+# Check 4: Clippy Lints (optional, can be slow)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Uncomment to enable clippy checks (can be slow for large changes)

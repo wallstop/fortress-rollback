@@ -90,6 +90,13 @@ def is_workflow_file(path: str) -> bool:
     return Path(path).suffix in {".yml", ".yaml"}
 
 
+def is_workspace_lock_surface_file(path: str) -> bool:
+    """Return True for Cargo topology, locks, and canonical release tooling."""
+    return Path(path).name in {"Cargo.toml", "Cargo.lock"} or path.startswith(
+        "scripts/release/"
+    )
+
+
 def is_docs_markdown_file(path: str) -> bool:
     """Return True for markdown files under docs/ (vale targets)."""
     return path.startswith("docs/") and path.endswith(".md")
@@ -221,6 +228,9 @@ def plan_checks(
         is_agent_skill_markdown_file(path) for path in changed_files
     )
     workflow_changed = any(is_workflow_file(path) for path in changed_files)
+    workspace_lock_changed = any(
+        is_workspace_lock_surface_file(path) for path in changed_files
+    )
     docs_files = sorted(path for path in extant_files if is_docs_markdown_file(path))
     rust_changed = any(is_rust_file(path) for path in changed_files)
     rust_files = sorted(path for path in extant_files if is_rust_file(path))
@@ -256,6 +266,24 @@ def plan_checks(
                 command=["bash", "scripts/sync-version.sh", "--check"],
                 fix_hint="Run 'bash scripts/sync-version.sh' to synchronize references.",
                 fix_command=["bash", "scripts/sync-version.sh"],
+            )
+        )
+
+    if run_all or workspace_lock_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="workspace-lock-check",
+                description="validate every Cargo workspace lock with full dependency metadata",
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/release/workspace_locks.py",
+                    "check",
+                ],
+                fix_hint=(
+                    "Run 'python3 scripts/release/workspace_locks.py sync', then "
+                    "rerun the full check; never bypass --locked or use --no-deps "
+                    "as a lock-freshness oracle."
+                ),
             )
         )
 

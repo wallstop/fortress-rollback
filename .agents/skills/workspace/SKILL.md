@@ -173,6 +173,22 @@ cargo doc --workspace
 cargo publish -p crate_name
 ```
 
+### Checked-In Lock Ownership
+
+Fortress Rollback discovers every tracked manifest with Cargo and requires one
+tracked `Cargo.lock` beside each owning workspace-root manifest. Workspace
+members share their root lock; member-local and orphan locks are invalid.
+
+```bash
+python3 scripts/release/workspace_locks.py list
+python3 scripts/release/workspace_locks.py sync
+python3 scripts/release/workspace_locks.py check
+```
+
+Do not hand-edit locks, bypass `--locked`, or use `cargo metadata --no-deps` as
+a freshness check. The canonical checker performs full locked dependency
+resolution for every dynamically discovered root.
+
 ---
 
 ## Test Organization
