@@ -43,31 +43,47 @@ if [[ ! "$toolchain" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
 fi
 
 install_args=(--profile minimal --no-self-update)
-IFS=',' read -ra components <<< "${REQUESTED_COMPONENTS:-}"
-for component in "${components[@]}"; do
-  component="${component#"${component%%[![:space:]]*}"}"
-  component="${component%"${component##*[![:space:]]}"}"
-  if [ -n "$component" ]; then
-    if [[ ! "$component" =~ ^[A-Za-z0-9._-]+$ ]]; then
-      echo "::error::Invalid rustup component '$component'."
-      exit 1
-    fi
-    install_args+=(--component "$component")
-  fi
-done
 
-IFS=',' read -ra targets <<< "${REQUESTED_TARGETS:-}"
-for target in "${targets[@]}"; do
-  target="${target#"${target%%[![:space:]]*}"}"
-  target="${target%"${target##*[![:space:]]}"}"
-  if [ -n "$target" ]; then
-    if [[ ! "$target" =~ ^[A-Za-z0-9._-]+$ ]]; then
-      echo "::error::Invalid rustup target '$target'."
-      exit 1
+# Parse with scalar state rather than read -a. macOS ships Bash 3.2, where expanding
+# an empty array under `set -u` fails even when the array was explicitly initialized.
+append_requested_items() {
+  local kind="$1"
+  local remaining="$2"
+  local item=""
+  local has_more="false"
+
+  while :; do
+    case "$remaining" in
+      *,*)
+        item="${remaining%%,*}"
+        remaining="${remaining#*,}"
+        has_more="true"
+        ;;
+      *)
+        item="$remaining"
+        remaining=""
+        has_more="false"
+        ;;
+    esac
+
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    if [ -n "$item" ]; then
+      if [[ ! "$item" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "::error::Invalid rustup $kind '$item'."
+        exit 1
+      fi
+      install_args+=("--$kind" "$item")
     fi
-    install_args+=(--target "$target")
-  fi
-done
+
+    if [ "$has_more" != "true" ]; then
+      break
+    fi
+  done
+}
+
+append_requested_items "component" "${REQUESTED_COMPONENTS:-}"
+append_requested_items "target" "${REQUESTED_TARGETS:-}"
 
 echo "=== Pinned nightly installation ==="
 echo "toolchain=$toolchain"

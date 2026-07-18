@@ -27,20 +27,23 @@ retry-safe, semver-aware, and self-enforcing, then open a fully reviewed green P
 - [x] Pin required Rust toolchains and eliminate floating required nightlies.
 - [x] Update project guidance, preflight selection, and architectural decisions.
 - [x] Complete local verification and adversarial review.
-- [ ] Open the PR and resolve CI/reviewer feedback.
+- [x] Open draft PR #254 and trigger Cursor Bugbot and Copilot review on the
+  first pushed commit.
+- [ ] Resolve CI/reviewer feedback and make every required PR check green.
 - [ ] Repository administrator: require the stable `Verify prepared release
   state` check on `main` and enable merge queue (preferred) or strict
   up-to-date required checks; GitHub does not expose this setting to repo code.
 
 ## Verification
 
-- Focused integrated release/toolchain/preflight contracts: 370 tests passed.
-- Complete Python/script suite: 1,944 tests passed.
-- Complete agent preflight passed, including 266 release automation tests, 64
+- Focused integrated release/toolchain/preflight contracts: 372 tests passed.
+- Complete Python/script suite: 1,946 tests passed.
+- Complete agent preflight passed, including 266 release automation tests, 66
   toolchain tests, 49 Agent Skills, all 5,138 local files and 1,392 links,
   changelog policy, workflow linting, fallback imports, and spelling.
-- Toolchain installers have executable Bash 3.2 success, retry exhaustion,
-  malformed/overflow pin, and workflow/job/step floating-nightly regressions.
+- Toolchain installers have executable Bash 3.2 success, empty-list parsing,
+  retry exhaustion, malformed/overflow pin, and workflow/job/step
+  floating-nightly regressions.
 - Rust formatting, workspace Clippy with `-D warnings`, and the complete
   workspace/all-targets test and benchmark lane passed with `tokio,json`.
 - ShellCheck and the repository-wide shell portability scan pass.

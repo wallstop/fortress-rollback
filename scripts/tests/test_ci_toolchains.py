@@ -462,7 +462,13 @@ def test_pinned_nightly_installer_retries_and_reports_diagnostics() -> None:
     assert "rustup target list" in installer
     assert "mapfile" not in installer
     assert "readarray" not in installer
+    assert not re.search(
+        r"^\s*(?:IFS=.*\s)?read\s+-[A-Za-z]*a",
+        installer,
+        re.MULTILINE,
+    )
     assert "declare -A" not in installer
+    assert not re.search(r'for\s+\w+\s+in\s+"\$\{\w+\[@\]\}"', installer)
 
 
 @pytest.mark.parametrize(
@@ -602,6 +608,66 @@ fi
     assert github_output.read_text(encoding="utf-8").strip() == (
         f"toolchain={pin}"
     )
+
+
+@pytest.mark.parametrize(
+    ("components", "targets"),
+    (("", ""), (" , ", ",")),
+)
+def test_pinned_nightly_installer_accepts_empty_requested_lists(
+    tmp_path: Path, components: str, targets: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    rustup_log = tmp_path / "rustup.log"
+    github_env = tmp_path / "github-env"
+    github_output = tmp_path / "github-output"
+
+    fake_rustup = fake_bin / "rustup"
+    fake_rustup.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" >> "$FAKE_RUSTUP_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_rustup.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "GITHUB_ACTION_PATH": str(ACTION.parent),
+            "GITHUB_ENV": str(github_env),
+            "GITHUB_OUTPUT": str(github_output),
+            "PIN_FILE_NAME": "toolchain",
+            "REQUESTED_COMPONENTS": components,
+            "REQUESTED_TARGETS": targets,
+            "BASH_COMPAT": "3.2",
+            "FAKE_RUSTUP_LOG": str(rustup_log),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(INSTALLER)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    install_calls = [
+        line
+        for line in rustup_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("toolchain install ")
+    ]
+    assert install_calls == [
+        f"toolchain install {PIN.read_text(encoding='utf-8').strip()} "
+        "--profile minimal --no-self-update"
+    ]
+    assert github_env.read_text(encoding="utf-8").startswith("RUSTUP_TOOLCHAIN=")
+    assert github_output.read_text(encoding="utf-8").startswith("toolchain=")
 
 
 def test_pinned_nightly_installer_exhausts_retries_without_writing_outputs(
