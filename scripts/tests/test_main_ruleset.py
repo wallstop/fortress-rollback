@@ -90,7 +90,7 @@ def test_check_accepts_matching_live_ruleset(monkeypatch: pytest.MonkeyPatch) ->
     def urlopen(request: object, timeout: int) -> MagicMock:
         calls.append((request.get_method(), request.full_url))
         if request.full_url.endswith(
-            "rulesets?per_page=100&includes_parents=false"
+            "rulesets?per_page=100&page=1&includes_parents=false"
         ):
             return _response([{"id": 16185604, "name": "Main Protection"}])
         return _response(_live_config())
@@ -127,7 +127,7 @@ def test_apply_repairs_drift_with_exact_config(monkeypatch: pytest.MonkeyPatch) 
     def urlopen(request: object, timeout: int) -> MagicMock:
         requests.append(request)
         if request.full_url.endswith(
-            "rulesets?per_page=100&includes_parents=false"
+            "rulesets?per_page=100&page=1&includes_parents=false"
         ):
             return _response([{"id": 16185604, "name": "Main Protection"}])
         if request.get_method() == "GET":
@@ -184,5 +184,31 @@ def test_lookup_explicitly_excludes_inherited_rulesets(
         == "current"
     )
     assert requests[0].full_url.endswith(
-        "/rulesets?per_page=100&includes_parents=false"
+        "/rulesets?per_page=100&page=1&includes_parents=false"
     )
+
+
+def test_lookup_follows_ruleset_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[object] = []
+    first_page = [
+        {"id": index + 1, "name": f"Unrelated {index}"}
+        for index in range(main_ruleset.RULESETS_PER_PAGE)
+    ]
+
+    def urlopen(request: object, timeout: int) -> MagicMock:
+        requests.append(request)
+        if "&page=1&" in request.full_url:
+            return _response(first_page)
+        if "&page=2&" in request.full_url:
+            return _response([{"id": 16185604, "name": "Main Protection"}])
+        return _response(_live_config())
+
+    monkeypatch.setattr(main_ruleset.urllib.request, "urlopen", urlopen)
+
+    assert (
+        main_ruleset.synchronize("wallstop/fortress-rollback", "token")
+        == "current"
+    )
+    assert "&page=1&" in requests[0].full_url
+    assert "&page=2&" in requests[1].full_url
+    assert requests[2].get_method() == "GET"

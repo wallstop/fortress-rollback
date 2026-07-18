@@ -19,6 +19,8 @@ DEFAULT_CONFIG = REPO_ROOT / ".github" / "rulesets" / "main-protection.json"
 API_ROOT = "https://api.github.com"
 API_VERSION = "2022-11-28"
 MAX_RESPONSE_BYTES = 1_048_576
+RULESETS_PER_PAGE = 100
+MAX_RULESET_PAGES = 100
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MANAGED_FIELDS = (
     "name",
@@ -141,16 +143,26 @@ def _request_json(
 
 
 def _find_ruleset(repository: str, token: str, name: str) -> int | None:
-    document = _request_json(
-        "GET",
-        f"/repos/{repository}/rulesets?per_page=100&includes_parents=false",
-        token=token,
-    )
-    if not isinstance(document, list):
-        raise RulesetError("GitHub ruleset listing must be an array")
-    if not all(isinstance(item, dict) for item in document):
-        raise RulesetError("every GitHub ruleset listing entry must be an object")
-    matches = [item for item in document if item.get("name") == name]
+    rulesets: list[dict[str, Any]] = []
+    for page in range(1, MAX_RULESET_PAGES + 1):
+        document = _request_json(
+            "GET",
+            f"/repos/{repository}/rulesets?per_page={RULESETS_PER_PAGE}"
+            f"&page={page}&includes_parents=false",
+            token=token,
+        )
+        if not isinstance(document, list):
+            raise RulesetError("GitHub ruleset listing must be an array")
+        if not all(isinstance(item, dict) for item in document):
+            raise RulesetError("every GitHub ruleset listing entry must be an object")
+        rulesets.extend(document)
+        if len(document) < RULESETS_PER_PAGE:
+            break
+    else:
+        raise RulesetError(
+            f"repository ruleset listing exceeds {MAX_RULESET_PAGES} pages"
+        )
+    matches = [item for item in rulesets if item.get("name") == name]
     if len(matches) > 1:
         raise RulesetError(f"repository has multiple rulesets named {name!r}")
     if not matches:
