@@ -56,7 +56,7 @@ jobs:
       - name: Generate release GitHub App token
         id: app-token
         if: ${{ !inputs.dry_run }}
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.0.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -64,46 +64,95 @@ jobs:
           permission-pull-requests: write
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token || github.token }}
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      - name: Install pinned release Rust
+        id: release-rust
+        uses: ./.github/actions/install-pinned-release
+
+      - name: Install pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0
         with:
-          toolchain: stable
+          python-version: "3.13.5"
+          cache: pip
+          cache-dependency-path: scripts/release/requirements.txt
 
       - name: Test release tooling before mutation
         run: |
           set -euo pipefail
-          pip install pytest --quiet
-          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_workflows.py --no-header -q
+          python3 -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --only-binary=:all: \
+            --requirement scripts/release/requirements.txt \
+            --quiet
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
 
-      - name: Prepare release files
-        id: prepare
+      - name: Plan release version
+        id: plan
         env:
           BUMP: ${{ inputs.bump }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          prepare_args=(--bump "${BUMP}")
-          if [ "${DRY_RUN}" = "true" ]; then
-            prepare_args+=(--dry-run)
-          fi
-          python3 scripts/release/prepare_release.py "${prepare_args[@]}" | tee "${RUNNER_TEMP}/prepare-release.txt"
-          current_version="$(sed -n 's/^current_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
-          prepared_version="$(sed -n 's/^prepared_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
+          release_date="$(date -u +%Y-%m-%d)"
+          python3 scripts/release/prepare_release.py \
+            --bump "${BUMP}" \
+            --date "${release_date}" \
+            --dry-run | tee "${RUNNER_TEMP}/prepare-release-plan.txt"
+          current_version="$(sed -n 's/^current_version=//p' "${RUNNER_TEMP}/prepare-release-plan.txt")"
+          prepared_version="$(sed -n 's/^prepared_version=//p' "${RUNNER_TEMP}/prepare-release-plan.txt")"
           if ! printf '%s\n' "${prepared_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-            echo "::error::Release preparation did not produce a strict X.Y.Z version."
+            echo "::error::Release planning did not produce a strict X.Y.Z version."
             exit 1
           fi
-          echo "current_version=${current_version}" >> "${GITHUB_OUTPUT}"
-          echo "version=${prepared_version}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "current_version=${current_version}"
+            echo "version=${prepared_version}"
+            echo "requested_date=${release_date}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve release branch recovery
+        id: recovery
+        env:
+          BUMP: ${{ inputs.bump }}
+          CURRENT_VERSION: ${{ steps.plan.outputs.current_version }}
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+          REQUESTED_DATE: ${{ steps.plan.outputs.requested_date }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/release_branch.py resolve \
+            --default-branch "${DEFAULT_BRANCH}" \
+            --previous-version "${CURRENT_VERSION}" \
+            --target-version "${PREPARED_VERSION}" \
+            --bump "${BUMP}" \
+            --requested-date "${REQUESTED_DATE}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Prepare release files
+        if: steps.recovery.outputs.exists != 'true'
+        env:
+          BUMP: ${{ inputs.bump }}
+          CURRENT_VERSION: ${{ steps.plan.outputs.current_version }}
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_DATE: ${{ steps.recovery.outputs.release_date }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/prepare_release.py \
+            --bump "${BUMP}" \
+            --date "${RELEASE_DATE}" | tee "${RUNNER_TEMP}/prepare-release.txt"
+          actual_current="$(sed -n 's/^current_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
+          actual_prepared="$(sed -n 's/^prepared_version=//p' "${RUNNER_TEMP}/prepare-release.txt")"
+          if [ "${actual_current}" != "${CURRENT_VERSION}" ] || [ "${actual_prepared}" != "${PREPARED_VERSION}" ]; then
+            echo "::error::Applied release versions do not match the validated plan."
+            exit 1
+          fi
 
       - name: Synchronize workspace locks and version references
-        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           before_sync="${RUNNER_TEMP}/release-before-canonical-sync.diff"
@@ -118,6 +167,24 @@ jobs:
             exit 1
           fi
 
+      - name: Finalize reviewed release metadata
+        if: steps.recovery.outputs.exists != 'true'
+        env:
+          BUMP: ${{ inputs.bump }}
+          CURRENT_VERSION: ${{ steps.plan.outputs.current_version }}
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_DATE: ${{ steps.recovery.outputs.release_date }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/sync-issue-template-versions.py \
+            --local-only \
+            --ensure-version "v${PREPARED_VERSION}"
+          python3 scripts/release/release_state.py generate \
+            --previous-version "${CURRENT_VERSION}" \
+            --target-version "${PREPARED_VERSION}" \
+            --bump "${BUMP}" \
+            --date "${RELEASE_DATE}"
+
       - name: Validate prepared release
         run: |
           set -euo pipefail
@@ -125,20 +192,55 @@ jobs:
           bash scripts/sync-version.sh --check
           python3 scripts/hooks/check-changelog-unreleased.py
 
+      - name: Verify immutable reviewed release state
+        env:
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/release_state.py verify \
+            --expected-version "${PREPARED_VERSION}"
+
+      - name: Test release tooling after preparation
+        run: |
+          set -euo pipefail
+          python3 -m pytest scripts/tests/test_workspace_locks.py scripts/tests/test_prepare_release.py scripts/tests/test_release_policy.py scripts/tests/test_release_state.py scripts/tests/test_release_state_ci.py scripts/tests/test_release_checkpoint.py scripts/tests/test_publish_state.py scripts/tests/test_release_branch.py scripts/tests/test_sync_issue_template_versions.py scripts/tests/test_issue_template_versions_wiring.py scripts/tests/test_release_workflows.py --no-header -q
+
       - name: Validate release package
-        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           cargo publish --dry-run --locked --allow-dirty
 
-      - name: Show prepared working-tree diff
-        if: ${{ !inputs.dry_run }}
-        run: git --no-pager diff -- .
+      - name: Reverify release state after validation
+        env:
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/release_state.py verify \
+            --expected-version "${PREPARED_VERSION}"
+
+      - name: Stage and show complete prepared diff
+        env:
+          BRANCH_EXISTS: ${{ steps.recovery.outputs.exists }}
+          BASE_SHA: ${{ steps.recovery.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${BRANCH_EXISTS}" = "true" ]; then
+            git --no-pager diff --binary "${BASE_SHA}..HEAD" -- .
+          else
+            git add --all
+            if git diff --cached --quiet; then
+              echo "::error::Release preparation produced no changes."
+              exit 1
+            fi
+            git --no-pager diff --cached --binary -- .
+          fi
 
       - name: Summarize release lock synchronization
         env:
-          CURRENT_VERSION: ${{ steps.prepare.outputs.current_version }}
-          PREPARED_VERSION: ${{ steps.prepare.outputs.version }}
+          CURRENT_VERSION: ${{ steps.plan.outputs.current_version }}
+          PREPARED_VERSION: ${{ steps.plan.outputs.version }}
+          BRANCH_EXISTS: ${{ steps.recovery.outputs.exists }}
+          RELEASE_DATE: ${{ steps.recovery.outputs.release_date }}
         run: |
           set -euo pipefail
           {
@@ -146,8 +248,12 @@ jobs:
             echo
             echo "Version: \`${CURRENT_VERSION}\` → \`${PREPARED_VERSION}\`"
             echo
+            echo "Release date: \`${RELEASE_DATE}\`"
+            echo
+            echo "Existing branch reused: \`${BRANCH_EXISTS}\`"
+            echo
             echo "Workspace roots:"
-            sed -n 's/^workspace_root=//p' "${RUNNER_TEMP}/prepare-release.txt" |
+            sed -n 's/^workspace_root=//p' "${RUNNER_TEMP}/prepare-release-plan.txt" |
               while IFS= read -r workspace_root; do
                 printf -- "- \`%s\`\n" "${workspace_root}"
               done
@@ -157,44 +263,40 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ steps.prepare.outputs.version }}
+          VERSION: ${{ steps.plan.outputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ steps.recovery.outputs.branch }}
+          BRANCH_EXISTS: ${{ steps.recovery.outputs.exists }}
+          BASE_SHA: ${{ steps.recovery.outputs.base_sha }}
+          REPLACE_SHA: ${{ steps.recovery.outputs.replace_sha }}
         run: |
           set -euo pipefail
-          branch="release/v${VERSION}"
-          if git ls-remote --exit-code --heads origin "${branch}" > "${RUNNER_TEMP}/release-branch.txt" 2>&1; then
-            echo "::error::Release branch ${branch} already exists."
-            exit 1
-          elif [ "$?" -ne 2 ]; then
-            echo "::error::Could not determine whether ${branch} exists."
-            sed -n '1,20p' "${RUNNER_TEMP}/release-branch.txt"
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" > "${RUNNER_TEMP}/release-tag.txt" 2>&1; then
-            echo "::error::Release tag v${VERSION} already exists."
-            exit 1
-          elif [ "$?" -ne 2 ]; then
-            echo "::error::Could not determine whether tag v${VERSION} exists."
-            sed -n '1,20p' "${RUNNER_TEMP}/release-tag.txt"
-            exit 1
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${branch}"
-          git add --all
-          if git diff --cached --quiet; then
-            echo "::error::Release preparation produced no changes."
-            exit 1
-          fi
-          git commit -m "Prepare v${VERSION} release"
 
           # Match the repository's established token handling in wiki-sync.yml:
           # keep credentials out of URLs and let git request them only at push.
           # shellcheck disable=SC2016
           git config --local credential.helper '!f() { echo "password=${GH_TOKEN}"; }; f'
           git config --local credential.https://github.com.username "x-access-token"
-          git push origin "HEAD:refs/heads/${branch}"
+          if [ "${BRANCH_EXISTS}" != "true" ]; then
+            # Catch main moving while generation and validation were running.
+            python3 scripts/release/release_branch.py verify-default \
+              --default-branch "${DEFAULT_BRANCH}" \
+              --expected-sha "${BASE_SHA}"
+            git commit -m "Prepare v${VERSION} release"
+            push_args=(
+              python3 scripts/release/release_branch.py push
+              --default-branch "${DEFAULT_BRANCH}"
+              --expected-base-sha "${BASE_SHA}"
+              --branch "${BRANCH}"
+            )
+            if [ -n "${REPLACE_SHA}" ]; then
+              push_args+=(--expected-branch-sha "${REPLACE_SHA}")
+            fi
+            "${push_args[@]}"
+          fi
+          head_sha="$(git rev-parse 'HEAD^{commit}')"
 
           body_file="${RUNNER_TEMP}/release-pr.md"
           {
@@ -204,5 +306,11 @@ jobs:
             echo
             echo "After this PR is green and merged, run **Release - Publish Crate** on \`${DEFAULT_BRANCH}\` with \`${VERSION}\`."
           } > "${body_file}"
-          gh pr create --repo "${GITHUB_REPOSITORY}" --base "${DEFAULT_BRANCH}" --head "${branch}" \
-            --title "Prepare v${VERSION} release" --body-file "${body_file}"
+          python3 scripts/release/release_branch.py ensure-pr \
+            --repository "${GITHUB_REPOSITORY}" \
+            --base "${DEFAULT_BRANCH}" \
+            --head "${BRANCH}" \
+            --head-sha "${head_sha}" \
+            --title "Prepare v${VERSION} release" \
+            --body-file "${body_file}" \
+            --github-output "${GITHUB_OUTPUT}"

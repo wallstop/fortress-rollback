@@ -16,6 +16,7 @@ on:
       - "scripts/release/**"
       - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/sync-issue-template-versions.py"
       - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/hooks/check-wire-golden-immutable.py"
       - "scripts/ci/check-derive-bounds.sh"
@@ -25,9 +26,14 @@ on:
       - ".vale.ini"
       - ".vale/**"
       - ".github/actions/install-cargo-tool/**"
+      - ".github/actions/install-pinned-nightly/**"
+      - ".github/actions/install-pinned-release/**"
       - ".github/workflows/ci-docs.yml"
+      - ".github/workflows/sync-issue-template.yml"
+      - ".github/ISSUE_TEMPLATE/bug_report.yml"
       - ".github/workflows/ci-rust.yml"
       - ".github/workflows/release-prepare.yml"
+      - ".github/workflows/ci-release-state.yml"
       - ".github/workflows/publish.yml"
       - ".github/workflows/ci-version-sync.yml"
       - ".github/workflows/ci-verification.yml"
@@ -46,6 +52,7 @@ on:
       - "scripts/release/**"
       - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
+      - "scripts/ci/sync-issue-template-versions.py"
       - "scripts/hooks/check-rust-semantic-claims.py"
       - "scripts/hooks/check-wire-golden-immutable.py"
       - "scripts/ci/check-derive-bounds.sh"
@@ -55,9 +62,14 @@ on:
       - ".vale.ini"
       - ".vale/**"
       - ".github/actions/install-cargo-tool/**"
+      - ".github/actions/install-pinned-nightly/**"
+      - ".github/actions/install-pinned-release/**"
       - ".github/workflows/ci-docs.yml"
+      - ".github/workflows/sync-issue-template.yml"
+      - ".github/ISSUE_TEMPLATE/bug_report.yml"
       - ".github/workflows/ci-rust.yml"
       - ".github/workflows/release-prepare.yml"
+      - ".github/workflows/ci-release-state.yml"
       - ".github/workflows/publish.yml"
       - ".github/workflows/ci-version-sync.yml"
       - ".github/workflows/ci-verification.yml"
@@ -650,7 +662,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
 
       - name: Measure documentation coverage
         run: |
@@ -663,7 +676,7 @@ jobs:
 
           # Generate coverage report
           RUSTDOCFLAGS="-Z unstable-options --show-coverage" \
-            cargo +nightly doc --no-deps 2>&1 | tee doc-coverage.txt
+            cargo doc --no-deps 2>&1 | tee doc-coverage.txt
 
           # Extract and display coverage table
           {

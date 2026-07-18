@@ -63,16 +63,24 @@ the unreleased features themselves must be folded into their `### Added` entry i
 - Keep `## [Unreleased]` undated.
 - Use ISO dates on release headers: `## [X.Y.Z] - YYYY-MM-DD`.
 - If `Cargo.toml` is `X.Y.Z`, the matching changelog header must be dated.
+- Treat the preparation date as the release date. It is reviewed and immutable;
+  publication must not rewrite it afterward.
 - Validate: `bash scripts/sync-version.sh --check`
 - Auto-fix link/date metadata: `bash scripts/sync-version.sh --changelog-only`
-- Post-publish finalization must stamp the immutable released version, not
-  whatever `Cargo.toml` says on the default branch after release:
-  `bash scripts/sync-version.sh --stamp-release-date --release-version X.Y.Z`
-- Issue-template release dropdown sync during publish must include the
-  just-created tag with `sync-issue-template-versions.py --ensure-version vX.Y.Z`
-  so GitHub API listing delay cannot omit the release.
+- Release preparation must add the target tag to the issue-template dropdown;
+  post-publish default-branch commits are forbidden.
 - Treat unresolved `sync-version.sh` metadata issues as failures; warnings are
   not acceptable for required release metadata.
+
+## Release Bump Classification
+
+- `Added`, `Deprecated`, or non-breaking `Changed`: at least minor.
+- `**Breaking:**` or `Removed`: minor before 1.0; major at or after 1.0.
+- Only `Fixed` and/or `Security`: patch is allowed.
+- Empty `[Unreleased]`: preparation must fail.
+
+The release tool enforces this floor. Protocol-version incompatibilities are
+always `Changed` + `**Breaking:**`; do not bury them in a `Fixed` entry.
 
 ## Writing Guidelines
 

@@ -2,12 +2,9 @@
 """Guard the issue-template version-sync wiring and dropdown invariants.
 
 Background (GitHub issue #168): the bug-report version dropdown drifted because
-the standalone ``sync-issue-template.yml`` workflow triggers on
-``release: [released]``, but a release created by ``publish.yml`` with the
-default ``GITHUB_TOKEN`` does not emit that event. The durable fix syncs the
-dropdown *inline* in ``publish.yml``. These offline tests protect both the
-wiring (so the inline sync can't silently regress) and the dropdown content
-(unique, semver-descending entries between the sentinels).
+the standalone release event is not emitted by a release created with the
+default ``GITHUB_TOKEN``. The durable fix finalizes the dropdown in the reviewed
+release-preparation PR, before the immutable source digest is recorded.
 """
 from __future__ import annotations
 
@@ -16,26 +13,51 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+PREPARE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-prepare.yml"
 BUG_REPORT = REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
 BEGIN_SENTINEL = "# BEGIN_FORTRESS_VERSIONS"
 END_SENTINEL = "# END_FORTRESS_VERSIONS"
 SYNC_SCRIPT = "scripts/ci/sync-issue-template-versions.py"
+SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "sync-issue-template.yml"
+DOCS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
 
 
-def test_publish_workflow_syncs_issue_template_inline() -> None:
-    """publish.yml must invoke the issue-template sync (root-cause fix for #168)."""
-    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
-    assert SYNC_SCRIPT in text, (
-        "publish.yml must run "
-        f"'{SYNC_SCRIPT}' inline so every release updates the bug-report "
-        "version dropdown (a GITHUB_TOKEN-created release does not trigger the "
-        "standalone release-event workflow)."
-    )
-    # The sync step pushes the refreshed template back to the default branch.
-    assert "bug_report.yml" in text and "git push" in text, (
-        "publish.yml's issue-template sync step must commit and push the "
-        "updated bug_report.yml."
-    )
+def test_prepare_workflow_syncs_issue_template_before_digest() -> None:
+    """The reviewed PR must contain the target version before it is hashed."""
+    prepare = PREPARE_WORKFLOW.read_text(encoding="utf-8")
+    assert SYNC_SCRIPT in prepare
+    assert "--local-only" in prepare
+    assert '--ensure-version "v${PREPARED_VERSION}"' in prepare
+    assert prepare.index(SYNC_SCRIPT) < prepare.index("release_state.py generate")
+
+
+def test_publish_workflow_does_not_push_issue_template_fixup() -> None:
+    """Published, tagged, and default-branch sources must stay identical."""
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert SYNC_SCRIPT not in publish
+    assert "bug_report.yml" not in publish
+    assert "git commit" not in publish
+
+
+def test_sync_repair_workflow_is_not_release_triggered() -> None:
+    """Creating a release must never cause an unreviewed source mutation."""
+    workflow = SYNC_WORKFLOW.read_text(encoding="utf-8")
+    on_block = workflow.split("permissions:", maxsplit=1)[0]
+    assert "workflow_dispatch:" in on_block
+    assert "release:" not in on_block
+
+
+def test_issue_template_sync_surfaces_trigger_docs_ci_for_push_and_pr() -> None:
+    """Every source of dropdown drift must exercise its offline CI checks."""
+    docs = DOCS_WORKFLOW.read_text(encoding="utf-8")
+    for path in (
+        SYNC_SCRIPT,
+        ".github/workflows/sync-issue-template.yml",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ):
+        assert docs.count(f'      - "{path}"') == 2, (
+            f"ci-docs.yml must trigger for {path} on both push and pull_request"
+        )
 
 
 def _dropdown_versions() -> list[str]:
@@ -85,25 +107,13 @@ def test_dropdown_includes_v0_8_1() -> None:
     )
 
 
-def test_publish_workflow_stamps_release_date() -> None:
-    """publish.yml must stamp the real release date (refresh-at-release)."""
-    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
-    assert "--stamp-release-date" in text, (
-        "publish.yml must run 'sync-version.sh --stamp-release-date' so the "
-        "changelog's placeholder date is refreshed to the real release date."
-    )
-    assert "RELEASE_VERSION: ${{ steps.get_version.outputs.version }}" in text, (
-        "publish.yml must preserve the published version for post-publish "
-        "metadata finalization, even if the default branch is bumped before "
-        "the finalizer runs."
-    )
-    assert '--release-version "$RELEASE_VERSION"' in text, (
-        "publish.yml must pass the immutable published version into "
-        "sync-version.sh instead of letting the default branch Cargo.toml "
-        "choose which changelog header is stamped."
-    )
-    assert '--ensure-version "$RELEASE_TAG"' in text, (
-        "publish.yml must inject the just-created release tag into the "
-        "issue-template sync so API listing delay cannot omit the published "
-        "version from bug_report.yml."
-    )
+def test_prepare_workflow_chooses_one_release_date_before_generation() -> None:
+    """New releases share one UTC date while reruns reuse committed metadata."""
+    prepare = PREPARE_WORKFLOW.read_text(encoding="utf-8")
+    assert 'release_date="$(date -u +%Y-%m-%d)"' in prepare
+    assert '--date "${release_date}"' in prepare
+    assert 'echo "requested_date=${release_date}"' in prepare
+    assert "steps.recovery.outputs.release_date" in prepare
+    assert '--date "${RELEASE_DATE}"' in prepare
+    publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert "--stamp-release-date" not in publish

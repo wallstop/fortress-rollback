@@ -21,15 +21,21 @@ sys.modules[SPEC.name] = prepare_release
 SPEC.loader.exec_module(prepare_release)
 
 
-def _write_fixture(tmp_path: Path, *, notes: str = "### Added\n\n- A feature.\n") -> Path:
+def _write_fixture(
+    tmp_path: Path,
+    *,
+    notes: str = "### Added\n\n- A feature.\n",
+    current_version: str = "1.2.3",
+) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "Cargo.toml").write_text(
-        '[package]\nname = "fortress-rollback"\nversion = "1.2.3"\n',
+        f'[package]\nname = "fortress-rollback"\nversion = "{current_version}"\n',
         encoding="utf-8",
     )
+    current_requirement = ".".join(current_version.split(".")[:2])
     (repo / "README.md").write_text(
-        'fortress-rollback = "1.2"\n', encoding="utf-8"
+        f'fortress-rollback = "{current_requirement}"\n', encoding="utf-8"
     )
     sync_script = repo / "scripts" / "sync-version.sh"
     sync_script.parent.mkdir()
@@ -46,13 +52,20 @@ def _write_fixture(tmp_path: Path, *, notes: str = "### Added\n\n- A feature.\n"
 """
         + notes
         + """
-## [1.2.3] - 2026-01-01
+## [CURRENT_VERSION] - 2026-01-01
 
 - Previous release.
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v1.2.3...HEAD
-[1.2.3]: https://github.com/wallstop/fortress-rollback/releases/tag/v1.2.3
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/vCURRENT_VERSION...HEAD
+[CURRENT_VERSION]: https://github.com/wallstop/fortress-rollback/releases/tag/vCURRENT_VERSION
 """,
+        encoding="utf-8",
+    )
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(
+        changelog_path.read_text(encoding="utf-8").replace(
+            "CURRENT_VERSION", current_version
+        ),
         encoding="utf-8",
     )
     standalone = {
@@ -119,17 +132,58 @@ def _run(repo: Path, bump: str, *extra: str) -> subprocess.CompletedProcess[str]
 
 
 @pytest.mark.parametrize(
-    ("bump", "expected", "expected_dependency"),
+    ("version", "message"),
     [
-        ("patch", "1.2.4", "1.2"),
-        ("minor", "1.3.0", "1.3"),
-        ("major", "2.0.0", "2.0"),
+        (
+            f"{'9' * 4_301}.0.0",
+            "maximum length for u64 SemVer components",
+        ),
+        ("18446744073709551616.0.0", "larger than u64"),
+        ("0.18446744073709551616.0", "larger than u64"),
+        ("0.0.18446744073709551616", "larger than u64"),
+    ],
+)
+def test_parse_version_rejects_unbounded_semver_components(
+    version: str, message: str
+) -> None:
+    with pytest.raises(prepare_release.PreparationError, match=message):
+        prepare_release.parse_version(version)
+
+
+@pytest.mark.parametrize(
+    ("version", "bump", "component"),
+    [
+        ("18446744073709551615.0.0", "major", "major"),
+        ("1.18446744073709551615.0", "minor", "minor"),
+        ("1.2.18446744073709551615", "patch", "patch"),
+    ],
+)
+def test_bump_version_rejects_u64_component_overflow(
+    version: str, bump: str, component: str
+) -> None:
+    with pytest.raises(
+        prepare_release.PreparationError,
+        match=rf"cannot bump {component} version component beyond u64",
+    ):
+        prepare_release.bump_version(version, bump)
+
+
+@pytest.mark.parametrize(
+    ("bump", "notes", "expected", "expected_dependency"),
+    [
+        ("patch", "### Fixed\n\n- A fix.\n", "1.2.4", "1.2"),
+        ("minor", "### Added\n\n- A feature.\n", "1.3.0", "1.3"),
+        ("major", "### Removed\n\n- An old API.\n", "2.0.0", "2.0"),
     ],
 )
 def test_prepare_release_bumps_manifest_all_locks_and_changelog(
-    tmp_path: Path, bump: str, expected: str, expected_dependency: str
+    tmp_path: Path,
+    bump: str,
+    notes: str,
+    expected: str,
+    expected_dependency: str,
 ) -> None:
-    repo = _write_fixture(tmp_path)
+    repo = _write_fixture(tmp_path, notes=notes)
 
     result = _run(repo, bump)
 
@@ -144,7 +198,7 @@ def test_prepare_release_bumps_manifest_all_locks_and_changelog(
         lock = lock_path.read_text(encoding="utf-8")
         assert f'name = "fortress-rollback"\nversion = "{expected}"' in lock
     changelog = (repo / "CHANGELOG.md").read_text()
-    assert f"## [{expected}] - 2026-07-12\n\n### Added" in changelog
+    assert f"## [{expected}] - 2026-07-12\n\n{notes.strip()}" in changelog
     expected_link = (
         f"[{expected}]: https://github.com/wallstop/fortress-rollback/compare/"
         f"v1.2.3...v{expected}"
@@ -201,6 +255,36 @@ def test_prepare_release_rejects_empty_unreleased_notes(tmp_path: Path) -> None:
     assert 'version = "1.2.3"' in (repo / "Cargo.toml").read_text()
 
 
+def test_prepare_release_rejects_bump_below_changelog_minimum(
+    tmp_path: Path,
+) -> None:
+    repo = _write_fixture(tmp_path, notes="### Added\n\n- A feature.\n")
+
+    result = _run(repo, "patch")
+
+    assert result.returncode != 0
+    assert "requested patch bump is below the minimum minor bump" in result.stderr
+    assert 'version = "1.2.3"' in (repo / "Cargo.toml").read_text()
+
+
+def test_prepare_release_breaking_pre_one_notes_prepare_minor_version(
+    tmp_path: Path,
+) -> None:
+    repo = _write_fixture(
+        tmp_path,
+        current_version="0.10.0",
+        notes="### Changed\n\n- **Breaking:** The wire format changed.\n",
+    )
+
+    result = _run(repo, "minor")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "current_version=0.10.0" in result.stdout
+    assert "prepared_version=0.11.0" in result.stdout
+    assert 'version = "0.11.0"' in (repo / "Cargo.toml").read_text()
+    assert "## [0.11.0] - 2026-07-12" in (repo / "CHANGELOG.md").read_text()
+
+
 def test_prepare_release_rejects_lockfile_version_mismatch(tmp_path: Path) -> None:
     repo = _write_fixture(tmp_path)
     lock_path = repo / "Cargo.lock"
@@ -231,7 +315,7 @@ def test_prepare_release_version_sync_failure_leaves_repository_unchanged(
         if path.is_file() and ".git" not in path.parts
     }
 
-    result = _run(repo, "patch")
+    result = _run(repo, "minor")
 
     assert result.returncode != 0
     assert "version synchronization update failed with exit code 7" in result.stderr
@@ -382,9 +466,62 @@ def test_prepare_dynamic_output_keeps_pre_sandbox_baseline(
     assert 'version = "1.2.3"' in (repo / "Cargo.toml").read_text()
 
 
-def test_real_release_sync_preserves_unrelated_lock_packages() -> None:
+def test_prepared_release_tree_remains_valid_and_rejects_second_preparation(
+    tmp_path: Path,
+) -> None:
+    repo = _write_fixture(tmp_path, notes="### Added\n\n- A feature.\n")
+
+    first = _run(repo, "minor")
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [Unreleased]\n\n## [1.3.0] - 2026-07-12" in changelog
+    prepare_release.workspace_locks.check(repo)
+    environment = prepare_release.os.environ.copy()
+    environment["FORTRESS_PROJECT_ROOT"] = str(repo)
+    check = subprocess.run(
+        ["bash", str(repo / "scripts" / "sync-version.sh"), "--check"],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, check.stdout + check.stderr
+    before_second = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+
+    second = _run(repo, "minor")
+
+    assert second.returncode != 0
+    assert "Unreleased section has no release notes" in second.stderr
+    after_second = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+    assert after_second == before_second
+
+
+def test_real_release_sync_preserves_unrelated_lock_packages(tmp_path: Path) -> None:
+    repo = tmp_path / "real-repository"
+    repo.mkdir()
+    prepare_release._copy_tracked_sandbox(REPO_ROOT, repo)
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(
+        prepare_release.re.sub(
+            r"(?ms)(^## \[Unreleased\]\s*\n).*?(?=^## \[)",
+            "\\1\n### Fixed\n\n- A controlled regression fixture.\n\n",
+            changelog_path.read_text(encoding="utf-8"),
+            count=1,
+        ),
+        encoding="utf-8",
+    )
     _current, _target, prepared_files, _roots = prepare_release.prepare(
-        REPO_ROOT, "patch", "2026-07-17"
+        repo, "patch", "2026-07-17"
     )
 
     for prepared in prepared_files:

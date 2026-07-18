@@ -16,6 +16,7 @@ on:
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
       - 'tests/godot-emscripten/**'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-rust.yml'
   pull_request:
     branches: [main]
@@ -32,6 +33,7 @@ on:
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
       - 'tests/godot-emscripten/**'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-rust.yml'
   workflow_dispatch:
 
@@ -314,11 +316,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install nightly with Miri
-        uses: dtolnay/rust-toolchain@master
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
         with:
           # Pin Miri toolchain to avoid breakages from nightly regressions.
           # Bump intentionally after validating Miri on all CI platforms.
-          toolchain: nightly-2026-02-10
+          pin-file: miri-toolchain
           components: miri
 
       - name: Cache cargo registry (no target for Miri)
@@ -334,10 +337,10 @@ jobs:
           #   "contains outdated or invalid JSON; try `cargo clean`".
           # IMPORTANT: use a versioned cache namespace so we never restore pre-fix caches
           # that may have included `target/`.
-          key: miri-v2-${{ matrix.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: miri-v2-${{ steps.nightly.outputs.toolchain }}-${{ matrix.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            miri-v2-${{ matrix.os }}-${{ matrix.name }}-cargo-
-            miri-v2-${{ matrix.os }}-cargo-
+            miri-v2-${{ steps.nightly.outputs.toolchain }}-${{ matrix.os }}-${{ matrix.name }}-cargo-
+            miri-v2-${{ steps.nightly.outputs.toolchain }}-${{ matrix.os }}-cargo-
 
       - name: Miri toolchain diagnostics
         shell: bash

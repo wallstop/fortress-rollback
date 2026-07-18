@@ -10,6 +10,7 @@ on:
       - '.cargo/config.toml'
       - 'deny.toml'
       - 'supply-chain/**'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   pull_request:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - '.cargo/config.toml'
       - 'deny.toml'
       - 'supply-chain/**'
+      - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   workflow_dispatch:
   # Run security checks weekly regardless of changes
@@ -152,9 +154,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install nightly toolchain (required for udeps)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
 
       - name: Install cargo-udeps
         uses: ./.github/actions/install-cargo-tool
@@ -186,12 +187,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: udeps-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: udeps-${{ steps.nightly.outputs.toolchain }}-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            udeps-${{ runner.os }}-cargo-
+            udeps-${{ steps.nightly.outputs.toolchain }}-${{ runner.os }}-cargo-
 
       - name: Check for unused dependencies
-        run: cargo +nightly udeps --all-targets
+        run: cargo udeps --all-targets
         continue-on-error: true  # Warn but don't fail build
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
