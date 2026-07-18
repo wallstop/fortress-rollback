@@ -403,6 +403,25 @@ def test_publish_workflow_updates_existing_github_release() -> None:
     assert "gh release edit" in text
 
 
+def test_publish_workflow_release_commands_are_repository_explicit() -> None:
+    text = PUBLISH.read_text(encoding="utf-8")
+    release_step = text.split(
+        "- name: Create or update GitHub Release", maxsplit=1
+    )[1]
+    logical_lines = release_step.replace("\\\n", " ").splitlines()
+    release_commands = [
+        line.strip() for line in logical_lines if line.strip().startswith("gh release ")
+    ]
+
+    assert len(release_commands) == 3
+    assert {command.split()[2] for command in release_commands} == {
+        "create",
+        "edit",
+        "upload",
+    }
+    assert all('--repo "${GITHUB_REPOSITORY}"' in command for command in release_commands)
+
+
 def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
     text = VERSION_SYNC.read_text(encoding="utf-8")
 
