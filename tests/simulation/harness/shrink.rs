@@ -173,6 +173,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         .and_then(|(from, to)| Some((remap_index(from, removed)?, remap_index(to, removed)?)));
     RunOptions {
         receive_message_limit: options.receive_message_limit,
+        disconnect_timeout: options.disconnect_timeout,
         corrupt_state_from: remap_peer_frame(options.corrupt_state_from, removed),
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
@@ -1130,6 +1131,7 @@ mod tests {
         schedule.heal_at = 20;
         let options = RunOptions {
             receive_message_limit: Some(512),
+            disconnect_timeout: Some(Duration::from_secs(90)),
             corrupt_state_from: Some((3, 8)),
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
@@ -1158,6 +1160,7 @@ mod tests {
         assert_eq!(mapped.corrupt_checksum_from, None);
         assert_eq!(mapped.probe_confirmed_at, Some(19));
         assert_eq!(mapped.receive_message_limit, Some(512));
+        assert_eq!(mapped.disconnect_timeout, Some(Duration::from_secs(90)));
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.receipt_range_probe_target, Some(1));
         assert_eq!(

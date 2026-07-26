@@ -375,7 +375,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     )
     assert (
         rust_step["uses"]
-        == "dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88"
+        == "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c"
     )
     assert rust_step["with"]["toolchain"] == "nightly-2026-07-08"
     assert set(str(rust_step["with"]["components"]).split(",")) == {
@@ -396,7 +396,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     assert emsdk_step["with"]["actions-cache-folder"] == "emsdk-cache"
 
     node_step = next(step for step in steps if step.get("name") == "Install Node.js")
-    assert node_step["uses"] == "actions/setup-node@v6"
+    assert node_step["uses"] == "actions/setup-node@v7"
     assert str(node_step["with"]["node-version"]) == "24"
     assert node_step["with"]["package-manager-cache"] is False
 
