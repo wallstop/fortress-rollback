@@ -90,29 +90,13 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
     }
 
     if noise == BackgroundNoise::ReliableFifo {
-        let retired = schedule
-            .events
-            .iter()
-            .filter_map(|(_, event)| match event {
-                ScheduleEvent::PeerKill { peer }
-                | ScheduleEvent::GracefulRemove { target: peer, .. }
-                | ScheduleEvent::LegacyDisconnect { target: peer, .. }
-                | ScheduleEvent::SpectatorHostKill { host: peer } => Some(*peer),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut eligible = (0..n_players)
-            .filter(|peer| !retired.contains(peer))
-            .collect::<Vec<_>>();
-        if eligible.len() < 2 {
-            // Two-player retirement stories have no pair that remains live;
-            // their generated lifecycle event occurs after the early HOL
-            // window below, so both initial endpoints remain meaningful.
-            // This branch is structural rather than silently skipping the
-            // reliable-FIFO assertion.
-            eligible.clear();
-            eligible.extend(0..n_players);
-        }
+        // Generated lifecycle events cannot start before step 100. Keep the
+        // planted HOL window wholly before that boundary so its endpoints are
+        // still driven even when the lifecycle row later freezes or retires
+        // one of them.
+        let start = 40 + u32::try_from((seed / 17) % 20).expect("HOL start fits u32");
+        let window = 20 + u32::try_from((seed / 31) % 20).expect("HOL window fits u32");
+        let eligible = (0..n_players).collect::<Vec<_>>();
         let from_index =
             usize::try_from(seed % u64::try_from(eligible.len()).expect("endpoint count fits u64"))
                 .expect("peer index fits usize");
@@ -123,8 +107,6 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
         )
         .expect("peer offset fits usize");
         let to = eligible[(from_index + peer_offset) % eligible.len()];
-        let start = 100 + u32::try_from((seed / 17) % 150).expect("HOL start fits u32");
-        let window = 20 + u32::try_from((seed / 31) % 40).expect("HOL window fits u32");
         let fifo = schedule
             .initial_links
             .iter()
@@ -161,6 +143,19 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
     schedule
 }
 
+fn nightly_run_options(schedule: &Schedule) -> RunOptions {
+    if schedule.config.noise == BackgroundNoise::Clean {
+        return RunOptions::default();
+    }
+    let run_duration = Duration::from_millis(
+        u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
+    );
+    RunOptions {
+        disconnect_timeout: Some(run_duration.saturating_add(Duration::from_secs(1))),
+        ..RunOptions::default()
+    }
+}
+
 /// Runs one disjoint shard of the long simulation fleet. The explicit tier
 /// gate prevents a manually selected ignored test from silently running a
 /// costly workload with an accidental/default seed base.
@@ -184,7 +179,7 @@ fn run_nightly_shard(shard: u64) {
         let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
         let noise = nightly_noise(seed);
         let schedule = nightly_schedule(seed, n_players, noise);
-        let report = run(&schedule, &RunOptions::default());
+        let report = run(&schedule, &nightly_run_options(&schedule));
         report.expect_pass(&schedule);
         if noise == BackgroundNoise::ReliableFifo {
             assert!(
@@ -373,6 +368,64 @@ fn non_clean_nightly_lifecycle_rewrites_only_retirement_stories() {
             );
         }
     }
+}
+
+#[test]
+fn nightly_reliable_fifo_hol_sender_remains_driven() {
+    const CI_FAILURE_SEED: u64 = 29_718_845_598_175;
+    let schedule = nightly_schedule(CI_FAILURE_SEED, 12, BackgroundNoise::ReliableFifo);
+    let (hol_start, hol_end, hol_sender) = schedule
+        .events
+        .iter()
+        .find_map(|(start, event)| match event {
+            ScheduleEvent::SetLink { from, to, policy } if !policy.retransmit_delay.is_zero() => {
+                let end = schedule.events.iter().find_map(|(end, restore)| {
+                    matches!(
+                        restore,
+                        ScheduleEvent::SetLink {
+                            from: restore_from,
+                            to: restore_to,
+                            policy,
+                        } if restore_from == from
+                            && restore_to == to
+                            && policy.retransmit_delay.is_zero()
+                    )
+                    .then_some(*end)
+                })?;
+                Some((*start, end, *from))
+            },
+            _ => None,
+        })
+        .expect("reliable-FIFO nightly row must plant one HOL window");
+    assert!(
+        hol_end <= 100,
+        "HOL premise must finish before generated lifecycle events can begin"
+    );
+    assert!(
+        !schedule.events.iter().any(|(start, event)| matches!(
+            event,
+            ScheduleEvent::PeerStall { peer, steps }
+                if *peer == hol_sender
+                    && *start < hol_end
+                    && start.saturating_add(*steps) > hol_start
+        )),
+        "HOL sender {hol_sender} is frozen throughout the planted premise"
+    );
+}
+
+#[test]
+fn non_clean_nightly_disconnect_timeout_outlasts_modeled_run() {
+    let schedule = nightly_schedule(30_068_604_101_890, 12, BackgroundNoise::Rough);
+    let options = nightly_run_options(&schedule);
+    let modeled = Duration::from_millis(
+        u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
+    );
+    assert!(options
+        .disconnect_timeout
+        .is_some_and(|timeout| timeout > modeled));
+
+    let clean = nightly_schedule(1, 3, BackgroundNoise::Clean);
+    assert_eq!(nightly_run_options(&clean), RunOptions::default());
 }
 
 #[test]
@@ -4331,6 +4384,22 @@ fn diagnose_repro() {
     use super::harness::diagnose;
     let schedule = generate(1, SimConfig::smoke(4));
     diagnose(&schedule);
+}
+
+#[test]
+#[ignore = "long release-mode regression for historical scheduled CI failures"]
+fn nightly_ci_2026_07_failure_seeds_hold_invariants() {
+    for (seed, noise) in [
+        (29_718_845_598_175, BackgroundNoise::ReliableFifo),
+        (30_068_604_101_890, BackgroundNoise::Rough),
+    ] {
+        let schedule = nightly_schedule(seed, 12, noise);
+        let report = run(&schedule, &nightly_run_options(&schedule));
+        report.expect_pass(&schedule);
+        if noise == BackgroundNoise::ReliableFifo {
+            assert!(report.net_stats.retransmit_delayed > 0);
+        }
+    }
 }
 
 /// Budget probe: measures the wall-clock cost of the largest supported mesh

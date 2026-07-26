@@ -47,6 +47,7 @@ use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Input contract used by the deterministic simulation harness.
 ///
@@ -232,6 +233,12 @@ pub struct RunOptions {
     /// `None` preserves legacy traces and the built-in limit of 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receive_message_limit: Option<usize>,
+    /// Override the session disconnect timeout for focused harness tiers.
+    /// `None` preserves the production default. Long-running transport-only
+    /// fleets use this to keep random loss from implicitly introducing a
+    /// terminal membership change; explicit lifecycle events remain effective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_timeout: Option<Duration>,
     /// Corrupt `(peer, from_frame)`'s simulated **state** from that frame on
     /// (a real divergence: state, checksums, and downstream frames all split).
     pub corrupt_state_from: Option<(usize, i32)>,
@@ -1749,6 +1756,7 @@ fn rebound_peer_addr(peer: usize) -> SocketAddr {
 #[cfg(feature = "hot-join")]
 struct HotJoinRuntime<'a, I: SimInput> {
     schedule: &'a Schedule,
+    options: &'a RunOptions,
     clock: &'a TestClock,
     net: &'a SimNet<Message>,
     addrs: &'a [SocketAddr],
@@ -1811,6 +1819,9 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         .with_disconnect_behavior(ctx.schedule.config.disconnect_behavior.into())
         .with_protocol_config(protocol_config)
         .with_violation_observer(observer as Arc<_>);
+    if let Some(timeout) = ctx.options.disconnect_timeout {
+        builder = builder.with_disconnect_timeout(timeout);
+    }
     if let Some(size) = ctx.schedule.config.event_queue_size {
         builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
             panic!(
@@ -2146,6 +2157,12 @@ pub(super) fn validate_run_options(
         ));
     }
     if options
+        .disconnect_timeout
+        .is_some_and(|timeout| timeout.is_zero())
+    {
+        return Err("disconnect_timeout must be non-zero".to_owned());
+    }
+    if options
         .probe_confirmed_at
         .is_some_and(|probe| probe >= schedule.config.steps)
     {
@@ -2353,6 +2370,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .with_disconnect_behavior(schedule.config.disconnect_behavior.into())
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(timeout) = options.disconnect_timeout {
+                builder = builder.with_disconnect_timeout(timeout);
+            }
             #[cfg(feature = "hot-join")]
             if hot_join_host_enabled[i] {
                 builder = builder.with_hot_join(true);
@@ -2442,6 +2462,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .expect("valid player count")
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(timeout) = options.disconnect_timeout {
+                builder = builder.with_disconnect_timeout(timeout);
+            }
             if let Some(size) = schedule.config.event_queue_size {
                 builder = builder.with_event_queue_size(size).unwrap_or_else(|error| {
                     panic!(
@@ -2787,6 +2810,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     // after reactivation.
                     let mut ctx = HotJoinRuntime {
                         schedule,
+                        options,
                         clock: &clock,
                         net: &net,
                         addrs: &addrs,
@@ -3665,6 +3689,28 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_timeout_override_is_nonzero_and_serializable() {
+        let schedule = schedule::generate(1, schedule::SimConfig::smoke(2));
+        let invalid = RunOptions {
+            disconnect_timeout: Some(Duration::ZERO),
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            validate_run_options(&schedule, &invalid),
+            Err("disconnect_timeout must be non-zero".to_owned())
+        );
+
+        let options = RunOptions {
+            disconnect_timeout: Some(Duration::from_secs(90)),
+            ..RunOptions::default()
+        };
+        validate_run_options(&schedule, &options).expect("positive timeout is valid");
+        let encoded = serde_json::to_vec(&options).expect("run options serialize");
+        let replay: RunOptions = serde_json::from_slice(&encoded).expect("run options deserialize");
+        assert_eq!(replay, options);
+    }
+
+    #[test]
     fn cpu_feedback_actuator_has_exact_poll_boundaries() {
         let policy = CpuFeedbackPolicy {
             simulated_frame_cost_us: 1,
@@ -4275,10 +4321,12 @@ mod tests {
             .collect();
         let dead = vec![false; n];
         let mut oracle = Oracle::new(n);
+        let options = RunOptions::default();
 
         {
             let mut ctx = HotJoinRuntime {
                 schedule: &schedule,
+                options: &options,
                 clock: &clock,
                 net: &net,
                 addrs: &addrs,
