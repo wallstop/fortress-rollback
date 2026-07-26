@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784398805082,
+  "lastUpdate": 1785082680631,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "18cae7cd381870418f95fb43adcc1c1fd48bb793",
-          "message": "Hardening M2 §5.2: PeerMetrics per-peer wire-exact traffic + accessor (#192)\n\n## Summary\n\nM2 §5.2 continued: adds the **per-peer** metrics surface\n(`PeerMetrics`), the deferred §5.1 receive-side wire accounting, and the\n`P2PSession::peer_metrics(handle)` accessor. Every counter lands with a\nlive consuming site — no dead fields under `deny(warnings)`.\n\nBuilds on #189 (D1 wire-exact bandwidth), #190 (D9 event-discard\ntelemetry), #191 (SessionMetrics rollback/pacing counters).\n\n## What's new (public API)\n\n- **`PeerMetrics`** (`#[non_exhaustive]`, `Copy`, `Serialize`,\n`to_json`/`to_json_pretty` under `json`) — a per-peer snapshot read via\n`P2PSession::peer_metrics(handle)`:\n- **Cumulative counters:** `bytes_sent`/`bytes_received`,\n`packets_sent`/`packets_received` (wire-exact via\n`Message::encoded_len`),\n`messages_sent_by_kind`/`messages_received_by_kind`,\n`input_bytes_pre_compression`/`input_bytes_post_compression`.\n- **Instantaneous gauges:** `pending_output_len`,\n`pending_checksums_len`, `ping_ms`, `remote_frame_advantage`.\n- **`MessageKind`** — payload-free mirror of the wire message variants\n(`as_str()`/`ALL`/`COUNT`), the message analogue of `EventKind`.\n- **`MessageKindCounts`** — per-kind array counter with\n`get()`/`total()` and a self-describing labeled-map `Serialize`.\n\n## Wiring (single-site, always-on)\n\n| Counter(s) | Site |\n|---|---|\n| `messages_sent_by_kind` | `queue_message` (with the existing\n`bytes_sent`/`packets_sent`) |\n| `bytes_received`, `packets_received`, `messages_received_by_kind` |\ntop of `handle_message`, **before** any protocol-state filter |\n| `input_bytes_pre/post_compression` | `send_pending_output` compression\nsite |\n\nCounting receive before the shutdown/magic/state filters keeps\n`packets_received == messages_received_by_kind.total()` by construction\nand makes `bytes_received` a true wire-traffic meter (mirror of the send\nside). Verified there is exactly one production send site\n(`send_queue.push_back` in `queue_message`) and one production receive\nsite (`handle_message`, via the poll paths).\n\n## Design note\n\nDropped the plan's `PeerMetrics::send_queue_len`: it would collide in\nname with `NetworkStats::send_queue_len` (which actually reports\n`pending_output.len()`) while exposing only a transient internal flush\nbuffer. `pending_output_len` — the real backpressure gauge — is kept.\n\n## Tests\n\n- `metrics`: `MessageKind`/`MessageKindCounts` structural + JSON tests,\n`PeerMetrics` default/serialization.\n- `messages`: `message_body_kind_maps_every_variant` (all variants +\n`Message::kind()` delegation).\n- `protocol`: exact send byte/kind identity,\nreceive-counts-before-filters (incl. a Shutdown endpoint),\ninput-compression bytes, connection gauges.\n- `tests/network/peer_metrics.rs`: end-to-end 2-session routing\npopulates the counters via the public accessor, per-kind totals equal\npacket counters, metrics are **bit-identical across runs** (no\nwall-clock leakage), and the accessor rejects local/unknown handles.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features\ntokio,json[,hot-join]` clean\n- `cargo nextest run --features tokio,json` → 2373 passed; `+hot-join` →\n2611 passed\n- Rustdoc `--document-private-items` clean; `cargo test --doc` 159\npassed\n- `agent-preflight.py --auto-fix` all green (changelog-unreleased,\nversion-sync, link-check, doc-claims, typos, …)\n\n## Follow-ups (M2 §5.2 remainder)\n\n- `SpectatorSession::peer_metrics()` subset and `HotJoinMetrics` (each\nwith its own consuming site).\n- §5.3 baseline sweep.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Observability-only additions on existing send/receive paths; no\nwire-format or session-behavior changes. Handle validation errors are\nexplicit for non-remote handles.\n> \n> **Overview**\n> This PR extends session metrics with a **per-peer** surface:\n**`PeerMetrics`** (via **`P2PSession::peer_metrics(handle)`**) plus\n**`MessageKind`** / **`MessageKindCounts`** for labeled traffic\nbreakdowns. Snapshots include cumulative payload bytes and packets\n(send/receive), per-kind counts, input pre/post-compression totals, and\ngauges (`pending_output_len`, `pending_checksums_len`, `ping_ms`,\n`remote_frame_advantage`). Unlike **`network_stats`**, peer metrics do\nnot require synchronization.\n> \n> Protocol endpoints now increment receive counters at the **start** of\n**`handle_message`** (before magic/shutdown filters), send-side kind\ntallies in **`queue_message`**, and compression byte totals when\nflushing **`Input`** batches. **`MessageBody::kind()`** /\n**`Message::kind()`** tie wire messages to **`MessageKind`**.\n> \n> New unit and integration tests cover kind mapping, accounting\ninvariants, and deterministic two-session **`peer_metrics`** behavior;\nthe changelog documents the public API.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n441ce79e6ac7208b3c5cdb7236ae0045efa23fcb. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-04T22:23:00-07:00",
-          "tree_id": "c43fdb5832d37b68012c1a297a06f6de3785d588",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/18cae7cd381870418f95fb43adcc1c1fd48bb793"
-        },
-        "date": 1783229262154,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 111,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 161,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 469,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 708,
-            "range": "± 31",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1048,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 126048,
-            "range": "± 621",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45460,
-            "range": "± 394",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1245,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 106",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5339,6 +5213,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3109,
             "range": "± 238",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a9908b85000029e8116c60abd0df38cc7e62efad",
+          "message": "Harden scheduled simulation fleet and CI pin contracts (#262)\n\n## Summary\n\n- plant Reliable FIFO HOL windows before generated lifecycle faults so\nthe sender remains active\n- serialize and propagate a test-only disconnect-timeout override\nthrough peers, spectators, hot-join replacements, artifacts, and\nshrinking\n- keep non-clean nightly transport rows free of implicit terminal\nmembership changes while retaining production timeouts for clean\nlifecycle coverage\n- pin both July 2026 scheduled CI failure seeds as an ignored long\nregression\n- synchronize workflow contract tests and version comments with the\naction pins already merged by #261\n\nThis repairs the two failures that reset A8's scheduled-history gate; it\ndoes not promote A8 before seven consecutive scheduled `main` runs\nexist. The CI-pin follow-up repairs a pre-existing `main` mismatch\nexposed by this PR's Documentation run and does not change workflow\nbehavior.\n\n## Incident evidence\n\n- scheduled run 29718845598, seed `29718845598175`: the planted peer-7\nHOL link overlapped a peer-7 stall, so no retransmission could occur\n- scheduled run 30068604101, seed `30068604101890`: Rough loss caused an\nimplicit timeout and expected fail-closed membership split inside the\ntransport-only green tier\n- both exact seeds now pass the full oracle; the Reliable FIFO seed\nrecords positive `retransmit_delayed` evidence\n- Documentation run 30186497038: three assertions still expected the\npre-#261 `setup-python` and `rust-toolchain` pins; the complete contract\naudit also found and corrected the stale `setup-node@v6` assertion\n\n## Review readiness\n\n- Build/tests: PASS — 2,878 default tests and 222 doctests\n- Script tests: PASS — all 1,968 tests\n- Strict Clippy: PASS — default and `hot-join` configurations, warnings\ndenied\n- Exact historical seeds: PASS — ignored focused regression, 31.96s\ndebug\n- Workflow lint: PASS — actionlint on all workflows\n- Agent preflight: PASS — all checks, including release automation and\nCI toolchain contracts\n- Zero-panic/determinism: PASS — test-only simulation change; no\nproduction paths modified\n- Error handling: PASS — zero timeout rejected and covered\n- Tests breadth: PASS — premise, clean/non-clean split, serde, shrinker,\nhot-join propagation, exact seeds, exact action pins\n- Design log: N/A — no production architecture or public behavior change\n- CHANGELOG: N/A — test/CI contract repair only\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests/harness and CI pin\nassertions; production session APIs are only invoked via existing\nbuilder hooks in tests.\n> \n> **Overview**\n> **Simulation fleet** fixes two scheduled CI failures by reshaping\n**Reliable FIFO** head-of-line (HOL) injection and how long nightly\ntransport runs wait before disconnect.\n> \n> HOL windows are planted **before step 100** (lifecycle faults cannot\nstart earlier), so the chosen sender stays active instead of overlapping\nstalls/kills. A test-only **`RunOptions::disconnect_timeout`** is\nthreaded through session, spectator, and hot-join builders (plus shrink\nremapping) so **non-clean** nightly rows use a timeout longer than the\nmodeled run—avoiding implicit membership splits from random loss while\n**clean** rows keep default options.\n> \n> New unit tests lock the HOL premise, timeout behavior, serde/shrink\npropagation, and an ignored long regression over the two July 2026\nfailure seeds.\n> \n> **CI contracts** align workflow YAML and Python contract tests with\npins already on `main`: `actions/setup-python` v7 SHA,\n`dtolnay/rust-toolchain` and `actions/setup-node@v7` expectations—no\nintended workflow behavior change beyond those pin comments/versions.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfa68bef60420a418273e085c5c8e3176a617e7fb. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-07-26T09:09:19-07:00",
+          "tree_id": "d76e77b6ccaf36437dbe3fb59866d92bb84aebcb",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/a9908b85000029e8116c60abd0df38cc7e62efad"
+        },
+        "date": 1785082679926,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 117558,
+            "range": "± 3308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 39923,
+            "range": "± 450",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 761,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 991,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 7621,
+            "range": "± 176",
             "unit": "ns/iter"
           }
         ]
