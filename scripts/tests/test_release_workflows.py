@@ -143,7 +143,7 @@ def test_prepare_uses_exact_python_and_hash_locked_test_dependencies() -> None:
     text = PREPARE.read_text(encoding="utf-8")
     requirements = RELEASE_REQUIREMENTS.read_text(encoding="utf-8")
 
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in text
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in text
     assert 'python-version: "3.13.5"' in text
     assert "--require-hashes" in text
     assert "--only-binary=:all:" in text
@@ -162,7 +162,7 @@ def test_required_release_workflows_pin_python_runtime() -> None:
         text = workflow.read_text(encoding="utf-8")
         assert (
             text.count(
-                "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+                "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
             )
             == 1
         )
