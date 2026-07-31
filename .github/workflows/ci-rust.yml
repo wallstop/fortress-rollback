@@ -566,7 +566,7 @@ jobs:
 
       - name: Install wasm-bindgen CLI for browser runtime tests
         if: matrix.target == 'wasm32-unknown-unknown'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.3
         with:
           tool: wasm-bindgen-cli@0.2.106
 
