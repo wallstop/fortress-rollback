@@ -35,7 +35,15 @@ fn measure<T>(operation: impl FnOnce() -> T) -> (T, Stats) {
 
 #[track_caller]
 fn assert_zero_allocations(label: &str, stats: Stats) {
-    assert_eq!(stats, Stats::default(), "{label} allocation stats");
+    assert_eq!(stats.allocations, 0, "{label} allocation stats: {stats:?}");
+    assert_eq!(
+        stats.reallocations, 0,
+        "{label} allocation stats: {stats:?}"
+    );
+    assert_eq!(
+        stats.bytes_allocated, 0,
+        "{label} allocation stats: {stats:?}"
+    );
 }
 
 #[track_caller]
@@ -111,6 +119,16 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         "known-allocation control: {control:?}"
     );
     drop(allocation);
+
+    // The zero-allocation helper deliberately permits deallocation: its
+    // contract is about newly allocated memory, not every allocator event.
+    let deallocation = vec![0_u8; 4_096];
+    let ((), deallocation_control) = measure(|| drop(deallocation));
+    assert_eq!(
+        deallocation_control.deallocations, 1,
+        "known-deallocation control: {deallocation_control:?}"
+    );
+    assert_zero_allocations("known-deallocation control", deallocation_control);
 
     // `encode_into` publicly documents that a caller-provided buffer avoids
     // allocation on the successful path.
