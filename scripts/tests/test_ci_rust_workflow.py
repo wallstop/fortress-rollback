@@ -21,6 +21,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
+CARGO_LOCK = REPO_ROOT / "Cargo.lock"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 NETWORK_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 NETWORK_DOCKERIGNORE = REPO_ROOT / ".dockerignore"
@@ -89,6 +90,22 @@ def _load_cargo_config() -> dict:
     if tomllib is None:
         pytest.skip("tomllib/tomli not available")
     return tomllib.loads(CARGO_CONFIG.read_text(encoding="utf-8"))
+
+
+def _locked_package_version(package_name: str) -> str:
+    """Return the one locked version for a schema-coupled package."""
+    if tomllib is None:
+        pytest.skip("tomllib/tomli not available")
+    lockfile = tomllib.loads(CARGO_LOCK.read_text(encoding="utf-8"))
+    versions = {
+        package["version"]
+        for package in lockfile["package"]
+        if package["name"] == package_name
+    }
+    assert len(versions) == 1, (
+        f"expected exactly one {package_name!r} version in Cargo.lock, got {versions}"
+    )
+    return versions.pop()
 
 
 def _docker_copy_sources(dockerfile: str) -> tuple[Path, ...]:
@@ -328,7 +345,8 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
     assert install_step["uses"] == "taiki-e/install-action@v2"
-    assert install_step["with"]["tool"] == "wasm-bindgen-cli@0.2.106"
+    locked_bindgen = _locked_package_version("wasm-bindgen")
+    assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"
 
     test_step = next(
         step
