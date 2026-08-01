@@ -21,6 +21,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
+CI_COVERAGE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-coverage.yml"
 CARGO_LOCK = REPO_ROOT / "Cargo.lock"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 NETWORK_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
@@ -53,7 +54,7 @@ GODOT_CACHE_PATHS = {
 MATRIX_TARGET_EXPRESSION = "${{ matrix.target }}"
 CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS = (
     REPO_ROOT / ".github" / "workflows" / "ci-benchmarks.yml",
-    REPO_ROOT / ".github" / "workflows" / "ci-coverage.yml",
+    CI_COVERAGE_WORKFLOW,
     REPO_ROOT / ".github" / "workflows" / "ci-docs.yml",
     REPO_ROOT / ".github" / "workflows" / "ci-network.yml",
     REPO_ROOT / ".github" / "workflows" / "ci-quality.yml",
@@ -237,6 +238,23 @@ def test_cargo_heavy_workflows_trigger_on_cargo_config_changes(
 
     assert ".cargo/config.toml" in _workflow_paths(workflow, event)
     assert ".cargo/**" not in _workflow_paths(workflow, event)
+
+
+def test_coverage_allows_instrumented_large_mesh_controls_to_respond() -> None:
+    """Tarpaulin must tolerate deterministic N=16 controls under instrumentation."""
+    workflow = _load_workflow(CI_COVERAGE_WORKFLOW)
+    steps = workflow["jobs"]["coverage"]["steps"]
+    coverage_step = next(
+        step for step in steps if step.get("name") == "Run coverage (tarpaulin)"
+    )
+    commands = _shell_commands(coverage_step)
+
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:2] == ["cargo", "tarpaulin"]
+    timeouts = _option_values(command, "--timeout")
+    assert len(timeouts) == 1
+    assert int(timeouts[0]) >= 300
 
 
 def test_miri_job_has_no_cross_target_apt_setup() -> None:
