@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785082682045,
+  "lastUpdate": 1785625535530,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -4787,6 +4787,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1093,
             "range": "± 6",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "88b6c3040482e05118caf56279b638dbd8ad3982",
+          "message": "Promote N=16 controls and refresh dependency CI (#267)\n\n## What\n\nPromotes the four coordinated A8 N=16 simulation controls into the\nnormal PR test suite:\n\n- smoke-fleet invariants\n- reliable-FIFO/TCP invariants\n- seeded-divergence oracle coverage\n- bit-identical trace determinism\n\nThe N=12 smoke probe and 5,000-step N=16 budget diagnostic remain manual\nand ignored.\n\nThis PR also closes the dependency-maintenance work exposed by the\npromotion:\n\n- aligns `wasm-bindgen-cli` with locked `wasm-bindgen 0.2.126`\n- preserves Rust 1.86 compatibility with `serial_test 3.5.0` and a\nDependabot semver-major guard\n- refreshes all 65 compatible Cargo packages (`cargo update --dry-run`\nnow locks 0 packages)\n- pins `taiki-e/install-action@v2.85.6` and `docker/login-action@v4.6.0`\n- gives the promoted smoke control an evidence-backed 180-second local\nNextest ceiling, with retries still disabled\n- gives tarpaulin a 300-second response timeout inside the existing\n30-minute job cap\n\n## Why\n\nA8 required both an approximately 10-second PR budget and seven\nconsecutive scheduled `main` successes. The release-mode promotion set\nruns in 4.250 seconds locally, and the scheduled simulation fleet\ncompleted eight uninterrupted successful runs from 2026-07-25 through\n2026-08-01.\n\nThe initial PR runs then exposed three pre-existing CI incompatibilities\nfrom the preceding dependency update: a wasm-bindgen schema mismatch, an\nMSRV-incompatible serial_test major, and tarpaulin's 60-second\ninstrumented-response default. Each was reproduced before repair.\n\n## Impact\n\nNo production, public API, wire-format, allocation, or session-runtime\nbehavior changes. Changes are limited to test promotion, CI/tool\nconfiguration, dependency resolution, and regression contracts. No\nchangelog entry is required.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS\n- Agent preflight: PASS\n- MSRV and supply-chain checks: PASS\n- Error handling: N/A\n- Changelog: N/A\n\n## Validation\n\n- release-mode promotion set: 4/4 passed in 4.250 seconds\n- default Nextest: 2,882/2,882 passed\n- hot-join Nextest: 3,138/3,138 passed\n- focused loaded N=16 smoke: passed in 60.624 seconds on its first\nattempt under the new 180-second ceiling\n- `cargo +1.86 check --all-targets`\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `cargo deny check`\n- `cargo fmt --check`\n- warning-denied docs with `hot-join,tokio,json`\n- 1,969/1,969 script tests\n- actionlint and agent preflight, including 66 CI toolchain contract\ntests\n- real wasm browser smoke with CLI 0.2.126: 1/1 passed\n- exact tarpaulin command: 53.54% line coverage (7,034/13,139)\n- two-round main-thread adversarial review; repeat sweep clean\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> No production code changes, but PR CI now depends on longer simulation\nruns and a large lockfile refresh; serial_test 3.x and refreshed\ntransitive deps could affect test ordering/isolation if misused.\n> \n> **Overview**\n> Promotes **four A8 N=16 simulation controls** from ignored/manual runs\ninto the normal PR suite: smoke-fleet invariants, TCP reliable-FIFO\ninvariants, seeded oracle divergence, and bit-identical trace\ndeterminism. The N=12 smoke probe and other large-mesh diagnostics stay\n**`#[ignore]`**.\n> \n> **CI and tooling** are adjusted so those tests and the dependency\nrefresh stay green: a **180s** Nextest slow-timeout override for the\npromoted smoke probe, **300s** tarpaulin `--timeout` for instrumented\nN=16 work, **`wasm-bindgen-cli` pinned to locked 0.2.126** (with\n**`taiki-e/install-action@v2.85.6`**), **`serial_test` held at 3.5** for\nRust **1.86** MSRV plus a Dependabot ignore for `serial_test`\nsemver-major bumps, and a broad **`Cargo.lock`** refresh with\n**`docker/login-action@v4.6.0`**. Workflow regression tests assert\ntarpaulin timeout and wasm-bindgen lock alignment.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n2855d350eeaa818d518e3ea85dd4a62d339d9807. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-01T15:56:54-07:00",
+          "tree_id": "7ff864f4c78d16393dabc944a3b64b1651e14682",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/88b6c3040482e05118caf56279b638dbd8ad3982"
+        },
+        "date": 1785625535439,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 84,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 279,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 49,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 65,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 160,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 532,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 105,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 134,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 177,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 186,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 262,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 377,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 349,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 480,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 711,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 183,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 213,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 261,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 354,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 427,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 560,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 653,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 785,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 1050,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 483,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 664,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 890,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 1106,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 114,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 165,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 442,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 725,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1024,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 18,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 82,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 304,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 1439,
+            "range": "± 9",
             "unit": "ns/iter"
           }
         ]
