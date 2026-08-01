@@ -393,6 +393,8 @@ proptest = "1.11"
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }
+# Deterministic allocation contracts run in an isolated integration-test process.
+stats_alloc = "0.1.10"
 # Macro utilities for data-driven tests
 pastey = "0.2"
 
