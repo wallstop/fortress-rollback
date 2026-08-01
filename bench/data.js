@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785082680631,
+  "lastUpdate": 1785625534254,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "a500b62790b48aa6485489cbf14c1dbcddd1742c",
-          "message": "Hardening M2 §5.2: SpectatorSession::peer_metrics(host_index) (#193)\n\n## Summary\n\nCompletes the per-peer metrics surface from PR #192 (M2 §5.2). The\nspectator's host `UdpProtocol` endpoints already accumulate wire-exact\n`PeerMetrics` counters (same endpoint type as P2P remotes/spectators) —\nthis PR adds the accessor to read them, which was flagged as a follow-up\nin PLAN.md §5.2.\n\n## Change\n\n- **`SpectatorSession::peer_metrics(host_index: usize) ->\nOption<PeerMetrics>`** — hosts addressed by dense index in\n`0..num_hosts()` (builder-priority order, matching\n`start_spectator_session_multi`).\n\n### API shape: `Option`, not `Result`\n\n`P2PSession::peer_metrics(handle)` returns `Result<_, FortressError>`\nbecause it validates an **opaque `PlayerHandle`** (structured error on a\nnon-remote handle). A spectator has **no player handles** for its\nupstream hosts — they're a dense `Vec` addressed by index with a public\n`num_hosts()` bound, so out-of-range is the *only* failure mode.\n`Option` (à la `slice::get`) is the idiomatic, non-breaking shape. A\n`Result` here would have required a new `InvalidRequestKind` variant — a\nbreaking change to a non-`#[non_exhaustive]` enum, which the plan\nreserves for M5's single atomic break.\n\n### Failover caveat (documented, and tested)\n\nHost endpoints are compacted on failover (`retain_surviving_hosts`),\nnever rebuilt. So the counters at a fixed `host_index` do **not** reset\nacross a failover — they discontinuously jump to the promoted survivor's\nalready-running totals. Per-index rate math is only meaningful between\nfailovers. This is documented and locked by a test that drives the real\n`remove_disconnected_hosts` compaction path.\n\n## Tests (3, data-driven)\n\n- `spectator_peer_metrics_out_of_range_index_is_none` — index-bound\nbehavior.\n- `spectator_peer_metrics_are_isolated_and_count_received_host_traffic`\n— multi-host session; traffic delivered to host 1 only leaves host 0 at\nzero and host 1 at exactly the delivered `packets_received` /\n`Input`-by-kind. Proves per-host isolation.\n- `spectator_peer_metrics_index_follows_surviving_host_after_compaction`\n— proves the jump-not-reset failover semantics.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` —\nclean.\n- `cargo doc --no-deps --features hot-join,tokio,json,sync-send\n--document-private-items` — clean.\n- `cargo nextest run` — 2347 passed. `--features hot-join` — 2584\npassed.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nReviewed internally by an adversarial pass that caught (and this PR\nfixes) a rustdoc misstatement about failover counter behavior and added\nthe compaction test.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Additive read-only API delegating to existing `UdpProtocol` metrics;\nno wire or session behavior changes beyond documentation and tests.\n> \n> **Overview**\n> Adds **`SpectatorSession::peer_metrics(host_index) ->\nOption<PeerMetrics>`** so spectators can read the same wire-exact\nper-host traffic counters that **`P2PSession::peer_metrics`** already\nexposes for remotes. Hosts are keyed by dense index in\n**`0..num_hosts()`** (builder order from\n**`start_spectator_session_multi`**); out-of-range indices return\n**`None`** instead of a **`Result`**, since spectators have no\n**`PlayerHandle`** for upstream hosts.\n> \n> Rustdoc calls out **failover semantics**: when hosts are compacted\nafter a disconnect, counters at a fixed index **jump** to the promoted\nsurvivor’s totals rather than resetting, so per-index rate math should\nbe re-anchored after **`num_hosts()`** changes. **CHANGELOG** documents\nthe new API.\n> \n> Three tests lock index bounds, per-host isolation on a multi-host\nsession, and post-compaction index behavior via\n**`remove_disconnected_hosts`**.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb9741cb98e397709f26bc9c3e835d58e2f1ec558. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-04T23:22:43-07:00",
-          "tree_id": "0aeb89b4c2a4f09e567a6804aa5713782b779717",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/a500b62790b48aa6485489cbf14c1dbcddd1742c"
-        },
-        "date": 1783232900764,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 111,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 466,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 702,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1032,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 134519,
-            "range": "± 1309",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44714,
-            "range": "± 902",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1245,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5267,6 +5141,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 7621,
             "range": "± 176",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "88b6c3040482e05118caf56279b638dbd8ad3982",
+          "message": "Promote N=16 controls and refresh dependency CI (#267)\n\n## What\n\nPromotes the four coordinated A8 N=16 simulation controls into the\nnormal PR test suite:\n\n- smoke-fleet invariants\n- reliable-FIFO/TCP invariants\n- seeded-divergence oracle coverage\n- bit-identical trace determinism\n\nThe N=12 smoke probe and 5,000-step N=16 budget diagnostic remain manual\nand ignored.\n\nThis PR also closes the dependency-maintenance work exposed by the\npromotion:\n\n- aligns `wasm-bindgen-cli` with locked `wasm-bindgen 0.2.126`\n- preserves Rust 1.86 compatibility with `serial_test 3.5.0` and a\nDependabot semver-major guard\n- refreshes all 65 compatible Cargo packages (`cargo update --dry-run`\nnow locks 0 packages)\n- pins `taiki-e/install-action@v2.85.6` and `docker/login-action@v4.6.0`\n- gives the promoted smoke control an evidence-backed 180-second local\nNextest ceiling, with retries still disabled\n- gives tarpaulin a 300-second response timeout inside the existing\n30-minute job cap\n\n## Why\n\nA8 required both an approximately 10-second PR budget and seven\nconsecutive scheduled `main` successes. The release-mode promotion set\nruns in 4.250 seconds locally, and the scheduled simulation fleet\ncompleted eight uninterrupted successful runs from 2026-07-25 through\n2026-08-01.\n\nThe initial PR runs then exposed three pre-existing CI incompatibilities\nfrom the preceding dependency update: a wasm-bindgen schema mismatch, an\nMSRV-incompatible serial_test major, and tarpaulin's 60-second\ninstrumented-response default. Each was reproduced before repair.\n\n## Impact\n\nNo production, public API, wire-format, allocation, or session-runtime\nbehavior changes. Changes are limited to test promotion, CI/tool\nconfiguration, dependency resolution, and regression contracts. No\nchangelog entry is required.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS\n- Agent preflight: PASS\n- MSRV and supply-chain checks: PASS\n- Error handling: N/A\n- Changelog: N/A\n\n## Validation\n\n- release-mode promotion set: 4/4 passed in 4.250 seconds\n- default Nextest: 2,882/2,882 passed\n- hot-join Nextest: 3,138/3,138 passed\n- focused loaded N=16 smoke: passed in 60.624 seconds on its first\nattempt under the new 180-second ceiling\n- `cargo +1.86 check --all-targets`\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `cargo deny check`\n- `cargo fmt --check`\n- warning-denied docs with `hot-join,tokio,json`\n- 1,969/1,969 script tests\n- actionlint and agent preflight, including 66 CI toolchain contract\ntests\n- real wasm browser smoke with CLI 0.2.126: 1/1 passed\n- exact tarpaulin command: 53.54% line coverage (7,034/13,139)\n- two-round main-thread adversarial review; repeat sweep clean\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> No production code changes, but PR CI now depends on longer simulation\nruns and a large lockfile refresh; serial_test 3.x and refreshed\ntransitive deps could affect test ordering/isolation if misused.\n> \n> **Overview**\n> Promotes **four A8 N=16 simulation controls** from ignored/manual runs\ninto the normal PR suite: smoke-fleet invariants, TCP reliable-FIFO\ninvariants, seeded oracle divergence, and bit-identical trace\ndeterminism. The N=12 smoke probe and other large-mesh diagnostics stay\n**`#[ignore]`**.\n> \n> **CI and tooling** are adjusted so those tests and the dependency\nrefresh stay green: a **180s** Nextest slow-timeout override for the\npromoted smoke probe, **300s** tarpaulin `--timeout` for instrumented\nN=16 work, **`wasm-bindgen-cli` pinned to locked 0.2.126** (with\n**`taiki-e/install-action@v2.85.6`**), **`serial_test` held at 3.5** for\nRust **1.86** MSRV plus a Dependabot ignore for `serial_test`\nsemver-major bumps, and a broad **`Cargo.lock`** refresh with\n**`docker/login-action@v4.6.0`**. Workflow regression tests assert\ntarpaulin timeout and wasm-bindgen lock alignment.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n2855d350eeaa818d518e3ea85dd4a62d339d9807. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-01T15:56:54-07:00",
+          "tree_id": "7ff864f4c78d16393dabc944a3b64b1651e14682",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/88b6c3040482e05118caf56279b638dbd8ad3982"
+        },
+        "date": 1785625533747,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 131421,
+            "range": "± 494",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 47798,
+            "range": "± 130",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3147,
+            "range": "± 250",
             "unit": "ns/iter"
           }
         ]
