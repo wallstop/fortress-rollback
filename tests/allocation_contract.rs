@@ -44,6 +44,16 @@ fn assert_zero_allocations(label: &str, stats: Stats) {
         stats.bytes_allocated, 0,
         "{label} allocation stats: {stats:?}"
     );
+    assert_eq!(
+        stats.bytes_reallocated, 0,
+        "{label} allocation stats: {stats:?}"
+    );
+}
+
+fn allocated_and_grown_bytes(stats: Stats) -> usize {
+    let reallocation_growth = usize::try_from(stats.bytes_reallocated.max(0))
+        .expect("nonnegative reallocation growth fits usize");
+    stats.bytes_allocated.saturating_add(reallocation_growth)
 }
 
 #[track_caller]
@@ -54,14 +64,14 @@ fn assert_allocation_ceiling(
     maximum_bytes: usize,
 ) {
     let operations = stats.allocations.saturating_add(stats.reallocations);
+    let allocated_bytes = allocated_and_grown_bytes(stats);
     assert!(
         operations <= maximum_operations,
         "{label} used {operations} allocation operations (ceiling {maximum_operations}): {stats:?}"
     );
     assert!(
-        stats.bytes_allocated <= maximum_bytes,
-        "{label} allocated {} bytes (ceiling {maximum_bytes}): {stats:?}",
-        stats.bytes_allocated
+        allocated_bytes <= maximum_bytes,
+        "{label} allocated or grew by {allocated_bytes} bytes (ceiling {maximum_bytes}): {stats:?}"
     );
 }
 
@@ -129,6 +139,25 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         "known-deallocation control: {deallocation_control:?}"
     );
     assert_zero_allocations("known-deallocation control", deallocation_control);
+
+    // Synthetic counter sensitivity ensures positive reallocation growth is
+    // charged to the byte ceiling even when no fresh allocation is recorded.
+    let reallocation_control = Stats {
+        reallocations: 1,
+        bytes_reallocated: 4_096,
+        ..Stats::default()
+    };
+    assert_eq!(
+        allocated_and_grown_bytes(reallocation_control),
+        4_096,
+        "known-reallocation-growth control: {reallocation_control:?}"
+    );
+    assert_allocation_ceiling(
+        "known-reallocation-growth control",
+        reallocation_control,
+        1,
+        4_096,
+    );
 
     // `encode_into` publicly documents that a caller-provided buffer avoids
     // allocation on the successful path.
