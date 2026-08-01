@@ -57,6 +57,14 @@ filter = 'test(network::multi_process::)'
 test-group = "network-multi-process"
 slow-timeout = { period = "60s", terminate-after = 3 } # 180s: above the 165s macOS-scaled harness ceiling
 
+# The promoted N=16 smoke control completes in about 38s on an otherwise idle
+# debug build, but can cross the default 60s ceiling when Cargo or an IDE is
+# compiling concurrently. Keep the zero-retry policy while matching CI's 180s
+# diagnostic ceiling so scheduler contention is not misreported as a test hang.
+[[profile.default.overrides]]
+filter = 'test(probe_smoke_fleet_sixteen_player_mesh_holds_invariants)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 [profile.default.junit]
 # Generate JUnit XML reports for CI integration
 path = "target/nextest/default/junit.xml"
