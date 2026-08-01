@@ -20,6 +20,12 @@ updates:
       cargo-workspace:
         patterns:
           - "*"
+    ignore:
+      # serial_test 4.x requires Rust 1.93.1; retain the newest 3.x release
+      # until the repository deliberately raises its declared Rust 1.86 MSRV.
+      - dependency-name: "serial_test"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 2
 
   # Rust dependencies for fuzz directory (separate workspace)
