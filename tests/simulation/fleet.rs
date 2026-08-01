@@ -779,7 +779,6 @@ fn inband_detector_fires_on_checksum_lies_while_states_agree() {
 /// exactly as it does in the N=2 control. Guards against the oracle silently
 /// losing coverage as N grows (e.g., sampling or comparison short-circuits).
 #[test]
-#[ignore = "large-mesh oracle control; promote with the N=16 probes"]
 fn oracle_catches_seeded_divergence_in_sixteen_player_mesh() {
     let schedule = generate(11, SimConfig::smoke(16));
     let options = RunOptions {
@@ -805,7 +804,6 @@ fn oracle_catches_seeded_divergence_in_sixteen_player_mesh() {
 /// Meta-determinism at N=16: bit-identical trace reproduction must survive
 /// the largest supported mesh (guards the harness itself at scale).
 #[test]
-#[ignore = "large-mesh determinism control; promote with the N=16 probes"]
 fn same_schedule_produces_identical_trace_at_sixteen_players() {
     let schedule = generate(7, SimConfig::smoke(16));
     let first = run(&schedule, &RunOptions::default());
@@ -817,9 +815,9 @@ fn same_schedule_produces_identical_trace_at_sixteen_players() {
     );
 }
 
-/// Large-mesh probe fleets (N=12/16): the H-16P experiment rows. `#[ignore]`d
-/// until the fleet proves them sustainably green and CI budgets are
-/// recalibrated; run manually:
+/// Large-mesh probe fleet: N=16 runs in the PR suite after A8's scheduled
+/// history and CI-budget gates passed. The separate N=12 diagnostic remains
+/// `#[ignore]`d and can be run manually:
 ///
 /// ```text
 /// cargo nextest run --no-capture --run-ignored ignored-only -E 'test(probe_smoke_fleet)'
@@ -831,7 +829,6 @@ fn probe_smoke_fleet_twelve_player_mesh_holds_invariants() {
 }
 
 #[test]
-#[ignore = "large-mesh probe; promote to PR smoke after budget calibration"]
 fn probe_smoke_fleet_sixteen_player_mesh_holds_invariants() {
     run_smoke_fleet(16);
 }
@@ -938,7 +935,6 @@ fn tcp_model_reliable_fifo_four_player_mesh_holds_invariants() {
 }
 
 #[test]
-#[ignore = "large-mesh transport probe; promote after budget calibration"]
 fn tcp_model_reliable_fifo_sixteen_player_mesh_holds_invariants() {
     run_tcp_model_mesh(16);
 }

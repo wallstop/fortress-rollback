@@ -65,10 +65,14 @@ jobs:
       # 2. The overhead causes timeouts (default 60s is insufficient)
       # 3. These tests are thoroughly exercised in ci-network.yml with proper timeouts
       #
+      # The promoted deterministic N=16 simulation controls can take more than
+      # 60 seconds without a response under instrumentation. Keep this below
+      # the enclosing 30-minute job timeout while allowing those tests to finish.
+      #
       # --exclude-files removes code from coverage report
       # -- --skip multi_process passes skip argument to test executable
       - name: Run coverage (tarpaulin)
-        run: cargo tarpaulin --out Xml --exclude-files 'tests/network/multi_process.rs' -- --skip multi_process
+        run: cargo tarpaulin --timeout 300 --out Xml --exclude-files 'tests/network/multi_process.rs' -- --skip multi_process
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
