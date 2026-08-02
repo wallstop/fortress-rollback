@@ -43,6 +43,12 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "allow"
 highlight = "all"
+# Macroquad has no patched release for RUSTSEC-2025-0035. Its former font stack
+# also selected the unmaintained ttf-parser covered by RUSTSEC-2026-0192.
+deny = [
+    { name = "macroquad" },
+    { name = "ttf-parser" },
+]
 
 # Skip checking these dependencies (known to have multiple versions in tree)
 skip = []

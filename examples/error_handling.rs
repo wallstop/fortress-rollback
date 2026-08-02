@@ -15,18 +15,17 @@
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::disallowed_macros,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::literal_string_with_formatting_args
 )]
 
 use fortress_rollback::{
     Config, FortressError, InternalErrorKind, InvalidRequestKind, PlayerHandle, PlayerType,
-    SessionBuilder, UdpNonBlockingSocket,
+    SessionBuilder, SpectatorConfig, UdpNonBlockingSocket,
 };
-use std::net::SocketAddr;
+use std::error::Error;
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 
 // Define a minimal config for demonstration
 struct GameConfig;
@@ -37,178 +36,168 @@ impl Config for GameConfig {
     type Address = SocketAddr;
 }
 
-fn main() {
+type ExampleResult = Result<(), Box<dyn Error>>;
+
+fn contract_error(message: &'static str) -> Box<dyn Error> {
+    io::Error::other(message).into()
+}
+
+fn main() -> ExampleResult {
     println!("=== Fortress Rollback Error Handling Examples ===\n");
 
-    configuration_errors();
-    session_setup_errors();
-    runtime_error_handling();
-    runtime_input_delay_and_remove_errors();
+    configuration_errors()?;
+    session_setup_errors()?;
+    runtime_error_handling()?;
+    runtime_input_delay_and_remove_errors()?;
     error_recovery_patterns();
+    Ok(())
 }
 
 /// Examples of configuration-time errors and how to handle them
-fn configuration_errors() {
+fn configuration_errors() -> ExampleResult {
     println!("--- Configuration Errors ---\n");
 
     // Example 1: Invalid FPS
     println!("1. Invalid FPS:");
     let result = SessionBuilder::<GameConfig>::new().with_fps(0);
     match result {
-        Ok(_) => println!("   Unexpected success"),
-        Err(e) => {
-            println!("   Error: {}", e);
-            // Pattern match for specific handling
-            if let FortressError::InvalidRequest { info } = &e {
-                println!("   Reason: {}", info);
-            }
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::ZeroFps,
+        }) => {
+            println!("   Error: FPS must be greater than zero");
         },
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(contract_error("zero FPS was accepted")),
     }
     println!();
 
     // Example 2: Duplicate player handle
     println!("2. Duplicate player handle:");
     let result = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Local, PlayerHandle::new(0))); // Same handle!
     match result {
-        Ok(_) => println!("   Unexpected success"),
-        Err(FortressError::InvalidRequest { info }) => {
-            println!("   Error: Player handle already in use");
-            println!("   Details: {}", info);
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::PlayerHandleInUse { handle },
+        }) => {
+            println!("   Error: Player handle {handle} is already in use");
         },
-        Err(e) => println!("   Unexpected error type: {}", e),
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(contract_error("duplicate player handle was accepted")),
     }
     println!();
 
     // Example 3: Invalid player handle for player type
     println!("3. Invalid handle for player type:");
     let result = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2).unwrap()
+        .with_num_players(2)?
         // Handle 5 is invalid for a local player in a 2-player game
         .add_player(PlayerType::Local, PlayerHandle::new(5));
     match result {
-        Ok(_) => println!("   Unexpected success"),
-        Err(FortressError::InvalidRequest { info }) => {
-            println!("   Error: Invalid player handle");
-            println!("   Details: {}", info);
+        Err(FortressError::InvalidRequestStructured {
+            kind:
+                InvalidRequestKind::InvalidLocalPlayerHandle {
+                    handle,
+                    num_players,
+                },
+        }) => {
+            println!("   Error: Local handle {handle} is invalid for {num_players} players");
         },
-        Err(e) => println!("   Unexpected error type: {}", e),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {
+            return Err(contract_error(
+                "out-of-range local player handle was accepted",
+            ))
+        },
     }
     println!();
 
-    // Example 4: Invalid max_frames_behind
-    println!("4. Invalid max_frames_behind:");
-    let result = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
-        .with_max_frames_behind(0); // Must be >= 1
+    // Example 4: Invalid spectator buffer
+    println!("4. Invalid spectator buffer:");
+    let result = SpectatorConfig {
+        buffer_size: 0,
+        ..SpectatorConfig::default()
+    }
+    .validate();
     match result {
-        Ok(_) => println!("   Unexpected success"),
-        Err(FortressError::InvalidRequest { info }) => {
-            println!("   Error: Invalid configuration");
-            println!("   Details: {}", info);
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::ZeroBufferSize,
+        }) => {
+            println!("   Error: Spectator buffer size must be greater than zero");
         },
-        Err(e) => println!("   Unexpected error type: {}", e),
+        Err(error) => return Err(error.into()),
+        Ok(()) => return Err(contract_error("zero spectator buffer was accepted")),
     }
     println!();
+    Ok(())
 }
 
 /// Examples of session startup errors
-fn session_setup_errors() {
+fn session_setup_errors() -> ExampleResult {
     println!("--- Session Setup Errors ---\n");
 
     // Example 1: Socket binding error
     println!("1. Socket binding error:");
-    // Try to bind to a privileged port (will fail without root)
-    let socket_result = UdpNonBlockingSocket::bind_to_port(80);
+    // A zero-length receive buffer is always invalid, independent of host privileges.
+    let socket_result = UdpNonBlockingSocket::bind_to_port_with_buffer_sizes(0, 0, 1024);
     match socket_result {
-        Ok(_) => println!("   Bound to port 80 (running as root?)"),
-        Err(e) => {
-            println!("   Error: {}", e);
-            println!("   Recovery: Try a different port or check permissions");
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            println!("   Error: {error}");
+            println!("   Recovery: Configure non-zero socket buffers");
         },
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(contract_error("zero-length socket buffer was accepted")),
     }
     println!();
 
     // Example 2: Starting session without enough players
     println!("2. Starting P2P session without players:");
-    // Create a socket first (on a high port that should work)
-    if let Ok(socket) = UdpNonBlockingSocket::bind_to_port(0) {
-        let builder = SessionBuilder::<GameConfig>::new()
-            .with_num_players(2)
-            .unwrap();
-        // Don't add any players!
-
-        let result = builder.start_p2p_session(socket);
-        match result {
-            Ok(_) => println!("   Unexpected success"),
-            Err(FortressError::InvalidRequest { info }) => {
-                println!("   Error: Cannot start session");
-                println!("   Details: {}", info);
-            },
-            Err(e) => println!("   Error: {}", e),
-        }
+    let socket = UdpNonBlockingSocket::bind_to_port(0)?;
+    let builder = SessionBuilder::<GameConfig>::new().with_num_players(2)?;
+    // Don't add any players!
+    match builder.start_p2p_session(socket) {
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::NotEnoughPlayers { expected, actual },
+        }) => {
+            println!("   Error: Expected {expected} players, but registered {actual}");
+        },
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(contract_error("P2P session started without players")),
     }
     println!();
+    Ok(())
 }
 
 /// Examples of runtime error handling during gameplay
-fn runtime_error_handling() {
+fn runtime_error_handling() -> ExampleResult {
     println!("--- Runtime Error Handling ---\n");
 
     // Create a simple 2-player setup
     println!("Setting up a test session...");
 
-    // Use fixed ports for the example
-    let port1: u16 = 17000;
-    let port2: u16 = 17001;
-
-    let socket1 = match UdpNonBlockingSocket::bind_to_port(port1) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("   Failed to create socket on port {}: {}", port1, e);
-            println!("   Port may be in use. Try again later.");
-            return;
-        },
-    };
-
-    let socket2 = match UdpNonBlockingSocket::bind_to_port(port2) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("   Failed to create socket on port {}: {}", port2, e);
-            println!("   Port may be in use. Try again later.");
-            return;
-        },
-    };
-
-    let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
-    let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+    // Ephemeral ports avoid conflicts with other local processes.
+    let socket1 = UdpNonBlockingSocket::bind_to_port(0)?;
+    let socket2 = UdpNonBlockingSocket::bind_to_port(0)?;
+    let port1 = socket1.local_addr()?.port();
+    let port2 = socket2.local_addr()?.port();
+    let addr1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port1);
+    let addr2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port2);
 
     // Create sessions
     let sess1 = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Remote(addr2), PlayerHandle::new(1)))
         .and_then(|b| b.start_p2p_session(socket1));
 
     let sess2 = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))
         .and_then(|b| b.add_player(PlayerType::Local, PlayerHandle::new(1)))
         .and_then(|b| b.start_p2p_session(socket2));
 
-    let (mut sess1, mut sess2) = match (sess1, sess2) {
-        (Ok(s1), Ok(s2)) => (s1, s2),
-        (Err(e), _) | (_, Err(e)) => {
-            println!("   Failed to create sessions: {}", e);
-            return;
-        },
-    };
+    let (mut sess1, mut sess2) = (sess1?, sess2?);
 
     println!("   Sessions created on ports {} and {}", port1, port2);
 
@@ -221,37 +210,41 @@ fn runtime_error_handling() {
             println!("   Error: Session not synchronized yet");
             println!("   Recovery: Wait for SessionState::Running before adding inputs");
         },
-        Err(e) => println!("   Error: {}", e),
+        Err(error) => return Err(error.into()),
     }
 
     // Example 2: Getting network stats before sync
     println!("\n2. Getting network stats before sync:");
     let stats_result = sess1.network_stats(PlayerHandle::new(1));
     match stats_result {
-        Ok(stats) => println!("   Stats: {:?}", stats),
+        Ok(_) => {
+            return Err(contract_error(
+                "network stats were available before synchronization",
+            ))
+        },
         Err(FortressError::NotSynchronized) => {
             println!("   Error: Cannot get stats - not synchronized");
             println!("   Recovery: Wait for synchronization to complete");
         },
-        Err(e) => println!("   Error: {}", e),
+        Err(error) => return Err(error.into()),
     }
 
     // Example 3: Invalid player handle
     println!("\n3. Invalid player handle:");
     let result = sess1.add_local_input(PlayerHandle::new(99), 42u8);
     match result {
-        Ok(()) => println!("   Unexpected success"),
-        Err(FortressError::InvalidPlayerHandle { handle, max_handle }) => {
-            println!(
-                "   Error: Invalid handle {} (max valid: {})",
-                handle, max_handle
-            );
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::NotLocalPlayer { handle },
+        }) => {
+            println!("   Error: Handle {handle} is not a registered local player");
             println!("   Recovery: Use handles 0 to num_players-1");
         },
-        Err(FortressError::InvalidRequest { info }) => {
-            println!("   Error: {}", info);
+        Err(error) => return Err(error.into()),
+        Ok(()) => {
+            return Err(contract_error(
+                "input was accepted for an unregistered handle",
+            ))
         },
-        Err(e) => println!("   Error: {}", e),
     }
 
     // Do some polling to let them sync
@@ -261,6 +254,7 @@ fn runtime_error_handling() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     println!();
+    Ok(())
 }
 
 /// Demonstrates how to react to the new structured error variants returned
@@ -288,7 +282,7 @@ fn runtime_error_handling() {
 /// - `InternalErrorKind::InputQueueGapFillFailed { frame }` — library
 ///   invariant violation while replicating gap-fill bytes during a
 ///   mid-session input-delay increase; report as a bug.
-fn runtime_input_delay_and_remove_errors() {
+fn runtime_input_delay_and_remove_errors() -> ExampleResult {
     println!("--- Runtime Input-Delay and Remove-Player Error Variants ---\n");
 
     // Build a session locally so we can issue `set_input_delay`/`remove_player`
@@ -296,45 +290,25 @@ fn runtime_input_delay_and_remove_errors() {
     // never actually establishes a handshake; we rely on the validation
     // performed inside the session methods, which runs regardless of
     // synchronization state.
-    let socket = match UdpNonBlockingSocket::bind_to_port(0) {
-        Ok(s) => s,
-        Err(err) => {
-            println!("   Could not bind socket: {err}; skipping demo.");
-            return;
-        },
-    };
-    let remote: SocketAddr = match "127.0.0.1:17999".parse() {
-        Ok(addr) => addr,
-        Err(err) => {
-            println!("   Could not parse remote address: {err}; skipping demo.");
-            return;
-        },
-    };
+    let socket = UdpNonBlockingSocket::bind_to_port(0)?;
+    let remote = SocketAddr::from((Ipv4Addr::LOCALHOST, 17_999));
 
     let local_handle = PlayerHandle::new(0);
     let remote_handle = PlayerHandle::new(1);
     let session_result = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
-        .with_input_delay(2)
-        .unwrap()
+        .with_num_players(2)?
+        .with_input_delay(2)?
         .add_player(PlayerType::Local, local_handle)
         .and_then(|b| b.add_player(PlayerType::Remote(remote), remote_handle))
         .and_then(|b| b.start_p2p_session(socket));
 
-    let mut session = match session_result {
-        Ok(s) => s,
-        Err(err) => {
-            println!("   Could not start P2P session: {err}; skipping demo.");
-            return;
-        },
-    };
+    let mut session = session_result?;
 
     println!("1. set_input_delay error variants:");
-    let _ = demonstrate_set_input_delay_errors(&mut session, local_handle);
+    demonstrate_set_input_delay_errors(&mut session, local_handle)?;
 
     println!("\n2. remove_player error variants:");
-    let _ = demonstrate_remove_player_errors(&mut session, local_handle, remote_handle);
+    demonstrate_remove_player_errors(&mut session, local_handle, remote_handle)?;
 
     println!("\n3. InternalErrorKind::InputQueueGapFillFailed:");
     println!("   This variant fires only on a library-invariant violation while replicating");
@@ -349,6 +323,7 @@ fn runtime_input_delay_and_remove_errors() {
     println!("   }}");
     println!("   ```");
     println!();
+    Ok(())
 }
 
 /// Issues a few `set_input_delay` calls and pattern-matches on the structured
@@ -357,20 +332,18 @@ fn runtime_input_delay_and_remove_errors() {
 fn demonstrate_set_input_delay_errors<C: Config>(
     session: &mut fortress_rollback::P2PSession<C>,
     local_handle: PlayerHandle,
-) -> Result<(), FortressError> {
+) -> ExampleResult {
     // Initial-setup decrease is allowed (no inputs added yet); use that path
     // to leave the session in a deterministic state.
     if let Err(err) = session.set_input_delay(local_handle, 1) {
-        println!("   Unexpected error setting initial delay: {err}");
-        return Err(err);
+        return Err(err.into());
     }
 
     // Now request a decrease again. This is still pre-input so it succeeds —
     // we set up the conditions for a *mid-session* decrease in `runtime`
     // tests; this function focuses on shape-matching every variant.
     if let Err(err) = session.set_input_delay(local_handle, 0) {
-        println!("   Unexpected error decreasing delay: {err}");
-        return Err(err);
+        return Err(err.into());
     }
 
     // Demonstrate the typed-error pattern shapes a caller writes for each of
@@ -422,8 +395,8 @@ fn demonstrate_set_input_delay_errors<C: Config>(
             );
         },
         Err(other) => {
-            // Anything else is an unexpected error; propagate.
-            return Err(other);
+            // Anything else violates the example's expected contract; propagate.
+            return Err(other.into());
         },
     }
 
@@ -437,12 +410,12 @@ fn demonstrate_remove_player_errors<C: Config>(
     session: &mut fortress_rollback::P2PSession<C>,
     local_handle: PlayerHandle,
     remote_handle: PlayerHandle,
-) -> Result<(), FortressError> {
+) -> ExampleResult {
     // Removing a local player is rejected with `DisconnectLocalPlayer`; the
     // recovery is to tear down the session instead of trying to remove the
     // local player.
     match session.remove_player(local_handle) {
-        Ok(()) => println!("   Unexpected: removed local player (this should not happen)"),
+        Ok(()) => return Err(contract_error("local player removal was accepted")),
         Err(FortressError::InvalidRequestStructured {
             kind: InvalidRequestKind::DisconnectLocalPlayer { handle },
         }) => {
@@ -452,8 +425,7 @@ fn demonstrate_remove_player_errors<C: Config>(
             );
         },
         Err(other) => {
-            println!("   Unexpected error removing local player: {other}");
-            return Err(other);
+            return Err(other.into());
         },
     }
 
@@ -461,15 +433,14 @@ fn demonstrate_remove_player_errors<C: Config>(
     match session.remove_player(remote_handle) {
         Ok(()) => println!("   Removed remote player {remote_handle} (graceful drop)."),
         Err(other) => {
-            println!("   Unexpected error on first remove: {other}");
-            return Err(other);
+            return Err(other.into());
         },
     }
 
     // Removing the same remote player a second time returns
     // `PlayerAlreadyRemoved`; treat as a no-op.
     match session.remove_player(remote_handle) {
-        Ok(()) => println!("   Unexpected: removed already-removed player"),
+        Ok(()) => return Err(contract_error("already-removed player was removed twice")),
         Err(FortressError::InvalidRequestStructured {
             kind: InvalidRequestKind::PlayerAlreadyRemoved { handle },
         }) => {
@@ -480,7 +451,7 @@ fn demonstrate_remove_player_errors<C: Config>(
                  state; ignoring duplicate request."
             );
         },
-        Err(other) => return Err(other),
+        Err(other) => return Err(other.into()),
     }
 
     Ok(())

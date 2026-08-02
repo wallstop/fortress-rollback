@@ -26,8 +26,8 @@
 //! # Note on Current Limitations
 //!
 //! This file demonstrates the loom testing patterns but cannot be run with
-//! `cargo test --test loom_concurrency` because other dev-dependencies
-//! (macroquad -> hyper-util -> tokio) fail to compile under `cfg(loom)`.
+//! `cargo test --test loom_concurrency` because other dev-dependencies can fail
+//! to compile when their modules are disabled under `cfg(loom)`.
 //!
 //! The solution is to either:
 //! 1. Create a separate `loom-tests/` crate in the workspace

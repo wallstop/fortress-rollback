@@ -39,20 +39,20 @@ Fortress Rollback began as a fortified fork of the excellent [`ggrs`](https://gi
 
 Questions, bug reports, or feature ideas are welcome on [GitHub Issues](https://github.com/wallstop/fortress-rollback/issues).
 
-## Interactive Examples
+## Examples
 
-Fortress Rollback includes interactive game examples built with [macroquad](https://github.com/not-fl3/macroquad). Run them locally to see rollback networking in action:
+Fortress Rollback includes headless examples for configuration, custom transports, error and
+request handling, and deterministic SyncTest sessions:
 
 ```shell
-# P2P session (run in two terminals with different ports)
-cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001
-cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7001 --players 127.0.0.1:7000 localhost
-
-# Sync test (determinism verification)
-cargo run --example ex_game_synctest --features graphical-examples -- --num-players 2 --check-distance 7
+cargo run --example configuration
+cargo run --example custom_socket
+cargo run --example error_handling
+cargo run --example request_handling
+cargo run --example sync_test
 ```
 
-See the [examples README](./examples/README.md) for system dependencies and more options.
+See the [examples README](./examples/README.md) for what each example demonstrates.
 
 ## Getting Started
 
@@ -63,24 +63,6 @@ To get started with Fortress Rollback, check out the following resources:
 - 💻 **[Examples](./examples/)** — Working code examples for common use cases
 - 🎮 **[Request Handling Example](./examples/request_handling.rs)** — How to handle game loop requests with manual matching or the `handle_requests!` macro
 - 📋 **[API Documentation](https://docs.rs/fortress-rollback/latest/fortress_rollback/)** — Auto-generated Rust docs on docs.rs
-
-### System Dependencies for Examples
-
-The interactive examples use [macroquad](https://github.com/not-fl3/macroquad), which requires system libraries:
-
-**Linux (Debian/Ubuntu):**
-
-```shell
-sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
-```
-
-**Linux (Fedora/RHEL):**
-
-```shell
-sudo dnf install alsa-lib-devel libX11-devel libXi-devel mesa-libGL-devel
-```
-
-**macOS/Windows:** No additional dependencies required.
 
 ## Development Status
 
@@ -128,9 +110,9 @@ For detailed configuration guidance, see the [User Guide](./docs/user-guide.md#n
 | `hot-join` | Allows a peer to join/rejoin a running session by filling a reserved or gracefully-dropped slot via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`; player count stays fixed) |
 | `tokio` | Enables `TokioUdpSocket` for async Tokio applications |
 | `paranoid` | Runtime invariant checking in release builds |
-| `graphical-examples` | Enables ex_game graphical examples (requires macroquad deps) |
 | `loom` | Loom-compatible synchronization primitives for concurrency testing |
 | `json` | JSON serialization for telemetry types (`to_json()` methods) |
+| `graphical-examples` | Deprecated no-op retained for downstream manifest compatibility; enables no code or dependency |
 | `z3-verification` | Enables Z3 SMT solver proofs (development/CI only — requires Z3 installed) |
 | `z3-verification-bundled` | Like `z3-verification` but builds Z3 from source (slow, no system Z3 needed) |
 
