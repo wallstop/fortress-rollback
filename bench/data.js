@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785639445143,
+  "lastUpdate": 1785644433508,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "236e1f506ac134b72e8fb01dbf9297a77cb2cce2",
-          "message": "Hardening M3 §6.1: PeerStall lifecycle fault (peer hang) in the DST harness (#198)\n\nFirst M3 §6.1 lifecycle-vocabulary fault: `ScheduleEvent::PeerStall` freezes a peer for a bounded window (local hang — GC pause / frame-time spike), distinct from the existing network-only faults. Test-infra only (no src/ or public-crate API, no changelog).\n\n- schedule.rs: new PeerStall variant; schema bump 1->2; random generator untouched so every existing seed (incl. the D8 regression) stays bit-identical.\n- harness/mod.rs: per-peer stall deadline + frozen-but-folded trace; reusable mid-run confirmed-frame probe; up-front schedule-index + probe-range validation so malformed corpus schedules fail loudly.\n- fleet.rs: freeze->recover arc (measured clean [244,245] vs frozen [195,195]); oracle-teeth-under-hitch negative control; malformed-schedule should_panic.\n\nReviewed by an adversarial sub-agent (verdict: solid) + GitHub Copilot (2 rounds, all threads resolved) + Cursor Bugbot (Low Risk).",
-          "timestamp": "2026-07-05T11:14:55-07:00",
-          "tree_id": "d85b1e079b7c71dcf8d23934d3cfd0a344be5948",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/236e1f506ac134b72e8fb01dbf9297a77cb2cce2"
-        },
-        "date": 1783275579302,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 110,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 159,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 461,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 700,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1033,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 123352,
-            "range": "± 1962",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45166,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 102",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4907,6 +4781,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3146,
             "range": "± 221",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "48532d1f5613cc3a4528cffc0ba76199f16dd8bc",
+          "message": "Eliminate warmed sync-test input staging allocations (#272)\n\n## What\n\n- replace per-frame `BTreeMap` input staging in `SyncTestSession` with\nfallibly preallocated player-indexed slots\n- retain slot storage across frames while preserving duplicate\noverwrite, missing-input retry, and deterministic player ordering\n- tighten the deterministic allocation ledger to zero operations/bytes\nfor warmed N=2 and N=4 frames, and one exact 128-byte\nreturned-`InputVec` spill at N=16\n- document the observable performance improvement in the changelog\n\n## Why\n\nPR #270 established a deterministic allocation ledger and measured one\nallocation / 192 bytes per warmed frame at N=2 and N=4, plus four\noperations / 800 bytes at N=16. Those allocations came from rebuilding\nthe sync-test staging map every frame. Constructor-owned slots remove\nthat repeated work without changing the public API or wire behavior.\n\nProgresses #264.\n\n## Impact\n\nWarmed `SyncTestSession::advance_frame()` calls for one-to-four-player\nsessions are heap-allocation-free. Sixteen-player frames now allocate\nonly for the returned `InputVec` above its inline capacity. Construction\nremains fallible for arbitrary configured player counts, and an\nimpossible slot-length mismatch returns a structured internal error.\n\n## Validation\n\n- allocation contract: 10 consecutive debug runs and one release run\n- focused semantic/allocation tests: 3/3\n- sync-test unit suite: 49/49\n- sync-test determinism regression: 1/1\n- default Nextest matrix: 2,883/2,883\n- `hot-join` Nextest matrix: 3,139/3,139\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- warning-denied workspace documentation\n- changelog formatting, Unreleased policy, and version synchronization\n- agent preflight, including 286 release-automation tests and 1,393\nlinks\n- independent adversarial review: zero findings\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (private staging refactor)\n- CHANGELOG reviewed: YES\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Private sync-test staging only; semantics are covered by unit and\nallocation-contract tests with no public API or network wire changes.\n> \n> **Overview**\n> **`SyncTestSession`** no longer rebuilds per-frame input staging with\na **`BTreeMap`**. Construction fallibly reserves\n**`Vec<Option<PlayerInput>>`** indexed by player handle;\n**`add_local_input`** overwrites slots, and **`advance_frame`** clears\nslots to **`None`** while keeping that storage for the next frame.\n> \n> **Behavior preserved or tightened:** missing-input checks cover empty\nslots; player-index ordering in **`AdvanceFrame`** inputs is unchanged;\na failed **`advance_frame`** keeps already-staged inputs so callers can\nadd only missing players and retry.\n> \n> **Allocation impact:** warmed **`advance_frame()`** for 1–4 players is\nheap-free; 16-player frames are limited to the returned **`InputVec`**\nspill above inline capacity (allocation contract and changelog updated).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ne75047918c901b6ab1d3efd941014a20544284f7. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-01T21:10:58-07:00",
+          "tree_id": "9ec5f320b3389a097eb8fdaa21a7fc088ad6c7a0",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/48532d1f5613cc3a4528cffc0ba76199f16dd8bc"
+        },
+        "date": 1785644432357,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 146309,
+            "range": "± 4246",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 54020,
+            "range": "± 367",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 105",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2775,
+            "range": "± 342",
             "unit": "ns/iter"
           }
         ]
