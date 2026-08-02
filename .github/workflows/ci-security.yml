@@ -10,6 +10,7 @@ on:
       - '.cargo/config.toml'
       - 'deny.toml'
       - 'supply-chain/**'
+      - 'scripts/ci/check-advisory-dispositions.py'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   pull_request:
@@ -21,12 +22,13 @@ on:
       - '.cargo/config.toml'
       - 'deny.toml'
       - 'supply-chain/**'
+      - 'scripts/ci/check-advisory-dispositions.py'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   workflow_dispatch:
-  # Run security checks weekly regardless of changes
+  # Run security checks daily so disposition deadlines cannot remain stale.
   schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight UTC
+    - cron: '0 0 * * *'  # Daily at midnight UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,6 +42,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check advisory dispositions
+        run: python3 scripts/ci/check-advisory-dispositions.py
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked

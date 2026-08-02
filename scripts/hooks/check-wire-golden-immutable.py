@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prevent released wire-golden rewrites without a protocol-version bump."""
+"""Prevent released wire and serialization golden rewrites."""
 
 from __future__ import annotations
 
@@ -17,12 +17,21 @@ _LEGACY_PATHS = {
     "src/network/wire_golden_legacy_0_9.rs",
     "tests/network/wire_golden_legacy_0_9.rs",
 }
+_IMMUTABLE_SERIALIZATION_PATHS = {
+    "src/serialization_golden_bincode_2_0_1.rs",
+}
+_SERIALIZATION_GOLDEN_MODULE = "serialization_golden_bincode_2_0_1"
+_SERIALIZATION_GOLDEN_PATH = "src/serialization_golden_bincode_2_0_1.rs"
 _VERSION_PATH = "src/lib.rs"
 
 
 def protected_path(path: str) -> bool:
-    """Return whether `path` is a released immutable wire fixture."""
-    return path in _LEGACY_PATHS or _VERSIONED_GOLDEN_RE.fullmatch(path) is not None
+    """Return whether `path` is a released immutable serialization fixture."""
+    return (
+        path in _LEGACY_PATHS
+        or path in _IMMUTABLE_SERIALIZATION_PATHS
+        or _VERSIONED_GOLDEN_RE.fullmatch(path) is not None
+    )
 
 
 def parse_protocol_version(text: str) -> int:
@@ -92,6 +101,21 @@ def _candidate_file_text(
     if cached:
         return _git(repo_root, ["show", f":{path}"]).decode("utf-8")
     return (repo_root / path).read_text(encoding="utf-8")
+
+
+def _candidate_has_path(
+    repo_root: Path, path: str, cached: bool, base_ref: str | None
+) -> bool:
+    """Return whether the candidate tree contains `path`."""
+    if base_ref is not None:
+        return bool(_git(repo_root, ["ls-tree", "-z", "--name-only", "HEAD", "--", path]))
+    if cached:
+        try:
+            _git(repo_root, ["show", f":{path}"])
+        except RuntimeError:
+            return False
+        return True
+    return (repo_root / path).is_file()
 
 
 def _rust_code_only(text: str) -> str:
@@ -271,6 +295,28 @@ def _has_registered_test_module(codec: str, version: int) -> bool:
     )
 
 
+def _has_serialization_golden_registration(lib: str) -> bool:
+    """Require the immutable suite to be an active top-level test module."""
+    lib = _rust_code_only(lib)
+    lines = lib.splitlines()
+    offsets = _line_offsets(lib)
+    top_level = _top_level_lines(lib)
+    declaration = f"mod {_SERIALIZATION_GOLDEN_MODULE};"
+    expected_attributes = [
+        f'#[path="{Path(_SERIALIZATION_GOLDEN_PATH).name}"]',
+        "#[cfg(test)]",
+    ]
+    return any(
+        line.strip() == declaration
+        and index in top_level
+        and _attributes_before(
+            lib, offsets[index] + len(line) - len(line.lstrip())
+        )
+        == expected_attributes
+        for index, line in enumerate(lines)
+    )
+
+
 def _registered_version_modules(codec: str) -> set[int]:
     """Return top-level versioned golden modules compiled by the current codec."""
     top_level = _top_level_lines(codec)
@@ -440,9 +486,35 @@ def check_diff(
 ) -> bool:
     """Check a local candidate or committed `base_ref..HEAD` diff."""
     try:
+        if _candidate_has_path(
+            repo_root, _SERIALIZATION_GOLDEN_PATH, cached, base_ref
+        ):
+            candidate_lib = _candidate_file_text(
+                repo_root, _VERSION_PATH, cached, base_ref
+            )
+            if not _has_serialization_golden_registration(candidate_lib):
+                print(
+                    f"{_VERSION_PATH}:0: {_SERIALIZATION_GOLDEN_PATH} must be registered as the exact top-level #[cfg(test)] module {_SERIALIZATION_GOLDEN_MODULE}",
+                    file=sys.stderr,
+                )
+                return False
         changed = _changed_existing_goldens(repo_root, cached, base_ref)
         if not changed:
             return True
+        immutable_serialization = sorted(
+            set(changed).intersection(_IMMUTABLE_SERIALIZATION_PATHS)
+        )
+        if immutable_serialization:
+            for path in immutable_serialization:
+                print(
+                    f"{path}:0: released serialization golden is immutable",
+                    file=sys.stderr,
+                )
+            print(
+                "  remedy: restore the historical fixture and add a separately named successor suite for any new format",
+                file=sys.stderr,
+            )
+            return False
         base = base_ref if base_ref is not None else "HEAD"
         base_text = _git(repo_root, ["show", f"{base}:{_VERSION_PATH}"]).decode("utf-8")
         base_version = parse_protocol_version(base_text)

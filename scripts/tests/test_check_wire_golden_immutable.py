@@ -55,6 +55,23 @@ def _add_v2_suite(repo: Path) -> None:
     )
 
 
+def _install_serialization_golden(repo: Path) -> None:
+    _write(
+        repo,
+        "src/serialization_golden_bincode_2_0_1.rs",
+        "const BINCODE_2: &[u8] = &[2];\n",
+    )
+    lib = repo / "src/lib.rs"
+    lib.write_text(
+        lib.read_text(encoding="utf-8")
+        + '#[cfg(test)]\n#[path = "serialization_golden_bincode_2_0_1.rs"]\n'
+        "mod serialization_golden_bincode_2_0_1;\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "install serialization golden")
+
+
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     _git(tmp_path, "init", "-q")
@@ -92,6 +109,104 @@ def test_existing_fixture_change_fails(repo: Path, path: str, capsys: pytest.Cap
     _write(repo, path, "changed\n")
     assert not HOOK.check_diff(repo)
     assert path in capsys.readouterr().err
+
+
+def test_serialization_fixture_change_fails_even_with_protocol_bump(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _install_serialization_golden(repo)
+    path = "src/serialization_golden_bincode_2_0_1.rs"
+    _write(repo, path, "changed\n")
+    lib = repo / "src/lib.rs"
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace(
+            "pub const PROTOCOL_VERSION: u8 = 1;",
+            "pub const PROTOCOL_VERSION: u8 = 2;",
+        ),
+        encoding="utf-8",
+    )
+    _add_v2_suite(repo)
+
+    assert not HOOK.check_diff(repo)
+    error = capsys.readouterr().err
+    assert path in error
+    assert "serialization golden is immutable" in error
+
+
+def test_serialization_successor_can_be_added_without_rewriting_history(
+    repo: Path,
+) -> None:
+    _install_serialization_golden(repo)
+    _write(
+        repo,
+        "src/serialization_golden_candidate.rs",
+        "const CANDIDATE: &[u8] = &[3];\n",
+    )
+
+    assert HOOK.check_diff(repo)
+
+
+def test_new_serialization_golden_requires_exact_registration(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        repo,
+        "src/serialization_golden_bincode_2_0_1.rs",
+        "const BINCODE_2: &[u8] = &[2];\n",
+    )
+
+    assert not HOOK.check_diff(repo)
+    assert "must be registered" in capsys.readouterr().err
+
+    _write(
+        repo,
+        "src/lib.rs",
+        "pub const PROTOCOL_VERSION: u8 = 1;\n"
+        '#[cfg(test)]\n#[path = "serialization_golden_bincode_2_0_1.rs"]\n'
+        "mod serialization_golden_bincode_2_0_1;\n",
+    )
+    assert HOOK.check_diff(repo)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_serialization_registration_removal_fails(
+    repo: Path, cached: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _install_serialization_golden(repo)
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 1;\n")
+    if cached:
+        _git(repo, "add", "src/lib.rs")
+
+    assert not HOOK.check_diff(repo, cached=cached)
+    assert "must be registered" in capsys.readouterr().err
+
+
+def test_serialization_registration_cannot_be_cfg_disabled(repo: Path) -> None:
+    _install_serialization_golden(repo)
+    lib = repo / "src/lib.rs"
+    lib.write_text(
+        lib.read_text(encoding="utf-8").replace(
+            "#[cfg(test)]", "#[cfg(any())]\n#[cfg(test)]"
+        ),
+        encoding="utf-8",
+    )
+
+    assert not HOOK.check_diff(repo)
+
+
+def test_committed_serialization_registration_removal_fails(repo: Path) -> None:
+    _install_serialization_golden(repo)
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _write(repo, "src/lib.rs", "pub const PROTOCOL_VERSION: u8 = 1;\n")
+    _git(repo, "add", "src/lib.rs")
+    _git(repo, "commit", "-qm", "disable serialization golden")
+
+    assert not HOOK.check_diff(repo, base_ref=base)
 
 
 def test_deleted_or_renamed_fixture_fails(repo: Path) -> None:

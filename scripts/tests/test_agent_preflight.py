@@ -44,12 +44,18 @@ CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
     ("ci-toolchain-contract", ".github/actions/install-pinned-release/toolchain"),
     ("ci-toolchain-contract", ".github/workflows/ci-rust.yml"),
     ("ci-toolchain-contract", ".github/workflows/ci-security.yml"),
+    ("advisory-dispositions", "supply-chain/advisory-dispositions.toml"),
+    ("advisory-dispositions", "deny.toml"),
+    ("advisory-dispositions", "scripts/ci/check-advisory-dispositions.py"),
+    ("advisory-dispositions", "fuzz/Cargo.lock"),
     ("validate-agent-skills", ".agents/skills/fortress-development/SKILL.md"),
     ("agent-skills-quality", ".agents/skills/dev-pipeline/SKILL.md"),
     ("actionlint", ".github/workflows/ci.yml"),
     ("changelog-unreleased-rule", "CHANGELOG.md"),
     ("wire-golden-immutable", "src/network/wire_golden_v1.rs"),
     ("wire-golden-immutable", "tests/network/wire_golden_legacy_0_9.rs"),
+    ("wire-golden-immutable", "src/serialization_golden_bincode_2_0_1.rs"),
+    ("wire-golden-immutable", "src/lib.rs"),
     ("vale-advisory", "docs/index.md"),
     ("link-check", "README.md"),
     ("doc-claims", "tests/common/channel_socket.rs"),
@@ -193,6 +199,19 @@ def test_plan_checks_runs_ci_toolchain_contract_for_pin_changes() -> None:
         "--no-header",
         "-q",
     ]
+
+
+def test_plan_checks_runs_advisory_disposition_policy_for_security_surfaces() -> None:
+    checks = plan_checks({"supply-chain/advisory-dispositions.toml"})
+    policy_check = next(
+        check for check in checks if check.check_id == "advisory-dispositions"
+    )
+
+    assert policy_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/ci/check-advisory-dispositions.py",
+    ]
+    assert policy_check.fix_hint is not None
 
 
 def test_plan_checks_runs_network_timing_invariants_for_timing_surfaces() -> None:

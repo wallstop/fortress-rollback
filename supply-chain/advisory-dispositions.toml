@@ -1,0 +1,17 @@
+format = 1
+
+[[dispositions]]
+advisory = "RUSTSEC-2025-0141"
+package = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+owner = "Fortress Rollback maintainers"
+issue = "https://github.com/wallstop/fortress-rollback/issues/273"
+review_by = 2026-11-02
+reason = "Bincode 2.0.1 defines existing network, replay, hot-join, input, and checksum bytes; bincode 3.0.0 is intentionally unusable, so replacement requires a compatibility migration rather than a routine update."
+exit_criteria = [
+    "Freeze every format-critical byte surface and close malformed-input allocation and recursion gaps.",
+    "Select a maintained candidate that passes Rust 1.86, WASM, determinism, safety, allocation, and performance gates.",
+    "Preserve bincode 2.0.1 bytes or ship an explicit version boundary and migration decoder before removing this disposition.",
+]
