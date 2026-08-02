@@ -13,6 +13,38 @@ use crate::{
     Config, FortressError, Frame, InternalErrorKind, PlayerHandle, SerializationErrorKind,
 };
 
+/// Read-only input staging used by protocol serialization.
+///
+/// Implementations expose lookup by player handle; `InputBytes` owns the
+/// ascending handle walk so storage choice cannot change wire ordering.
+pub(crate) trait InputSource<T: Config> {
+    fn get(&self, handle: PlayerHandle) -> Option<&PlayerInput<T::Input>>;
+
+    fn serializable_len(&self, num_players: usize) -> usize;
+}
+
+impl<T: Config> InputSource<T> for BTreeMap<PlayerHandle, PlayerInput<T::Input>> {
+    fn get(&self, handle: PlayerHandle) -> Option<&PlayerInput<T::Input>> {
+        self.get(&handle)
+    }
+
+    fn serializable_len(&self, num_players: usize) -> usize {
+        self.keys()
+            .filter(|handle| handle.as_usize() < num_players)
+            .count()
+    }
+}
+
+impl<T: Config> InputSource<T> for [Option<PlayerInput<T::Input>>] {
+    fn get(&self, handle: PlayerHandle) -> Option<&PlayerInput<T::Input>> {
+        self.get(handle.as_usize()).and_then(Option::as_ref)
+    }
+
+    fn serializable_len(&self, num_players: usize) -> usize {
+        self.iter().take(num_players).flatten().count()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InputBytesDecodeError {
     AllocationFailed {
@@ -146,7 +178,7 @@ impl InputBytes {
     /// whose serialized length differs from `Config::Input::default()`.
     pub fn try_from_inputs<T: Config>(
         num_players: usize,
-        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+        inputs: &(impl InputSource<T> + ?Sized),
     ) -> Result<Self, FortressError> {
         let input_size = codec::encoded_len(&T::Input::default()).map_err(|err| {
             report_violation!(
@@ -161,10 +193,7 @@ impl InputBytes {
             return Err(SerializationErrorKind::InputSerializedSizeZero.into());
         }
 
-        let serializable_inputs = inputs
-            .keys()
-            .filter(|handle| handle.as_usize() < num_players)
-            .count();
+        let serializable_inputs = inputs.serializable_len(num_players);
         let estimated_size = input_size.checked_mul(serializable_inputs).ok_or({
             FortressError::SerializationErrorStructured {
                 kind: SerializationErrorKind::InputSerializedFrameTooLarge {
@@ -180,7 +209,7 @@ impl InputBytes {
         let mut frame = Frame::NULL;
         // in ascending order
         for handle in 0..num_players {
-            if let Some(input) = inputs.get(&PlayerHandle::new(handle)) {
+            if let Some(input) = inputs.get(PlayerHandle::new(handle)) {
                 let input_len = codec::encoded_len(&input.input).map_err(|err| {
                     report_violation!(
                         ViolationSeverity::Error,
@@ -592,6 +621,23 @@ mod tests {
         let input_bytes = InputBytes::from_inputs::<TestConfig>(2, &inputs);
         // Only serializes inputs that exist - results in 4 bytes for player 0
         assert_eq!(input_bytes.bytes.len(), 4);
+    }
+
+    #[test]
+    fn map_and_slot_input_sources_encode_identically() {
+        let frame = Frame::new(50);
+        let player_zero = PlayerInput::new(frame, TestInput { inp: 42 });
+        let player_two = PlayerInput::new(frame, TestInput { inp: 99 });
+        let mut map = BTreeMap::new();
+        map.insert(PlayerHandle::new(2), player_two);
+        map.insert(PlayerHandle::new(0), player_zero);
+        let slots = vec![Some(player_zero), None, Some(player_two)];
+
+        let from_map = InputBytes::try_from_inputs::<TestConfig>(3, &map).unwrap();
+        let from_slots = InputBytes::try_from_inputs::<TestConfig>(3, slots.as_slice()).unwrap();
+
+        assert_eq!(from_slots.frame, from_map.frame);
+        assert_eq!(from_slots.bytes, from_map.bytes);
     }
 
     #[test]

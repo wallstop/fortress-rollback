@@ -12,7 +12,10 @@ use std::hint::black_box;
 use std::net::SocketAddr;
 
 use fortress_rollback::network::codec;
-use fortress_rollback::{Config, PlayerHandle, SessionBuilder, SyncTestSession};
+use fortress_rollback::{
+    Config, DesyncDetection, FortressRequest, Message, NonBlockingSocket, P2PSession, PlayerHandle,
+    SessionBuilder, SyncTestSession,
+};
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 
 #[global_allocator]
@@ -24,6 +27,16 @@ impl Config for AllocationConfig {
     type Input = u32;
     type State = u32;
     type Address = SocketAddr;
+}
+
+struct AllocationSocket;
+
+impl NonBlockingSocket<SocketAddr> for AllocationSocket {
+    fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        Vec::new()
+    }
 }
 
 fn measure<T>(operation: impl FnOnce() -> T) -> (T, Stats) {
@@ -103,6 +116,50 @@ fn warmed_synctest_frame_stats(num_players: usize) -> Stats {
                 .expect("add measured input");
         }
         black_box(session.advance_frame().expect("advance measured frame"))
+    });
+    black_box(requests);
+    stats
+}
+
+fn warmed_all_local_p2p_frame_stats(num_players: usize) -> Stats {
+    let mut builder = SessionBuilder::new()
+        .with_num_players(num_players)
+        .expect("configure allocation-contract P2P player count")
+        .with_desync_detection_mode(DesyncDetection::Off);
+    for player in 0..num_players {
+        builder = builder
+            .add_local_player(player)
+            .expect("add allocation-contract P2P local player");
+    }
+    let mut session: P2PSession<AllocationConfig> = builder
+        .start_p2p_session(AllocationSocket)
+        .expect("construct allocation-contract P2P session");
+
+    for player in 0..num_players {
+        session
+            .add_local_input(
+                PlayerHandle::new(player),
+                u32::try_from(player).expect("allocation-contract handle fits u32"),
+            )
+            .expect("add P2P warm-up input");
+    }
+    let warm_up_requests = session.advance_frame().expect("advance P2P warm-up frame");
+    for request in warm_up_requests {
+        if let FortressRequest::SaveGameState { cell, frame } = request {
+            cell.save(frame, Some(0), Some(0));
+        }
+    }
+
+    let (requests, stats) = measure(|| {
+        for player in 0..num_players {
+            session
+                .add_local_input(
+                    PlayerHandle::new(player),
+                    u32::try_from(player).expect("allocation-contract handle fits u32"),
+                )
+                .expect("add measured P2P input");
+        }
+        black_box(session.advance_frame().expect("advance measured P2P frame"))
     });
     black_box(requests);
     stats
@@ -203,6 +260,23 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         }
         assert_allocation_ceiling(
             &format!("warmed {players}-player sync-test frame"),
+            first,
+            operation_ceiling,
+            byte_ceiling,
+        );
+    }
+
+    for (players, operation_ceiling, byte_ceiling) in [(2, 0, 0), (4, 0, 0), (16, 1, 128)] {
+        let first = warmed_all_local_p2p_frame_stats(players);
+        for repetition in 1..3 {
+            assert_eq!(
+                warmed_all_local_p2p_frame_stats(players),
+                first,
+                "warmed {players}-player all-local P2P frame repetition {repetition}"
+            );
+        }
+        assert_allocation_ceiling(
+            &format!("warmed {players}-player all-local P2P frame"),
             first,
             operation_ceiling,
             byte_ceiling,
