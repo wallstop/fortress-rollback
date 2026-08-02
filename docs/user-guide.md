@@ -2116,11 +2116,14 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
 | `loom`                    | Enables Loom-compatible synchronization primitives    | Concurrency testing               | `loom` crate        |
+| `graphical-examples`      | Deprecated no-op compatibility flag                   | Existing downstream feature lists | None                |
 | `z3-verification`         | Enables Z3 formal verification tests                  | Development/CI verification       | `z3` crate (system) |
 | `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
-| `graphical-examples`      | Enables the ex_game graphical examples                | Running visual demos              | `macroquad` crate   |
 
 > **Note:** The core library needs no WASM feature flag, but browser and Godot Web builds require different ABI, dependency, toolchain, and transport integration. See [Web / WASM Integration](#web--wasm-integration) below.
+
+`graphical-examples` no longer enables example binaries or a rendering dependency. Remove it from
+new manifests; the empty name remains temporarily so existing feature lists continue to resolve.
 
 ### Feature Details
 
@@ -2296,22 +2299,6 @@ cargo test --features z3-verification-bundled
 
 **Warning:** Building Z3 from source takes 30+ minutes. Use `z3-verification` with system Z3 when possible.
 
-#### `graphical-examples`
-
-Enables the interactive game examples that use [macroquad](https://github.com/not-fl3/macroquad) for graphics and audio.
-
-**System dependencies (Linux):**
-
-```bash
-sudo apt-get install libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev
-```
-
-**Running examples:**
-
-```bash
-cargo run --example ex_game_p2p --features graphical-examples -- --local-port 7000 --players localhost 127.0.0.1:7001
-```
-
 ### Feature Flag Combinations
 
 Most features are independent and can be combined freely. Here's a matrix showing valid combinations:
@@ -2323,7 +2310,6 @@ Most features are independent and can be combined freely. Here's a matrix showin
 | `paranoid` + `z3-verification`                | ✅     | Maximum verification               |
 | `z3-verification` + `z3-verification-bundled` | ⚠️     | Redundant (bundled implies base)   |
 | `loom` + any other                            | ⚠️     | Loom tests should run in isolation |
-| `graphical-examples` + any                    | ✅     | Examples are independent           |
 
 **Recommended combinations:**
 
@@ -2340,9 +2326,6 @@ fortress-rollback = { version = "0.11", features = ["sync-send", "tokio"] }
 [dependencies]
 fortress-rollback = { version = "0.11", features = ["sync-send", "paranoid"] }
 
-# Development with examples
-[dependencies]
-fortress-rollback = { version = "0.11", features = ["sync-send", "graphical-examples"] }
 ```
 
 ### Web / WASM Integration
@@ -4084,7 +4067,7 @@ Key serialization behaviors:
 ## Next Steps
 
 - Read the [Architecture Guide](architecture.md) for deeper understanding
-- Check the examples in `examples/ex_game/` for working code
+- Check the headless examples in `examples/` for working code
 - See `examples/configuration.rs` for configuration patterns
 - See `examples/error_handling.rs` for error handling patterns
 - Ask questions, request features, or report bugs on [GitHub Issues](https://github.com/wallstop/fortress-rollback/issues)

@@ -145,6 +145,10 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
+      - name: Run error-handling example contract
+        if: runner.os == 'Linux'
+        run: cargo run --locked --example error_handling
+
       - name: Run tests (nextest)
         run: cargo nextest run --profile ci --verbose
         env:
@@ -450,7 +454,7 @@ jobs:
           cache-key: feature
 
       - name: Check feature powerset (excluding slow features)
-        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,graphical-examples
+        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled
 
   # Package dry-run
   package-dry-run:
@@ -584,6 +588,10 @@ jobs:
 
       - name: Check WASM build (with hot-join feature)
         run: cargo check --target ${{ matrix.target }} --no-default-features --features hot-join
+
+      - name: Check documented browser custom-socket example
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: cargo check --locked --target ${{ matrix.target }} --example custom_socket
 
       - name: Run clippy for WASM target
         run: cargo clippy --target ${{ matrix.target }} --no-default-features -- -D warnings

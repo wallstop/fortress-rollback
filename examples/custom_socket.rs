@@ -23,9 +23,6 @@
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::disallowed_macros,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::type_complexity,
     clippy::use_self
@@ -106,12 +103,17 @@ impl ChannelSocket {
 
 impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
     fn send_to(&mut self, msg: &Message, addr: &ChannelPeerId) {
-        let senders = self.peer_senders.lock().unwrap();
+        let Ok(senders) = self.peer_senders.lock() else {
+            eprintln!("ChannelSocket routing lock was poisoned; dropping packet");
+            return;
+        };
         for (peer_id, sender) in senders.iter() {
             if peer_id == addr {
                 // Clone the message since we might send to multiple peers
                 // In a real network socket, you'd serialize once and send bytes
-                let _ = sender.send((self.local_id, msg.clone()));
+                if sender.send((self.local_id, msg.clone())).is_err() {
+                    eprintln!("ChannelSocket peer {addr:?} disconnected; dropping packet");
+                }
                 return;
             }
         }
@@ -244,7 +246,9 @@ impl NonBlockingSocket<WebSocketPeerId> for WebSocketAdapter {
 
         // In practice:
         // if let Some(ws) = self.connections.get_mut(addr) {
-        //     let _ = ws.send(WebSocketMessage::Binary(bytes));
+        //     if ws.send(WebSocketMessage::Binary(bytes)).is_err() {
+        //         eprintln!("WebSocket peer {addr:?} disconnected; dropping packet");
+        //     }
         // }
     }
 

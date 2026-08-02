@@ -37,7 +37,7 @@ def main() -> int:
             "check",
             "--feature-powerset",
             "--exclude-features",
-            "z3-verification,z3-verification-bundled,graphical-examples",
+            "z3-verification,z3-verification-bundled",
         ],
         check=False,
         env=env,

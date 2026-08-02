@@ -15,9 +15,6 @@
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::disallowed_macros,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
     // Allow needless_update because we explicitly show `..Default::default()` pattern for
     // forward compatibility - even when all fields are specified, this pattern ensures
@@ -30,6 +27,7 @@ use fortress_rollback::{
     PlayerType, ProtocolConfig, SaveMode, SessionBuilder, SpectatorConfig, SyncConfig,
     TimeSyncConfig, UdpNonBlockingSocket,
 };
+use std::error::Error;
 use std::net::SocketAddr;
 use web_time::Duration;
 
@@ -42,32 +40,34 @@ impl Config for GameConfig {
     type Address = SocketAddr;
 }
 
-fn main() {
+type ExampleResult = Result<(), Box<dyn Error>>;
+
+fn main() -> ExampleResult {
     println!("=== Fortress Rollback Configuration Examples ===\n");
 
-    basic_configuration();
-    network_presets();
-    custom_configuration();
-    competitive_setup();
-    casual_online_setup();
-    spectator_setup();
-    dynamic_configuration();
-    disconnect_behavior_setup();
-    runtime_input_delay_demo();
+    basic_configuration()?;
+    network_presets()?;
+    custom_configuration()?;
+    competitive_setup()?;
+    casual_online_setup()?;
+    spectator_setup()?;
+    dynamic_configuration()?;
+    disconnect_behavior_setup()?;
+    runtime_input_delay_demo()?;
+    Ok(())
 }
 
 /// Basic configuration with sensible defaults
-fn basic_configuration() {
+fn basic_configuration() -> ExampleResult {
     println!("--- Basic Configuration ---");
 
     let builder = SessionBuilder::<GameConfig>::new()
         // Required: Set the number of players
-        .with_num_players(2).unwrap()
+        .with_num_players(2)?
         // Optional: Add input delay (reduces rollbacks at cost of latency)
-        .with_input_delay(2).unwrap()
+        .with_input_delay(2)?
         // Optional: Set expected framerate for timing calculations
-        .with_fps(60)
-        .expect("FPS must be > 0")
+        .with_fps(60)?
         // Optional: Customize desync detection interval (default: 60 frames)
         .with_desync_detection_mode(DesyncDetection::On { interval: 100 })
         // Optional: Control how far ahead the game can predict (0 = lockstep)
@@ -77,6 +77,7 @@ fn basic_configuration() {
     println!("  - 2 players with 2-frame input delay");
     println!("  - 60 FPS with 8-frame prediction window");
     println!("  - Desync detection enabled (every 100 frames)\n");
+    Ok(())
 }
 
 /// Using built-in presets for common network conditions
@@ -89,13 +90,14 @@ fn basic_configuration() {
 /// Example:
 /// ```ignore
 /// SessionBuilder::<GameConfig>::new()
-///     .with_num_players(2).unwrap()
+///     .with_num_players(2)?
 ///     .with_lan_defaults()
-///     .add_local_player(0).unwrap()
-///     .add_remote_player(1, addr).unwrap()
-///     .start_p2p_session(socket)
+///     .add_local_player(0)?
+///     .add_remote_player(1, addr)?
+///     .start_p2p_session(socket)?;
+/// # Ok::<(), FortressError>(())
 /// ```
-fn network_presets() {
+fn network_presets() -> ExampleResult {
     println!("--- Network Presets ---");
     println!("TIP: Use with_lan_defaults(), with_internet_defaults(), or");
     println!("     with_high_latency_defaults() for quick configuration!\n");
@@ -103,13 +105,11 @@ fn network_presets() {
     // LAN/Local play - fast connections, minimal latency
     // Equivalent to: .with_lan_defaults()
     let lan_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_sync_config(SyncConfig::lan())
         .with_protocol_config(ProtocolConfig::competitive())
         .with_time_sync_config(TimeSyncConfig::responsive())
-        .with_input_delay(0)
-        .unwrap()
+        .with_input_delay(0)?
         .with_max_prediction_window(4);
 
     println!("LAN preset (< 20ms RTT):");
@@ -122,13 +122,11 @@ fn network_presets() {
     // Regional internet (20-80ms RTT)
     // Equivalent to: .with_internet_defaults().with_max_prediction_window(8)
     let regional_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_sync_config(SyncConfig::default())
         .with_protocol_config(ProtocolConfig::default())
         .with_time_sync_config(TimeSyncConfig::default())
-        .with_input_delay(2)
-        .unwrap()
+        .with_input_delay(2)?
         .with_max_prediction_window(8);
 
     println!("Regional preset (20-80ms RTT):");
@@ -140,13 +138,11 @@ fn network_presets() {
     // High-latency networks (80-200ms RTT)
     // Similar to: .with_high_latency_defaults().with_max_prediction_window(12)
     let high_latency_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_sync_config(SyncConfig::high_latency())
         .with_protocol_config(ProtocolConfig::high_latency())
         .with_time_sync_config(TimeSyncConfig::smooth())
-        .with_input_delay(4)
-        .unwrap()
+        .with_input_delay(4)?
         .with_max_prediction_window(12);
 
     println!("High-latency preset (80-200ms RTT):");
@@ -158,13 +154,11 @@ fn network_presets() {
 
     // Lossy networks (5-15% packet loss)
     let lossy_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_sync_config(SyncConfig::lossy())
         .with_protocol_config(ProtocolConfig::default())
         .with_time_sync_config(TimeSyncConfig::smooth())
-        .with_input_delay(3)
-        .unwrap()
+        .with_input_delay(3)?
         .with_max_prediction_window(15);
 
     println!("Lossy network preset (5-15% packet loss):");
@@ -172,10 +166,11 @@ fn network_presets() {
     println!("  - 15-frame prediction window");
     println!("  - 3-frame input delay");
     println!("  Builder: {:?}\n", lossy_builder);
+    Ok(())
 }
 
 /// Custom fine-tuned configuration
-fn custom_configuration() {
+fn custom_configuration() -> ExampleResult {
     println!("--- Custom Configuration ---");
 
     // Custom sync configuration
@@ -218,8 +213,7 @@ fn custom_configuration() {
     };
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_sync_config(custom_sync)
         .with_protocol_config(custom_protocol)
         .with_time_sync_config(custom_time_sync);
@@ -229,16 +223,17 @@ fn custom_configuration() {
     println!("  - 150ms quality reports");
     println!("  - 64 checksum history slots");
     println!("  Builder: {:?}\n", builder);
+    Ok(())
 }
 
 /// Configuration for competitive/tournament play
-fn competitive_setup() {
+fn competitive_setup() -> ExampleResult {
     println!("--- Competitive Setup ---");
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2).unwrap()
+        .with_num_players(2)?
         // Minimal input delay for fastest response (accept more rollbacks)
-        .with_input_delay(1).unwrap()
+        .with_input_delay(1)?
         // Enable desync detection to catch cheating
         .with_desync_detection_mode(DesyncDetection::On { interval: 30 })
         // Use competitive presets
@@ -251,8 +246,7 @@ fn competitive_setup() {
         .with_disconnect_timeout(Duration::from_millis(1500))
         .with_disconnect_notify_delay(Duration::from_millis(300))
         // High framerate for smooth gameplay
-        .with_fps(120)
-        .expect("FPS must be > 0");
+        .with_fps(120)?;
 
     println!("Competitive setup (requires < 100ms RTT):");
     println!("  - 1-frame input delay for fastest response");
@@ -261,16 +255,17 @@ fn competitive_setup() {
     println!("  - 120 FPS target");
     println!("  - Recommended: Enforce RTT < 100ms in matchmaking");
     println!("  Builder: {:?}\n", builder);
+    Ok(())
 }
 
 /// Configuration for casual online play
-fn casual_online_setup() {
+fn casual_online_setup() -> ExampleResult {
     println!("--- Casual Online Setup ---");
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(4).unwrap() // Support up to 4 players
+        .with_num_players(4)? // Support up to 4 players
         // Moderate input delay for stability
-        .with_input_delay(3).unwrap()
+        .with_input_delay(3)?
         // Less frequent desync checks (performance)
         .with_desync_detection_mode(DesyncDetection::On { interval: 300 })
         // Balanced presets
@@ -285,8 +280,7 @@ fn casual_online_setup() {
         // Enable sparse saving for better performance
         .with_save_mode(SaveMode::Sparse)
         // Standard 60 FPS
-        .with_fps(60)
-        .expect("FPS must be > 0");
+        .with_fps(60)?;
 
     println!("Casual online setup:");
     println!("  - 4 players supported");
@@ -294,10 +288,11 @@ fn casual_online_setup() {
     println!("  - Sparse saving enabled (performance)");
     println!("  - Lenient disconnect handling (5s timeout)");
     println!("  Builder: {:?}\n", builder);
+    Ok(())
 }
 
 /// Configuration for spectator sessions
-fn spectator_setup() {
+fn spectator_setup() -> ExampleResult {
     println!("--- Spectator Setup ---");
 
     // Fast-paced game spectator config
@@ -338,7 +333,7 @@ fn spectator_setup() {
     };
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2).unwrap()
+        .with_num_players(2)?
         .with_spectator_config(custom_spectator)
         // Use high-latency presets for spectator hosts
         .with_sync_config(SyncConfig::high_latency())
@@ -349,10 +344,11 @@ fn spectator_setup() {
     println!("  - 3x catch-up speed when behind");
     println!("  - Tolerates up to 30 frames behind");
     println!("  Builder: {:?}\n", builder);
+    Ok(())
 }
 
 /// Dynamically choose configuration based on measured network conditions
-fn dynamic_configuration() {
+fn dynamic_configuration() -> ExampleResult {
     println!("--- Dynamic Configuration Based on Network Conditions ---");
 
     // Example: Choose configuration based on RTT and packet loss
@@ -363,10 +359,8 @@ fn dynamic_configuration() {
         choose_config_for_network(example_rtt_ms, example_packet_loss);
 
     let builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
-        .with_input_delay(input_delay)
-        .unwrap()
+        .with_num_players(2)?
+        .with_input_delay(input_delay)?
         .with_sync_config(sync_config)
         .with_max_prediction_window(prediction_window);
 
@@ -391,6 +385,7 @@ fn dynamic_configuration() {
     println!("  RTT > 100ms       → SyncConfig::high_latency()");
     println!("  RTT < 20ms        → SyncConfig::lan()");
     println!("  Otherwise         → SyncConfig::default()\n");
+    Ok(())
 }
 
 /// Helper function to choose configuration based on network conditions
@@ -441,13 +436,12 @@ fn choose_config_for_network(rtt_ms: u32, packet_loss_percent: f32) -> (usize, S
 /// `P2PSession::disconnect_player` retains its non-graceful semantics under
 /// either setting; the explicit `P2PSession::remove_player` always performs
 /// a graceful drop regardless of this setting.
-fn disconnect_behavior_setup() {
+fn disconnect_behavior_setup() -> ExampleResult {
     println!("--- Disconnect Behavior Selection ---\n");
 
     // Default behavior is `Halt`: a peer drop halts the session.
     let halt_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(2)
-        .unwrap()
+        .with_num_players(2)?
         .with_disconnect_behavior(DisconnectBehavior::Halt);
     println!("`DisconnectBehavior::Halt` (default, legacy halt-on-drop):");
     println!("  - On auto-timeout: confirmed_frame() stalls; session halts.");
@@ -457,8 +451,7 @@ fn disconnect_behavior_setup() {
 
     // Opt in to graceful drop for free-for-all / 3+ player games.
     let graceful_builder = SessionBuilder::<GameConfig>::new()
-        .with_num_players(3)
-        .unwrap()
+        .with_num_players(3)?
         .with_disconnect_behavior(DisconnectBehavior::ContinueWithout);
     println!("`DisconnectBehavior::ContinueWithout` (graceful peer drop):");
     println!("  - On auto-timeout: dropped peer's input queue is frozen at their");
@@ -467,6 +460,7 @@ fn disconnect_behavior_setup() {
     println!("  - Suitable for 3+ player games, casual lobbies, and any flow");
     println!("    where the show must go on after a peer leaves.");
     println!("  Builder: {:?}\n", graceful_builder);
+    Ok(())
 }
 
 /// Demonstrates `P2PSession::set_input_delay` / `P2PSession::input_delay`
@@ -490,53 +484,28 @@ fn disconnect_behavior_setup() {
 /// In addition, `InternalErrorKind::InputQueueGapFillFailed { frame }` may
 /// fire if an internal invariant is violated while replicating gap-fill bytes
 /// during a mid-session increase; treat as a library bug and report it.
-fn runtime_input_delay_demo() {
+fn runtime_input_delay_demo() -> ExampleResult {
     println!("--- Runtime Input Delay Demo ---\n");
 
     // Bind to ephemeral ports so we can exercise the live-session API. Both
     // ports are local; this never actually establishes the handshake — it is
     // enough to demonstrate the API surface.
-    let socket = match UdpNonBlockingSocket::bind_to_port(0) {
-        Ok(s) => s,
-        Err(err) => {
-            println!("   Could not bind socket: {err}; skipping demo.");
-            return;
-        },
-    };
-    let remote: SocketAddr = match "127.0.0.1:17799".parse() {
-        Ok(addr) => addr,
-        Err(err) => {
-            println!("   Could not parse remote address: {err}; skipping demo.");
-            return;
-        },
-    };
+    let socket = UdpNonBlockingSocket::bind_to_port(0)?;
+    let remote = SocketAddr::from(([127, 0, 0, 1], 17_799));
 
     let local_handle = PlayerHandle::new(0);
     let session_result = SessionBuilder::<GameConfig>::new()
         .with_num_players(2)
-        .unwrap()
-        .with_input_delay(2)
-        .unwrap()
-        .add_player(PlayerType::Local, local_handle)
+        .and_then(|builder| builder.with_input_delay(2))
+        .and_then(|builder| builder.add_player(PlayerType::Local, local_handle))
         .and_then(|b| b.add_player(PlayerType::Remote(remote), PlayerHandle::new(1)))
         .and_then(|b| b.start_p2p_session(socket));
 
-    let mut session = match session_result {
-        Ok(s) => s,
-        Err(err) => {
-            println!("   Could not start P2P session: {err}; skipping demo.");
-            return;
-        },
-    };
+    let mut session = session_result?;
 
     // Read the current delay (set via `with_input_delay(2)` above).
-    match session.input_delay(local_handle) {
-        Ok(delay) => println!("   Initial input delay: {delay} frame(s)"),
-        Err(err) => {
-            println!("   Could not read input delay: {err}; aborting demo.");
-            return;
-        },
-    }
+    let delay = session.input_delay(local_handle)?;
+    println!("   Initial input delay: {delay} frame(s)");
 
     // Apply an *initial-setup* increase (no inputs added yet → applies cleanly
     // with no gap-fill replication).
@@ -564,16 +533,13 @@ fn runtime_input_delay_demo() {
             );
         },
         Err(other) => {
-            println!("   Unexpected error: {other}");
-            return;
+            return Err(other.into());
         },
     }
 
     // Confirm the new delay round-tripped via the getter.
-    match session.input_delay(local_handle) {
-        Ok(delay) => println!("   Updated input delay: {delay} frame(s)"),
-        Err(err) => println!("   Could not read updated input delay: {err}"),
-    }
+    let delay = session.input_delay(local_handle)?;
+    println!("   Updated input delay: {delay} frame(s)");
 
     // Exercising the decrease path. Decreases are only allowed before any
     // input has been added; once inputs exist, the call returns
@@ -589,6 +555,7 @@ fn runtime_input_delay_demo() {
                  unsupported); carry the lower delay over to the next session."
             );
         },
-        Err(other) => println!("   Unexpected error: {other}"),
+        Err(other) => return Err(other.into()),
     }
+    Ok(())
 }

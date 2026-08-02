@@ -14,8 +14,8 @@ Loom tests need to be isolated from the main crate's dev-dependencies because:
    use `#![cfg(not(loom))]` to disable modules under loom, causing compilation failures
    when building with `RUSTFLAGS="--cfg loom"`.
 
-2. **Heavy dev-dependencies**: The main crate has many dev-dependencies (macroquad,
-   criterion, z3, etc.) that don't need to be compiled for loom testing.
+2. **Heavy dev-dependencies**: The main crate has many dev-dependencies (criterion,
+   Z3 bindings, and others) that don't need to be compiled for loom testing.
 
 3. **Minimal test surface**: Loom tests focus specifically on concurrent primitives,
    so they only need the core library.

@@ -35,7 +35,7 @@ gitignore = true
 all_features = false
 no_default_features = false
 
-# Test core features only (excludes slow z3-verification and graphical examples)
+# Test core features only (excludes slow Z3 verification)
 # The tokio feature is included to test async socket adapters
 features = ["tokio", "json"]
 

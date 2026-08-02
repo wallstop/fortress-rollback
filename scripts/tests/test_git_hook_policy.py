@@ -311,7 +311,8 @@ def test_cargo_hack_local_excludes_match_ci_slow_features() -> None:
     """Local cargo-hack runs must avoid bundled Z3 builds."""
     content = CARGO_HACK_WRAPPER.read_text(encoding="utf-8")
 
-    assert "z3-verification,z3-verification-bundled,graphical-examples" in content
+    assert "z3-verification,z3-verification-bundled" in content
+    assert "graphical-examples" not in content
 
 
 def test_rust_formatter_wrapper_is_file_scoped() -> None:
