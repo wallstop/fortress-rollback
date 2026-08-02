@@ -148,6 +148,17 @@ def is_ci_toolchain_surface_file(path: str) -> bool:
     }
 
 
+def is_advisory_disposition_surface_file(path: str) -> bool:
+    """Return True for cargo-deny exception policy inputs and enforcement."""
+    return Path(path).name in {"Cargo.lock", "Cargo.toml"} or path in {
+        ".github/workflows/ci-security.yml",
+        "deny.toml",
+        "scripts/ci/check-advisory-dispositions.py",
+        "scripts/tests/test_check_advisory_dispositions.py",
+        "supply-chain/advisory-dispositions.toml",
+    }
+
+
 def is_docs_markdown_file(path: str) -> bool:
     """Return True for markdown files under docs/ (vale targets)."""
     return path.startswith("docs/") and path.endswith(".md")
@@ -159,10 +170,18 @@ def is_changelog_file(path: str) -> bool:
 
 
 def is_wire_golden_surface_file(path: str) -> bool:
-    """Return True for immutable wire fixtures and their enforcing hook."""
-    return path == "scripts/hooks/check-wire-golden-immutable.py" or (
-        path.startswith(("src/network/wire_golden_", "tests/network/wire_golden_"))
-        and path.endswith(".rs")
+    """Return True for immutable serialization fixtures and their enforcing hook."""
+    return (
+        path
+        in {
+            "scripts/hooks/check-wire-golden-immutable.py",
+            "src/lib.rs",
+            "src/serialization_golden_bincode_2_0_1.rs",
+        }
+        or (
+            path.startswith(("src/network/wire_golden_", "tests/network/wire_golden_"))
+            and path.endswith(".rs")
+        )
     )
 
 
@@ -288,6 +307,9 @@ def plan_checks(
     ci_toolchain_changed = any(
         is_ci_toolchain_surface_file(path) for path in changed_files
     )
+    advisory_disposition_changed = any(
+        is_advisory_disposition_surface_file(path) for path in changed_files
+    )
     docs_files = sorted(path for path in extant_files if is_docs_markdown_file(path))
     rust_changed = any(is_rust_file(path) for path in changed_files)
     rust_files = sorted(path for path in extant_files if is_rust_file(path))
@@ -395,6 +417,22 @@ def plan_checks(
             )
         )
 
+    if run_all or advisory_disposition_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="advisory-dispositions",
+                description="reject stale or source-drifted cargo-deny exceptions",
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/ci/check-advisory-dispositions.py",
+                ],
+                fix_hint=(
+                    "Update or remove the documented exception before its review date; "
+                    "keep the dependency, source, checksum, and Cargo.lock resolution exact."
+                ),
+            )
+        )
+
     if run_all or agent_skill_changed:
         checks.append(
             PlannedCheck(
@@ -451,15 +489,16 @@ def plan_checks(
         checks.append(
             PlannedCheck(
                 check_id="wire-golden-immutable",
-                description="prevent released wire fixture changes without a protocol bump",
+                description="prevent released serialization fixture rewrites",
                 command=[
                     PYTHON_EXECUTABLE,
                     "scripts/hooks/check-wire-golden-immutable.py",
                     "--local",
                 ],
                 fix_hint=(
-                    "Restore released wire fixtures, or bump PROTOCOL_VERSION and add the next "
-                    "versioned golden suite as the active registration."
+                    "Restore historical serialization fixtures. For protocol bytes, bump "
+                    "PROTOCOL_VERSION and add the matching active wire suite; for other formats, "
+                    "add a separately named successor and migration path."
                 ),
             )
         )

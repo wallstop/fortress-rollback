@@ -241,6 +241,9 @@ pub mod rle;
 /// Provides a minimal, high-quality PRNG that replaces the `rand` crate dependency.
 /// See the module documentation for usage details.
 pub mod rng;
+#[cfg(test)]
+#[path = "serialization_golden_bincode_2_0_1.rs"]
+mod serialization_golden_bincode_2_0_1;
 #[doc(hidden)]
 pub mod sync;
 #[doc(hidden)]
