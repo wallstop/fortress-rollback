@@ -35,11 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libclang-dev \
     # Java (for TLA+)
     default-jdk \
-    # macroquad example dependencies (graphics, audio, input)
-    libasound2-dev \
-    libx11-dev \
-    libxi-dev \
-    libgl1-mesa-dev \
     # Visualization
     graphviz \
     # Networking tools (for network testing)

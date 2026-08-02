@@ -25,13 +25,11 @@
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::disallowed_macros,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing
 )]
 
 use fortress_rollback::prelude::*;
+use fortress_rollback::InternalErrorKind;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -333,6 +331,9 @@ fn non_deterministic_test() -> Result<(), FortressError> {
         }
     }
 
-    println!("Unexpected: no mismatch detected!");
-    Ok(())
+    Err(FortressError::InternalErrorStructured {
+        kind: InternalErrorKind::Custom(
+            "nondeterministic example did not detect a checksum mismatch",
+        ),
+    })
 }

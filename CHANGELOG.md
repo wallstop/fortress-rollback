@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sixteen players retains only the returned `InputVec` spill. Network encoding and checksum history
   keep their separate bounded allocations; application state callbacks are outside this measurement.
 
+### Removed
+
+- Removed the Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries
+  because Macroquad has no patched release for soundness defects reachable from safe code. The
+  `graphical-examples` feature name remains temporarily as a deprecated no-op for manifest
+  compatibility and enables no code or dependency. The retained headless examples cover
+  configuration, custom sockets, error handling, request handling, and deterministic SyncTest
+  integration without graphics or audio dependencies.
+
 ### Fixed
 
 - **Pre-existing:** ordinary networked `P2PSession` frame polling no longer reserves space for 256

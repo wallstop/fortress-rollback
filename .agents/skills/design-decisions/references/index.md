@@ -4,6 +4,7 @@ Lightweight decision logs live here.
 
 Use domain files like:
 
+- `dependencies.txt`
 - `network.txt`
 - `sync-layer.txt`
 

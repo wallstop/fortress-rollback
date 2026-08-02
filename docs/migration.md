@@ -8,6 +8,28 @@
 
 Fortress Rollback is the correctness-first, verified fork of the original `ggrs` crate. This guide explains how to migrate existing projects.
 
+## Upgrading from 0.11
+
+The Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries are removed.
+Their dependency has no patched release for
+[RUSTSEC-2025-0035](https://rustsec.org/advisories/RUSTSEC-2025-0035.html), which reports soundness
+defects reachable from safe code. Remove `graphical-examples` from your Cargo feature lists; its
+name remains temporarily as a deprecated no-op for manifest compatibility and enables no code or
+dependency. Use the retained headless examples for Fortress integration patterns, then connect the
+session to your renderer and input stack in application code.
+
+```shell
+# Before (0.11)
+cargo run --features graphical-examples --example ex_game_p2p
+
+# After
+cargo run --example configuration
+```
+
+The removed binaries have no direct graphical replacement. Start with the `configuration`,
+`custom_socket`, or `sync_test` example, then drive your renderer from the resulting session
+requests and state in the application crate.
+
 ## TL;DR
 
 - Update your dependency to `fortress-rollback` and change Rust imports to `fortress_rollback`.
@@ -223,7 +245,7 @@ The `sync-send` feature flag remains compatible. Fortress Rollback adds several 
 | `paranoid`           | Runtime invariant checking             | ✅               |
 | `loom`               | Concurrency testing                    | ✅               |
 | `z3-verification`    | Formal verification tests              | ✅               |
-| `graphical-examples` | Interactive demos                      | ✅               |
+| `graphical-examples` | Deprecated no-op compatibility flag    | ✅ (enables nothing) |
 | `hot-join`           | Peers can join/rejoin a running session via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`) | ✅               |
 | `z3-verification-bundled` | `z3-verification` with a bundled Z3 build (no system Z3 needed) | ✅               |
 

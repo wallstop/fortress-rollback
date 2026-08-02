@@ -303,7 +303,11 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
     )
     assert rust_step["with"]["targets"] == MATRIX_TARGET_EXPRESSION
 
-    check_commands = _cargo_commands(steps, "check")
+    check_commands = [
+        command
+        for command in _cargo_commands(steps, "check")
+        if "--no-default-features" in command
+    ]
     assert len(check_commands) == 5
     for command in check_commands:
         assert _option_values(command, "--target") == [MATRIX_TARGET_EXPRESSION]
@@ -387,6 +391,36 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
     assert command.count("--lib") == 1
     test_args = command[command.index("--") + 1 :]
     assert "--nocapture" in test_args
+
+
+def test_wasm_job_checks_documented_custom_socket_example() -> None:
+    """Browser transport guidance must compile for its documented target."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["wasm-check"]["steps"]
+    check_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Check documented browser custom-socket example"
+    )
+
+    assert check_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
+    assert check_step["run"] == (
+        "cargo check --locked --target ${{ matrix.target }} --example custom_socket"
+    )
+
+
+def test_build_job_runs_error_handling_example_contract() -> None:
+    """Structured-error example drift must fail ordinary Rust CI."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["build"]["steps"]
+    run_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Run error-handling example contract"
+    )
+
+    assert run_step["if"] == "runner.os == 'Linux'"
+    assert run_step["run"] == "cargo run --locked --example error_handling"
 
 
 def test_godot_fixture_changes_trigger_rust_ci() -> None:

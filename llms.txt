@@ -25,7 +25,7 @@ Key information:
 
 - [Configuration Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/configuration.rs): Demonstrates session builder configuration options
 - [Error Handling Example](https://github.com/wallstop/fortress-rollback/blob/main/examples/error_handling.rs): Shows proper error handling patterns
-- [Example Game](https://github.com/wallstop/fortress-rollback/tree/main/examples/ex_game): Complete interactive game demo using macroquad (graphics/audio) and plain UDP sockets (P2P, spectator, and SyncTest variants)
+- [Examples](https://github.com/wallstop/fortress-rollback/tree/main/examples): Headless configuration, custom socket, error handling, request handling, and SyncTest examples
 
 ## API Reference
 
