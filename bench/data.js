@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785625534254,
+  "lastUpdate": 1785631648377,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "42492249931c0c03f52a2557e93fa304c6ffd27a",
-          "message": "Hardening M2 §5.3 prep: per-peer wire-metrics aggregation in the DST harness (#194)\n\n## Summary\n\nFoundational step toward the M2 §5.3 baseline sweep, which needs a\nper-player **bandwidth ledger**. Today the simulation runner's\n`RunReport` carries only `SessionMetrics`; the wire-level counters\n(bytes/packets/by-kind) live on each session's per-remote `PeerMetrics`,\nwhich the harness consumes and drops.\n\nThis adds the aggregation and a fleet consumer — no production or\npublic-API change (test infrastructure only).\n\n## Change\n\n- **`RunReport.peer_wire: Vec<PeerWireTotals>`** — each peer's\nper-remote `PeerMetrics` folded into one per-player total: bytes/packets\nsent+received, per-`MessageKind` breakdown, and input\npre/post-compression bytes. Aggregation runs at end-of-run over the\npeer's remote handles (`PlayerHandle::new(j)` for `j != i`;\n`peer_metrics` succeeds for any remote handle regardless of sync state).\n- By-kind arrays are positional in `MessageKind::ALL` order (the\ncrate-private `MessageKind::index()` is unreachable from tests);\n`sent_by_kind` / `received_by_kind` read them by category. Instantaneous\ngauges (`pending_*`, `ping_ms`, `remote_frame_advantage`) are\ndeliberately dropped — they are not additive across links.\n- **Consumer:** `peer_wire_metrics_are_wired_across_smoke_fleet`\nasserts, per peer, the by-kind == packet-count identities (preserved by\naggregation) and that real **bidirectional** wire traffic flowed (Input\npackets each way). This exercises `P2PSession::peer_metrics` end-to-end\nunder randomized simulation — previously only covered by direct-call\nunit tests.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` —\nclean.\n- `cargo nextest run -E 'test(simulation::)'` — 27 passed; `--features\nhot-join` (17-variant `MessageKind`) — 27 passed. New test green both\nfeature sets.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nThe `peer_wire` field is deterministic and deliberately excluded from\n`trace_hash` (it's a metric, not a correctness invariant), so\nmeta-determinism is unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only harness and fleet assertions; no production or public API\nchanges.\n> \n> **Overview**\n> Adds a **per-player bandwidth ledger** to the deterministic simulation\nharness so upcoming M2 §5.3 baseline sweeps can read wire totals from\n`RunReport` instead of dropping per-remote `PeerMetrics`.\n> \n> **`RunReport.peer_wire`** holds one `PeerWireTotals` per peer, built\nat end-of-run by summing `P2PSession::peer_metrics` across every remote\nhandle (`j != i`). Totals include bytes/packets sent and received,\nper-`MessageKind` counts (via `MessageKind::ALL` layout), and input\npre/post-compression bytes; non-additive gauges (`pending_*`, ping,\nframe advantage) are omitted.\n> \n> **`peer_wire_metrics_are_wired_across_smoke_fleet`** runs the PR smoke\nfleet (2–4 players, fixed seeds) and checks aggregation invariants\n(by-kind sums match packet counts), bidirectional traffic, Input traffic\nboth ways, and non-zero compression byte counters—exercising\n`peer_metrics` end-to-end under randomized mesh sim. **`peer_wire` is\nnot folded into `trace_hash`**, so meta-determinism tests stay\nunchanged.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n88f7e691babd3876edbcc479a69a5ea75725daf4. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-07-05T00:05:12-07:00",
-          "tree_id": "4fceb32cb4352a663f444e67c637e34574592ac9",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/42492249931c0c03f52a2557e93fa304c6ffd27a"
-        },
-        "date": 1783235390205,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 470,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 718,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1042,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 122351,
-            "range": "± 220",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45386,
-            "range": "± 1505",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 103",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5195,6 +5069,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3147,
             "range": "± 250",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "158e85cac5456898b1dfa22813eab77917ce9c2a",
+          "message": "chore(deps): update serde in loom test lockfile (#259)\n\nBumps the cargo-loom-tests group with 1 update in the /loom-tests\ndirectory: [serde](https://github.com/serde-rs/serde).\n\nUpdates `serde` from 1.0.228 to 1.0.229\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/serde-rs/serde/releases\">serde's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.0.229</h2>\n<ul>\n<li>Update to syn 3</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/7fc3b4c30c94f73a96ebd1553f2b090d928fc3a8\"><code>7fc3b4c</code></a>\nRelease 1.0.229</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6d6e9a11101354ce769a3438a088b6b9305c1863\"><code>6d6e9a1</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/serde-rs/serde/issues/3085\">#3085</a>\nfrom dtolnay/syn3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6dec3b751126c8338cac0fe8085612d695e4ecf3\"><code>6dec3b7</code></a>\nUpdate to syn 3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/cfe669241065984177ff63af8b45058e6e9b499d\"><code>cfe6692</code></a>\nResolve mut_mut pedantic clippy lint</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/1023d077510b4aef36a41ef56fdb7798568a2654\"><code>1023d07</code></a>\nUpdate actions/upload-artifact@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/dd682c2c86aa7629e77c1ccd93212d3729f4c66d\"><code>dd682c2</code></a>\nUpdate actions/checkout@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/5f0f18b9211732f2d82f73b5a43e4f5ff3701251\"><code>5f0f18b</code></a>\nUpdate ui test suite to nightly-2026-06-01</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/63a1498f0e7be991ffac5939bdd202ca16e9a23f\"><code>63a1498</code></a>\nRegenerate stderr with trybuild normalization fixes</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/fa7da4a93567ed347ad0735c28e439fca688ef26\"><code>fa7da4a</code></a>\nFix unused_features warning</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6b1a17851ea3d86a56aa116ca1cbf428f8d5f22d\"><code>6b1a178</code></a>\nUnpin CI miri toolchain</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/serde-rs/serde/compare/v1.0.228...v1.0.229\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Lockfile-only dependency patch with no changes to fortress-rollback or\nloom test code; serde 1.0.229 is a minor release updating serde_derive’s\nsyn dependency.\n> \n> **Overview**\n> Updates **`loom-tests/Cargo.lock`** only: **`serde`**,\n**`serde_core`**, and **`serde_derive`** move from **1.0.228** to\n**1.0.229**.\n> \n> The notable transitive change is that **`serde_derive`** now depends\non **`syn` 3.0.3** (added as a separate lockfile entry), while other\nproc-macro crates in the same lockfile keep **`syn` 2.0.111** via\nexplicit version pins. No application or test source files are modified.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n5389ad653105568c3a26ee765419bacdf6082db1. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-01T17:38:58-07:00",
+          "tree_id": "b8e096eb90d3d694f36980260b35db06d983f2e7",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/158e85cac5456898b1dfa22813eab77917ce9c2a"
+        },
+        "date": 1785631647855,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 134954,
+            "range": "± 315",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 50499,
+            "range": "± 355",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1601,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3111,
+            "range": "± 254",
             "unit": "ns/iter"
           }
         ]
