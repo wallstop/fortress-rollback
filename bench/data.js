@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785687120273,
+  "lastUpdate": 1785687493531,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "99321fcbbab6a337d52a36b8dacf8d50a58f9576",
-          "message": "Hardening M3 §6.1: PeerKill lifecycle op (peer crash) + oracle alive-mask (#200)\n\nThird M3 §6.1 lifecycle op — the first oracle-coupled one, introducing the alive-mask §6.2 liveness needs. `ScheduleEvent::PeerKill` crashes a peer: the harness stops driving it and detaches it from the fabric (inbox discarded, further traffic dropped), and the oracle excludes it from the *liveness* checks (end-progress + the live-peer confirmed prefix) while still comparing its pre-death states. Test-infra only.\n\n- schedule.rs: PeerKill { peer }; schema v4; round-trip covers all three lifecycle events.\n- oracle.rs: dead mask + mark_peer_dead (fail-loud on out-of-range); finalize excludes dead peers from (c-lite) and from global_confirmed, but still compares their pre-death recorded states in (b); NoLivePeers guard against an all-crashed vacuous pass.\n- harness/mod.rs: dead mask; PeerKill handler (detach + mark_peer_dead); drive loop skips dead peers; peer index in the shared up-front validation.\n- fleet.rs: peer_kill_survivors_converge_under_continue_without (GREEN — a single crash under ContinueWithout degrades gracefully: survivors stay byte-consistent, no fork) + oracle_catches_seeded_divergence_under_peer_kill (survivor corrupted post-crash — the mask lets state-agreement reach the post-crash prefix) + oracle_catches_pre_kill_divergence_on_the_killed_peer (a peer that diverged before crashing is still caught) + run_rejects_out_of_range_peer_kill.\n\nData: crashing peer 1 of 4 under ContinueWithout keeps survivors {0,2,3} byte-consistent — contrast Halt's D13 divergence and the split-brain fork.\n\nReviewed by an adversarial sub-agent (verdict: solid) + GitHub Copilot (9 rounds — 2 substantive oracle-integrity fixes: all-dead guard, pre-death divergence detection; then fail-loud + doc precision) + Cursor Bugbot (SUCCESS).",
-          "timestamp": "2026-07-05T13:53:30-07:00",
-          "tree_id": "6aedb1b0d9dd093120dcde374087a2d8a8a8a9cb",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/99321fcbbab6a337d52a36b8dacf8d50a58f9576"
-        },
-        "date": 1783285101793,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 161,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 484,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 743,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1062,
-            "range": "± 41",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 126896,
-            "range": "± 372",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44824,
-            "range": "± 438",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 106",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4763,6 +4637,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3139,
             "range": "± 241",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "71d9ca03f7aa05528793b0a6bf4ce01fe40f66fa",
+          "message": "Refresh standalone workspace dependencies (#276)\n\n## Summary\n\n- refresh every dependency in the three standalone Cargo workspaces to\nthe newest version allowed by their manifests\n- add the previously omitted `/tests/godot-emscripten` workspace to\nweekly Dependabot coverage\n- leave the root workspace unchanged because `cargo update --workspace`\nreports zero compatible updates\n\n## Compatibility and security\n\n- retains the repository's declared dependency constraints and lockfile\nformat\n- fuzz and Loom workspaces compile with Rust 1.86\n- the Godot Emscripten probe compiles on its supported current toolchain\nfor `wasm32-unknown-emscripten`; its existing `godot 0.5.4` dependency\nrequires Rust 1.94\n- `cargo audit` reports no vulnerabilities or yanked crates; the allowed\nbincode unmaintained advisory remains tracked in #273\n- the macroquad advisory remains tracked separately in #274\n\n## Validation\n\n- `cargo +1.86.0 check --locked --manifest-path fuzz/Cargo.toml`\n- `RUSTFLAGS='--cfg loom' cargo +1.86.0 check --locked --manifest-path\nloom-tests/Cargo.toml`\n- `cargo check --locked --manifest-path\ntests/godot-emscripten/Cargo.toml --target wasm32-unknown-emscripten`\n- `cargo audit --file` for all three refreshed lockfiles\n- `cargo update --dry-run` for all three standalone manifests: zero\nremaining compatible updates\n- repository pre-commit hooks for the staged files\n\n## Review readiness\n\nThis is intentionally separate from #275: it contains only generated\nlockfile refreshes and Dependabot coverage. It has no library source,\npublic API, protocol, or behavior change.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Dependency-only lockfile and CI config changes with no API or runtime\nbehavior changes; risk is limited to toolchain/test compatibility if a\ntransitive update regresses builds.\n> \n> **Overview**\n> Refreshes **Cargo.lock** for the three standalone workspaces (`fuzz/`,\n`loom-tests/`, and `tests/godot-emscripten/`) to the newest versions\nallowed by their manifests, without changing root workspace dependencies\nor any library source.\n> \n> Lockfile churn is mostly transitive bumps (e.g. `syn`, `libc`,\n`wasm-bindgen`, `futures-*`, regex crates) and slimmer Windows-related\ndependency trees where upstream crates dropped older `windows` umbrella\npackages.\n> \n> **Dependabot** now includes weekly grouped updates for\n`/tests/godot-emscripten`, matching the other isolated Cargo workspaces.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n51e40e2a0e3188c369815074b61dee3b6c56021a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-02T16:04:28Z",
+          "tree_id": "266f1aefcfa67aaa6c9142447b07fab320313618",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/71d9ca03f7aa05528793b0a6bf4ce01fe40f66fa"
+        },
+        "date": 1785687492328,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 132653,
+            "range": "± 795",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 48373,
+            "range": "± 290",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1243,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 109",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3140,
+            "range": "± 204",
             "unit": "ns/iter"
           }
         ]
