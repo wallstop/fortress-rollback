@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785631649620,
+  "lastUpdate": 1785634366694,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -5495,6 +5495,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1373,
             "range": "± 3",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e3e90605b92fd68e593859286eba2f8f82192c31",
+          "message": "chore(deps): refresh fuzz dependency lockfile (#268)\n\nBumps the cargo-fuzz group with 5 updates in the /fuzz directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [libfuzzer-sys](https://github.com/rust-fuzz/libfuzzer) | `0.4.10` |\n`0.4.13` |\n| [serde](https://github.com/serde-rs/serde) | `1.0.228` | `1.0.229` |\n| [tracing](https://github.com/tokio-rs/tracing) | `0.1.43` | `0.1.44` |\n| [smallvec](https://github.com/servo/rust-smallvec) | `1.15.1` |\n`1.15.2` |\n| [tracing-subscriber](https://github.com/tokio-rs/tracing) | `0.3.22` |\n`0.3.23` |\n\n\nUpdates `libfuzzer-sys` from 0.4.10 to 0.4.13\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/rust-fuzz/libfuzzer/blob/main/CHANGELOG.md\">libfuzzer-sys's\nchangelog</a>.</em></p>\n<blockquote>\n<h2>0.4.13</h2>\n<p>Released 2026-06-04.</p>\n<h3>Changed</h3>\n<ul>\n<li>Updated docs for the <code>fuzz_mutator!</code> macro to link to <a\nhref=\"https://docs.rs/mutatis\">the <code>mutatis</code>\ncrate</a>, which is a helpful crate when writing complex\ncustom mutators.</li>\n</ul>\n<hr />\n<h2>0.4.12</h2>\n<p>Released 2026-02-10.</p>\n<h3>Changed</h3>\n<ul>\n<li>Recommend <code>SmallRng</code> over <code>StdRng</code> in the\nexamples for faster, more lightweight\nseeding and sampling</li>\n<li>Updated <code>rand</code> dependency from 0.8.5 to 0.10</li>\n<li>Updated <code>flate2</code> dependency from 1.0.24 to 1.1</li>\n<li>Rename <code>gen</code> variable to <code>rng</code> for better 2024\nEdition compatibility</li>\n</ul>\n<hr />\n<h2>0.4.11</h2>\n<p>Released 2026-02-10.</p>\n<h3>Changed</h3>\n<ul>\n<li>Updated to <code>libFuzzer</code> commit <code>a47b42eb9f9b</code>\n(<code>release/22.x</code>).</li>\n</ul>\n<hr />\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/719e4efb9b8857ebaa782ae59376c8cbb78fed0f\"><code>719e4ef</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/144\">#144</a>\nfrom fitzgen/bump-to-0.4.13</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/2500b23c78391c022f57ff1ee359b186ad48464d\"><code>2500b23</code></a>\nBump to version 0.4.13</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/e9120b05b4d85d4c3d70a98f4c9eafce6d6d60d0\"><code>e9120b0</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/143\">#143</a>\nfrom fitzgen/link-to-mutatis-from-fuzz-mutator</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/0743afb84597680abf52881307a9c37ae9eadbf0\"><code>0743afb</code></a>\nLink to <code>mutatis</code> from the <code>fuzz_mutator!</code>\ndocs</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/752f2e26ba609c1d909795ff0e9bf9685c9d410b\"><code>752f2e2</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/142\">#142</a>\nfrom fitzgen/bump-to-0.4.12</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/735448b1416f0326f81d54b92cf47d1052180bbf\"><code>735448b</code></a>\nBump to 0.4.12</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/be9241f1b73b802f44d17f622c39f03a50ff2fa9\"><code>be9241f</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/140\">#140</a>\nfrom rchildre3/update-deps-and-rand-algos</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/4b013b634b8b89b146caaacd4d578cc7e2b0f28e\"><code>4b013b6</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/141\">#141</a>\nfrom fitzgen/bump-to-version-0.4.11</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/312386d095b11bc7d610e1d245c8ae76b729f4d8\"><code>312386d</code></a>\nBump to version 0.4.11</li>\n<li><a\nhref=\"https://github.com/rust-fuzz/libfuzzer/commit/31764e336c54023817e7d5d4d94d19bf794530c2\"><code>31764e3</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/rust-fuzz/libfuzzer/issues/139\">#139</a>\nfrom rchildre3/update-libfuzzer-22.x</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/rust-fuzz/libfuzzer/compare/0.4.10...0.4.13\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `serde` from 1.0.228 to 1.0.229\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/serde-rs/serde/releases\">serde's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.0.229</h2>\n<ul>\n<li>Update to syn 3</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/7fc3b4c30c94f73a96ebd1553f2b090d928fc3a8\"><code>7fc3b4c</code></a>\nRelease 1.0.229</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6d6e9a11101354ce769a3438a088b6b9305c1863\"><code>6d6e9a1</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/serde-rs/serde/issues/3085\">#3085</a>\nfrom dtolnay/syn3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6dec3b751126c8338cac0fe8085612d695e4ecf3\"><code>6dec3b7</code></a>\nUpdate to syn 3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/cfe669241065984177ff63af8b45058e6e9b499d\"><code>cfe6692</code></a>\nResolve mut_mut pedantic clippy lint</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/1023d077510b4aef36a41ef56fdb7798568a2654\"><code>1023d07</code></a>\nUpdate actions/upload-artifact@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/dd682c2c86aa7629e77c1ccd93212d3729f4c66d\"><code>dd682c2</code></a>\nUpdate actions/checkout@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/5f0f18b9211732f2d82f73b5a43e4f5ff3701251\"><code>5f0f18b</code></a>\nUpdate ui test suite to nightly-2026-06-01</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/63a1498f0e7be991ffac5939bdd202ca16e9a23f\"><code>63a1498</code></a>\nRegenerate stderr with trybuild normalization fixes</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/fa7da4a93567ed347ad0735c28e439fca688ef26\"><code>fa7da4a</code></a>\nFix unused_features warning</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6b1a17851ea3d86a56aa116ca1cbf428f8d5f22d\"><code>6b1a178</code></a>\nUnpin CI miri toolchain</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/serde-rs/serde/compare/v1.0.228...v1.0.229\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `tracing` from 0.1.43 to 0.1.44\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tracing/releases\">tracing's\nreleases</a>.</em></p>\n<blockquote>\n<h2>tracing 0.1.44</h2>\n<h3>Fixed</h3>\n<ul>\n<li>Fix <code>record_all</code> panic (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>)</li>\n</ul>\n<h3>Changed</h3>\n<ul>\n<li><code>tracing-core</code>: updated to 0.1.36 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/pull/3432\">tokio-rs/tracing#3432</a>\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/pull/3440\">tokio-rs/tracing#3440</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/2d55f6faf9be83e7e4634129fb96813241aac2b8\"><code>2d55f6f</code></a>\nchore: prepare tracing 0.1.44 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3439\">#3439</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/10a9e838a35e6ded79d66af246be2ee05417136d\"><code>10a9e83</code></a>\nchore: prepare tracing-core 0.1.36 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/ee82cf92a8c750f98cfb7a417cc8defb37e26a00\"><code>ee82cf9</code></a>\ntracing: fix record_all panic (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/9978c3663bcd58de14b3cf089ad24cb63d00a922\"><code>9978c36</code></a>\nchore: prepare tracing-mock 0.1.0-beta.3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3429\">#3429</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/cc44064b3a41cb586bd633f8a024354928e25819\"><code>cc44064</code></a>\nchore: prepare tracing-subscriber 0.3.22 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3428\">#3428</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/tokio-rs/tracing/compare/tracing-0.1.43...tracing-0.1.44\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `smallvec` from 1.15.1 to 1.15.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/servo/rust-smallvec/releases\">smallvec's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.15.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Exclude development script from cargo packaging by <a\nhref=\"https://github.com/weiznich\"><code>@​weiznich</code></a> in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/397\">servo/rust-smallvec#397</a></li>\n<li>Fix use-after-free in DrainFilter::keep_rest for SmallVec with\ncapacity 0 by <a\nhref=\"https://github.com/Shnatsel\"><code>@​Shnatsel</code></a> in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/407\">servo/rust-smallvec#407</a></li>\n<li>Work around rustc 1.93 perf regression with MaybeUninit by <a\nhref=\"https://github.com/glandium\"><code>@​glandium</code></a> in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/410\">servo/rust-smallvec#410</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a href=\"https://github.com/Shnatsel\"><code>@​Shnatsel</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/407\">servo/rust-smallvec#407</a></li>\n<li><a href=\"https://github.com/glandium\"><code>@​glandium</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/410\">servo/rust-smallvec#410</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.15.1...v1.15.2\">https://github.com/servo/rust-smallvec/compare/v1.15.1...v1.15.2</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/c469051a1ba05ef1a03dd69e14b4a5aa329e6f10\"><code>c469051</code></a>\nBump version.</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/9fe422b9cd1ab6350e35ca48386a5de348900583\"><code>9fe422b</code></a>\nFix Windows CI.</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/51b965f56a066888828dae0b84e2ed190a1bdfe7\"><code>51b965f</code></a>\nWork around rustc 1.93 perf regression with MaybeUninit</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/9da26a5315c563d4de181b0be9e75d165289f81e\"><code>9da26a5</code></a>\nFix use-after-free in DrainFilter::keep_rest for zero-capacity\nSmallVecs</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/79184f15937f841881cb32f02fe30286def5b69b\"><code>79184f1</code></a>\nAdd Miri test for use-after-free in DrainFilter::keep_rest</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/f59fb36b35064e63aa74992aab807552b1b68096\"><code>f59fb36</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/397\">#397</a>\nfrom GiGainfosystems/exclude_scripts</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/28b6ed71755c929634fc331c30a1d32b95edf576\"><code>28b6ed7</code></a>\nExclude development script</li>\n<li>See full diff in <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.15.1...v1.15.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `tracing-subscriber` from 0.3.22 to 0.3.23\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/tokio-rs/tracing/releases\">tracing-subscriber's\nreleases</a>.</em></p>\n<blockquote>\n<h2>tracing-subscriber 0.3.23</h2>\n<h3>Fixed</h3>\n<ul>\n<li>Allow ansi sanitization to be disabled (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3484\">#3484</a>)</li>\n</ul>\n<p><a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3484\">#3484</a>:\n<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/pull/3484\">tokio-rs/tracing#3484</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/54ede4d5d85a536aed5485c5213011d9ec961935\"><code>54ede4d</code></a>\nchore: prepare tracing-subscriber 0.3.23 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3490\">#3490</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/37558d5f26340e999089bf3a680a800435332312\"><code>37558d5</code></a>\nsubscriber: allow ansi sanitization to be disabled (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3484\">#3484</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/efc690fa6bd1d9c3a57528b9bc8ac80504a7a6ed\"><code>efc690f</code></a>\ncore: add missing const (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3449\">#3449</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/0c32367cf9df27e750c4c81803de62a4e64e2ef1\"><code>0c32367</code></a>\ncore: Use const initializers instead of <code>once_cell</code></li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/9feb241133e55e70c7d4399689b8ef72f71d070f\"><code>9feb241</code></a>\ndocs: add arcswap reload crate to related (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3442\">#3442</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/2d55f6faf9be83e7e4634129fb96813241aac2b8\"><code>2d55f6f</code></a>\nchore: prepare tracing 0.1.44 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3439\">#3439</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/10a9e838a35e6ded79d66af246be2ee05417136d\"><code>10a9e83</code></a>\nchore: prepare tracing-core 0.1.36 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3440\">#3440</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/ee82cf92a8c750f98cfb7a417cc8defb37e26a00\"><code>ee82cf9</code></a>\ntracing: fix record_all panic (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3432\">#3432</a>)</li>\n<li><a\nhref=\"https://github.com/tokio-rs/tracing/commit/9978c3663bcd58de14b3cf089ad24cb63d00a922\"><code>9978c36</code></a>\nchore: prepare tracing-mock 0.1.0-beta.3 (<a\nhref=\"https://redirect.github.com/tokio-rs/tracing/issues/3429\">#3429</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/tokio-rs/tracing/compare/tracing-subscriber-0.3.22...tracing-subscriber-0.3.23\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Lockfile-only dependency bumps in the fuzz harness; no production code\npaths changed, though serde’s syn 3 move is worth a quick fuzz build\nsmoke check.\n> \n> **Overview**\n> Updates **`fuzz/Cargo.lock`** only—no Rust source changes. Five direct\nbumps in the fuzz workspace: **`libfuzzer-sys`** 0.4.10→0.4.13,\n**`serde`** 1.0.228→1.0.229, **`tracing`** 0.1.43→0.1.44, **`smallvec`**\n1.15.1→1.15.2, and **`tracing-subscriber`** 0.3.22→0.3.23.\n> \n> The lockfile also pins **`syn`** twice (`2.0.111` for most\nproc-macros, **`3.0.3`** for **`serde_derive`** after serde’s syn 3\nmigration), plus transitive bumps to **`tracing-core`**,\n**`serde_core`**, and **`serde_derive`**.\n> \n> Notable upstream fixes in these versions: **`smallvec`**\nuse-after-free in `DrainFilter::keep_rest`, **`tracing`** `record_all`\npanic fix, and **`libfuzzer-sys`** libFuzzer 22.x / dependency updates\nin 0.4.11–0.4.13.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n516d246095bcd69eadbd0ab8a9a5cfbb22600baa. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-01T18:24:00-07:00",
+          "tree_id": "77500f93ec513809f5f13c53751c8a12e9a7018d",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e3e90605b92fd68e593859286eba2f8f82192c31"
+        },
+        "date": 1785634366602,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 40,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 93,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 337,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 46,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 63,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 159,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 575,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 102,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 127,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 167,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 174,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 228,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 324,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 318,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 426,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 623,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 159,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 189,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 222,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 289,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 349,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 440,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 574,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 697,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 875,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 554,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 654,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 817,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 987,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 99,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 135,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 574,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 968,
+            "range": "± 42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1481,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 84,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 283,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 1056,
+            "range": "± 17",
             "unit": "ns/iter"
           }
         ]
