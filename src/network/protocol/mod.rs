@@ -3254,6 +3254,13 @@ impl<T: Config> UdpProtocol<T> {
         self.queue_message(message.into_body());
     }
 
+    /// Returns the number of coordinated graceful-drop messages currently
+    /// staged in the bounded endpoint mailbox.
+    #[must_use]
+    pub(crate) fn received_drop_message_count(&self) -> usize {
+        self.received_drop_messages.len()
+    }
+
     /// Drains every coordinated graceful-drop control message staged since the
     /// previous drain. The endpoint mailbox itself is bounded by
     /// [`MAX_RECEIVED_DROP_MESSAGES`].

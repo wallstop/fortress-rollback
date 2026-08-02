@@ -4,17 +4,24 @@
 //! The process-local global allocator therefore cannot observe allocations from
 //! another test, and every measured operation excludes construction and warm-up.
 
-#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 #![forbid(unsafe_code)]
 
 use std::alloc::System;
 use std::hint::black_box;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 use fortress_rollback::network::codec;
 use fortress_rollback::{
-    Config, DesyncDetection, FortressRequest, Message, NonBlockingSocket, P2PSession, PlayerHandle,
-    SessionBuilder, SyncTestSession,
+    Config, DesyncDetection, FortressRequest, Message, MessageKind, NonBlockingSocket, P2PSession,
+    PlayerHandle, SessionBuilder, SessionState, SyncTestSession,
 };
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 
@@ -37,6 +44,70 @@ impl NonBlockingSocket<SocketAddr> for AllocationSocket {
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
         Vec::new()
     }
+}
+
+struct SwitchableSocket {
+    local_addr: SocketAddr,
+    peer_addr: SocketAddr,
+    sender: mpsc::Sender<(SocketAddr, Message)>,
+    receiver: Mutex<mpsc::Receiver<(SocketAddr, Message)>>,
+    drop_outbound: Arc<AtomicBool>,
+    sends: Arc<AtomicUsize>,
+}
+
+impl NonBlockingSocket<SocketAddr> for SwitchableSocket {
+    fn send_to(&mut self, msg: &Message, addr: &SocketAddr) {
+        if *addr != self.peer_addr {
+            return;
+        }
+        self.sends.fetch_add(1, Ordering::Relaxed);
+        if !self.drop_outbound.load(Ordering::Relaxed) {
+            let _result = self.sender.send((self.local_addr, msg.clone()));
+        }
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+        self.receiver
+            .lock()
+            .expect("allocation socket mutex poisoned")
+            .try_iter()
+            .collect()
+    }
+}
+
+fn switchable_socket_pair() -> (
+    SwitchableSocket,
+    SwitchableSocket,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+) {
+    let addr_a = SocketAddr::from(([127, 0, 0, 1], 31_001));
+    let addr_b = SocketAddr::from(([127, 0, 0, 1], 31_002));
+    let (to_a, from_b) = mpsc::channel();
+    let (to_b, from_a) = mpsc::channel();
+    let drop_a = Arc::new(AtomicBool::new(false));
+    let sends_a = Arc::new(AtomicUsize::new(0));
+
+    (
+        SwitchableSocket {
+            local_addr: addr_a,
+            peer_addr: addr_b,
+            sender: to_b,
+            receiver: Mutex::new(from_b),
+            drop_outbound: Arc::clone(&drop_a),
+            sends: Arc::clone(&sends_a),
+        },
+        SwitchableSocket {
+            local_addr: addr_b,
+            peer_addr: addr_a,
+            sender: to_a,
+            receiver: Mutex::new(from_a),
+            drop_outbound: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(AtomicUsize::new(0)),
+        },
+        drop_a,
+        sends_a,
+    )
 }
 
 fn measure<T>(operation: impl FnOnce() -> T) -> (T, Stats) {
@@ -165,6 +236,166 @@ fn warmed_all_local_p2p_frame_stats(num_players: usize) -> Stats {
     stats
 }
 
+fn fulfill_save_requests(requests: fortress_rollback::RequestVec<AllocationConfig>) {
+    for request in requests {
+        match request {
+            FortressRequest::SaveGameState { cell, frame } => {
+                cell.save(frame, Some(0), Some(0));
+            },
+            FortressRequest::AdvanceFrame { .. } => {},
+            FortressRequest::LoadGameState { frame, .. } => {
+                panic!("allocation fixture unexpectedly requested rollback to {frame}");
+            },
+        }
+    }
+}
+
+fn warmed_networked_p2p_send_stats(num_players: usize) -> Stats {
+    let (socket_a, socket_b, drop_a, sends_a) = switchable_socket_pair();
+    let addr_a = socket_a.local_addr;
+    let addr_b = socket_b.local_addr;
+    let remote_handle = PlayerHandle::new(num_players.saturating_sub(1));
+
+    let mut builder_a = SessionBuilder::new()
+        .with_num_players(num_players)
+        .expect("configure networked allocation-contract player count")
+        .with_desync_detection_mode(DesyncDetection::Off);
+    let mut builder_b = SessionBuilder::new()
+        .with_num_players(num_players)
+        .expect("configure networked allocation-contract player count")
+        .with_desync_detection_mode(DesyncDetection::Off);
+    for player in 0..num_players {
+        if player + 1 == num_players {
+            builder_a = builder_a
+                .add_remote_player(player, addr_b)
+                .expect("add allocation-contract remote player to A");
+            builder_b = builder_b
+                .add_local_player(player)
+                .expect("add allocation-contract local player to B");
+        } else {
+            builder_a = builder_a
+                .add_local_player(player)
+                .expect("add allocation-contract local player to A");
+            builder_b = builder_b
+                .add_remote_player(player, addr_a)
+                .expect("add allocation-contract remote player to B");
+        }
+    }
+    let mut session_a: P2PSession<AllocationConfig> = builder_a
+        .start_p2p_session(socket_a)
+        .expect("construct networked allocation-contract session A");
+    let mut session_b: P2PSession<AllocationConfig> = builder_b
+        .start_p2p_session(socket_b)
+        .expect("construct networked allocation-contract session B");
+
+    for _ in 0..64 {
+        session_a.poll_remote_clients();
+        session_b.poll_remote_clients();
+        if session_a.current_state() == SessionState::Running
+            && session_b.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+    assert_eq!(session_a.current_state(), SessionState::Running);
+    assert_eq!(session_b.current_state(), SessionState::Running);
+
+    for warm_up_frame in 0..2 {
+        for player in 0..num_players.saturating_sub(1) {
+            session_a
+                .add_local_input(PlayerHandle::new(player), 0)
+                .expect("add networked warm-up input to A");
+        }
+        session_b
+            .add_local_input(remote_handle, 0)
+            .expect("add networked warm-up input to B");
+        fulfill_save_requests(
+            session_a
+                .advance_frame()
+                .expect("advance networked warm-up frame on A"),
+        );
+        fulfill_save_requests(
+            session_b
+                .advance_frame()
+                .expect("advance networked warm-up frame on B"),
+        );
+        for _ in 0..4 {
+            session_a.poll_remote_clients();
+            session_b.poll_remote_clients();
+        }
+        assert_eq!(
+            session_a
+                .peer_metrics(remote_handle)
+                .expect("read A peer metrics")
+                .pending_output_len,
+            0,
+            "warm-up input {warm_up_frame} must be acknowledged before measuring"
+        );
+    }
+
+    drop_a.store(true, Ordering::Relaxed);
+    let sends_before = sends_a.load(Ordering::Relaxed);
+    let metrics_before = session_a
+        .peer_metrics(remote_handle)
+        .expect("read A peer metrics before measurement");
+    let (requests, stats) = measure(|| {
+        for player in 0..num_players.saturating_sub(1) {
+            session_a
+                .add_local_input(PlayerHandle::new(player), 0)
+                .expect("add measured networked input to A");
+        }
+        black_box(
+            session_a
+                .advance_frame()
+                .expect("advance measured networked frame on A"),
+        )
+    });
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, FortressRequest::AdvanceFrame { .. }))
+            .count(),
+        1,
+        "the measured frame must request exactly one application advance"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !matches!(request, FortressRequest::LoadGameState { .. })),
+        "the measured steady-state frame must not include rollback work"
+    );
+    black_box(requests);
+    assert_eq!(
+        sends_a.load(Ordering::Relaxed),
+        sends_before + 1,
+        "measured frame must exercise one endpoint send"
+    );
+    let metrics_after = session_a
+        .peer_metrics(remote_handle)
+        .expect("read A peer metrics after measurement");
+    assert_eq!(
+        metrics_after.messages_sent_by_kind.get(MessageKind::Input),
+        metrics_before.messages_sent_by_kind.get(MessageKind::Input) + 1,
+        "the measured endpoint message must be an Input packet"
+    );
+    assert_eq!(
+        metrics_after.input_bytes_pre_compression,
+        metrics_before.input_bytes_pre_compression
+            + u64::try_from(num_players.saturating_sub(1) * size_of::<u32>())
+                .expect("bounded input bytes fit u64"),
+        "the measured Input packet must include every local player's bytes"
+    );
+    assert!(
+        metrics_after.input_bytes_post_compression > metrics_before.input_bytes_post_compression,
+        "the measured Input packet must exercise delta/RLE compression"
+    );
+    assert_eq!(
+        metrics_after.pending_output_len, 1,
+        "the non-allocating sink must leave exactly one bounded frame awaiting acknowledgement"
+    );
+    stats
+}
+
 /// Allocation contracts are measured together so the instrumented allocator
 /// cannot observe concurrently running tests in this integration-test process.
 #[test]
@@ -277,6 +508,31 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         }
         assert_allocation_ceiling(
             &format!("warmed {players}-player all-local P2P frame"),
+            first,
+            operation_ceiling,
+            byte_ceiling,
+        );
+    }
+
+    // This real synchronized one-endpoint path includes Fortress's internal
+    // receive/control poll plus input serialization, delta/RLE compression,
+    // status gossip, and request construction. The switchable socket counts
+    // submission but deliberately excludes adapter buffering and cloning. Its
+    // allocation contract is bounded rather than zero: one input buffer stays
+    // retained until acknowledgment, and compression/status temporaries are
+    // released after submission. The byte ceilings also prevent the empty
+    // graceful-drop poll from restoring its former 28 KiB reservation.
+    for (players, operation_ceiling, byte_ceiling) in [(2, 4, 128), (4, 4, 128), (16, 5, 512)] {
+        let first = warmed_networked_p2p_send_stats(players);
+        for repetition in 1..3 {
+            assert_eq!(
+                warmed_networked_p2p_send_stats(players),
+                first,
+                "warmed {players}-player networked P2P send repetition {repetition}"
+            );
+        }
+        assert_allocation_ceiling(
+            &format!("warmed {players}-player networked P2P send"),
             first,
             operation_ceiling,
             byte_ceiling,

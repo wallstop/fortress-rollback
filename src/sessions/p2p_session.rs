@@ -2597,13 +2597,20 @@ impl<T: Config> P2PSession<T> {
     }
 
     fn poll_coordinated_drop(&mut self) {
-        let capacity = self
+        let Some(received_count) = self
             .player_reg
             .remotes
-            .len()
-            .saturating_mul(crate::network::MAX_RECEIVE_MESSAGES_PER_POLL);
+            .values()
+            .try_fold(0_usize, |count, endpoint| {
+                count.checked_add(endpoint.received_drop_message_count())
+            })
+        else {
+            self.coordinated_drop_fail_closed(DropAbortReason::ResourceLimit, true);
+            return;
+        };
+
         let mut received = Vec::new();
-        if received.try_reserve_exact(capacity).is_err() {
+        if received_count > 0 && received.try_reserve_exact(received_count).is_err() {
             self.coordinated_drop_fail_closed(DropAbortReason::ResourceLimit, true);
             return;
         }
@@ -12859,6 +12866,49 @@ mod tests {
             ),
             0,
             "the certificate generation uses the same documented u16 wrapping semantics"
+        );
+    }
+
+    #[test]
+    fn empty_drop_mailboxes_still_drive_queued_operation() {
+        let mut session = create_two_player_session();
+        let remote = PlayerHandle::new(1);
+        let remote_addr = test_addr(8080);
+        session.state = SessionState::Running;
+        session
+            .player_reg
+            .remotes
+            .get_mut(&remote_addr)
+            .expect("remote endpoint exists")
+            .force_running_for_tests();
+        assert_eq!(
+            session
+                .player_reg
+                .remotes
+                .values()
+                .map(UdpProtocol::received_drop_message_count)
+                .sum::<usize>(),
+            0,
+            "the regression requires empty bounded mailboxes"
+        );
+        assert!(session.coordinated_drop.queued.insert(remote));
+
+        session.poll_coordinated_drop();
+
+        assert!(
+            !session.coordinated_drop.queued.contains(&remote),
+            "the empty-mailbox poll must consume the queued operation"
+        );
+        assert!(
+            session.coordinated_drop.committed.contains_key(&remote),
+            "the single-survivor certificate must commit without inbound control messages"
+        );
+        assert!(
+            session
+                .local_connect_status
+                .get(remote.as_usize())
+                .is_some_and(|status| status.disconnected),
+            "the committed operation must freeze the remote slot"
         );
     }
 
