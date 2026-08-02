@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785634364600,
+  "lastUpdate": 1785637792391,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bbd0bd4670b410eca6aa310e0a22f02dfd69dd95",
-          "message": "Hardening M2 §5.2: HotJoinMetrics — joiner hot-join handshake latency (#196)\n\n## Summary\n\nCompletes the M2 §5.2 metrics surface. Adds a `hot-join`-feature-gated\npublic `HotJoinMetrics`, read via `P2PSession::hot_join_metrics() ->\nOption<HotJoinMetrics>` (`None` for any session that did not hot-join —\na host, or a peer that synchronized normally). It reports a joiner's\nhandshake latency:\n\n- `completed` — whether the joiner reached `Running`.\n- `polls_to_running` — `poll_remote_clients` iterations spent\n`HotJoining`.\n- `millis_to_running` — elapsed time on the **injectable protocol\nclock**, so it is deterministic under the DST/simulation harness (no\nwall clock).\n\n## Design\n\n- **Clock access** reuses the session's already-stored\n`protocol_config.clock` via a `clock_now`/`now()` helper byte-identical\nto the protocol endpoint's — session- and endpoint-level timings share a\nbasis.\n- `join_started_at` is stamped at construction for a joiner (read before\n`protocol_config` is moved into the session); `became_running_at` is\nstamped by an **idempotent** `record_hot_join_activation()` (only stamps\nonce, no-op for a non-joiner).\n- **Every-path completeness (the D9 lesson):** a joiner reaches\n`Running` at three sites — 2-peer snapshot apply, N-peer snapshot apply,\nand `check_initial_sync` (reachable when a joiner is fail-closed to\n`Synchronizing` mid-handshake and later resumes without applying a\nsnapshot). All three call the shared idempotent helper, so `completed`\ncan never be permanently stuck `false` while the session is genuinely\n`Running`. **The `check_initial_sync` site was found by an internal\nadversarial review** — my first pass instrumented only the two apply\nsites; the review proved the fail-closed→resume path reaches `Running`\nuninstrumented.\n- Type matches `SessionMetrics`/`PeerMetrics` conventions:\n`#[non_exhaustive]`, `Copy`, `serde::Serialize`,\n`to_json()`/`to_json_pretty()` under `json`.\n\n## Tests\n\n`hot_join_metrics_records_joiner_latency` drives a full 2-peer join and\nasserts: host → `None`; joiner incomplete (with `millis == 0`) while\n`HotJoining`; completed with positive `polls_to_running` and\n`millis_to_running` after activation; and a stable completed metric\nacross later polls. The N-peer and fail-closed sites reuse the same\nvalidated idempotent helper (the N-peer joiner tests use a low-level\n`ManualJoiner`, not a `P2PSession`, so they can't exercise the accessor\ndirectly).\n\n## Validation\n\n- `cargo clippy --workspace --all-targets` on both `tokio,json` and\n`hot-join,tokio,json` — clean.\n- `cargo nextest run` — 2349 passed; `--features hot-join` — 2588\npassed.\n- `cargo doc --no-deps --features hot-join,tokio,json,sync-send\n--document-private-items` — clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\nCompiles cleanly with and without `hot-join` (all new items\nfeature-gated; no dead code under `#![deny(warnings)]`).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Observability-only, feature-gated instrumentation on existing hot-join\nactivation paths; no wire or handshake behavior changes.\n> \n> **Overview**\n> With the **`hot-join`** feature, this PR adds a public\n**`HotJoinMetrics`** type and **`P2PSession::hot_join_metrics() ->\nOption<HotJoinMetrics>`**. Hosts and normally synchronized peers get\n**`None`**; joiners get **`completed`**, **`polls_to_running`**\n(increments on each **`poll_remote_clients`** while **`HotJoining`**),\nand **`millis_to_running`** on the session’s **`ProtocolConfig::clock`**\n(deterministic under simulation).\n> \n> **`P2PSession`** stores joiner-side **`HotJoinTiming`**: join start at\nconstruction, activation via idempotent\n**`record_hot_join_activation()`** at all three paths to **`Running`**\n(2-peer snapshot apply, N-peer apply, and **`check_initial_sync`** after\nfail-closed resume). Optional **`to_json()`** / **`to_json_pretty()`**\nmatch other metrics types. Changelog and an integration test\n**`hot_join_metrics_records_joiner_latency`** cover the full 2-peer join\nflow.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nd877905ca6ddcf23e35c4ce96b78ad32c615adf6. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-05T02:16:59-07:00",
-          "tree_id": "e0b0501ae18b058c998c82fc4d30e6f3aea2fc04",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bbd0bd4670b410eca6aa310e0a22f02dfd69dd95"
-        },
-        "date": 1783243298666,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 120,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 167,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 472,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 768,
-            "range": "± 27",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1072,
-            "range": "± 25",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 127394,
-            "range": "± 316",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48492,
-            "range": "± 282",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -5051,6 +4925,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 7792,
             "range": "± 142",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fc22bc4af27e9e5d331632183b1be54494938ae0",
+          "message": "test: add deterministic allocation contracts (#270)\n\nEstablish an isolated, deterministic heap-allocation ledger for documented zero-allocation paths and warmed sync-test ceilings.\n\nProgresses #264.",
+          "timestamp": "2026-08-01T19:21:20-07:00",
+          "tree_id": "ed3c0306b69ae30b92cc28668e9198b899b7de6f",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/fc22bc4af27e9e5d331632183b1be54494938ae0"
+        },
+        "date": 1785637791937,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 131341,
+            "range": "± 2409",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 47751,
+            "range": "± 425",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 92",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2787,
+            "range": "± 267",
             "unit": "ns/iter"
           }
         ]
