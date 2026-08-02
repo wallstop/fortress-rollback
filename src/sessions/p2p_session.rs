@@ -13652,12 +13652,24 @@ mod tests {
     }
 
     #[test]
-    fn advance_frame_dropped_local_input_suppresses_endpoint_send() {
+    fn advance_frame_dropped_local_input_suppresses_input_message() {
         let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
         let socket = RecordingSocket {
             sent: Arc::clone(&sent),
         };
+        let clock_now = Arc::new(std::sync::Mutex::new(web_time::Instant::now()));
+        let protocol_clock = Arc::clone(&clock_now);
+        let protocol_config = ProtocolConfig {
+            clock: Some(Arc::new(move || {
+                *protocol_clock.lock().expect("protocol clock lock")
+            })),
+            protocol_rng_seed: Some(0),
+            ..ProtocolConfig::default()
+        };
+        let elapsed_report_interval =
+            protocol_config.quality_report_interval + web_time::Duration::from_millis(1);
         let mut session = SessionBuilder::<TestConfig>::new()
+            .with_protocol_config(protocol_config)
             .with_num_players(2)
             .unwrap()
             .add_local_player(0)
@@ -13681,14 +13693,22 @@ mod tests {
             .and_then(Option::as_mut)
             .expect("local input slot must exist")
             .frame = Frame::new(1);
+        *clock_now.lock().expect("protocol clock lock") += elapsed_report_interval;
 
         session
             .advance_frame()
             .expect("dropped local input must fail closed without a send");
 
+        let sent = sent.lock().expect("recording socket lock");
         assert!(
-            sent.lock().expect("recording socket lock").is_empty(),
-            "Frame::NULL local input must suppress the whole endpoint send"
+            sent.iter()
+                .any(|message| matches!(message.body, MessageBody::QualityReport(_))),
+            "the regression requires legitimate elapsed-timer traffic"
+        );
+        assert!(
+            sent.iter()
+                .all(|message| !matches!(message.body, MessageBody::Input(_))),
+            "Frame::NULL local input must suppress Input messages; observed {sent:?}"
         );
     }
 
