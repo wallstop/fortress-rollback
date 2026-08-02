@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785637792391,
+  "lastUpdate": 1785639445143,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "9a6202cbf17ec0db7c60d2fe1c3df4313d8da45f",
-          "message": "Hardening M2 §5.3: checked-in sweep cost-ledger baseline + regression gate (#197)\n\n## Summary\n\nAdds the M2 §5.3 **cost ledger**: a checked-in baseline\n(`tests/simulation/baselines/sweep-v1.json`, blessed at 0.9.0 wire\nsizes) plus a regression comparison in `sweep_pr_gate`. Each gate cell's\ncost/behavior metrics are checked against the baseline within tolerance\n(plan §5.3: **bytes ±5%, rollbacks ±10%; `desync_incidents` exact 0**).\nAt M5, the +6 B/packet wire change surfaces here as a reviewed,\nover-tolerance delta — that's the ledger's purpose.\n\n## Change (`tests/simulation/baseline_sweep.rs`, test-only)\n\n- **`BaselineCell`** stores each cell's identity + measured cost\nmetrics. Volatile `version`/`git_sha` and the per-kind map are omitted\nso the JSON stays a stable, reviewable diff.\n- **`check_or_bless_baseline`**: compares the gate cells to the\nchecked-in file, or regenerates it when `FORTRESS_SWEEP_BLESS=1` is set\n(`FORTRESS_SWEEP_BLESS=1 cargo test --test simulation sweep_pr_gate`).\nThe refresh command is in the drift/missing-file panic message.\n- **`assert_close`** uses a relative + absolute-floor tolerance, so a\nnear-zero baseline (a LAN cell's tiny rollback rate) is not brittle\nunder a purely relative bound.\n\n## Why this is robust, not fragile\n\nThe metrics are a deterministic function of `(seed, params)` (virtual\ntime, integer PCG RNG, IEEE-correctly-rounded float ops), so\n**same-platform runs reproduce the baseline exactly** — the tolerances\nare pure cross-platform safety margin. This PR's **3-OS Build & Test CI\nvalidates cross-platform determinism directly** against the\nLinux-blessed file: if it passes on macOS/Windows, determinism holds;\nthe generous floors absorb any last-ULP noise. Intentional changes\nregenerate the baseline as a reviewed diff (the plan's model).\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json` (incl.\n`-W clippy::nursery` spot-check) — clean.\n- `cargo nextest run -E 'test(simulation::)'` — 28 passed; `--features\nhot-join` — 28 passed. Gate passes against the blessed baseline; a fresh\nbless + compare round-trips exactly.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` — all checks pass.\n\n## Remaining §5.3 (follow-ups)\n\nThe input-width `{4,32}B` axis (a broad generic-input harness refactor)\nand the nightly full-matrix CI job remain — see PLAN.md §5.3.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test-only simulation harness and checked-in JSON; no production\nruntime or auth/data paths affected.\n> \n> **Overview**\n> Adds the M2 §5.3 **cost ledger**: a checked-in baseline at\n`tests/simulation/baselines/sweep-v1.json` and a comparison step wired\ninto **`sweep_pr_gate`**.\n> \n> **`BaselineCell`** captures each gate cell’s identity and steady-state\nmetrics (bandwidth, rollbacks, lag, etc.) while omitting volatile fields\nlike `version`/`git_sha` so baseline updates stay reviewable.\n**`check_or_bless_baseline`** loads that file and compares the five PR\ngate cells: cell labels and parameters must match exactly,\n**`desync_incidents`** must stay **0**, and cost metrics use\n**`assert_close`** (bytes ±5%, rollbacks ±10%, with small absolute\nfloors for near-zero LAN rollback rates). Setting\n**`FORTRESS_SWEEP_BLESS=1`** regenerates the JSON instead of failing on\ndrift.\n> \n> This extends the existing gate (desync, liveness, determinism) with\nregression detection for wire/rollback behavior—intentional wire-format\nchanges are expected to show up as a blessed baseline diff rather than\nsilent CI pass.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n1762e9d913dba21d92b2174cbac87f21e541e8f6. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-07-05T03:10:10-07:00",
-          "tree_id": "ae884b2ded053d85570aa64e134b4252baec837b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/9a6202cbf17ec0db7c60d2fe1c3df4313d8da45f"
-        },
-        "date": 1783246476501,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 119,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 171,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 473,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 734,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1068,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 127349,
-            "range": "± 1157",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48796,
-            "range": "± 277",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4979,6 +4853,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2787,
             "range": "± 267",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "df198e728fb3b87e0ba5cd3914bb65f0d07479d0",
+          "message": "chore(ci): refresh current action pins (#271)\n\nUpdate all sccache-action call sites to v0.0.11 and pin setup-java to v5.7.0 while preserving the publish workflow's immutable SHA policy.\n\nSupersedes #269.",
+          "timestamp": "2026-08-01T19:48:51-07:00",
+          "tree_id": "6711ce26741e8a72cf3e891561326fe757905de0",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/df198e728fb3b87e0ba5cd3914bb65f0d07479d0"
+        },
+        "date": 1785639443882,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 143131,
+            "range": "± 6138",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 47184,
+            "range": "± 1599",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 108",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3146,
+            "range": "± 221",
             "unit": "ns/iter"
           }
         ]
