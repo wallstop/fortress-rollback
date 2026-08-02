@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785644435383,
+  "lastUpdate": 1785687122401,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -6911,6 +6911,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1427,
             "range": "± 5",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0d60cf4b90ff8624d8036316f607cae7a6ce2946",
+          "message": "Eliminate P2P local-input staging allocations (#275)\n\n## What\n\n- replace per-frame `P2PSession` local-input `BTreeMap` staging with\nfallibly preallocated player-indexed slots\n- retain slot storage across frames while preserving sparse handles,\noverwrite, retry, input-drop, and deterministic ordering semantics\n- let protocol serialization consume map-backed or slot-backed inputs\nwithout changing canonical handle order or encoded bytes\n- extend the deterministic allocation ledger to the isolated warmed\nall-local P2P staging path\n\n## Why\n\nIssue #264's allocation ledger identified the next candidate but\nrequired measurement before optimization. The zero-allocation target\nfailed with a stable signature:\n\n- N=2: one allocation / 192 bytes\n- N=4: one allocation / 192 bytes\n- N=16: four allocations / 800 bytes\n\nThe transient cost matched the removed sync-test staging map: N=16\ncontained 672 bytes of map nodes plus the returned `InputVec`'s 128-byte\nspill.\n\n## Result\n\nWith desync detection disabled to isolate staging, the warm-up save\nrequest fulfilled, and application callbacks outside the measured\nregion:\n\n- N=2: zero allocations / zero bytes\n- N=4: zero allocations / zero bytes\n- N=16: one allocation / 128 bytes (the returned `InputVec` spill)\n\nNetwork encoding and checksum history retain their separate bounded\nallocations; this PR does not claim whole networked frames are\nallocation-free.\n\n## Semantics and safety\n\nRegression coverage pins:\n\n- sparse/nonzero local player handles\n- reverse submission preserving ascending player order\n- observable duplicate overwrite\n- missing-input failure followed by retry with only the missing slot\n- `Frame::NULL` local-input rejection suppressing the whole endpoint\nsend\n- map-backed and slot-backed input sources producing identical frame\nmetadata and bytes\n- fallible construction-time reservation with structured errors\n\nNo public signature, config default, or wire layout changes.\n\n## Validation\n\n- allocation target went red with the exact baseline above before\nproduction changes\n- ten consecutive debug allocation runs\n- release-mode allocation contract\n- default Nextest: 2,886 passed, 71 skipped\n- hot-join Nextest: 3,142 passed, 72 skipped\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- warning-denied workspace docs\n- changelog/version checks, 1,393 links, 286 release-automation tests,\nspelling, allocation-bound hook, and full agent preflight\n- independent adversarial review: zero remaining findings\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (private staging representation)\n- CHANGELOG reviewed: YES\n\nProgresses #264.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Internal staging and protocol abstraction only; no public API or wire\nlayout changes. Risk is mainly behavioral parity (sparse handles, drop\nsuppression, encoding order), which the expanded tests target.\n> \n> **Overview**\n> **P2P local-input staging** moves from a per-frame `BTreeMap` to\nconstructor-reserved `Vec<Option<PlayerInput>>` slots indexed by player\nhandle. Slots are cleared with `None` after each advance instead of\n`clear()`, so sparse handles, overwrite, and missing-input retry keep\nworking without rebuilding map nodes each frame.\n> \n> **Wire encoding** gains an internal `InputSource` trait so\n`InputBytes::try_from_inputs` and `send_input` accept either the old map\nor the new slot slice; ascending handle order and encoded bytes stay\nidentical.\n> \n> **Allocation contract** adds warmed all-local `P2PSession` frame\nmeasurements (desync off, warm-up save fulfilled): 2–4 players stay\nheap-free on staging; 16 players keep only the returned `InputVec`\nspill. Network encode and checksum history are outside that ledger.\n> \n> Regression tests cover sparse local handles, dropped-input send\nsuppression, map vs slot encoding parity, and overwrite/advance\nbehavior.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n95a01679fdb10aeaad5ad03f748ba8dc30ad25e0. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-02T09:03:21-07:00",
+          "tree_id": "374b3a2b6007454278e38b596c04be67b05d3d87",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/0d60cf4b90ff8624d8036316f607cae7a6ce2946"
+        },
+        "date": 1785687122307,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 33,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 33,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 38,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 93,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 307,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 36,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 41,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 60,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 161,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 579,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 30,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 29,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 30,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 31,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 97,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 125,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 167,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 162,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 227,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 346,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 294,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 420,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 651,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 158,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 181,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 227,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 289,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 351,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 474,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 542,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 668,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 939,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 462,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 631,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 849,
+            "range": "± 99",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 1044,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 102,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 137,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 436,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 697,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1049,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 21,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 85,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 356,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 1298,
+            "range": "± 4",
             "unit": "ns/iter"
           }
         ]
