@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `SyncTestSession::advance_frame()` now reuses constructor-owned input staging, making warmed
-  one-to-four-player frames heap-allocation-free and reducing sixteen-player frames to the returned
-  `InputVec` spill.
+- `P2PSession` and `SyncTestSession` now reuse constructor-owned local-input staging. On the
+  measured warmed path, staging one to four local players adds no heap allocation, while staging
+  sixteen players retains only the returned `InputVec` spill. Network encoding and checksum history
+  keep their separate bounded allocations; application state callbacks are outside this measurement.
 
 ## [0.11.0] - 2026-07-18
 
