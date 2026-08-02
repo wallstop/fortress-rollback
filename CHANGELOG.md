@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sixteen players retains only the returned `InputVec` spill. Network encoding and checksum history
   keep their separate bounded allocations; application state callbacks are outside this measurement.
 
+### Fixed
+
+- **Pre-existing:** ordinary networked `P2PSession` frame polling no longer reserves space for 256
+  graceful-drop control records per remote when every bounded endpoint mailbox is empty. In the
+  deterministic one-endpoint allocation contract, warmed N=2, N=4, and N=16 frame/send measurements
+  fall from 28.7–29.1 KiB to 45, 57, and 378 allocated bytes while active graceful-drop state machines
+  continue to advance on empty polls.
+
 ## [0.11.0] - 2026-07-18
 
 ### Added
