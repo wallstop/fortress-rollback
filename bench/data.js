@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785694669619,
+  "lastUpdate": 1785712460040,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "493c54b1f61dae7d6ea2d22217fe4ef7c4999e54",
-          "message": "Hardening M3: clock-skew consistency probe + honest H-SKEW status (#203)\n\nA long-run clock-skew consistency probe, and an honest status update on hypothesis H-SKEW.\n\nWhat this validly shows: per-peer clock skew (peer 0 at +0.1% over 10k steps) does not break mesh state consistency or liveness — the skew shifts timing-gated behavior (RTT gauge, quality-report/keepalive cadence) and the mesh still confirms a byte-identical prefix, peers in step. Extends the short +10% clock_skew_is_tolerated_and_alters_execution observation to a realistic magnitude over a long run.\n\nH-SKEW is NOT executed here — it remains OWED. An earlier revision claimed to *falsify* H-SKEW; the adversarial review correctly rejected that. This harness advances every peer one frame per step (lockstep) and reads the clock only for timestamps, so H-SKEW's rate-drift mechanism (fast clock -> faster frame production -> ~43 frames/hour accumulation) is structurally absent: the frame-advantage delta floor(half_rtt*fps/1000) stays 1 from 0% through ~+11% skew, so average_frame_advantage never reaches MIN_RECOMMENDATION at any ppm. 'Zero recommendations' was a tautology, not a falsification. Testing H-SKEW needs a skew-gated frame model (advance each peer at a rate driven by its own skewed clock) — recorded in PLAN.md §13/§6.6-pre.2.\n\n- fleet.rs: clock_skew_long_run_schedule + clock_skew_holds_consistency_over_a_long_run (#[ignore]d). Asserts consistency+liveness and that the confirmed-frame spread stays bounded (the first sign skew ever leaked into frame production).\n\nReviewed by an adversarial sub-agent (which correctly rejected the original falsification claim) + GitHub Copilot (3 rounds) + Cursor Bugbot (SUCCESS).",
-          "timestamp": "2026-07-05T16:45:33-07:00",
-          "tree_id": "5fdeedfaf8fdf997fecb7b53d2885cdc8a7a92d5",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/493c54b1f61dae7d6ea2d22217fe4ef7c4999e54"
-        },
-        "date": 1783295409216,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 110,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 174,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 467,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 719,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1045,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 122234,
-            "range": "± 400",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45242,
-            "range": "± 504",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 89",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4547,6 +4421,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3140,
             "range": "± 204",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "20caf394a1f157a4cfbe2877f6891f657a3184ad",
+          "message": "security: remove advisory-affected graphical examples (#280)\n\nCloses #274\n\n## Summary\n\n- remove the Macroquad-based ExGame binaries and the advisory-affected\nMacroquad/font stack from every Cargo workspace lock\n- retain `graphical-examples` as an empty deprecated compatibility\nfeature so existing manifests keep resolving without enabling code or\ndependencies\n- remove demo-only dependencies, native graphical packages, stale\ncargo-vet exemptions, and feature-matrix exclusions; ban `macroquad` and\n`ttf-parser` from re-entry\n- keep and harden five portable headless examples, including fail-closed\nstructured error handling and browser-WASM custom-socket compilation\n- document the security boundary, migration path, and dependency design\ndecision\n\n## Security rationale\n\nMacroquad 0.4.16 exposes process-global mutable context through safe\nAPIs used by the deleted render loops and has no patched release for\nRUSTSEC-2025-0035. Its font initialization selected the unmaintained\n`ttf-parser` owner covered by RUSTSEC-2026-0192. Neither crate remains\nin the resolved graph or workspace locks.\n\n## Validation\n\n- default Nextest: 2,887 passed; 71 skipped\n- hot-join Nextest: 3,143 passed; 72 skipped\n- Rust 1.86 all-target check\n- strict workspace Clippy with `tokio,json`\n- all five retained examples compile and run\n- browser `wasm32-unknown-unknown` custom-socket example check\n- cargo-semver-checks: 196/196 checks passed against 0.11.0\n- `cargo audit`: only separately tracked bincode warning (#273)\n- `cargo deny check advisories licenses bans sources`\n- workspace lock/version sync, docs/wiki/link claims, actionlint,\nrelease/toolchain tests, and authoritative agent preflight\n- two independent adversarial review iterations; no blockers remain\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Removes public graphical binaries and changes the default example\nstory (breaking for users who relied on ex_game), but core library\nnetworking behavior is unchanged; supply-chain risk from the advisory\nstack is eliminated.\n> \n> **Overview**\n> Removes the Macroquad-based **ExGame** examples (`ex_game_p2p`,\n`ex_game_spectator`, `ex_game_synctest`) and the **Macroquad** optional\ndependency from the workspace lockfile because Macroquad has no patched\nrelease for soundness issues reachable from safe code\n(RUSTSEC-2025-0035) and pulled in unmaintained **ttf-parser**\n(RUSTSEC-2026-0192).\n> \n> **`graphical-examples`** stays as a **deprecated no-op** feature so\nexisting Cargo manifests keep resolving without enabling code or deps.\n**`cargo deny`** now **bans** `macroquad` and `ttf-parser` to block\nre-entry.\n> \n> **Supply chain & tooling:** Strips graphical dev-deps (`macroquad`,\n`clap`, `tracing-log`), Linux devcontainer graphics/audio packages,\nstale **cargo-vet** exemptions, and **`graphical-examples`** from\nmutation/cargo-hack feature exclusions.\n> \n> **Examples & CI:** README and docs pivot to **headless** examples\n(`configuration`, `custom_socket`, `error_handling`, `request_handling`,\n`sync_test`); several examples use **`Result`** and structured\n**`FortressError`** matching instead of panics. CI adds **`cargo run\n--example error_handling`** on Linux and **`cargo check`** for the\n**`custom_socket`** example on **`wasm32-unknown-unknown`**.\n> \n> **Docs:** CHANGELOG, migration guide (0.11 upgrade), user guide, and\nwiki describe the security boundary and that graphics must live in the\napplication crate.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n9cd8a39121fc959272b8b314d2b7633dc0776f50. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-02T16:06:08-07:00",
+          "tree_id": "be47194f8f95eae916ea4ba3af8cd01775392766",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/20caf394a1f157a4cfbe2877f6891f657a3184ad"
+        },
+        "date": 1785712459196,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 135324,
+            "range": "± 1737",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 46345,
+            "range": "± 258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1244,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3152,
+            "range": "± 243",
             "unit": "ns/iter"
           }
         ]
