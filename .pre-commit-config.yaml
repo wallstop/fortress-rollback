@@ -86,6 +86,13 @@ repos:
         language: python
         types: [python]
 
+      - id: advisory-dispositions
+        name: check advisory dispositions
+        entry: python scripts/ci/check-advisory-dispositions.py
+        language: python
+        pass_filenames: false
+        files: '(^|/)Cargo\.(toml|lock)$|^(deny\.toml|supply-chain/advisory-dispositions\.toml|scripts/ci/check-advisory-dispositions\.py)$'
+
       # ══════════════════════════════════════════════════════════════════════
       # Rust checks
       # ══════════════════════════════════════════════════════════════════════
@@ -227,7 +234,7 @@ repos:
         files: '^CHANGELOG\.md$'
 
       - id: wire-golden-immutable
-        name: released wire golden immutability
+        name: released serialization golden immutability
         entry: python scripts/hooks/check-wire-golden-immutable.py --cached
         language: python
         pass_filenames: false

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- An immutable bincode 2.0.1 compatibility suite now pins representative fixed-width input,
+  rich state, replay, hot-join bridge, and checksum bytes across every centralized codec path.
+  The temporary RUSTSEC-2025-0141 exception is version-pinned, owned by issue #273, and enforced
+  against a 2026-11-02 review deadline with explicit exit criteria. Serialized runtime bytes are
+  unchanged.
 - `P2PSession` and `SyncTestSession` now reuse constructor-owned local-input staging. On the
   measured warmed path, staging one to four local players adds no heap allocation, while staging
   sixteen players retains only the returned `InputVec` spill. Network encoding and checksum history

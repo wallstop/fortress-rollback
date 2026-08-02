@@ -6,6 +6,7 @@ Use domain files like:
 
 - `dependencies.txt`
 - `network.txt`
+- `serialization.txt`
 - `sync-layer.txt`
 
 Entry format:

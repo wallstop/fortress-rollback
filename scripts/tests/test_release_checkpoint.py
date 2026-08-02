@@ -244,10 +244,15 @@ def test_absent_tag_accepts_previous_checkpoint_older_than_search_bound(
             f"intervening main commit {index}",
         )
     _git(trusted, "cherry-pick", prepared)
-    # This fixture deliberately replaces a long local-bare history. Send a
-    # self-contained pack so receive-pack never depends on an object advertised
-    # from the history being replaced.
-    _git(trusted, "push", "--force", "--no-thin", "origin", "main")
+    # Publish the deliberately rewritten history to an empty remote. Replacing
+    # the populated fixture remote makes pack generation depend on its
+    # advertised old refs and has produced missing-object failures across Git
+    # versions, even with --no-thin.
+    replacement_remote = tmp_path / "replacement-origin.git"
+    _git(tmp_path, "init", "--bare", str(replacement_remote))
+    _git(trusted, "remote", "set-url", "origin", str(replacement_remote))
+    _git(trusted, "push", "--set-upstream", "origin", "main")
+    _git(trusted, "push", "origin", "refs/tags/v1.2.2")
 
     checkpoint = _resolve(trusted, tmp_path)
 
