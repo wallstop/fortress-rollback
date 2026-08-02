@@ -28,21 +28,20 @@
 //! not a *grow* (no `unsafe` stack manipulation, no new dependency), matching
 //! the library's bounded-allocation / fail-closed discipline.
 //!
-//! # Why only `Config::State`
+//! # Why inputs are guarded too
 //!
-//! [`Config::Input`](crate::Config::Input) is bound `Copy`, and a `Copy + Sized`
-//! type is **provably non-recursive** (recursion requires heap indirection —
-//! `Box`/`Vec`/`String` — none of which are `Copy`; a direct `enum E { N([E;2]) }`
-//! is infinite-size and rejected by the compiler). So the input decode path
-//! cannot be driven into unbounded recursion by malicious bytes and needs no
-//! depth guard; only the `State` path
-//! ([`codec::decode_bounded`](crate::network::codec::decode_bounded)) is
-//! wrapped.
+//! [`Config::Input`](crate::Config::Input) is bound `Copy`, so the returned
+//! value cannot itself own a recursive structure. That does not constrain a
+//! hand-written `Deserialize` implementation: it can recursively decode and
+//! discard a non-`Copy` helper before returning the input. The bounded state,
+//! normal input, replay-input, hot-join bridge, and coordinated-drop backfill
+//! decode paths therefore all use this guard.
 
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
 };
 use std::fmt;
+use std::marker::PhantomData;
 
 /// Maximum container-nesting depth permitted when decoding a peer-controlled
 /// value. A value nested deeper is rejected with a recoverable error instead of
@@ -72,6 +71,42 @@ where
         depth: 0,
         limit,
     })
+}
+
+/// A serde seed that applies [`deserialize_depth_limited`] while allowing the
+/// outer format decoder to retain its exact consumed-byte accounting.
+///
+/// The codec uses this with bincode's `seed_decode_from_slice`: the seed keeps
+/// the existing recursion-depth guard, while bincode reports how much of the
+/// supplied slice the guarded decode consumed so embedded trailing bytes can be
+/// rejected without a second decode or a re-encode comparison.
+pub(crate) struct DepthLimitedSeed<T> {
+    limit: usize,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T> DepthLimitedSeed<T> {
+    /// Creates a seed that rejects nesting deeper than `limit`.
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'de, T> DeserializeSeed<'de> for DepthLimitedSeed<T>
+where
+    T: serde::Deserialize<'de>,
+{
+    type Value = T;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_depth_limited(deserializer, self.limit)
+    }
 }
 
 /// The recoverable error returned when nesting exceeds the limit. Built on the
@@ -923,6 +958,7 @@ mod tests {
     /// blob is rejected with a recoverable error instead of aborting, while a
     /// realistically-nested one decodes.
     #[test]
+    #[cfg(feature = "hot-join")]
     fn decode_bounded_rejects_deeply_nested_state() {
         use crate::network::codec;
 
@@ -941,6 +977,46 @@ mod tests {
         assert_eq!(
             decode_plain::<Nest>(&too_deep).unwrap(),
             build_nest(MAX_DECODE_DEPTH + 50),
+        );
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    struct DiscardingRecursiveInput;
+
+    impl<'de> Deserialize<'de> for DiscardingRecursiveInput {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let _discarded = Nest::deserialize(deserializer)?;
+            Ok(Self)
+        }
+    }
+
+    /// A `Copy` result does not make its custom deserializer non-recursive.
+    /// Exercise the production prefix helper used by replay and peer-input
+    /// paths so future fast-path refactors cannot remove the shared guard.
+    #[test]
+    fn bounded_prefix_rejects_recursion_hidden_by_copy_input() {
+        use crate::network::codec;
+
+        let shallow = encode(&build_nest(2));
+        let (decoded, consumed) =
+            codec::decode_bounded_prefix_with_consumed::<DiscardingRecursiveInput>(&shallow)
+                .expect("shallow custom input must decode");
+        assert_eq!(decoded, DiscardingRecursiveInput);
+        assert_eq!(consumed, shallow.len());
+
+        let too_deep = encode(&build_nest(MAX_DECODE_DEPTH + 50));
+        assert!(
+            codec::decode_bounded_prefix_with_consumed::<DiscardingRecursiveInput>(&too_deep)
+                .is_err(),
+            "a Copy input's recursive custom deserializer must be depth-limited"
+        );
+        assert_eq!(
+            decode_plain::<DiscardingRecursiveInput>(&too_deep).unwrap(),
+            DiscardingRecursiveInput,
+            "control: the rejected bytes are well-formed"
         );
     }
 }

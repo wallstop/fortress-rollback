@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** bounded input decoding now applies both recursion-depth and Serde-managed
+  allocation limits to replay inputs and coordinated graceful-drop backfill, matching normal and
+  hot-join bridge input handling. Hot-join state snapshots also reject trailing bytes inside the
+  nested state payload. Malformed data now fails with a decode error; valid network and replay
+  formats are unchanged. Hand-written `Deserialize` implementations remain responsible for
+  allocations they perform outside the deserializer.
 - **Pre-existing:** ordinary networked `P2PSession` frame polling no longer reserves space for 256
   graceful-drop control records per remote when every bounded endpoint mailbox is empty. In the
   deterministic one-endpoint allocation contract, warmed N=2, N=4, and N=16 frame/send measurements
