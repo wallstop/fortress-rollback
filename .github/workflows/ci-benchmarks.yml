@@ -55,7 +55,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
         continue-on-error: true
 
       - name: Verify sccache is working
@@ -182,7 +182,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
         continue-on-error: true
 
       - name: Verify sccache is working
@@ -319,7 +319,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
         continue-on-error: true
 
       - name: Verify sccache is working
