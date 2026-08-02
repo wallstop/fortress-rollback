@@ -189,10 +189,10 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     assert_allocation_ceiling("sixteen-player HandleVec spill", collecting_stats, 1, 256);
     drop(handles);
 
-    // The ceilings are based on the red-run observations (1/192 B, 1/192 B,
-    // and 4/800 B). Byte ceilings leave bounded layout headroom while operation
-    // counts stay tight enough to expose new per-player allocation growth.
-    for (players, operation_ceiling, byte_ceiling) in [(2, 1, 256), (4, 1, 256), (16, 4, 1_024)] {
+    // Warmed frame input staging reuses constructor-owned storage at every
+    // scale. N=2 and N=4 therefore touch no allocator; N=16 retains one exact
+    // 128-byte spill for the returned 16-player InputVec above inline capacity.
+    for (players, operation_ceiling, byte_ceiling) in [(2, 0, 0), (4, 0, 0), (16, 1, 128)] {
         let first = warmed_synctest_frame_stats(players);
         for repetition in 1..3 {
             assert_eq!(
