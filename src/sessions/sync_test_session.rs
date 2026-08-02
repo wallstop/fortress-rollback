@@ -37,7 +37,7 @@ where
     sync_layer: SyncLayer<T>,
     dummy_connect_status: Vec<ConnectionStatus>,
     checksum_history: BTreeMap<Frame, Option<u128>>,
-    local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    local_inputs: Vec<Option<PlayerInput<T::Input>>>,
     /// Pending events to be consumed via [`events()`](Self::events).
     event_queue: VecDeque<FortressEvent<T>>,
     /// Optional observer for specification violations.
@@ -107,7 +107,7 @@ impl<T: Config> SyncTestSession<T> {
                     ),
                     dummy_connect_status: Vec::new(),
                     checksum_history: BTreeMap::new(),
-                    local_inputs: BTreeMap::new(),
+                    local_inputs: Vec::new(),
                     event_queue: VecDeque::new(),
                     violation_observer: None,
                 }
@@ -129,6 +129,14 @@ impl<T: Config> SyncTestSession<T> {
             .map_err(|_err| allocation_failed("synctest.dummy_connect_status", num_players))?;
         for _ in 0..num_players {
             dummy_connect_status.push(ConnectionStatus::default());
+        }
+
+        let mut local_inputs = Vec::new();
+        local_inputs
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("synctest.local_inputs", num_players))?;
+        for _ in 0..num_players {
+            local_inputs.push(None);
         }
 
         let mut sync_layer =
@@ -153,7 +161,7 @@ impl<T: Config> SyncTestSession<T> {
             sync_layer,
             dummy_connect_status,
             checksum_history: BTreeMap::new(),
-            local_inputs: BTreeMap::new(),
+            local_inputs,
             event_queue: VecDeque::new(),
             violation_observer,
         })
@@ -180,7 +188,17 @@ impl<T: Config> SyncTestSession<T> {
             .into());
         }
         let player_input = PlayerInput::<T::Input>::new(self.sync_layer.current_frame(), input);
-        self.local_inputs.insert(player_handle, player_input);
+        let local_inputs_len = self.local_inputs.len();
+        let slot = self.local_inputs.get_mut(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(crate::error::IndexOutOfBounds {
+                    name: "synctest.local_inputs",
+                    index: player_handle.as_usize(),
+                    length: local_inputs_len,
+                }),
+            },
+        )?;
+        *slot = Some(player_input);
         Ok(())
     }
 
@@ -223,16 +241,25 @@ impl<T: Config> SyncTestSession<T> {
         }
 
         // we require inputs for all players
-        if self.num_players != self.local_inputs.len() {
+        if self.num_players != self.local_inputs.len()
+            || self.local_inputs.iter().any(Option::is_none)
+        {
             return Err(InvalidRequestKind::MissingLocalInput.into());
         }
         // pass all inputs into the sync layer
-        for (&handle, &input) in self.local_inputs.iter() {
+        for (player, input) in self.local_inputs.iter().enumerate() {
+            let input = match input {
+                Some(input) => *input,
+                None => return Err(InvalidRequestKind::MissingLocalInput.into()),
+            };
             // send the input into the sync layer
-            self.sync_layer.add_local_input(handle, input);
+            self.sync_layer
+                .add_local_input(PlayerHandle::new(player), input);
         }
-        // clear local inputs after using them
-        self.local_inputs.clear();
+        // Clear values while retaining the constructor-owned player slots.
+        for input in &mut self.local_inputs {
+            *input = None;
+        }
 
         // save the current frame in the synchronization layer
         // we can skip all the saving if the check_distance is 0
@@ -824,6 +851,21 @@ mod tests {
                 kind: InvalidRequestKind::MissingLocalInput
             })
         ));
+
+        // A failed advance must retain already staged inputs so callers can
+        // supply only the missing player and retry without changing semantics.
+        session
+            .add_local_input(PlayerHandle::new(1), 100)
+            .expect("should add the missing input");
+        let requests = session.advance_frame().expect("retry should advance");
+        let inputs = requests.iter().find_map(|request| match request {
+            FortressRequest::AdvanceFrame { inputs } => Some(inputs),
+            _ => None,
+        });
+        let inputs = inputs.expect("retry should return an advance request");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].0, 42);
+        assert_eq!(inputs[1].0, 100);
     }
 
     #[test]
@@ -1220,11 +1262,13 @@ mod tests {
     fn requests_contain_advance_frame_with_inputs() {
         let mut session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 0, 0, None);
 
-        session
-            .add_local_input(PlayerHandle::new(0), 111)
-            .expect("should succeed");
+        // Add in reverse handle order; the emitted input vector must remain
+        // player-index ordered.
         session
             .add_local_input(PlayerHandle::new(1), 222)
+            .expect("should succeed");
+        session
+            .add_local_input(PlayerHandle::new(0), 111)
             .expect("should succeed");
 
         let requests = session.advance_frame().expect("should advance");

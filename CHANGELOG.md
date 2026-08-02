@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `SyncTestSession::advance_frame()` now reuses constructor-owned input staging, making warmed
+  one-to-four-player frames heap-allocation-free and reducing sixteen-player frames to the returned
+  `InputVec` spill.
+
 ## [0.11.0] - 2026-07-18
 
 ### Added
