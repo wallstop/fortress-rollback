@@ -17,7 +17,7 @@ pub use handshake_trace::{
     HandshakeReplyDisposition, HandshakeRequestDisposition, HandshakeRequestIdDisposition,
     HandshakeTraceAction, HandshakeTraceConfig, HandshakeTraceEvent, HandshakeTraceOverflow,
 };
-use input_bytes::{log_input_decode_error, InputBytes};
+use input_bytes::{log_input_decode_error, InputBytes, InputSource};
 pub use state::ProtocolState;
 
 use crate::error::{allocation_failed, SerializationErrorKind};
@@ -1745,7 +1745,7 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn send_input(
         &mut self,
-        inputs: &BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+        inputs: &(impl InputSource<T> + ?Sized),
         connect_status: &[ConnectionStatus],
     ) {
         if self.state != ProtocolState::Running {

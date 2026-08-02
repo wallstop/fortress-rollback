@@ -329,8 +329,9 @@ where
 
     /// Contains all events to be forwarded to the user.
     event_queue: VecDeque<FortressEvent<T>>,
-    /// Contains all local inputs not yet sent into the system. This should have inputs for every local player before calling advance_frame
-    local_inputs: BTreeMap<PlayerHandle, PlayerInput<T::Input>>,
+    /// Contains all local inputs not yet sent into the system, indexed by player handle.
+    /// This should have inputs for every local player before calling `advance_frame`.
+    local_inputs: Vec<Option<PlayerInput<T::Input>>>,
 
     /// With desync detection, the session will compare checksums for all peers to detect discrepancies / desyncs between peers
     desync_detection: DesyncDetection,
@@ -2784,6 +2785,14 @@ impl<T: Config> P2PSession<T> {
             .try_reserve_exact(event_queue_size)
             .map_err(|_err| allocation_failed("p2p.event_queue", event_queue_size))?;
 
+        let mut local_inputs = Vec::new();
+        local_inputs
+            .try_reserve_exact(num_players)
+            .map_err(|_err| allocation_failed("p2p.local_inputs", num_players))?;
+        for _ in 0..num_players {
+            local_inputs.push(None);
+        }
+
         Ok(Self {
             state,
             num_players,
@@ -2798,7 +2807,7 @@ impl<T: Config> P2PSession<T> {
             disconnect_frame: Frame::NULL,
             player_reg: players,
             event_queue,
-            local_inputs: BTreeMap::new(),
+            local_inputs,
             desync_detection,
             local_checksum_history: BTreeMap::new(),
             last_sent_checksum_frame: Frame::NULL,
@@ -2866,7 +2875,17 @@ impl<T: Config> P2PSession<T> {
             .into());
         }
         let player_input = PlayerInput::<T::Input>::new(self.sync_layer.current_frame(), input);
-        self.local_inputs.insert(player_handle, player_input);
+        let local_inputs_len = self.local_inputs.len();
+        let slot = self.local_inputs.get_mut(player_handle.as_usize()).ok_or(
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(crate::error::IndexOutOfBounds {
+                    name: "p2p.local_inputs",
+                    index: player_handle.as_usize(),
+                    length: local_inputs_len,
+                }),
+            },
+        )?;
+        *slot = Some(player_input);
         Ok(())
     }
 
@@ -2971,7 +2990,12 @@ impl<T: Config> P2PSession<T> {
 
         // check if input for all local players is queued (zero-allocation via iterator)
         for handle in self.player_reg.local_player_handles_iter() {
-            if !self.local_inputs.contains_key(&handle) {
+            if self
+                .local_inputs
+                .get(handle.as_usize())
+                .and_then(Option::as_ref)
+                .is_none()
+            {
                 return Err(InvalidRequestKind::MissingLocalInput.into());
             }
         }
@@ -3076,13 +3100,14 @@ impl<T: Config> P2PSession<T> {
         // register local inputs in the system and send them (zero-allocation via iterator)
         for handle in self.player_reg.local_player_handles_iter() {
             // we have checked that these all exist above, but return error for safety
-            let player_input =
-                self.local_inputs
-                    .get_mut(&handle)
-                    .ok_or_else(|| FortressError::MissingInput {
-                        player_handle: handle,
-                        frame: self.sync_layer.current_frame(),
-                    })?;
+            let player_input = self
+                .local_inputs
+                .get_mut(handle.as_usize())
+                .and_then(Option::as_mut)
+                .ok_or_else(|| FortressError::MissingInput {
+                    player_handle: handle,
+                    frame: self.sync_layer.current_frame(),
+                })?;
             // send the input into the sync layer
             let actual_frame = self.sync_layer.add_local_input(handle, *player_input);
             player_input.frame = actual_frame;
@@ -3100,9 +3125,14 @@ impl<T: Config> P2PSession<T> {
         }
 
         // if the local inputs have not been dropped by the sync layer, send to all remote clients
-        if !self.local_inputs.values().any(|&i| i.frame == Frame::NULL) {
+        if !self
+            .local_inputs
+            .iter()
+            .flatten()
+            .any(|input| input.frame == Frame::NULL)
+        {
             for endpoint in self.player_reg.remotes.values_mut() {
-                endpoint.send_input(&self.local_inputs, &self.local_connect_status);
+                endpoint.send_input(self.local_inputs.as_slice(), &self.local_connect_status);
                 endpoint.send_all_messages(&mut self.socket);
             }
         }
@@ -3150,7 +3180,9 @@ impl<T: Config> P2PSession<T> {
             // advance the frame count
             self.sync_layer.advance_frame();
             // clear the local inputs after advancing the frame to allow new inputs to be ingested
-            self.local_inputs.clear();
+            for input in &mut self.local_inputs {
+                *input = None;
+            }
             requests.push(FortressRequest::AdvanceFrame { inputs });
 
             // Record the forward (visual) advance and sample confirmation lag:
@@ -12486,6 +12518,23 @@ mod tests {
         }
     }
 
+    struct RecordingSocket {
+        sent: Arc<std::sync::Mutex<Vec<Message>>>,
+    }
+
+    impl NonBlockingSocket<SocketAddr> for RecordingSocket {
+        fn send_to(&mut self, msg: &Message, _addr: &SocketAddr) {
+            self.sent
+                .lock()
+                .expect("recording socket lock")
+                .push(msg.clone());
+        }
+
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+            Vec::new()
+        }
+    }
+
     struct QueuedReceiveSocket {
         messages: Arc<std::sync::Mutex<Vec<(SocketAddr, Message)>>>,
     }
@@ -13441,7 +13490,48 @@ mod tests {
         session
             .add_local_input(PlayerHandle::new(0), 20u8)
             .expect("Second input failed");
-        // Should succeed without error - second input overwrites first
+        let requests = session.advance_frame().expect("Advance failed");
+        let input = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::AdvanceFrame { inputs } => inputs.first(),
+                FortressRequest::SaveGameState { .. } | FortressRequest::LoadGameState { .. } => {
+                    None
+                },
+            })
+            .expect("advance request must contain the local input");
+        assert_eq!(input.0, 20);
+    }
+
+    #[test]
+    fn add_local_input_uses_sparse_player_handle_slot() {
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .unwrap()
+            .add_remote_player(0, test_addr(8080))
+            .unwrap()
+            .add_remote_player(1, test_addr(8080))
+            .unwrap()
+            .add_local_player(2)
+            .unwrap()
+            .start_p2p_session(DummySocket)
+            .unwrap();
+
+        session
+            .add_local_input(PlayerHandle::new(2), 42)
+            .expect("sparse local input must succeed");
+
+        assert_eq!(session.local_inputs.len(), 3);
+        assert!(session.local_inputs.first().is_some_and(Option::is_none));
+        assert!(session.local_inputs.get(1).is_some_and(Option::is_none));
+        assert_eq!(
+            session
+                .local_inputs
+                .get(2)
+                .and_then(Option::as_ref)
+                .map(|input| input.input),
+            Some(42)
+        );
     }
 
     // ==========================================
@@ -13512,6 +13602,47 @@ mod tests {
     }
 
     #[test]
+    fn advance_frame_dropped_local_input_suppresses_endpoint_send() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let socket = RecordingSocket {
+            sent: Arc::clone(&sent),
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_local_player(0)
+            .unwrap()
+            .add_remote_player(1, test_addr(8080))
+            .unwrap()
+            .start_p2p_session(socket)
+            .unwrap();
+        session.state = SessionState::Running;
+        for endpoint in session.player_reg.remotes.values_mut() {
+            endpoint.force_running_for_tests();
+        }
+        session.poll_remote_clients();
+        sent.lock().expect("recording socket lock").clear();
+        session
+            .add_local_input(PlayerHandle::new(0), 42)
+            .expect("local input must be staged");
+        session
+            .local_inputs
+            .first_mut()
+            .and_then(Option::as_mut)
+            .expect("local input slot must exist")
+            .frame = Frame::new(1);
+
+        session
+            .advance_frame()
+            .expect("dropped local input must fail closed without a send");
+
+        assert!(
+            sent.lock().expect("recording socket lock").is_empty(),
+            "Frame::NULL local input must suppress the whole endpoint send"
+        );
+    }
+
+    #[test]
     fn advance_frame_multiple_local_players_requires_all_inputs() {
         let mut session = create_two_local_players_session();
         // Add input for player 0 only
@@ -13526,19 +13657,55 @@ mod tests {
                 kind: InvalidRequestKind::MissingLocalInput
             })
         ));
+
+        session
+            .add_local_input(PlayerHandle::new(1), 7u8)
+            .expect("Input retry failed");
+        let requests = session.advance_frame().expect("Advance retry failed");
+        let inputs = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::AdvanceFrame { inputs } => Some(inputs),
+                FortressRequest::SaveGameState { .. } | FortressRequest::LoadGameState { .. } => {
+                    None
+                },
+            })
+            .expect("advance retry must retain the first input");
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|(input, _status)| *input)
+                .collect::<Vec<_>>(),
+            vec![42, 7]
+        );
     }
 
     #[test]
     fn advance_frame_multiple_local_players_succeeds_with_all_inputs() {
         let mut session = create_two_local_players_session();
         session
-            .add_local_input(PlayerHandle::new(0), 1u8)
-            .expect("Input 0 failed");
-        session
             .add_local_input(PlayerHandle::new(1), 2u8)
             .expect("Input 1 failed");
+        session
+            .add_local_input(PlayerHandle::new(0), 1u8)
+            .expect("Input 0 failed");
         let requests = session.advance_frame().expect("Advance failed");
-        assert!(!requests.is_empty());
+        let inputs = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::AdvanceFrame { inputs } => Some(inputs),
+                FortressRequest::SaveGameState { .. } | FortressRequest::LoadGameState { .. } => {
+                    None
+                },
+            })
+            .expect("advance request must exist");
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|(input, _status)| *input)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     // ==========================================
