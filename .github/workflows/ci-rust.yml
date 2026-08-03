@@ -748,8 +748,10 @@ jobs:
     # The .cargo/config.toml specifies clang+lld for faster local builds, but
     # Cross.toml passes through these env vars so CI can override to GCC.
     #
-    # RUSTFLAGS must be cleared because .cargo/config.toml sets "-C link-arg=-fuse-ld=lld"
-    # which is incompatible with GCC (GCC doesn't understand the -fuse-ld=lld flag).
+    # RUSTFLAGS must be non-empty because .cargo/config.toml sets
+    # "-C link-arg=-fuse-ld=lld", which is incompatible with GCC. Cargo
+    # concatenates target-specific environment rustflags with target config,
+    # while a global RUSTFLAGS value takes precedence over target config.
     #
     # IMPORTANT: We must ALSO override the x86_64 (host) target settings because proc-macro
     # crates and build scripts compile for the HOST machine, not the cross-compile target.
@@ -758,10 +760,9 @@ jobs:
     env:
       # Target (aarch64) linker settings
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+      RUSTFLAGS: "-C link-arg=-Wl,--as-needed"
       # Host (x86_64) linker settings - required for build scripts and proc-macros
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
     steps:
       - uses: actions/checkout@v7

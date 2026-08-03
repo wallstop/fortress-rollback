@@ -15,6 +15,9 @@ import platform
 import shutil
 
 
+SYSTEM_LINKER_RUSTFLAGS = "-C link-arg=-Wl,--as-needed"
+
+
 def _get_linux_target_triple() -> str:
     """Return the Rust target triple for the current Linux host."""
     machine = platform.machine()
@@ -56,5 +59,7 @@ def get_cargo_env() -> dict[str, str]:
 
     return {
         f"{env_prefix}_LINKER": "cc",
-        f"{env_prefix}_RUSTFLAGS": "",
+        # Cargo concatenates target-specific environment rustflags with the
+        # matching target config. A global value takes precedence instead.
+        "RUSTFLAGS": SYSTEM_LINKER_RUSTFLAGS,
     }
