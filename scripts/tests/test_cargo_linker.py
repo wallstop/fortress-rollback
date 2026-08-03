@@ -21,6 +21,12 @@ import pytest
 from cargo_linker import _get_linux_target_triple, _is_lld_available, get_cargo_env
 
 
+@pytest.fixture(autouse=True)
+def clear_rustflags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fallback expectations independent of the test runner environment."""
+    monkeypatch.delenv("RUSTFLAGS", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Tests for _get_linux_target_triple
 # ---------------------------------------------------------------------------
@@ -247,6 +253,30 @@ class TestGetCargoEnv:
                 "Rustflags should select a GCC-compatible link argument, got "
                 f"'{result['RUSTFLAGS']}'"
             )
+
+    def test_existing_rustflags_are_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linker fallback must not discard caller-supplied compiler flags."""
+        monkeypatch.setenv("RUSTFLAGS", "--cfg custom_build")
+        with patch("cargo_linker.platform") as mock_platform, \
+             patch("cargo_linker.shutil.which", return_value=None):
+            mock_platform.system.return_value = "Linux"
+            mock_platform.machine.return_value = "x86_64"
+            result = get_cargo_env()
+            assert result["RUSTFLAGS"] == "--cfg custom_build"
+
+    def test_existing_empty_rustflags_are_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit empty global override still suppresses target config."""
+        monkeypatch.setenv("RUSTFLAGS", "")
+        with patch("cargo_linker.platform") as mock_platform, \
+             patch("cargo_linker.shutil.which", return_value=None):
+            mock_platform.system.return_value = "Linux"
+            mock_platform.machine.return_value = "x86_64"
+            result = get_cargo_env()
+            assert result["RUSTFLAGS"] == ""
 
 
 # ---------------------------------------------------------------------------

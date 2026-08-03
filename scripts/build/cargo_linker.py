@@ -11,6 +11,7 @@ overrides that disable the custom linker settings, matching the pattern used in 
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 
@@ -60,6 +61,7 @@ def get_cargo_env() -> dict[str, str]:
     return {
         f"{env_prefix}_LINKER": "cc",
         # Cargo concatenates target-specific environment rustflags with the
-        # matching target config. A global value takes precedence instead.
-        "RUSTFLAGS": SYSTEM_LINKER_RUSTFLAGS,
+        # matching target config. A global value takes precedence instead;
+        # preserve it when the caller already supplied one.
+        "RUSTFLAGS": os.environ.get("RUSTFLAGS", SYSTEM_LINKER_RUSTFLAGS),
     }
