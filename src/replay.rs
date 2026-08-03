@@ -17,8 +17,8 @@
 //! # Serialization
 //!
 //! Replays can be serialized to and from bytes using [`Replay::to_bytes`] and
-//! [`Replay::from_bytes`], which use the same deterministic bincode codec as
-//! network messages.
+//! [`Replay::from_bytes`], which use the same deterministic, bincode-compatible
+//! codec as network messages.
 //!
 //! # Example
 //!
@@ -139,6 +139,12 @@ pub struct ReplayDecodeConfig {
     pub validate: bool,
 }
 
+/// Maximum total zero-sized replay inputs accepted during decoding.
+///
+/// The limit bounds CPU work that cannot be inferred from encoded bytes while
+/// allowing far more player-frame entries than practical sessions use.
+pub const MAX_ZERO_SIZED_INPUTS: usize = 1_048_576;
+
 impl Default for ReplayDecodeConfig {
     fn default() -> Self {
         Self {
@@ -184,7 +190,7 @@ impl<I> Replay<I>
 where
     I: Serialize,
 {
-    /// Serializes this replay to bytes using the deterministic bincode codec.
+    /// Serializes this replay using the deterministic, bincode-compatible codec.
     ///
     /// # Errors
     ///
@@ -221,7 +227,7 @@ impl<I> Replay<I>
 where
     I: Copy + DeserializeOwned,
 {
-    /// Deserializes a replay from bytes using the deterministic bincode codec.
+    /// Deserializes a replay using the deterministic, bincode-compatible codec.
     ///
     /// # Errors
     ///
@@ -336,6 +342,18 @@ fn read_replay_string(
     Ok(out)
 }
 
+fn accumulate_zero_sized_input_count(current: usize, additional: usize) -> CodecResult<usize> {
+    let total = current
+        .checked_add(additional)
+        .ok_or_else(|| replay_decode_error("zero-sized replay input count overflow"))?;
+    if total > MAX_ZERO_SIZED_INPUTS {
+        return Err(replay_decode_error(format!(
+            "zero-sized replay input count {total} exceeds hard limit {MAX_ZERO_SIZED_INPUTS}"
+        )));
+    }
+    Ok(total)
+}
+
 /// Minimum wire footprint of one encoded frame: each frame begins with its
 /// own inputs.len u64 length prefix (8 bytes), so a frame can never encode in
 /// fewer bytes than that.
@@ -366,17 +384,11 @@ const MIN_INPUT_ENCODED_LEN: usize = 1;
 ///
 /// The byte bound is deliberately *skipped* for a zero-sized `T`. Such an
 /// element occupies no wire bytes and never allocates (`try_reserve_exact` is a
-/// no-op for it), so there is nothing to bound; and its count is intrinsically
-/// independent of the encoded size -- a valid replay of zero-sized inputs can
-/// declare any per-frame count within a fixed number of bytes. Applying a byte
-/// bound to it would therefore reject a replay that [`Replay::validate`] accepts
-/// and [`Replay::to_bytes`] produced, breaking round-trip self-consistency. The
-/// only residual cost is that a crafted huge per-frame count for a zero-sized
-/// input type spins the decode loop; that requires a zero-sized `Config::Input`
-/// (a degenerate game with no per-player input that no real configuration uses),
-/// allocates nothing, and cannot occur for any input that carries data -- every
-/// byte-carrying input is bounded here, and the decode loop additionally guards
-/// forward progress for non-zero-sized inputs.
+/// no-op for it), so its count is independent of encoded size. The replay
+/// decoder instead applies [`MAX_ZERO_SIZED_INPUTS`] to the cumulative
+/// zero-sized input count before entering each frame's decode loop.
+/// Every byte-carrying input remains bounded here, and the decode loop also
+/// guards forward progress for non-zero-sized inputs.
 ///
 /// [`Config::Input`]: crate::Config::Input
 fn reserve_replay_vec<T>(
@@ -417,6 +429,7 @@ where
     let mut cursor = 0;
     let num_players = read_replay_usize(bytes, &mut cursor, "num_players")?;
     let frame_count = read_replay_usize(bytes, &mut cursor, "frames.len")?;
+    let mut zero_sized_input_count = 0_usize;
 
     let mut frames = Vec::new();
     reserve_replay_vec(
@@ -433,6 +446,11 @@ where
             return Err(replay_decode_error(format!(
                 "replay frame {frame_index} has {frame_inputs_len} input(s), expected {num_players}"
             )));
+        }
+
+        if core::mem::size_of::<I>() == 0 {
+            zero_sized_input_count =
+                accumulate_zero_sized_input_count(zero_sized_input_count, frame_inputs_len)?;
         }
 
         let mut frame = Vec::new();
@@ -457,8 +475,8 @@ where
             // Forward-progress guard: a non-zero-sized input must consume at
             // least one wire byte, so the loop can run at most `remaining` times
             // regardless of the declared count. A zero-sized input legitimately
-            // consumes nothing; its separate CPU-count policy residual is
-            // documented on `reserve_replay_vec` above.
+            // consumes nothing and is covered by the cumulative count policy
+            // above.
             if core::mem::size_of::<I>() != 0 && consumed == 0 {
                 return Err(replay_decode_error(format!(
                     "replay input at frame {frame_index}, player {player_index} decoded zero bytes"
@@ -1065,15 +1083,16 @@ mod tests {
 
     #[test]
     fn replay_roundtrips_zero_sized_inputs_with_many_players() {
-        // Regression guard for the zero-sized-input bound exemption. A replay of
+        // Regression guard for the zero-sized-input byte-bound exemption. A replay of
         // zero-sized inputs encodes its per-frame input count in a fixed number
         // of bytes no matter how large that count is, so the count can legitimately
         // exceed the bytes that follow it. Here num_players (64) far exceeds the
         // few tens of trailing bytes: applying the byte bound to a zero-sized
         // element (as a byte-carrying one is bounded) would reject this replay
         // even though `validate` accepts it and `to_bytes` produced it -- a
-        // round-trip/self-consistency break. The bound is skipped for zero-sized
-        // elements, so the round-trip holds.
+        // round-trip/self-consistency break. The byte bound is skipped for
+        // zero-sized elements, while the separate cumulative CPU-work limit
+        // remains far above this valid replay, so the round-trip holds.
         #[derive(Copy, Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
         struct Zst;
 
@@ -1093,6 +1112,41 @@ mod tests {
         let bytes = replay.to_bytes().unwrap();
         let restored = Replay::<Zst>::from_bytes(&bytes).unwrap();
         assert_eq!(restored, replay);
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_zero_sized_input_count_bomb() {
+        #[derive(Copy, Clone, PartialEq, Eq, Default, Debug, Deserialize)]
+        struct Zst;
+
+        let hostile_count = MAX_ZERO_SIZED_INPUTS + 1;
+        let hostile_count_u64 = u64::try_from(hostile_count).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&hostile_count_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&hostile_count_u64.to_le_bytes()); // frame0.inputs.len
+
+        let error = Replay::<Zst>::from_bytes(&bytes)
+            .expect_err("zero-sized input count bomb must fail before its decode loop");
+        let message = error.to_string();
+        assert!(message.contains("zero-sized replay input count"));
+        assert!(message.contains("exceeds hard limit"));
+    }
+
+    #[test]
+    fn zero_sized_input_limit_counts_across_frames() {
+        assert_eq!(
+            accumulate_zero_sized_input_count(MAX_ZERO_SIZED_INPUTS - 3, 3).unwrap(),
+            MAX_ZERO_SIZED_INPUTS
+        );
+
+        let error = accumulate_zero_sized_input_count(MAX_ZERO_SIZED_INPUTS - 3, 4)
+            .expect_err("the cumulative limit must include every frame");
+        assert!(error.to_string().contains("exceeds hard limit"));
+
+        let overflow = accumulate_zero_sized_input_count(usize::MAX, 1)
+            .expect_err("cumulative count arithmetic must not wrap");
+        assert!(overflow.to_string().contains("count overflow"));
     }
 
     #[test]

@@ -63,7 +63,7 @@ use crate::{InputStatus, InputVec, PlayerHandle};
 #[cfg(feature = "hot-join")]
 pub(crate) const DEFAULT_HOT_JOIN_MAX_SNAPSHOT_WIRE_BYTES: usize = 4096;
 
-/// Serializes a host's `Config::State` into bincode bytes for a `StateSnapshot`.
+/// Serializes a host's `Config::State` into bincode-compatible bytes for a `StateSnapshot`.
 ///
 /// Mirrors how the protocol `InputBytes` type maps serialization failures: the
 /// codec encode is the should-never-happen path (a `Config::State` whose

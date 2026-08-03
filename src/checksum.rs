@@ -100,7 +100,7 @@ use std::hash::Hasher;
 /// Computes a deterministic `u128` checksum of a serializable game state.
 ///
 /// This function:
-/// 1. Serializes the state using bincode with fixed-integer encoding
+/// 1. Serializes the state using the bincode-compatible codec with fixed-integer encoding
 /// 2. Hashes the serialized bytes using FNV-1a
 /// 3. Returns the hash as `u128` (matching [`GameStateCell::save`] signature)
 ///

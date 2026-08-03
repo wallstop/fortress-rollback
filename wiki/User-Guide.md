@@ -715,7 +715,7 @@ cell.save(frame, Some(game_state.clone()), Some(checksum));
 
 The `compute_checksum` function:
 
-1. Serializes your state using bincode with fixed-integer encoding (platform-independent)
+1. Serializes your state using the bincode-compatible codec with fixed-integer encoding (platform-independent)
 2. Hashes the bytes using FNV-1a (deterministic, no random seeds)
 3. Returns a `u128` checksum matching the `cell.save()` signature
 
@@ -748,7 +748,7 @@ let fnv_checksum = hash_bytes_fnv1a(&bytes);
 let fletcher_checksum = u128::from(fletcher16(&bytes));
 ```
 
-> **Note:** The `network::codec` module uses a fixed-integer bincode configuration that ensures deterministic serialization across platforms. This is the same configuration used internally for network messages.
+> **Note:** The `network::codec` module uses a fixed-integer bincode-compatible configuration backed by the maintained `bincode-next` fork. It ensures deterministic serialization across platforms and is the same configuration used internally for network messages.
 
 ---
 

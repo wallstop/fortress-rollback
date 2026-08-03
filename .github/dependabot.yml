@@ -21,6 +21,11 @@ updates:
         patterns:
           - "*"
     ignore:
+      # bincode-next 3.x requires Rust 1.90; retain the newest compatible 2.x
+      # release until the repository deliberately raises its Rust 1.86 MSRV.
+      - dependency-name: "bincode-next"
+        update-types:
+          - "version-update:semver-major"
       # serial_test 4.x requires Rust 1.93.1; retain the newest 3.x release
       # until the repository deliberately raises its declared Rust 1.86 MSRV.
       - dependency-name: "serial_test"

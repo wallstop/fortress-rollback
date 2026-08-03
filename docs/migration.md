@@ -744,7 +744,7 @@ and other payloads whose encoded size can change per frame.
 
 #### `Replay::from_bytes` validation and bounds
 
-`Replay::from_bytes()` now uses a replay-specific checked decoder instead of generic bincode container decoding. It requires `I: Copy`, matching the `Config::Input` contract, validates the decoded replay before returning, and rejects trailing bytes. Use `Replay::from_bytes_with_config(bytes, ReplayDecodeConfig::new().max_bytes(limit))` if your application wants to enforce its own replay file-size policy.
+`Replay::from_bytes()` now uses a replay-specific checked decoder instead of generic bincode container decoding. It requires `I: Copy`, matching the `Config::Input` contract, validates the decoded replay before returning, and rejects trailing bytes. It also applies a hard limit of 1,048,576 cumulative zero-sized inputs because those values consume CPU work without consuming payload bytes. Use `Replay::from_bytes_with_config(bytes, ReplayDecodeConfig::new().max_bytes(limit))` if your application wants to enforce its own replay file-size policy.
 
 #### `RleDecodeReason` — new variants
 
