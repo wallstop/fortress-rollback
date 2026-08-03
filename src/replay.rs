@@ -131,8 +131,9 @@ pub struct ReplayDecodeConfig {
     /// `None` means no caller policy limit. Allocation sizes are still bounded:
     /// every length-prefixed vector (frames, per-frame inputs, checksums) is
     /// checked against the remaining byte slice before any memory is reserved,
-    /// so a malformed replay cannot drive an out-of-proportion allocation
-    /// regardless of this setting.
+    /// and each input is decoded with fixed recursion and Serde-managed
+    /// allocation limits. A hand-written `Deserialize` implementation remains
+    /// responsible for allocations it performs outside the deserializer.
     pub max_bytes: Option<usize>,
     /// Whether to run [`Replay::validate`] after decoding.
     pub validate: bool,
@@ -447,16 +448,17 @@ where
             let remaining = bytes
                 .get(cursor..)
                 .ok_or_else(|| replay_decode_error("replay input cursor out of bounds"))?;
-            let (input, consumed) = codec::decode::<I>(remaining).map_err(|err| {
-                replay_decode_error(format!(
-                    "failed to decode replay input at frame {frame_index}, player {player_index}: {err}"
-                ))
-            })?;
+            let (input, consumed) = codec::decode_bounded_prefix_with_consumed::<I>(remaining)
+                .map_err(|err| {
+                    replay_decode_error(format!(
+                        "failed to decode replay input at frame {frame_index}, player {player_index}: {err}"
+                    ))
+                })?;
             // Forward-progress guard: a non-zero-sized input must consume at
             // least one wire byte, so the loop can run at most `remaining` times
             // regardless of the declared count. A zero-sized input legitimately
-            // consumes nothing; its iteration count is bounded instead by the
-            // `reserve_replay_vec` byte check above.
+            // consumes nothing; its separate CPU-count policy residual is
+            // documented on `reserve_replay_vec` above.
             if core::mem::size_of::<I>() != 0 && consumed == 0 {
                 return Err(replay_decode_error(format!(
                     "replay input at frame {frame_index}, player {player_index} decoded zero bytes"
@@ -908,6 +910,42 @@ mod tests {
     fn replay_from_invalid_bytes_fails() {
         let result = Replay::<u8>::from_bytes(&[0xFF, 0xFF, 0xFF]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_from_bytes_rejects_allocating_input_length_bomb() {
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+        struct AllocatingDeserializeInput;
+
+        impl<'de> Deserialize<'de> for AllocatingDeserializeInput {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let _payload = Vec::<u8>::deserialize(deserializer)?;
+                Ok(Self)
+            }
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // num_players
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // frames.len
+        bytes.extend_from_slice(&1_u64.to_le_bytes()); // frame0.inputs.len
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // malicious input Vec len
+
+        let error = Replay::<AllocatingDeserializeInput>::from_bytes(&bytes)
+            .expect_err("nested input length bomb must be rejected before allocating");
+
+        match error {
+            codec::CodecError::DecodeError { message, operation } => {
+                assert_eq!(operation, codec::CodecOperation::Decode);
+                assert!(
+                    message.contains("frame 0, player 0"),
+                    "message was: {message}"
+                );
+            },
+            other => panic!("expected replay decode error, got {other:?}"),
+        }
     }
 
     #[test]

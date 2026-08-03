@@ -1548,8 +1548,9 @@ pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED
 /// allocating and fails with a decode error once the total would exceed the
 /// limit — so even a `Vec<u8>`/`serde_bytes` field claiming `u64::MAX` is
 /// rejected without allocating. `bytes` is additionally pre-rejected when it is
-/// itself longer than the cap, so no input this function accepts can drive an
-/// allocation past [`MAX_BOUNDED_DECODE_LEN`].
+/// itself longer than the cap. As with every Serde decoder, this accounts for
+/// containers requested through the deserializer; it cannot police arbitrary
+/// allocation performed directly inside a hand-written `Deserialize` impl.
 ///
 /// Use this (not [`decode_value`]) for any value reconstructed from
 /// peer-controlled bytes whose type can contain a length-prefixed container.
@@ -1577,8 +1578,7 @@ pub(crate) const MAX_BOUNDED_DECODE_LEN: usize = crate::rle::DEFAULT_MAX_DECODED
 /// Returns [`CodecError::DecodeError`] when `bytes` exceeds the byte cap, when a
 /// declared container length would exceed the cap, when container nesting exceeds
 /// [`MAX_DECODE_DEPTH`](super::codec_depth::MAX_DECODE_DEPTH), or when bincode
-/// otherwise fails to decode (truncated input; trailing bytes are *not* rejected
-/// here — use [`decode_bounded_with_consumed`] if you need the consumed length).
+/// otherwise fails to decode, including truncated input or trailing bytes.
 #[cfg(feature = "hot-join")]
 pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T> {
     // alloc-bound: the same MAX_BOUNDED_DECODE_LEN byte cap as
@@ -1588,17 +1588,23 @@ pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T
     // depth-limited deserializer below.
     reject_over_cap(bytes.len())?;
     let config = bounded_decode_config();
-    // Wrap bincode's deserializer so a deeply-nested (recursive) `Config::State`
-    // blob is rejected with a recoverable error instead of overflowing the stack
-    // (B-codec). `BorrowedSerdeDecoder` exposes the serde deserializer; the
-    // borrowed reader is correct for a `DeserializeOwned` type (no field actually
-    // borrows from the slice).
-    let mut decoder = bincode::serde::BorrowedSerdeDecoder::from_slice(bytes, config, ());
-    super::codec_depth::deserialize_depth_limited::<T, _>(
-        decoder.as_deserializer(),
-        super::codec_depth::MAX_DECODE_DEPTH,
-    )
-    .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
+    // A serde seed preserves the existing depth-limited deserializer while
+    // allowing bincode to report exact consumption from its borrowed slice
+    // reader. This rejects bytes hidden inside `StateSnapshot::state_bytes`;
+    // exact outer-message consumption alone cannot see that nested padding.
+    let seed = super::codec_depth::DepthLimitedSeed::<T>::new(super::codec_depth::MAX_DECODE_DEPTH);
+    let (value, consumed) = bincode::serde::seed_decode_from_slice(seed, bytes, config)
+        .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))?;
+    if consumed != bytes.len() {
+        return Err(CodecError::decode(
+            format!(
+                "bounded value has {} trailing byte(s)",
+                bytes.len() - consumed
+            ),
+            CodecOperation::Decode,
+        ));
+    }
+    Ok(value)
 }
 
 /// [`decode_bounded`] variant that also returns the number of bytes consumed,
@@ -1606,13 +1612,11 @@ pub(crate) fn decode_bounded<T: DeserializeOwned>(bytes: &[u8]) -> CodecResult<T
 /// (e.g. the hot-join bridge-input blob: `num_players` fixed-width inputs
 /// concatenated) and must verify exact consumption.
 ///
-/// Unlike [`decode_bounded`], this path is **not** recursion-depth-limited, and
-/// it does not need to be: its only callers decode `Config::Input`, which is
-/// bound `Copy`, and a `Copy + Sized` type is provably non-recursive (recursion
-/// requires `Box`/`Vec`/heap indirection, none of which are `Copy`; a direct
-/// `enum E { N([E; 2]) }` is infinite-size and rejected by the compiler). So
-/// malicious bytes cannot drive this decode into unbounded recursion, and the
-/// hot input-decode path stays on the direct bincode call.
+/// This path applies both the Serde-managed allocation limit and the shared
+/// recursion-depth limit. Although `Config::Input` is `Copy`, a hand-written
+/// `Deserialize` impl can recursively decode and discard a non-`Copy` helper
+/// before returning the input value, so the returned type alone does not prove
+/// that decoding is non-recursive.
 pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> CodecResult<(T, usize)> {
@@ -1624,11 +1628,31 @@ pub(crate) fn decode_bounded_with_consumed<T: DeserializeOwned>(
     // *before* allocating and error once it would exceed the cap, so a malicious
     // length prefix (e.g. a `Vec<u8>` claiming u64::MAX) yields a decode error,
     // never a giant `vec![0u8; len]`. No input this function accepts can drive an
-    // allocation past the cap. Empirically verified for both the per-element
-    // (`Vec<T>`) and native (`serde_bytes`) decode paths.
+    // Serde-managed allocation past the cap. Empirically verified for both the
+    // per-element (`Vec<T>`) and native (`serde_bytes`) decode paths. A custom
+    // `Deserialize` implementation remains responsible for any allocation it
+    // performs without going through the deserializer.
     reject_over_cap(bytes.len())?;
+    decode_bounded_prefix_with_consumed(bytes)
+}
+
+/// Decodes one allocation-bounded value from the front of a potentially larger
+/// byte stream and returns its consumed length.
+///
+/// Unlike [`decode_bounded_with_consumed`], this does not reject the source
+/// slice merely because the *remaining stream* exceeds
+/// [`MAX_BOUNDED_DECODE_LEN`]. The bincode `Limit` still caps every
+/// deserializer-accounted byte claim made by this one value before allocation,
+/// and the depth-limited seed rejects recursive decoding past the shared limit.
+/// This is required by replay files, which concatenate many individually
+/// bounded inputs and intentionally allow a caller-controlled total file-size
+/// policy larger than the per-value cap.
+pub(crate) fn decode_bounded_prefix_with_consumed<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> CodecResult<(T, usize)> {
     let config = bounded_decode_config();
-    bincode::serde::decode_from_slice(bytes, config)
+    let seed = super::codec_depth::DepthLimitedSeed::<T>::new(super::codec_depth::MAX_DECODE_DEPTH);
+    bincode::serde::seed_decode_from_slice(seed, bytes, config)
         .map_err(|e| CodecError::decode(e.to_string(), CodecOperation::Decode))
 }
 

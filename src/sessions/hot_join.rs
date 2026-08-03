@@ -17,8 +17,10 @@
 //! user `Config::State` whose `Deserialize` impl may contain length-prefixed
 //! containers; a corrupt snapshot could claim an enormous embedded length.
 //! `deserialize_state` therefore decodes through `codec::decode_bounded`, which
-//! caps every container claim at `MAX_BOUNDED_DECODE_LEN` so a hostile length
-//! prefix cannot drive an oversized *allocation*.
+//! caps every Serde-managed container claim at `MAX_BOUNDED_DECODE_LEN` so a
+//! hostile length prefix cannot drive an oversized allocation through the
+//! deserializer. A hand-written `Deserialize` implementation remains
+//! responsible for allocations it performs directly.
 //!
 //! The byte cap alone bounds *allocation* but not *recursion depth*: bincode
 //! decodes a recursive type by recursing, and a pathologically deeply-nested
@@ -218,9 +220,11 @@ fn validate_snapshot_wire_size(
 /// Deserializes a `Config::State` from peer-controlled snapshot bytes.
 ///
 /// Decodes through `codec::decode_bounded` so a corrupt or malicious snapshot
-/// cannot trigger an oversized *allocation*: every length-prefixed container the
-/// state declares is bounded to `MAX_BOUNDED_DECODE_LEN` (64 MiB) before
-/// allocating, and `bytes` longer than that cap is rejected outright. See
+/// cannot trigger an oversized allocation through the deserializer: every
+/// Serde-managed length-prefixed container the state declares is bounded to
+/// `MAX_BOUNDED_DECODE_LEN` (64 MiB) before allocating, and `bytes` longer than
+/// that cap is rejected outright. Hand-written `Deserialize` implementations
+/// remain responsible for allocations they perform directly. See
 /// `codec::decode_bounded` for the full bincode allocation-bound analysis. The
 /// incoming `bytes` slice is itself already bounded to the packet by chunk-2's
 /// [`decode_message`](crate::network::codec::decode_message).
@@ -239,9 +243,10 @@ fn validate_snapshot_wire_size(
 /// # Errors
 ///
 /// Returns [`FortressError::SerializationErrorStructured`] if `bytes` are
-/// truncated, malformed, exceed the bounded-decode cap, declare a container
-/// length larger than the cap, or are nested past the recursion-depth limit.
-/// Hostile input yields `Err`, never an OOM or a stack-overflow abort.
+/// truncated, malformed, contain trailing bytes, exceed the bounded-decode cap,
+/// declare a container length larger than the cap, or are nested past the
+/// recursion-depth limit. These malformed Serde structures yield `Err` rather
+/// than an oversized deserializer allocation or stack-overflow abort.
 // dead_code: consumed by chunk 5's joiner snapshot orchestration.
 #[cfg(feature = "hot-join")]
 #[allow(dead_code)]
@@ -563,9 +568,10 @@ pub(crate) fn encode_bridge_inputs<T: Config>(
 ///
 /// Returns [`FortressError::SerializationErrorStructured`] if the blob is
 /// truncated, malformed, has trailing bytes, or any element fails the bounded
-/// decode (`codec::decode_bounded_with_consumed` caps every container claim,
-/// so a hostile length prefix inside a non-conforming variable-width
-/// `Config::Input` yields `Err`, never an oversized allocation).
+/// decode. `codec::decode_bounded_with_consumed` caps recursion and
+/// Serde-managed container claims, so a hostile length prefix passed through
+/// the deserializer yields `Err`; a hand-written `Deserialize` implementation
+/// remains responsible for allocations it performs directly.
 #[cfg(feature = "hot-join")]
 pub(crate) fn decode_bridge_inputs<T: Config>(
     bytes: &[u8],
@@ -869,6 +875,23 @@ mod tests {
         let bytes = serialize_state::<TestConfig>(&original).unwrap();
         let decoded = deserialize_state::<TestConfig>(&bytes).unwrap();
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn deserialize_rejects_trailing_bytes() {
+        let original = VecState::sample();
+        let mut bytes = serialize_state::<TestConfig>(&original).unwrap();
+        bytes.push(0xAA);
+
+        let result = deserialize_state::<TestConfig>(&bytes);
+
+        assert!(
+            matches!(
+                result,
+                Err(FortressError::SerializationErrorStructured { .. })
+            ),
+            "state bytes with nested trailing data must be rejected, got {result:?}"
+        );
     }
 
     #[test]

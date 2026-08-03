@@ -312,11 +312,9 @@ pub mod network {
     /// Provides centralized, zero-allocation-where-possible encoding and decoding
     /// of network messages using bincode.
     pub mod codec;
-    /// Recursion-depth-limited serde wrapper for peer-controlled decodes
-    /// (closes the recursive-`Config::State` stack-overflow surface, B-codec).
-    /// Only the hot-join `Config::State` snapshot decode (`codec::decode_bounded`)
-    /// needs it, so it is gated with that feature.
-    #[cfg(feature = "hot-join")]
+    /// Recursion-depth-limited serde wrapper for peer-controlled state and
+    /// input decodes, including custom input deserializers that recursively
+    /// decode and discard helper values before returning a `Copy` input.
     mod codec_depth;
     #[doc(hidden)]
     pub mod compression;

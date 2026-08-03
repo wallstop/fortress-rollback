@@ -943,6 +943,30 @@ impl<T: Config> Default for HotJoinConfig<T> {
     }
 }
 
+/// Decodes one fixed-width input from peer-controlled coordinated-drop
+/// backfill bytes.
+///
+/// The caller has already sliced the chunk to the configured input width. The
+/// bounded codec must still run before exact-consumption validation: a custom
+/// `Config::Input` deserializer can request a Serde-managed length-prefixed
+/// temporary container or recursively decode and discard a helper even though
+/// the resulting input is `Copy`. Direct allocations inside a hand-written
+/// deserializer remain that implementation's responsibility.
+fn decode_coordinated_drop_backfill_input<I: serde::de::DeserializeOwned>(
+    encoded: &[u8],
+    expected_width: usize,
+) -> Result<I, DropAbortReason> {
+    if encoded.len() != expected_width {
+        return Err(DropAbortReason::ConflictingHistory);
+    }
+    let (input, consumed) = crate::network::codec::decode_bounded_with_consumed::<I>(encoded)
+        .map_err(|_error| DropAbortReason::ConflictingHistory)?;
+    if consumed != expected_width {
+        return Err(DropAbortReason::ConflictingHistory);
+    }
+    Ok(input)
+}
+
 impl<T: Config> P2PSession<T> {
     fn coordinated_drop_now(&self) -> web_time::Instant {
         self.protocol_config
@@ -2027,11 +2051,8 @@ impl<T: Config> P2PSession<T> {
                         .bytes
                         .get(offset..end)
                         .ok_or(DropAbortReason::ConflictingHistory)?;
-                    let (input, consumed) = crate::network::codec::decode::<T::Input>(encoded)
-                        .map_err(|_error| DropAbortReason::ConflictingHistory)?;
-                    if consumed != input_width {
-                        return Err(DropAbortReason::ConflictingHistory);
-                    }
+                    let input =
+                        decode_coordinated_drop_backfill_input::<T::Input>(encoded, input_width)?;
                     let frame_offset = i32::try_from(frame_offset)
                         .map_err(|_error| DropAbortReason::ResourceLimit)?;
                     let frame = Frame::new(
@@ -12508,6 +12529,30 @@ mod tests {
         type Input = u8;
         type State = u8;
         type Address = SocketAddr;
+    }
+
+    #[test]
+    fn coordinated_drop_backfill_rejects_allocating_input_length_bomb() {
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+        struct AllocatingDeserializeInput;
+
+        impl<'de> serde::Deserialize<'de> for AllocatingDeserializeInput {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let _payload = <Vec<u8> as serde::Deserialize>::deserialize(deserializer)?;
+                Ok(Self)
+            }
+        }
+
+        let encoded = u64::MAX.to_le_bytes();
+        let result = decode_coordinated_drop_backfill_input::<AllocatingDeserializeInput>(
+            &encoded,
+            encoded.len(),
+        );
+
+        assert!(matches!(result, Err(DropAbortReason::ConflictingHistory)));
     }
 
     fn test_addr(port: u16) -> SocketAddr {
