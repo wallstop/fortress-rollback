@@ -310,7 +310,7 @@ pub mod network {
     /// Binary codec for network message serialization.
     ///
     /// Provides centralized, zero-allocation-where-possible encoding and decoding
-    /// of network messages using bincode.
+    /// of network messages using the bincode-compatible wire format.
     pub mod codec;
     /// Recursion-depth-limited serde wrapper for peer-controlled state and
     /// input decodes, including custom input deserializers that recursively

@@ -1,8 +1,9 @@
 //! Binary codec for network message serialization.
 //!
 //! This module provides a centralized, optimized interface for encoding and decoding
-//! network messages using bincode. It encapsulates the bincode configuration to ensure
-//! consistent, deterministic serialization across the codebase.
+//! network messages using the bincode wire format. It uses the maintained
+//! `bincode-next` fork behind an internal dependency alias and encapsulates the
+//! configuration to ensure consistent, deterministic serialization across the codebase.
 //!
 //! # Design Rationale
 //!

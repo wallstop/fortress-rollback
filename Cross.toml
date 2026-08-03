@@ -22,20 +22,24 @@
 #
 # To override locally (if needed):
 #   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
+#   RUSTFLAGS="-C link-arg=-Wl,--as-needed" \
 #   cross check --target aarch64-unknown-linux-gnu
 [build.env]
 passthrough = [
+    # A non-empty global override takes precedence over target rustflags from
+    # .cargo/config.toml. Cargo concatenates target-specific environment flags
+    # with the checked-in target flags, so an empty target override cannot
+    # remove the local `-fuse-ld=lld` argument in GCC-based CI containers.
+    "RUSTFLAGS",
     # Target (aarch64) variables - for cross-compiled binaries
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER",
-    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
     # Host (x86_64) variables - for build scripts and proc-macros
     "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ]
 
 [target.aarch64-unknown-linux-gnu]
 # No additional target-specific settings needed.
 # Linker and rustflags are configured via:
 # - .cargo/config.toml (local development with clang+lld)
-# - Environment variables passed through [build.env] (CI with GCC)
+# - Environment variables passed through [build.env] (CI with GCC and a
+#   non-empty global RUSTFLAGS override)

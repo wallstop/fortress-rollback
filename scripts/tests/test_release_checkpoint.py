@@ -234,6 +234,10 @@ def test_absent_tag_accepts_previous_checkpoint_older_than_search_bound(
     trusted, _remote = repository
     prepared = _git(trusted, "rev-parse", "HEAD")
     previous = _git(trusted, "rev-parse", "HEAD~1")
+    # Keep the source commit explicitly reachable while constructing the long
+    # replacement history. Relying on reflog-only reachability made this test
+    # sensitive to Git 2.54 maintenance pruning objects before the later push.
+    _git(trusted, "update-ref", "refs/test/prepared-release", prepared)
     _git(trusted, "reset", "--hard", previous)
     for index in range(release_checkpoint.MAX_FIRST_PARENT_COMMITS + 1):
         _git(

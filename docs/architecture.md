@@ -930,11 +930,17 @@ This is used to:
 
 ### Binary Codec (`network::codec`)
 
-The codec module provides centralized, deterministic serialization for all network messages using bincode. It encapsulates configuration to ensure consistent encoding across the codebase.
+The codec module provides centralized, deterministic serialization for all network messages using
+the bincode wire format. The implementation is the maintained `bincode-next` 2.1.0 fork, retained
+under the internal `bincode` dependency name and exactly pinned because serialized bytes are part of
+the network, replay, hot-join, and checksum contracts. It is the newest fork release compatible with
+the Rust 1.86 MSRV; bincode-next 3.x requires Rust 1.90. The migration from bincode 2.0.1 preserves
+the immutable golden vectors and public codec APIs.
 
 **Key Design Points:**
 
-- **Centralized Configuration**: Single bincode config with fixed-size integers for deterministic message sizes
+- **Centralized Configuration**: Single bincode-compatible config with fixed-size integers for deterministic message sizes
+- **Dependency Guardrail**: `cargo-deny` bans the original unmaintained `bincode` package from re-entering the graph
 - **Zero-Allocation Options**: `encode_into` writes to existing buffers for hot paths
 - **Clear Error Handling**: `CodecResult<T>` with descriptive error variants
 - **Bounded Peer Decode**: `decode_message` validates the protocol-v2 prelude and network `Message` lengths before allocation

@@ -23,7 +23,7 @@ This directory contains documentation for the Fortress Rollback library.
 
 The architecture guide includes detailed documentation of the network serialization layer:
 
-- **[Binary Codec](architecture.md#binary-codec-networkcodec)** — Centralized bincode serialization with zero-allocation options
+- **[Binary Codec](architecture.md#binary-codec-networkcodec)** — Centralized bincode-compatible serialization with zero-allocation options
 - **[Input Compression](architecture.md#input-compression-networkcompression)** — XOR delta encoding + RLE compression pipeline
 - **[Message Types](architecture.md#during-gameplay)** — Protocol message format and types
 

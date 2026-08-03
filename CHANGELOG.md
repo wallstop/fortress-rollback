@@ -16,11 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- An immutable bincode 2.0.1 compatibility suite now pins representative fixed-width input,
-  rich state, replay, hot-join bridge, and checksum bytes across every centralized codec path.
-  The temporary RUSTSEC-2025-0141 exception is version-pinned, owned by issue #273, and enforced
-  against a 2026-11-02 review deadline with explicit exit criteria. Serialized runtime bytes are
-  unchanged.
+- Serialization now uses the maintained `bincode-next` 2.1.0 fork behind the existing internal
+  `bincode` dependency name. The original unmaintained package and its RUSTSEC-2025-0141 exception
+  are removed and banned from the dependency graph. An immutable bincode 2.0.1 compatibility suite
+  pins representative fixed-width input, rich state, replay, hot-join bridge, and checksum bytes;
+  serialized runtime bytes and public codec APIs are unchanged. The fork remains exactly pinned for
+  wire/replay stability and is the newest release compatible with the Rust 1.86 MSRV.
 - `P2PSession` and `SyncTestSession` now reuse constructor-owned local-input staging. On the
   measured warmed path, staging one to four local players adds no heap allocation, while staging
   sixteen players retains only the returned `InputVec` spill. Network encoding and checksum history
@@ -37,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replay decoding now rejects more than 1,048,576 cumulative zero-sized inputs. Such
+  inputs consume no encoded payload bytes, so the existing byte and allocation bounds could not
+  limit their decode-loop CPU work. The hard ceiling preserves the existing `ReplayDecodeConfig`
+  shape and applies before entering the hostile frame's input loop.
 - **Pre-existing:** bounded input decoding now applies both recursion-depth and Serde-managed
   allocation limits to replay inputs and coordinated graceful-drop backfill, matching normal and
   hot-join bridge input handling. Hot-join state snapshots also reject trailing bytes inside the

@@ -2452,7 +2452,7 @@ mod tests {
         compression,
         messages::{Goodbye, Input, MessageBody, MessageHeader},
     };
-    use crate::{Config, Message, NonBlockingSocket, SessionBuilder};
+    use crate::{Config, Message, NonBlockingSocket, ProtocolConfig, SessionBuilder};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     /// A minimal test configuration for unit testing.
@@ -2462,6 +2462,21 @@ mod tests {
         type Input = u8;
         type State = u8;
         type Address = SocketAddr;
+    }
+
+    /// Builds spectator unit-test sessions on a frozen protocol clock.
+    ///
+    /// These tests stage protocol events directly and then poll them. A platform
+    /// monotonic clock can cross the two-second disconnect timeout while Miri is
+    /// interpreting the staging loop, turning test execution speed into a host
+    /// failover event. Tests that need a timer transition must inject and advance
+    /// their own clock instead.
+    fn deterministic_spectator_builder() -> SessionBuilder<TestConfig> {
+        let now = web_time::Instant::now();
+        SessionBuilder::<TestConfig>::new().with_protocol_config(ProtocolConfig {
+            clock: Some(Arc::new(move || now)),
+            ..ProtocolConfig::default()
+        })
     }
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -2605,7 +2620,7 @@ mod tests {
 
     // Helper function to create a spectator session for testing
     fn create_test_spectator_session() -> Option<SpectatorSession<TestConfig>> {
-        SessionBuilder::new()
+        deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session(test_addr(7000), DummySocket)
@@ -2618,7 +2633,7 @@ mod tests {
         catchup_speed: usize,
     ) -> Option<SpectatorSession<TestConfig>> {
         use crate::SpectatorConfig;
-        SessionBuilder::new()
+        deterministic_spectator_builder()
             .with_num_players(num_players)
             .unwrap()
             .with_spectator_config(SpectatorConfig {
@@ -2660,7 +2675,7 @@ mod tests {
     fn spectator_peer_metrics_are_isolated_and_count_received_host_traffic() {
         use crate::metrics::MessageKind;
 
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7420), test_addr(7421)], DummySocket)
@@ -2702,7 +2717,7 @@ mod tests {
     /// promoted survivor's running totals rather than resetting.
     #[test]
     fn spectator_peer_metrics_index_follows_surviving_host_after_compaction() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7430), test_addr(7431)], DummySocket)
@@ -3098,7 +3113,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let session: Option<SpectatorSession<TestConfig>> = SessionBuilder::new()
+        let session: Option<SpectatorSession<TestConfig>> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer)
@@ -3505,7 +3520,7 @@ mod tests {
         let observer = Arc::new(CollectingObserver::new());
         let observer_clone = Arc::clone(&observer);
 
-        let session: Option<SpectatorSession<TestConfig>> = SessionBuilder::new()
+        let session: Option<SpectatorSession<TestConfig>> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer)
@@ -3557,7 +3572,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer.clone())
@@ -3584,7 +3599,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer.clone())
@@ -3623,7 +3638,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(3)
             .unwrap()
             .with_violation_observer(observer.clone())
@@ -3651,7 +3666,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer.clone())
@@ -3705,7 +3720,7 @@ mod tests {
 
     #[test]
     fn spectator_partial_host_input_conflict_latches_after_canonical_commit() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7305), test_addr(7306)], DummySocket)
@@ -3756,7 +3771,7 @@ mod tests {
     // to a no-op makes it fail (confirmed during arbitration).
     #[test]
     fn spectator_nonoverlapping_divergent_late_stream_latches_divergence() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(
@@ -3827,7 +3842,7 @@ mod tests {
     // catches it before any frame > F can play back a divergent frozen value.
     #[test]
     fn spectator_frozen_slot_divergent_value_at_freeze_frame_latches_before_playback() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7411), test_addr(7412)], DummySocket)
@@ -3917,7 +3932,7 @@ mod tests {
     // the spectator analog of the c25fc1f asymmetric-loss desync.
     #[test]
     fn spectator_asymmetric_freeze_frame_nonoverlapping_region_converges_to_global_min() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7421), test_addr(7422)], DummySocket)
@@ -4072,7 +4087,7 @@ mod tests {
     // that the late-arrival test leaves unverified.
     #[test]
     fn spectator_asymmetric_freeze_frame_converges_at_commit_time_when_lower_host_staged_first() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7431), test_addr(7432)], DummySocket)
@@ -4218,7 +4233,7 @@ mod tests {
 
     #[test]
     fn spectator_partial_host_input_conflict_latches_before_canonical_commit() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7307), test_addr(7308)], DummySocket)
@@ -4267,7 +4282,7 @@ mod tests {
 
     #[test]
     fn spectator_pending_primary_disconnect_allows_unresolved_failover_without_divergence() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7311), test_addr(7312)], DummySocket)
@@ -4312,7 +4327,7 @@ mod tests {
 
     #[test]
     fn spectator_same_poll_later_disconnect_is_excluded_before_earlier_input() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7313), test_addr(7314)], DummySocket)
@@ -4346,7 +4361,7 @@ mod tests {
 
     #[test]
     fn spectator_same_host_input_before_disconnect_is_preserved() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session(test_addr(7315), DummySocket)
@@ -4368,7 +4383,7 @@ mod tests {
 
     #[test]
     fn spectator_disconnect_packet_preserves_final_inputs() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session(test_addr(7316), DummySocket)
@@ -4389,7 +4404,7 @@ mod tests {
 
     #[test]
     fn spectator_all_hosts_disconnect_with_conflict_latches_divergence() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7317), test_addr(7318)], DummySocket)
@@ -4431,7 +4446,7 @@ mod tests {
 
     #[test]
     fn spectator_host_frame_snapshot_keeps_packet_status_per_frame() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7309)], DummySocket)
@@ -4652,7 +4667,7 @@ mod tests {
 
     #[test]
     fn spectator_same_frame_redundant_host_cannot_refresh_or_disconnect_shared_status() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7310), test_addr(7311)], DummySocket)
@@ -4724,7 +4739,7 @@ mod tests {
 
     #[test]
     fn spectator_lower_priority_snapshot_is_provisional_until_primary_arrives() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7320), test_addr(7321)], DummySocket)
@@ -4784,7 +4799,7 @@ mod tests {
 
     #[test]
     fn spectator_disconnected_primary_promotes_next_host_for_unresolved_frame() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7330), test_addr(7331)], DummySocket)
@@ -4846,7 +4861,7 @@ mod tests {
         // `merge_connection_status`, which `#![deny(warnings)]` would otherwise
         // flag as unused) and this test fails — `host_connect_status[1]` becomes
         // the raised freeze 8 and `inputs_at_frame(6)` reads Confirmed.
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7340), test_addr(7341)], DummySocket)
@@ -4977,7 +4992,7 @@ mod tests {
         // (true, false) arm `return;` (leave disconnected, ignore the reactivation) —
         // this test fails: player 1 reads Disconnected and host_connect_status[1]
         // stays disconnected.
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7350)], DummySocket)
@@ -5092,7 +5107,7 @@ mod tests {
     // stale-connected gossip must NOT be followed.
     #[test]
     fn stale_lagging_canonical_host_cannot_resurrect_permanently_dropped_slot() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7501), test_addr(7502)], DummySocket)
@@ -5218,7 +5233,7 @@ mod tests {
     // freeze (1) belongs to the consumed first cycle.
     #[test]
     fn second_drop_after_reactivation_not_resurrected_by_cycle_one_witness() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7503), test_addr(7504)], DummySocket)
@@ -5428,7 +5443,7 @@ mod tests {
     // cycle-1 reactivation is followed, so only post-follow drop reports count.
     #[test]
     fn second_drop_after_reactivation_not_resurrected_by_high_view_cycle_one_witness() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7509), test_addr(7510)], DummySocket)
@@ -5664,7 +5679,7 @@ mod tests {
     // (which is the fail-CLOSED variant: no post-consume re-arm).
     #[test]
     fn cross_cycle_stale_drop_epoch_blocks_resurrect_after_consume() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7515), test_addr(7516)], DummySocket)
@@ -5850,7 +5865,7 @@ mod tests {
     // host failover.
     #[test]
     fn witnessed_failover_host_reactivation_is_followed() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7505), test_addr(7506)], DummySocket)
@@ -5960,7 +5975,7 @@ mod tests {
     // a real frame (`NULL < 0 <= latch`).
     #[test]
     fn null_freeze_witness_follows_null_latch_but_not_real_latch() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7511)], DummySocket)
@@ -6024,7 +6039,7 @@ mod tests {
     // provenance probe (the discriminator the corner turns on).
     #[test]
     fn within_cycle_pre_drop_epoch_blocks_follow_post_drop_epoch_follows() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7517)], DummySocket)
@@ -6088,7 +6103,7 @@ mod tests {
     // followed too. Single host, two full drop -> rejoin cycles.
     #[test]
     fn second_reactivation_followed_after_witness_consumption() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7512)], DummySocket)
@@ -6254,7 +6269,7 @@ mod tests {
     // LOWERS an already-disconnected slot's freeze frame).
     #[test]
     fn late_arriving_connected_snapshot_does_not_resurrect_dropped_slot() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7507), test_addr(7508)], DummySocket)
@@ -6355,7 +6370,7 @@ mod tests {
     // and gossips connected with real player-1 inputs.
     #[test]
     fn stale_staged_adopt_after_witness_consumption_recovers_when_host_catches_up() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7513), test_addr(7514)], DummySocket)
@@ -6568,7 +6583,7 @@ mod tests {
     // start failing and be replaced by a recovery assertion.
     #[test]
     fn genuine_reactivation_with_only_preconsume_witnesses_fails_closed_at_frozen_label() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[test_addr(7515), test_addr(7516)], DummySocket)
@@ -6793,7 +6808,7 @@ mod tests {
 
     #[test]
     fn spectator_stream_delay_releases_after_clean_all_hosts_disconnect() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_spectator_config(crate::SpectatorConfig {
@@ -6833,7 +6848,7 @@ mod tests {
 
     #[test]
     fn spectator_stream_delay_boundary_returns_prediction_threshold() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_spectator_config(crate::SpectatorConfig {
@@ -6868,7 +6883,7 @@ mod tests {
 
     #[test]
     fn spectator_session_multi_host_reports_host_count() {
-        let session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(
@@ -6881,7 +6896,7 @@ mod tests {
 
     #[test]
     fn spectator_remove_disconnected_hosts_uses_original_indices() {
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(
@@ -6910,7 +6925,7 @@ mod tests {
         use crate::telemetry::CollectingObserver;
 
         let observer = Arc::new(CollectingObserver::new());
-        let mut session: SpectatorSession<TestConfig> = SessionBuilder::new()
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_violation_observer(observer.clone())
@@ -6936,7 +6951,7 @@ mod tests {
 
     #[test]
     fn spectator_session_multi_host_empty_returns_none() {
-        let session: Option<SpectatorSession<TestConfig>> = SessionBuilder::new()
+        let session: Option<SpectatorSession<TestConfig>> = deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .start_spectator_session_multi(&[], DummySocket);
@@ -6952,7 +6967,7 @@ mod tests {
         enable_rewind: bool,
     ) -> SpectatorSession<TestConfig> {
         use crate::SpectatorConfig;
-        SessionBuilder::new()
+        deterministic_spectator_builder()
             .with_num_players(2)
             .unwrap()
             .with_spectator_config(SpectatorConfig {

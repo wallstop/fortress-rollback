@@ -210,11 +210,17 @@ while !session.is_complete() {
 | `frames` | `Vec<Vec<I>>` -- inputs per frame, one entry per player |
 | `checksums` | `Vec<Option<u128>>` -- per-frame checksums for validation |
 | `metadata` | `ReplayMetadata` -- library version, player count, total frame count, and skipped-frame count |
-| `to_bytes()` | Serialize to bytes (deterministic bincode codec) |
+| `to_bytes()` | Serialize with the deterministic, bincode-compatible codec |
 | `from_bytes(&[u8])` | Deserialize from bytes and validate the result |
 | `from_bytes_with_config(&[u8], ReplayDecodeConfig)` | Deserialize with a caller-defined byte limit or validation setting |
 | `total_frames()` | Number of recorded frames |
 | `validate()` | Check internal consistency (frames/checksums/metadata) |
+
+`ReplayDecodeConfig::default()` validates the replay and leaves the encoded byte limit to the
+caller. Every decode also caps cumulative zero-sized inputs at 1,048,576. Zero-sized values consume
+no payload bytes, so this hard limit bounds decode-loop CPU work that byte and allocation checks
+cannot measure. Use `max_bytes()` and `validate()` to set application policy; only trusted replays
+should use `without_byte_limit()`.
 
 ### ReplaySession&lt;T&gt;
 

@@ -21,6 +21,12 @@ import pytest
 from cargo_linker import _get_linux_target_triple, _is_lld_available, get_cargo_env
 
 
+@pytest.fixture(autouse=True)
+def clear_rustflags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fallback expectations independent of the test runner environment."""
+    monkeypatch.delenv("RUSTFLAGS", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Tests for _get_linux_target_triple
 # ---------------------------------------------------------------------------
@@ -130,10 +136,10 @@ class TestGetCargoEnv:
             result = get_cargo_env()
             assert result == {
                 "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER": "cc",
-                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "",
+                "RUSTFLAGS": "-C link-arg=-Wl,--as-needed",
             }, (
                 "x86_64 Linux without lld should override linker to 'cc' "
-                "and clear rustflags"
+                "and replace the configured lld rustflags"
             )
 
     def test_linux_aarch64_without_lld_returns_overrides(self) -> None:
@@ -145,10 +151,10 @@ class TestGetCargoEnv:
             result = get_cargo_env()
             assert result == {
                 "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "cc",
-                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "",
+                "RUSTFLAGS": "-C link-arg=-Wl,--as-needed",
             }, (
                 "aarch64 Linux without lld should override linker to 'cc' "
-                "and clear rustflags"
+                "and replace the configured lld rustflags"
             )
 
     def test_linux_unknown_arch_without_lld_returns_overrides(self) -> None:
@@ -160,7 +166,7 @@ class TestGetCargoEnv:
             result = get_cargo_env()
             assert result == {
                 "CARGO_TARGET_RISCV64_UNKNOWN_LINUX_GNU_LINKER": "cc",
-                "CARGO_TARGET_RISCV64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "",
+                "RUSTFLAGS": "-C link-arg=-Wl,--as-needed",
             }, (
                 "Unknown arch on Linux without lld should still produce "
                 "overrides using the fallback triple"
@@ -209,7 +215,7 @@ class TestGetCargoEnv:
     # -- Edge cases --
 
     def test_overrides_contain_exactly_two_keys(self) -> None:
-        """When overrides are returned, they contain exactly LINKER and RUSTFLAGS."""
+        """Overrides contain one target linker and global rustflags."""
         with patch("cargo_linker.platform") as mock_platform, \
              patch("cargo_linker.shutil.which", return_value=None):
             mock_platform.system.return_value = "Linux"
@@ -222,9 +228,7 @@ class TestGetCargoEnv:
             assert any(k.endswith("_LINKER") for k in keys), (
                 "Expected a _LINKER key in overrides"
             )
-            assert any(k.endswith("_RUSTFLAGS") for k in keys), (
-                "Expected a _RUSTFLAGS key in overrides"
-            )
+            assert "RUSTFLAGS" in keys, "Expected a global RUSTFLAGS override"
 
     def test_linker_override_value_is_cc(self) -> None:
         """The linker override uses 'cc' (the standard system compiler driver)."""
@@ -238,17 +242,41 @@ class TestGetCargoEnv:
                 f"Linker should be 'cc', got '{result[linker_key]}'"
             )
 
-    def test_rustflags_override_is_empty_string(self) -> None:
-        """The rustflags override is an empty string (clears config.toml flags)."""
+    def test_rustflags_override_replaces_target_config(self) -> None:
+        """Global rustflags replace the incompatible target config flags."""
         with patch("cargo_linker.platform") as mock_platform, \
              patch("cargo_linker.shutil.which", return_value=None):
             mock_platform.system.return_value = "Linux"
             mock_platform.machine.return_value = "x86_64"
             result = get_cargo_env()
-            flags_key = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"
-            assert result[flags_key] == "", (
-                f"Rustflags should be empty string, got '{result[flags_key]}'"
+            assert result["RUSTFLAGS"] == "-C link-arg=-Wl,--as-needed", (
+                "Rustflags should select a GCC-compatible link argument, got "
+                f"'{result['RUSTFLAGS']}'"
             )
+
+    def test_existing_rustflags_are_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linker fallback must not discard caller-supplied compiler flags."""
+        monkeypatch.setenv("RUSTFLAGS", "--cfg custom_build")
+        with patch("cargo_linker.platform") as mock_platform, \
+             patch("cargo_linker.shutil.which", return_value=None):
+            mock_platform.system.return_value = "Linux"
+            mock_platform.machine.return_value = "x86_64"
+            result = get_cargo_env()
+            assert result["RUSTFLAGS"] == "--cfg custom_build"
+
+    def test_existing_empty_rustflags_are_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit empty global override still suppresses target config."""
+        monkeypatch.setenv("RUSTFLAGS", "")
+        with patch("cargo_linker.platform") as mock_platform, \
+             patch("cargo_linker.shutil.which", return_value=None):
+            mock_platform.system.return_value = "Linux"
+            mock_platform.machine.return_value = "x86_64"
+            result = get_cargo_env()
+            assert result["RUSTFLAGS"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -261,12 +289,12 @@ class TestGetCargoEnv:
     [
         pytest.param(
             "Linux", "x86_64", None,
-            {"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"},
+            {"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "RUSTFLAGS"},
             id="linux-x86_64-no-lld",
         ),
         pytest.param(
             "Linux", "aarch64", None,
-            {"CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"},
+            {"CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", "RUSTFLAGS"},
             id="linux-aarch64-no-lld",
         ),
         pytest.param(

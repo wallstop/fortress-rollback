@@ -131,7 +131,7 @@ fn spawn_enemy(state: &mut GameState, rng: &mut SeededRng) {
 
 **Implementation:**
 
-- ✅ `bincode` configured with `standard().with_little_endian().with_fixed_int_encoding()` (fixed-size integers are an explicit override of bincode's variable-int default, ensuring identical serialized bytes across platforms)
+- ✅ The bincode-compatible codec is configured with `standard().with_little_endian().with_fixed_int_encoding()` (fixed-size integers are an explicit override of the format's variable-int default, ensuring identical serialized bytes across platforms)
 - ✅ Input types require `Serialize + Deserialize`
 - ✅ No platform-specific serialization
 
@@ -271,7 +271,7 @@ fn compute_checksum(state: &GameState) -> Option<u128> {
 }
 ```
 
-> **Note:** The `network::codec` module ensures consistent bincode configuration (fixed-size integers) across all serialization calls.
+> **Note:** The `network::codec` module ensures a consistent bincode-compatible configuration (fixed-size integers) across all serialization calls. The maintained `bincode-next` implementation is exactly pinned, and immutable golden vectors guard the serialized contract.
 
 ### R4: Avoid Platform-Specific Behavior
 
