@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785740382236,
+  "lastUpdate": 1785773283190,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "23b8593f89454125e02b5cf71291f8723186c55d",
-          "message": "[codex] Hardening M3 LegacyDisconnect lifecycle op (#207)\n\n## Summary\n\nAdds the M3 `LegacyDisconnect` lifecycle operation to the deterministic\nsimulation harness.\n\n- bumps simulation schedule schema to v6 and serializes\n`ScheduleEvent::LegacyDisconnect { by, target }`\n- wires the runner to call the real `P2PSession::disconnect_player` API,\nretiring/detaching the target only on success\n- adds planted coverage for serialization, malformed event validation,\ndeterministic execution, and the current Halt/D13 non-recovery shape\n- adds a pre-retirement divergence control so a legacy-disconnected\ntarget cannot hide a determinism bug behind the alive mask\n\nThis is intentionally not modeled as graceful convergence: the legacy\npath remains Halt/D13-facing and the test pins non-recovery precisely.\n\n## Validation\n\n- `cargo fmt`\n- `cargo nextest run --no-capture --no-fail-fast legacy_disconnect\npre_disconnect lifecycle_events_round_trip_through_json`\n- `cargo nextest run --no-capture --test simulation` (126 passed, 10\nskipped)\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo nextest run --no-capture` (2395 passed, 57 skipped)\n- `cargo nextest run --features hot-join --no-capture` (2634 passed, 57\nskipped)\n\n## Review Notes\n\nA local adversarial review found and fixed an overly loose\nexpected-failure assertion: the test now pins the exact live-peer\nnon-recovery set and only the expected failure classes.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation harness, schedule schema, and\ntests; production session code is only invoked, not modified.\n> \n> **Overview**\n> Introduces **`ScheduleEvent::LegacyDisconnect`** and bumps the\nsimulation schedule schema to **v6**, so corpus schedules can plant the\nlegacy **`P2PSession::disconnect_player`** path alongside existing\nlifecycle ops.\n> \n> The harness runner now executes that event like **`GracefulRemove`**:\none peer calls the real API, retires and detaches the target on success,\nand records **`SessionError`** on failure. **`LegacyDisconnect`** shares\nthe same up-front validation as graceful remove (range checks,\nremote-only target). The oracle treats legacy-disconnected peers like\nother retired peers for the alive mask (liveness excluded,\npre-retirement state still compared).\n> \n> **`clean_four_peer_lifecycle_schedule`** deduplicates the 4-peer mesh\nsetup used by peer-kill, graceful-remove, and legacy-disconnect\nbuilders; legacy schedules use **`DropPolicy::Halt`** to match today’s\nhalt-oriented behavior.\n> \n> New fleet coverage documents that this is **not** a\ngraceful-convergence contract:\n**`legacy_disconnect_reports_halt_non_recovery`** expects a failing run\nwith precise oracle failure classes, **`recovered_within_b == false`**,\nand deterministic trace hashes; plus pre-disconnect divergence and\nmalformed-event rejection tests. JSON round-trip tests include the new\nevent.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n9eb312a0acec2f1d1b443384e419c04e7c2f44ca. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-06T13:47:21-07:00",
-          "tree_id": "be71267422236758ffb3c973962535ee94e7d524",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/23b8593f89454125e02b5cf71291f8723186c55d"
-        },
-        "date": 1783371111064,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 121,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 166,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 510,
-            "range": "± 20",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 779,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1115,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 127293,
-            "range": "± 3413",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48570,
-            "range": "± 253",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 23",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1603,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4259,6 +4133,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3158,
             "range": "± 215",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "304587157+wallstop-auto-releaser[bot]@users.noreply.github.com",
+            "name": "wallstop-auto-releaser[bot]",
+            "username": "wallstop-auto-releaser[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f1d0c47253c981c1da7cf40fe0a27bfc91a3caab",
+          "message": "Prepare v0.12.0 release (#285)\n\nAutomated preparation for Fortress Rollback v0.12.0.\n\nCloses #227\n\nAfter this PR is green and merged, run **Release - Publish Crate** on\n`main` with `0.12.0`.\n\nCo-authored-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-03T08:59:57-07:00",
+          "tree_id": "5c79a3aa9804f817c529767c644d2f487bdfb29e",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f1d0c47253c981c1da7cf40fe0a27bfc91a3caab"
+        },
+        "date": 1785773282623,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 124150,
+            "range": "± 6313",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 36289,
+            "range": "± 197",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1405,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3115,
+            "range": "± 248",
             "unit": "ns/iter"
           }
         ]
