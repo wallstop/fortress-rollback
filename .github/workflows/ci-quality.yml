@@ -116,10 +116,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-shear
-        uses: ./.github/actions/install-cargo-tool
-        with:
-          tool: cargo-shear
-          version: "1.13.3"
+        run: |
+          set -euo pipefail
+          cargo_shear_version="1.13.3"
+          cargo_shear_archive="$RUNNER_TEMP/cargo-shear-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 3 \
+            --output "$cargo_shear_archive" \
+            "https://github.com/Boshen/cargo-shear/releases/download/v${cargo_shear_version}/cargo-shear-x86_64-unknown-linux-musl.tar.gz"
+          echo "21ba04662e0eaa6059ca7e1adf48f3bdf1c6656b613b926f3bda0dc6f5b38f82  $cargo_shear_archive" \
+            | sha256sum --check
+          tar -xzf "$cargo_shear_archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/cargo-shear" /usr/local/bin/cargo-shear
+          cargo shear --version
 
       - name: Check for unused dependencies
         run: |

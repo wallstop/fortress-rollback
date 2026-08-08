@@ -25,6 +25,9 @@ RUFF_ACTION = "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89"
 SHELLCHECK_SHA256 = (
     "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
 )
+CARGO_SHEAR_SHA256 = (
+    "21ba04662e0eaa6059ca7e1adf48f3bdf1c6656b613b926f3bda0dc6f5b38f82"
+)
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:
@@ -120,7 +123,33 @@ def test_quality_tools_are_immutable_and_version_pinned() -> None:
     shear = _step_by_name(
         _steps(workflow, "unused-deps-fast"), "Install cargo-shear"
     )
-    assert shear["with"] == {"tool": "cargo-shear", "version": "1.13.3"}
+    shear_install = shear["run"]
+    executable_lines = [
+        line.strip()
+        for line in shear_install.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    executable_install = "\n".join(executable_lines)
+    assert executable_lines[0] == "set -euo pipefail"
+    assert 'cargo_shear_version="1.13.3"' in shear_install
+    assert (
+        '"https://github.com/Boshen/cargo-shear/releases/download/'
+        'v${cargo_shear_version}/cargo-shear-x86_64-unknown-linux-musl.tar.gz"'
+        in executable_install
+    )
+    assert CARGO_SHEAR_SHA256 in executable_install
+    checksum_input = f'echo "{CARGO_SHEAR_SHA256}  $cargo_shear_archive" \\'
+    checksum_input_index = executable_lines.index(checksum_input)
+    assert executable_lines[checksum_input_index + 1] == "| sha256sum --check"
+    ordered_install_markers = [
+        "curl --fail --location --retry 3",
+        "| sha256sum --check",
+        'tar -xzf "$cargo_shear_archive"',
+        'sudo install -m 0755 "$RUNNER_TEMP/cargo-shear"',
+    ]
+    marker_positions = [executable_install.index(marker) for marker in ordered_install_markers]
+    assert marker_positions == sorted(marker_positions)
+    assert shear.get("continue-on-error") is not True
     command = _step_by_name(
         _steps(workflow, "unused-deps-fast"), "Check for unused dependencies"
     )
