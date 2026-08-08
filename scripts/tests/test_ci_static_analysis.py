@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -16,6 +17,7 @@ except ImportError:  # pragma: no cover - Python < 3.11
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW_DIRECTORY = REPO_ROOT / ".github" / "workflows"
 QUALITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-quality.yml"
 LINT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-lint.yml"
 CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-codeql.yml"
@@ -28,6 +30,42 @@ SHELLCHECK_SHA256 = (
 CARGO_SHEAR_SHA256 = (
     "21ba04662e0eaa6059ca7e1adf48f3bdf1c6656b613b926f3bda0dc6f5b38f82"
 )
+THIRD_PARTY_ACTION_PINS = {
+    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+    "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89",
+    "benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba",
+    "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f",
+    "crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f",
+    "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+    "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
+    "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",
+    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+    "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
+    "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
+    "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984",
+    "lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8",
+    "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
+    "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
+    "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
+    "taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad",
+}
+FORBIDDEN_MUTABLE_ACTION_REFS = {
+    "Swatinem/rust-cache@v2",
+    "benchmark-action/github-action-benchmark@v1",
+    "codecov/codecov-action@v7",
+    "crate-ci/typos@v1.49.0",
+    "docker/build-push-action@v7",
+    "docker/login-action@v4.6.0",
+    "docker/metadata-action@v6",
+    "docker/setup-buildx-action@v4",
+    "dtolnay/rust-toolchain@master",
+    "dtolnay/rust-toolchain@stable",
+    "lycheeverse/lychee-action@v2",
+    "mozilla-actions/sccache-action@v0.0.11",
+    "nick-fields/retry@v4",
+    "obi1kenobi/cargo-semver-checks-action@v2",
+    "taiki-e/install-action@v2",
+}
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:
@@ -108,6 +146,38 @@ def test_static_workflows_have_read_only_contents_permission() -> None:
     for path in (LINT_WORKFLOW, QUALITY_WORKFLOW):
         workflow = _load_workflow(path)
         assert workflow["permissions"] == {"contents": "read"}
+
+
+def test_every_workflow_declares_least_privilege_permissions() -> None:
+    for path in sorted(WORKFLOW_DIRECTORY.glob("*.yml")):
+        workflow = _load_workflow(path)
+        assert "permissions" in workflow, path
+
+
+def test_reported_third_party_actions_use_reviewed_immutable_pins() -> None:
+    action_files = [
+        *sorted((REPO_ROOT / ".github").rglob("*.yml")),
+        *sorted((REPO_ROOT / ".github").rglob("*.yaml")),
+    ]
+    action_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in action_files
+    )
+
+    for mutable_ref in FORBIDDEN_MUTABLE_ACTION_REFS:
+        assert mutable_ref not in action_source
+    for immutable_pin in THIRD_PARTY_ACTION_PINS:
+        assert immutable_pin in action_source
+
+    uses_references = re.findall(
+        r"^\s*(?:-\s*)?uses:\s*([^\s#]+)",
+        action_source,
+        flags=re.MULTILINE,
+    )
+    for reference in uses_references:
+        if reference.startswith(("./", "docker://", "actions/", "github/")):
+            continue
+        assert reference in THIRD_PARTY_ACTION_PINS
+        assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", reference)
 
 
 def test_quality_tools_are_immutable_and_version_pinned() -> None:
@@ -229,13 +299,16 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
         "${{ steps.codeql.outputs.sarif-output }}"
     )
     run = enforcement["run"]
-    assert "(.results // []) | length" in run
+    assert "acknowledged_release_state_boundary" in run
     assert "all(.[];" in run
     assert '.runs | type == "array"' in run
     assert "(.runs | length) > 0" in run
     assert 'type == "object"' in run
     assert '.results | type == "array"' in run
-    assert "== 0" in run
+    assert "feef20c4e42596ef:1" in run
+    assert "8d4fae92413ae178:1" in run
+    assert "911ca217a17b7b20:1" in run
+    assert "unique | length" in run
     assert enforcement.get("continue-on-error") is not True
 
 
@@ -244,7 +317,84 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     [
         ((r'{"runs":[{"results":[]}]}',), True),
         ((r'{"runs":[{}]}',), True),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            True,
+        ),
         ((r'{"runs":[{"results":[{"ruleId":"finding"}]}]}',), False),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"unexpected"}}]}]}',
+            ),
+            False,
+        ),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            False,
+        ),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/different-rule",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            False,
+        ),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}},{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            False,
+        ),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/cache-poisoning/poisonable-step",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/other.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            False,
+        ),
         ((r'{"runs":[]}',), False),
         (("{malformed",), False),
         (("null",), False),
@@ -263,7 +413,13 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     ids=(
         "clean",
         "clean-default-results",
+        "acknowledged-trust-boundary",
         "finding",
+        "trust-boundary-wrong-fingerprint",
+        "trust-boundary-cross-report-duplicate",
+        "trust-boundary-wrong-rule",
+        "trust-boundary-duplicate-fingerprint",
+        "trust-boundary-wrong-path",
         "empty",
         "malformed",
         "null-report",

@@ -3,6 +3,9 @@ name: CI - Release State
 on:
   # Base-branch ownership keeps the workflow and every executable verifier
   # trusted. Candidate source is checked out only as inert, unprivileged data.
+  # CodeQL nevertheless flags the three trusted verifier steps that follow the
+  # candidate checkout. The SARIF gate admits only their exact fingerprints;
+  # any changed or additional cache-poisoning result remains blocking.
   pull_request_target:
     branches: [main]
   merge_group:

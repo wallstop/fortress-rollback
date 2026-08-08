@@ -1,4 +1,6 @@
 name: CI - Verification
+permissions:
+  contents: read
 
 on:
   push:
@@ -79,7 +81,7 @@ jobs:
           java-version: '17'
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
           toolchain: stable
 
@@ -119,7 +121,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
           toolchain: stable
 
@@ -181,7 +183,7 @@ jobs:
             kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ steps.nightly.outputs.toolchain }}-
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 15
           max_attempts: 3
@@ -206,7 +208,7 @@ jobs:
       # SIGKILL (137) past the grace window -- if 137 recurs, switch to a
       # wrapper that handles both.
       - name: Run Kani verification (Tier 1 - Fast)
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 15
           max_attempts: 2
@@ -264,7 +266,7 @@ jobs:
             kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ steps.nightly.outputs.toolchain }}-
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 15
           max_attempts: 3
@@ -288,7 +290,7 @@ jobs:
       # Retry: same as Tier 1 -- only 143 (SIGTERM/preempt); 1 and 124 fail
       # immediately. See Tier 1 comment re: SIGKILL escalation.
       - name: Run Kani verification (Tier 2 - Part ${{ matrix.part }}/6)
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 10
           max_attempts: 2
@@ -346,7 +348,7 @@ jobs:
             kani-build-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ steps.nightly.outputs.toolchain }}-
 
       - name: Install Kani with retry
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 15
           max_attempts: 3
@@ -368,7 +370,7 @@ jobs:
       # See Tier 1/2: --jobs omitted (per-harness invocation); retry only on
       # 143 (SIGTERM/preempt); 1 and 124 fail immediately.
       - name: Run Kani verification (Tier 3 - Part ${{ matrix.part }}/5)
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 20
           max_attempts: 2
@@ -395,7 +397,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable snapshot
 
       - name: Cache cargo registry and build
         uses: actions/cache@v6

@@ -34,7 +34,7 @@ runs:
   steps:
     - name: Configure sccache
       id: sccache
-      uses: mozilla-actions/sccache-action@v0.0.11
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       continue-on-error: true
 
     - name: Verify sccache is working

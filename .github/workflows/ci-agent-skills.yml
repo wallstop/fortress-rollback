@@ -1,4 +1,6 @@
 name: Agent Skills Lint
+permissions:
+  contents: read
 
 on:
   push:

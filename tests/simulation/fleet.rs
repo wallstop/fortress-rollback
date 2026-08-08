@@ -2770,10 +2770,10 @@ const H_OSC_STEPS: u32 = 2_400;
 const H_OSC_JITTER_EPOCH_STEPS: u32 = 30;
 const H_OSC_JITTER_EPOCHS: u32 = (H_OSC_JITTER_END - H_OSC_JITTER_START) / H_OSC_JITTER_EPOCH_STEPS;
 
-fn h_osc_exogenous_delay_ms(epoch: u32, from: usize, to: usize, salt: u64) -> u64 {
+fn h_osc_exogenous_delay_ms(epoch: u32, from: usize, to: usize, schedule_id: u64) -> u64 {
     let low = from.min(to);
     let high = from.max(to);
-    let phase = u32::try_from(salt % u64::from(H_OSC_JITTER_EPOCHS))
+    let phase = u32::try_from(schedule_id % u64::from(H_OSC_JITTER_EPOCHS))
         .expect("phase is bounded by the epoch count");
     let balanced_epoch = if from < to {
         epoch.saturating_add(phase) % H_OSC_JITTER_EPOCHS
@@ -2792,7 +2792,7 @@ fn h_osc_exogenous_delay_ms(epoch: u32, from: usize, to: usize, salt: u64) -> u6
     20 + ((value ^ (value >> 31)) % 1_001)
 }
 
-fn h_osc_jitter_schedule(n: usize, policy: WaitRecommendationPolicy, salt: u64) -> Schedule {
+fn h_osc_jitter_schedule(n: usize, policy: WaitRecommendationPolicy, schedule_id: u64) -> Schedule {
     let mut schedule = wait_rec_schedule(n, AppModel::Obey);
     schedule.config.steps = H_OSC_STEPS;
     schedule.config.frame_model = FrameModel::SkewGated60Hz;
@@ -2811,7 +2811,7 @@ fn h_osc_jitter_schedule(n: usize, policy: WaitRecommendationPolicy, salt: u64) 
         for (from, to, clean) in &schedule.initial_links {
             let mut treatment = clean.clone();
             treatment.base_delay =
-                Duration::from_millis(h_osc_exogenous_delay_ms(epoch, *from, *to, salt));
+                Duration::from_millis(h_osc_exogenous_delay_ms(epoch, *from, *to, schedule_id));
             events.push((
                 step,
                 ScheduleEvent::SetLink {

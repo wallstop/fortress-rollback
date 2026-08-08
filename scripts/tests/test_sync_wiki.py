@@ -8,6 +8,7 @@ Material-specific syntax to GitHub Wiki-compatible markdown.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -610,8 +611,8 @@ Some content after that should be preserved'''
 
 </div>'''
         result = convert_grid_cards_to_list(content)
-        assert "https://example.com" in result
-        assert "[Visit](https://example.com)" in result
+        external_targets = re.findall(r"\]\((https?://[^)]+)\)", result)
+        assert external_targets == ["https://example.com"]
 
 
 class TestTransformOutsideCodeBlocks:
