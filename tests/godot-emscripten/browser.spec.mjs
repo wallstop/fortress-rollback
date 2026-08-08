@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const RESULT_KEY = "__FORTRESS_ROLLBACK_RESULT__";
 const GODOT_VERSION = "4.7.1-stable (official)";
+const THREADED_DLINK_WARNING =
+  "Blocking on the main thread is very dangerous, see " +
+  "https://emscripten.org/docs/porting/pthreads.html#blocking-on-the-main-browser-thread";
 const FIXTURE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(FIXTURE_ROOT, "dist");
 const MIME_TYPES = new Map([
@@ -27,6 +30,13 @@ function describeError(error) {
     message: error?.message ?? String(error),
     stack: error?.stack ?? "",
   });
+}
+
+function isExpectedConsoleError(mode, message) {
+  // Godot's official threaded dlink template synchronizes GDExtension loading
+  // once during startup. Emscripten 4.0.20 reports that known engine boundary
+  // as console.error even though the extension loads and every probe passes.
+  return mode.godotThreads && message === THREADED_DLINK_WARNING;
 }
 
 let server;
@@ -103,16 +113,28 @@ test.afterAll(async () => {
   }
 });
 
+test("console policy only admits the exact threaded dlink warning", () => {
+  expect(isExpectedConsoleError({ godotThreads: true }, THREADED_DLINK_WARNING)).toBe(true);
+  expect(isExpectedConsoleError({ godotThreads: false }, THREADED_DLINK_WARNING)).toBe(false);
+  expect(isExpectedConsoleError({ godotThreads: true }, `${THREADED_DLINK_WARNING}.`)).toBe(false);
+  expect(isExpectedConsoleError({ godotThreads: true }, "unrelated runtime error")).toBe(false);
+});
+
 for (const mode of MODES) {
   test(`${mode.name} Godot export completes Fortress quality probes`, async ({ page }, testInfo) => {
     test.setTimeout(60_000);
     const events = [];
     const errors = [];
+    const expectedConsoleErrors = [];
     page.on("console", (message) => {
       const event = `[console:${message.type()}] ${message.text()}`;
       events.push(event);
       if (message.type() === "error") {
-        errors.push(event);
+        if (isExpectedConsoleError(mode, message.text())) {
+          expectedConsoleErrors.push(event);
+        } else {
+          errors.push(event);
+        }
       }
     });
     page.on("pageerror", (error) => {
@@ -166,6 +188,7 @@ for (const mode of MODES) {
         error: "",
       });
       expect(result.real_clock_send_delta).toBeGreaterThanOrEqual(2);
+      expect(expectedConsoleErrors.length).toBeLessThanOrEqual(1);
       expect(errors).toEqual([]);
     } catch (error) {
       const snapshot = await page.evaluate((resultKey) => ({
