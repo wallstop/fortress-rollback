@@ -58,6 +58,14 @@ jobs:
           category: /language:${{ matrix.language }}
           output: codeql-results
 
+      - name: Upload CodeQL SARIF
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Fail on CodeQL findings
         env:
           SARIF_DIRECTORY: ${{ steps.codeql.outputs.sarif-output }}

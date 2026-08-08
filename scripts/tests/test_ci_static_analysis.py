@@ -214,6 +214,16 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     assert analyze["with"]["output"] == "codeql-results"
     assert analyze.get("continue-on-error") is not True
 
+    sarif_upload = _step_by_name(steps, "Upload CodeQL SARIF")
+    assert sarif_upload["uses"] == "actions/upload-artifact@v7"
+    assert sarif_upload["with"] == {
+        "name": "codeql-sarif-${{ matrix.language }}",
+        "path": "codeql-results/*.sarif",
+        "if-no-files-found": "error",
+        "retention-days": 7,
+    }
+    assert sarif_upload.get("continue-on-error") is not True
+
     enforcement = _step_by_name(steps, "Fail on CodeQL findings")
     assert enforcement["env"]["SARIF_DIRECTORY"] == (
         "${{ steps.codeql.outputs.sarif-output }}"
