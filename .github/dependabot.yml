@@ -124,3 +124,88 @@ updates:
       # builds at the minimum supported version. CI tests latest stable separately.
       # Only update when MSRV changes in Cargo.toml.
       - dependency-name: "rust"
+
+  # Development-container base images (kept separate from release/test images)
+  - package-ecosystem: "docker"
+    directory: "/.devcontainer"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    reviewers:
+      - "wallstop"
+    commit-message:
+      prefix: "chore(devcontainer)"
+    groups:
+      devcontainer-docker:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+
+  # Development-container features
+  - package-ecosystem: "devcontainers"
+    directory: "/.devcontainer"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    reviewers:
+      - "wallstop"
+    commit-message:
+      prefix: "chore(devcontainer)"
+    groups:
+      devcontainer-features:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+
+  # Documentation Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    reviewers:
+      - "wallstop"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-docs:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+
+  # Hash-locked release-preparation dependencies
+  - package-ecosystem: "pip"
+    directory: "/scripts/release"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    reviewers:
+      - "wallstop"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-release:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1
+
+  # Browser runtime dependencies for the Godot/Emscripten probe
+  - package-ecosystem: "npm"
+    directory: "/tests/godot-emscripten"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    reviewers:
+      - "wallstop"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      godot-emscripten-browser:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 1

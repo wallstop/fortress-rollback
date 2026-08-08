@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const RESULT_KEY = "__FORTRESS_ROLLBACK_RESULT__";
-const GODOT_VERSION = "4.6.3-stable (official)";
+const GODOT_VERSION = "4.7.1-stable (official)";
 const FIXTURE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(FIXTURE_ROOT, "dist");
 const MIME_TYPES = new Map([

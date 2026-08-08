@@ -158,10 +158,13 @@ if [[ "$cmd" == "pr" && "$subcmd" == "checks" ]]; then
     if [[ "$*" == *"--required --json name,state,link"* ]]; then
         if [[ -n "${GH_REQUIRED_CHECKS_DETAILS_JSON:-}" ]]; then
             printf '%s\\n' "$GH_REQUIRED_CHECKS_DETAILS_JSON"
+        elif [[ -n "${GH_REQUIRED_CHECKS_STATE_SEQUENCE:-}" ]]; then
+            state="$(next_sequence_value "$GH_REQUIRED_CHECKS_STATE_SEQUENCE" "SUCCESS" "required_checks_state")"
+            printf '[{"name":"ci","state":"%s","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]\\n' "$state"
         elif [[ -n "${GH_REQUIRED_CHECKS_STATE_JSON:-}" ]]; then
             printf '%s\\n' "$GH_REQUIRED_CHECKS_STATE_JSON"
         else
-            printf '%s\\n' '[{"name":"ci","state":"pass","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]'
+            printf '%s\\n' '[{"name":"ci","state":"SUCCESS","link":"https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1"}]'
         fi
         exit 0
     fi
@@ -626,6 +629,18 @@ def test_fallback_ignores_older_pending_when_latest_check_is_success(tmp_path: P
             "action_required",
             "  - ci [action_required] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
         ),
+        (
+            "STARTUP_FAILURE",
+            "  - ci [STARTUP_FAILURE] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
+        (
+            "STALE",
+            "  - ci [STALE] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
+        (
+            "FUTURE_STATE",
+            "  - ci [FUTURE_STATE] https://github.com/wallstop/fortress-rollback/actions/runs/999/job/1",
+        ),
     ],
 )
 def test_fails_when_required_checks_fail_with_diagnostics(
@@ -656,16 +671,16 @@ def test_fails_when_required_checks_fail_with_diagnostics(
 
 @pytest.mark.parametrize(
     "required_state",
-    ["success", "skipping", "neutral"],
+    ["SUCCESS", "SKIPPED", "NEUTRAL"],
 )
 def test_required_checks_non_blocking_states_proceed_to_merge(
     tmp_path: Path,
     required_state: str,
 ) -> None:
-    """States in the allow-list (success, skipping, neutral) must proceed to merge.
+    """Raw accepted states must proceed to merge.
 
-    `gh pr checks --required` lowercases via `ascii_downcase`; the script's allow-list
-    must accept these tokens so legitimate non-failure outcomes don't block merging.
+    These are the terminal raw states that `gh pr checks --json state` maps to
+    accepted outcomes under the repository's auto-merge policy.
     """
     result = _run_script(
         tmp_path,
@@ -682,6 +697,116 @@ def test_required_checks_non_blocking_states_proceed_to_merge(
     )
     log_text = (tmp_path / "gh.log").read_text(encoding="utf-8")
     assert "--squash" in log_text
+
+
+@pytest.mark.parametrize(
+    "transient_state",
+    ["EXPECTED", "REQUESTED", "WAITING", "QUEUED", "PENDING", "IN_PROGRESS"],
+)
+def test_required_checks_transient_states_poll_until_stable_success(
+    tmp_path: Path,
+    transient_state: str,
+) -> None:
+    """Every known raw transient state must poll rather than fail immediately."""
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_STATE_SEQUENCE": (
+                f"{transient_state},SUCCESS,SUCCESS"
+            ),
+            "GH_MERGE_SUCCESS_FLAG": "--squash",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+            "REQUIRED_CHECKS_SETTLE_TIMEOUT_SECONDS": "3",
+            "REQUIRED_STABLE_POLLS_REQUIRED": "2",
+        },
+    )
+    assert result.returncode == 0, (
+        f"State {transient_state!r} must poll to success, got stderr={result.stderr!r}"
+    )
+    assert "Required checks did not pass" not in result.stderr
+
+    log_lines = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    detail_queries = [
+        line for line in log_lines if "--required --json name,state,link" in line
+    ]
+    assert len(detail_queries) == 3
+    assert "--squash" in log_lines[-1]
+
+
+@pytest.mark.parametrize(
+    "details_json",
+    [
+        pytest.param(
+            '[{"name":"ci","state":null,"link":"https://example.invalid/check"}]',
+            id="state-null",
+        ),
+        pytest.param(
+            '[{"name":"ci","link":"https://example.invalid/check"}]',
+            id="state-missing",
+        ),
+        pytest.param(
+            '[{"name":"ci","state":7,"link":"https://example.invalid/check"}]',
+            id="state-number",
+        ),
+        pytest.param(
+            '[{"name":"ci","state":true,"link":"https://example.invalid/check"}]',
+            id="state-boolean",
+        ),
+        pytest.param(
+            '[{"name":"ci","state":{},"link":"https://example.invalid/check"}]',
+            id="state-object",
+        ),
+        pytest.param(
+            '[{"name":"ci","state":[],"link":"https://example.invalid/check"}]',
+            id="state-array",
+        ),
+        pytest.param(
+            '[{"name":[],"state":"SUCCESS","link":"https://example.invalid/check"}]',
+            id="name-array",
+        ),
+        pytest.param(
+            '[{"name":"ci","state":"SUCCESS","link":{}}]',
+            id="link-object",
+        ),
+        pytest.param(
+            '[{"name":"valid","state":"SUCCESS","link":"https://example.invalid/valid"},7]',
+            id="mixed-valid-and-non-object-items",
+        ),
+        pytest.param('{"name":"ci","state":"SUCCESS"}', id="top-level-object"),
+        pytest.param('"SUCCESS"', id="top-level-string"),
+        pytest.param("7", id="top-level-number"),
+        pytest.param("null", id="top-level-null"),
+        pytest.param("true", id="top-level-boolean"),
+        pytest.param("[7]", id="non-object-item"),
+        pytest.param(
+            '[]\n[{"name":"ci","state":"SUCCESS","link":"https://example.invalid/check"}]',
+            id="multiple-json-documents",
+        ),
+        pytest.param("{", id="invalid-json"),
+    ],
+)
+def test_required_checks_malformed_response_fails_closed(
+    tmp_path: Path,
+    details_json: str,
+) -> None:
+    """Malformed required-check responses must never reach the merge attempt."""
+    result = _run_script(
+        tmp_path,
+        {
+            "GH_REQUIRED_CHECKS_DETAILS_JSON": details_json,
+            "GH_MERGE_SUCCESS_FLAG": "--squash",
+            "GH_ALLOW_SQUASH": "true",
+            "GH_ALLOW_REBASE": "false",
+            "GH_ALLOW_MERGE": "false",
+        },
+    )
+    assert result.returncode == 1
+    assert "Invalid required checks response" in result.stderr
+
+    log_text = (tmp_path / "gh.log").read_text(encoding="utf-8")
+    assert "pr merge" not in log_text
 
 
 def test_waits_for_required_checks_to_appear_then_merges(tmp_path: Path) -> None:

@@ -12,8 +12,8 @@ if [ "$#" -ne 2 ]; then
     exit 2
 fi
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 case "$1" in
     /*) artifact=$1 ;;
     *) artifact=$(pwd)/$1 ;;

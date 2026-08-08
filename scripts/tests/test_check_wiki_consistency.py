@@ -633,8 +633,8 @@ class TestWikiLinkOverlapDetection:
         content = "[text]([[Page]])"
         links = parse_wiki_links_from_string(content)
         # Wiki-link should be found; markdown link that contains it is skipped
-        wiki_links = [l for l in links if l[3] == "wiki"]
-        md_links = [l for l in links if l[3] == "markdown"]
+        wiki_links = [link for link in links if link[3] == "wiki"]
+        md_links = [link for link in links if link[3] == "markdown"]
         assert len(wiki_links) == 1
         assert len(md_links) == 0  # Markdown link skipped due to overlap
         assert wiki_links[0][:2] == ("Page", "Page")
@@ -645,8 +645,8 @@ class TestWikiLinkOverlapDetection:
         links = parse_wiki_links_from_string(content)
         assert len(links) == 2
         # Both should be found
-        wiki_links = [l for l in links if l[3] == "wiki"]
-        md_links = [l for l in links if l[3] == "markdown"]
+        wiki_links = [link for link in links if link[3] == "wiki"]
+        md_links = [link for link in links if link[3] == "markdown"]
         assert len(wiki_links) == 1
         assert len(md_links) == 1
         assert wiki_links[0][:2] == ("WikiPage", "WikiPage")

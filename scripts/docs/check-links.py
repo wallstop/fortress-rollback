@@ -912,7 +912,7 @@ def main() -> int:
         rust_files_checked += 1
 
     # Print summary
-    print(f"\nLink check complete:")
+    print("\nLink check complete:")
     print(f"  Files checked: {files_checked}")
     print(f"    Markdown files: {markdown_files_checked}")
     print(f"    Rust files: {rust_files_checked}")

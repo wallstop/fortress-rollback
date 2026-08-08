@@ -10,7 +10,7 @@
 
 set -u
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 0
 
 echo "[kani-violation-cost] advisory scan: report_violation! callsites with"
 echo "[kani-violation-cost] >= 2 format args in files containing #[kani::proof]."

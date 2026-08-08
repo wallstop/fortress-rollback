@@ -567,7 +567,6 @@ process_markdown_file() {
 
     log_info "Processing $relative_file"
 
-    local block_file=""
     local block_line=""
     local block_num=""
     local block_lang=""
@@ -582,7 +581,6 @@ process_markdown_file() {
                 in_content=false
                 ;;
             FILE:*)
-                block_file="${line#FILE:}"
                 ;;
             LINE:*)
                 block_line="${line#LINE:}"
@@ -757,13 +755,11 @@ main() {
     print_header
     setup_temp_crate
 
-    local process_result=0
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        process_markdown_file "$SPECIFIC_FILE" || process_result=$?
+        process_markdown_file "$SPECIFIC_FILE" || true
     elif [[ -n "$SPECIFIC_DIR" ]]; then
         while IFS= read -r file; do
             if ! process_markdown_file "$file"; then
-                process_result=1
                 if $FAIL_FAST; then
                     break
                 fi
@@ -772,7 +768,6 @@ main() {
     else
         while IFS= read -r file; do
             if ! process_markdown_file "$file"; then
-                process_result=1
                 if $FAIL_FAST; then
                     break
                 fi

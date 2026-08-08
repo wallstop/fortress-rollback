@@ -146,7 +146,7 @@ impl TestResult {
 
         if let Some(runtime) = &self.runtime {
             format!(
-                "{base}, kind={:?}, state={}, current={}, confirmed={}, target={}, elapsed_ms={}, sync={:?}, sync_config={}, protocol_config={}, time_sync_config={}, sync_health={}, events={}",
+                "{base}, kind={:?}, state={}, current={}, confirmed={}, target_exclusive={}, elapsed_ms={}, sync={:?}, sync_config={}, protocol_config={}, time_sync_config={}, sync_health={}, events={}",
                 self.error_kind,
                 runtime.session_state,
                 runtime.current_frame,
@@ -1091,7 +1091,12 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
         .arg("--timeout")
         .arg(config.timeout_secs.to_string())
         .arg("--input-delay")
-        .arg(config.input_delay.to_string());
+        .arg(config.input_delay.to_string())
+        // The child exchanges test-only completion announcements over TCP on
+        // the same numeric ports as the production UDP session. This prevents
+        // an early finisher from exiting before every remote has received the
+        // final required input frame.
+        .arg("--completion-barrier");
 
     // Emit one additional `--peer` per extra remote address, in order. Combined
     // with the `--peer` above, the binary receives the full ordered remote list
@@ -1661,15 +1666,10 @@ fn run_n_peer_test(configs: Vec<PeerConfig>) -> Vec<TestResult> {
 
     let test_duration = test_start.elapsed();
 
-    // Diagnostic gate (mirrors the 2-peer gate, generalized to N): this dumps the
-    // per-peer checksum/final_value divergence purely as a debugging aid. The
-    // divergence is FREQUENTLY BENIGN even at 0% loss: the peer that confirms the
-    // target LAST computes its checksum/value over an already-discarded
-    // `[target - 64, target)` window (empty hash `cbf29ce484222325`,
-    // `final_value = 0`) -- the window-discard race documented in the module note
-    // above the N-peer tests. So a divergence here is NOT asserted on and does not
-    // by itself indicate a desync; it is only worth dumping alongside other
-    // diagnostics when a test fails for some other reason.
+    // Diagnostic gate (mirrors the 2-peer gate, generalized to N): dump any
+    // retained target-state divergence before verify_determinism_n names the
+    // first mismatching peer. Unlike the historical input-window checksum, this
+    // snapshot survives queue discard and divergence is a real oracle failure.
     let any_failure = results.iter().any(|r| !r.success);
     let first_value = results.first().map(|r| r.final_value);
     let first_checksum = results.first().map(|r| r.checksum);
@@ -1811,21 +1811,23 @@ fn validate_peer_config_sync_preset(label: &str, config: &PeerConfig) {
 
 /// Helper to verify determinism between two test results.
 ///
-/// NOTE: This only checks that both peers succeeded. A peer's `success` is set
-/// purely from `game.state.frame >= target && confirmed_frame >= target` in the
-/// binary; it does NOT read `sync_health()` (that is only logged in
-/// `runtime_diagnostics`). So `success == true` means each peer advanced to
-/// `target` AND confirmed all players' inputs through `target`. The `final_value`
-/// field is NOT compared because its calculation depends on when inputs become
-/// confirmed, which varies between peers due to network timing. This success
+/// NOTE: This only checks that both peers succeeded. A successful peer first
+/// satisfies `game.state.frame >= target && confirmed_frame >= target - 1` in
+/// the binary; it does NOT read `sync_health()` (that is only logged in
+/// `runtime_diagnostics`). The shared runner's test-only completion barrier then
+/// keeps it alive until every peer has independently satisfied that oracle and
+/// completed its pairwise READY/ACK exchange. So
+/// `success == true` means every peer advanced to `target` AND confirmed all
+/// players' inputs in `[0, target)`. `checksum` hashes the rollback-aware game
+/// state retained at exactly `target` and is compared across peers. This success
 /// oracle does not itself assert a desync-free state.
 ///
 /// See progress/session-73-flaky-network-test-analysis.md for details.
 #[track_caller]
 fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str) {
-    // success == true means each peer reached frame >= target with all inputs
-    // confirmed through target. final_value comparison is disabled because it
-    // depends on accumulation timing across peers.
+    // success == true means every peer reached frame >= target with all inputs
+    // confirmed in [0, target), retained the exact target state, then completed
+    // the shared acknowledged barrier.
 
     // Provide detailed diagnostics for sync failures
     if !result1.success || !result2.success {
@@ -1912,35 +1914,32 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
 
     assert!(
         result1.success,
-        "{}: Peer 1 failed (did not reach frame >= target, or confirmed_frame < target): {:?}",
+        "{}: Peer 1 failed (exclusive target oracle or completion barrier): {:?}",
         context, result1.error
     );
     assert!(
         result2.success,
-        "{}: Peer 2 failed (did not reach frame >= target, or confirmed_frame < target): {:?}",
+        "{}: Peer 2 failed (exclusive target oracle or completion barrier): {:?}",
         context, result2.error
     );
 
-    // Log if values differ (for debugging) but don't assert
-    if result1.final_value != result2.final_value {
-        eprintln!(
-            "NOTE: {} final_value differs (peer1={}, peer2={}), but both peers reached success",
-            context, result1.final_value, result2.final_value
-        );
-    }
+    assert_eq!(
+        result1.checksum, result2.checksum,
+        "{context}: retained target checksum diverged"
+    );
 }
 
 /// N-peer generalization of [`verify_determinism`].
 ///
-/// Asserts that every peer reached `success == true`. A peer's `success` is set
-/// purely from `game.state.frame >= target && confirmed_frame >= target` in the
-/// binary (`tests/network-peer/src/main.rs`); it is NOT derived from
-/// `sync_health()` (that is only logged in `runtime_diagnostics`). So
-/// `success == true` means: this peer advanced its simulation to `target` AND
-/// confirmed *all* N players' inputs through `target` (since `confirmed_frame`
-/// is the min over connected peers' `last_frame`). All peers succeeding is
-/// therefore the faithful N-peer generalization of the established 2-peer
-/// oracle.
+/// Asserts that every peer reached `success == true`. A successful peer first
+/// satisfies `game.state.frame >= target && confirmed_frame >= target - 1` in
+/// the binary (`tests/network-peer/src/main.rs`), then waits at the test-only
+/// completion barrier until every process independently satisfies that oracle
+/// and completes its pairwise READY/ACK exchange. It is NOT derived
+/// from `sync_health()` (that is only logged in
+/// `runtime_diagnostics`). So `success == true` means every peer advanced its
+/// simulation to `target` AND confirmed *all* N players' inputs in `[0, target)`
+/// (since `confirmed_frame` is the min over connected peers' `last_frame`).
 ///
 /// In addition, asserts that every peer observed ZERO `DesyncDetected` events.
 /// The historical 0%-loss false positive that forced this count to be log-only
@@ -1949,11 +1948,8 @@ fn verify_determinism(result1: &TestResult, result2: &TestResult, context: &str)
 /// REQUESTED frame instead of the queue's first missing frame, silently
 /// swallowing misprediction comparisons for the skipped window) and fixed
 /// there, so on a clean network a nonzero count is a genuine library
-/// regression -- see the module note above the N-peer tests. Like
-/// [`verify_determinism`], `final_value` and `checksum` are only logged, not
-/// asserted, because at 0% loss the last-confirming peer computes them over an
-/// already-discarded `[target - 64, target)` window (empty hash) -- flaky by
-/// construction.
+/// regression -- see the module note above the N-peer tests. The retained
+/// target-state `checksum` is also asserted equal across peers.
 #[track_caller]
 fn verify_determinism_n(results: &[TestResult], context: &str) {
     let any_failure = results.iter().any(|r| !r.success);
@@ -1997,8 +1993,8 @@ fn verify_determinism_n(results: &[TestResult], context: &str) {
     for (index, result) in results.iter().enumerate() {
         assert!(
             result.success,
-            "{context}: Peer {index} failed (did not reach frame >= target, \
-             or confirmed_frame < target): {:?}",
+            "{context}: Peer {index} failed (exclusive target oracle or \
+             completion barrier): {:?}",
             result.error
         );
     }
@@ -2035,16 +2031,12 @@ fn verify_determinism_n(results: &[TestResult], context: &str) {
         );
     }
 
-    // Log (do not assert) any final_value divergence, matching verify_determinism.
     if let Some(first) = results.first() {
         for (index, result) in results.iter().enumerate().skip(1) {
-            if result.final_value != first.final_value {
-                eprintln!(
-                    "NOTE: {context} final_value differs (peer0={}, peer{index}={}), \
-                     but every peer reached success",
-                    first.final_value, result.final_value
-                );
-            }
+            assert_eq!(
+                result.checksum, first.checksum,
+                "{context}: peer {index} retained target checksum diverged from peer 0"
+            );
         }
     }
 }
@@ -4350,6 +4342,17 @@ mod infrastructure_tests {
         verify_determinism_n(&results, "oracle_unit_test_clean");
     }
 
+    /// Non-vacuity guard for the retained target-state oracle: success flags
+    /// alone cannot hide a cross-peer state mismatch.
+    #[test]
+    #[should_panic(expected = "retained target checksum diverged from peer 0")]
+    fn verify_determinism_n_panics_on_target_checksum_mismatch() {
+        let mut divergent = successful_result_with_desyncs(0);
+        divergent.checksum = 2;
+        let results = vec![successful_result_with_desyncs(0), divergent];
+        verify_determinism_n(&results, "oracle_unit_test_target_checksum");
+    }
+
     /// Non-vacuity guard for the desync oracle flipped after the S30 F17 fix:
     /// a successful run where one peer observed a `DesyncDetected` event must
     /// fail `verify_determinism_n` (the count was previously logged-only).
@@ -6078,34 +6081,24 @@ fn test_burst_loss_extreme_unreliable() {
 // mesh via `n_peer_mesh_configs` (each peer is `network_test_peer` launched with
 // N-1 `--peer` args) and verify cross-peer determinism.
 //
-// Oracle: every peer must reach `success`. A peer's `success` is set purely from
-// `game.state.frame >= target && confirmed_frame >= target` in the binary
-// (`tests/network-peer/src/main.rs`); it does NOT read `sync_health()` /
-// `all_sync_health()` (those are only logged in `runtime_diagnostics`). So
-// `success == true` means each peer advanced its simulation to `target` AND
-// confirmed *all* N players' inputs through `target` (since `confirmed_frame` is
-// the min over connected peers' `last_frame`). All peers succeeding is therefore
-// the faithful N-peer generalization of the established 2-peer oracle
-// (`verify_determinism` / `verify_determinism_n`). A desync-free state is
+// Oracle: every peer must reach `success`. A successful peer first satisfies
+// `game.state.frame >= target && confirmed_frame >= target - 1` in the binary,
+// then waits at the test-only completion barrier until every process has
+// independently satisfied that oracle and completed its pairwise READY/ACK
+// exchange (`tests/network-peer/src/main.rs`). It does NOT read
+// `sync_health()` / `all_sync_health()` (those are only logged in
+// `runtime_diagnostics`). So `success == true` means every peer advanced its
+// simulation to `target` AND confirmed *all* N players' inputs in `[0, target)`
+// (since `confirmed_frame` is the min over connected peers' `last_frame`). A
+// desync-free state is
 // asserted separately via the per-peer `DesyncDetected == 0` check in
 // `verify_determinism_n` (see the DesyncDetected note below).
 //
-// NO CROSS-PEER CHECKSUM EQUALITY ORACLE: a strengthened cross-peer `checksum`
-// equality oracle was attempted (at success time the fixed
-// `[target - 64, target)` confirmed-input window should be identical across
-// peers at 0% loss), but it proved flaky even on clean localhost -- 3/20 green
-// over a 20x sweep of these three tests. Root cause matches the historical
-// flakiness note near `verify_determinism` and the binary's checksum comment:
-// the peer that confirms the target LAST computes its checksum after its current
-// frame has already advanced past `target`, so `set_last_confirmed_frame` has
-// already discarded the `[target - 64, target)` frames from its input queue;
-// `confirmed_inputs_for_frame` then returns `Err` for the whole window, giving
-// `frames_included = 0`, `final_value = 0`, and the empty-hash checksum
-// `cbf29ce484222325` -- which disagrees with the peers that captured a full
-// window. The same race already disables `final_value` comparison in the 2-peer
-// `verify_determinism`. We therefore assert `success` (which was 20/20 green)
-// plus the per-peer zero-`DesyncDetected` check below; `final_value` and
-// `checksum` are only logged in diagnostics.
+// CROSS-PEER TARGET-STATE ORACLE: each peer retains the rollback-aware TestState
+// produced at exactly `target` before later drain frames can discard input
+// history. A rollback below target clears that snapshot and re-simulation must
+// replace it, so missing or stale state fails closed. `verify_determinism_n`
+// asserts the deterministic checksum of that retained state across all peers.
 //
 // DesyncDetected == 0 (ASSERTED since the S30 F17 fix): the binary inherits
 // `DesyncDetection::On { interval: 60 }` (the library default), so the library's
@@ -6161,8 +6154,7 @@ fn three_peer_local_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
-    // log-only -- it proved flaky by construction; see module note above).
+    // Success + retained target checksum equality + zero DesyncDetected.
     verify_determinism_n(&results, "three_peer_local_network");
 
     for (index, result) in results.iter().enumerate() {
@@ -6196,8 +6188,7 @@ fn four_peer_local_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
-    // log-only -- it proved flaky by construction; see module note above).
+    // Success + retained target checksum equality + zero DesyncDetected.
     verify_determinism_n(&results, "four_peer_local_network");
 
     for (index, result) in results.iter().enumerate() {
@@ -6231,8 +6222,7 @@ fn three_peer_lan_network_is_deterministic() {
 
     let results = run_n_peer_test(configs);
 
-    // Success + zero-DesyncDetected oracle (cross-peer checksum equality stays
-    // log-only -- it proved flaky by construction; see module note above).
+    // Success + retained target checksum equality + zero DesyncDetected.
     verify_determinism_n(&results, "three_peer_lan_network");
 
     for (index, result) in results.iter().enumerate() {

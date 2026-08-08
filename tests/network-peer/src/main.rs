@@ -48,8 +48,8 @@
 //! ```
 
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use fortress_rollback::{
@@ -170,11 +170,12 @@ struct ChecksumDiagnostics {
     current_frame: i32,
 }
 
-/// Compute a checksum from confirmed inputs for a recent window of frames.
-/// This is deterministic because both peers have the same confirmed inputs,
-/// and we only use frames that are guaranteed to be in the input queue.
+/// Compute a best-effort checksum from confirmed inputs still retained in a
+/// recent frame window.
 ///
-/// Returns the checksum and diagnostic information about which frames were included.
+/// Confirmation advancement may already have evicted some frames, so this is
+/// diagnostic-only and reports every missing frame. Successful determinism
+/// checks use the retained target-state checksum instead.
 fn compute_confirmed_checksum_with_diagnostics<
     T: Config<Input = TestInput, Address = SocketAddr>,
 >(
@@ -183,8 +184,8 @@ fn compute_confirmed_checksum_with_diagnostics<
 ) -> (u64, ChecksumDiagnostics) {
     let mut hasher = DeterministicHasher::new();
 
-    // Use a window of the last 64 frames (half of input queue capacity).
-    // This ensures the frames are still available in the queue.
+    // Limit diagnostics to the last 64 frames (half of input queue capacity).
+    // Older confirmed frames may already have been evicted.
     const WINDOW_SIZE: i32 = 64;
     let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
 
@@ -222,56 +223,393 @@ fn compute_confirmed_checksum_with_diagnostics<
     (hasher.finish(), diagnostics)
 }
 
-/// Compute the game state value from confirmed inputs only.
-/// This is deterministic because both peers have the same confirmed inputs.
+/// Returns whether the peer has simulated the requested number of frames and
+/// confirmed every input in that exclusive frame range.
 ///
-/// We compute over a RECENT window of frames rather than all frames, because
-/// older frames may have been discarded from the input queue. The window size
-/// is chosen to be well within the input queue capacity (128 frames).
+/// `target_frames` is a frame count: reaching game frame `N` means the game
+/// simulated input frames `[0, N)`, so the last required confirmed input is
+/// `N - 1`. Invalid non-positive targets never satisfy the oracle.
+fn target_completion_reached(game_frame: i32, confirmed_frame: Frame, target_frames: i32) -> bool {
+    let Some(last_required_input_frame) = target_frames.checked_sub(1) else {
+        return false;
+    };
+
+    target_frames > 0
+        && game_frame >= target_frames
+        && confirmed_frame.as_i32() >= last_required_input_frame
+}
+
+const COMPLETION_BARRIER_MAGIC: [u8; 4] = *b"FTRB";
+const COMPLETION_BARRIER_IO_SLICE: Duration = Duration::from_secs(1);
+const COMPLETION_BARRIER_MESSAGE_LEN: usize = 9;
+const COMPLETION_READY: u8 = 1;
+const COMPLETION_ACK: u8 = 2;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum CompletionMessage {
+    Ready { player_index: usize },
+    Ack { player_index: usize },
+}
+
+impl CompletionMessage {
+    fn encode(self) -> io::Result<[u8; COMPLETION_BARRIER_MESSAGE_LEN]> {
+        let (kind, player_index) = match self {
+            Self::Ready { player_index } => (COMPLETION_READY, player_index),
+            Self::Ack { player_index } => (COMPLETION_ACK, player_index),
+        };
+        let player_index = u32::try_from(player_index).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "completion barrier player index exceeds u32",
+            )
+        })?;
+        let mut message = [0_u8; COMPLETION_BARRIER_MESSAGE_LEN];
+        message[..4].copy_from_slice(&COMPLETION_BARRIER_MAGIC);
+        message[4] = kind;
+        message[5..].copy_from_slice(&player_index.to_le_bytes());
+        Ok(message)
+    }
+
+    fn decode(message: [u8; COMPLETION_BARRIER_MESSAGE_LEN]) -> io::Result<Self> {
+        if message[..4] != COMPLETION_BARRIER_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "completion barrier received invalid magic",
+            ));
+        }
+        let player_index = u32::from_le_bytes([message[5], message[6], message[7], message[8]]);
+        let player_index = usize::try_from(player_index).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "completion barrier player index exceeds usize",
+            )
+        })?;
+        match message[4] {
+            COMPLETION_READY => Ok(Self::Ready { player_index }),
+            COMPLETION_ACK => Ok(Self::Ack { player_index }),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "completion barrier received invalid message kind",
+            )),
+        }
+    }
+}
+
+/// Pure readiness state for the test-only multi-process completion barrier.
 ///
-/// Returns the computed value and diagnostic information.
-fn compute_confirmed_game_value_with_diagnostics<
-    T: Config<Input = TestInput, Address = SocketAddr>,
->(
-    session: &fortress_rollback::P2PSession<T>,
-    target_frames: i32,
-) -> (i64, ChecksumDiagnostics) {
-    let mut value: i64 = 0;
+/// A peer may exit only after every participant has independently reached the
+/// exclusive target-frame oracle and every pair has completed its same-stream
+/// READY/ACK exchange. Keeping this state separate from the socket driver makes
+/// incomplete, duplicate, reordered, and invalid exchanges deterministic to
+/// test.
+struct CompletionBarrierState {
+    ready: Vec<bool>,
+}
 
-    // Use a window of the last 64 frames (half of input queue capacity).
-    // This ensures the frames are still available in the queue.
-    const WINDOW_SIZE: i32 = 64;
-    let start_frame = std::cmp::max(0, target_frames - WINDOW_SIZE);
+impl CompletionBarrierState {
+    fn new(num_players: usize) -> Option<Self> {
+        if num_players == 0 {
+            return None;
+        }
 
-    let mut frames_included = 0;
-    let mut frames_missing = Vec::new();
+        Some(Self {
+            ready: vec![false; num_players],
+        })
+    }
 
-    for frame_num in start_frame..target_frames {
-        let frame = Frame::new(frame_num);
-        match session.confirmed_inputs_for_frame(frame) {
-            Ok(inputs) => {
-                frames_included += 1;
-                // Apply each player's input using the same formula as TestState::advance
-                for (i, input) in inputs.iter().enumerate() {
-                    value = value.wrapping_add(input.value as i64 * (i as i64 + 1));
-                }
-            },
-            Err(_) => {
-                frames_missing.push(frame_num);
-            },
+    fn observe_ready(&mut self, player_index: usize) -> bool {
+        let Some(ready) = self.ready.get_mut(player_index) else {
+            return false;
+        };
+        let newly_ready = !*ready;
+        *ready = true;
+        newly_ready
+    }
+
+    fn inbound_complete(&self) -> bool {
+        self.ready.iter().all(|ready| *ready)
+    }
+
+    fn exchange_complete(&self, announced_to_peer: &[bool]) -> bool {
+        let expected_remote_count = self.ready.len().saturating_sub(1);
+        self.inbound_complete()
+            && announced_to_peer.len() == expected_remote_count
+            && announced_to_peer.iter().all(|announced| *announced)
+    }
+
+    fn pending_players(&self) -> Vec<usize> {
+        self.ready
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ready)| (!ready).then_some(index))
+            .collect()
+    }
+}
+
+/// Test-only completion exchange over TCP on the same numeric ports used by
+/// the production UDP session. TCP and UDP have independent port namespaces,
+/// so this cannot consume or perturb production protocol packets.
+///
+/// The listener is active for the whole run. Once the local completion oracle
+/// is satisfied, the lower player index initiates one same-stream READY/ACK
+/// exchange per pair. Directed initiation avoids mutual connect/read deadlock;
+/// an initiator retries until it reads the validated ACK, while the receiver
+/// counts the pair only after its bounded ACK write succeeds.
+struct CompletionBarrier {
+    listener: TcpListener,
+    peers: Vec<SocketAddr>,
+    acknowledged_by_peer: Vec<bool>,
+    local_player: usize,
+    state: CompletionBarrierState,
+    last_io_error: Option<String>,
+}
+
+impl CompletionBarrier {
+    fn read_message(stream: &mut TcpStream, io_timeout: Duration) -> io::Result<CompletionMessage> {
+        // Accepted-stream nonblocking inheritance differs across platforms.
+        // Force blocking mode explicitly, then bound that blocking read by the
+        // remaining completion-barrier slice. This allows a valid split write
+        // to finish without an immediate WouldBlock while preserving the
+        // caller's existing overall deadline.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(io_timeout))?;
+        let mut message = [0_u8; COMPLETION_BARRIER_MESSAGE_LEN];
+        stream.read_exact(&mut message)?;
+        CompletionMessage::decode(message)
+    }
+
+    fn bind(args: &Args, num_players: usize) -> io::Result<Self> {
+        let local_addr = SocketAddr::from(([127, 0, 0, 1], args.local_port));
+        let listener = TcpListener::bind(local_addr)?;
+        listener.set_nonblocking(true)?;
+        if args.player_index >= num_players {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "completion barrier player {} is outside 0..{}",
+                    args.player_index, num_players
+                ),
+            ));
+        }
+        let state = CompletionBarrierState::new(num_players).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "completion barrier requires at least one player",
+            )
+        })?;
+
+        Ok(Self {
+            listener,
+            peers: args.peers.clone(),
+            acknowledged_by_peer: vec![false; args.peers.len()],
+            local_player: args.player_index,
+            state,
+            last_io_error: None,
+        })
+    }
+
+    fn poll(&mut self, local_ready: bool, remaining_budget: Duration) {
+        let poll_start = Instant::now();
+        let Some(poll_budget) = Self::bounded_io_timeout(remaining_budget) else {
+            self.last_io_error =
+                Some("completion barrier exhausted its existing timeout".to_string());
+            return;
+        };
+        loop {
+            match self.listener.accept() {
+                Ok((mut stream, _)) => {
+                    let Some(io_timeout) = Self::io_timeout(poll_start, poll_budget) else {
+                        self.last_io_error =
+                            Some("completion barrier exhausted its existing timeout".to_string());
+                        break;
+                    };
+                    match Self::read_message(&mut stream, io_timeout) {
+                        Ok(CompletionMessage::Ready { player_index }) => {
+                            if local_ready && player_index < self.local_player {
+                                if let Some(peer_index) = self.remote_peer_index(player_index) {
+                                    let ack = CompletionMessage::Ack {
+                                        player_index: self.local_player,
+                                    };
+                                    match Self::write_message(
+                                        &mut stream,
+                                        ack,
+                                        poll_start,
+                                        poll_budget,
+                                    ) {
+                                        Ok(()) => {
+                                            self.state.observe_ready(player_index);
+                                            self.acknowledged_by_peer[peer_index] = true;
+                                        },
+                                        Err(error) => {
+                                            self.last_io_error = Some(format!(
+                                                "completion barrier failed to ACK player {player_index}: {error}"
+                                            ));
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        Ok(CompletionMessage::Ack { .. }) => {
+                            self.last_io_error = Some(
+                                "completion barrier received ACK without a READY request"
+                                    .to_string(),
+                            );
+                        },
+                        Err(error) => {
+                            self.last_io_error = Some(format!(
+                                "completion barrier failed to read announcement: {error}"
+                            ));
+                        },
+                    }
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    self.last_io_error =
+                        Some(format!("completion barrier failed to accept: {error}"));
+                    break;
+                },
+            }
+        }
+
+        if local_ready {
+            self.state.observe_ready(self.local_player);
+            self.announce_to_higher_players(poll_start, poll_budget);
         }
     }
 
-    let diagnostics = ChecksumDiagnostics {
-        start_frame,
-        end_frame: target_frames,
-        frames_included,
-        frames_missing,
-        confirmed_frame: session.confirmed_frame().as_i32(),
-        current_frame: session.current_frame().as_i32(),
-    };
+    fn announce_to_higher_players(&mut self, poll_start: Instant, remaining_budget: Duration) {
+        for (peer_index, peer_addr) in self.peers.iter().copied().enumerate() {
+            let remote_player = self.remote_player_index(peer_index);
+            if remote_player < self.local_player || self.acknowledged_by_peer[peer_index] {
+                continue;
+            }
+            match Self::send_ready_and_read_ack(
+                peer_addr,
+                self.local_player,
+                remote_player,
+                poll_start,
+                remaining_budget,
+            ) {
+                Ok(()) => {
+                    self.state.observe_ready(remote_player);
+                    self.acknowledged_by_peer[peer_index] = true;
+                },
+                Err(error) => {
+                    self.last_io_error = Some(format!(
+                        "completion barrier READY/ACK with {peer_addr} failed: {error}"
+                    ));
+                },
+            }
+        }
+    }
 
-    (value, diagnostics)
+    fn send_ready_and_read_ack(
+        peer_addr: SocketAddr,
+        local_player: usize,
+        expected_remote_player: usize,
+        poll_start: Instant,
+        remaining_budget: Duration,
+    ) -> io::Result<()> {
+        let io_timeout = Self::io_timeout(poll_start, remaining_budget).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "completion barrier exhausted its existing timeout",
+            )
+        })?;
+        let mut stream = TcpStream::connect_timeout(&peer_addr, io_timeout)?;
+        Self::write_message(
+            &mut stream,
+            CompletionMessage::Ready {
+                player_index: local_player,
+            },
+            poll_start,
+            remaining_budget,
+        )?;
+        let read_timeout = Self::io_timeout(poll_start, remaining_budget).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "completion barrier exhausted its existing timeout",
+            )
+        })?;
+        match Self::read_message(&mut stream, read_timeout)? {
+            CompletionMessage::Ack { player_index }
+                if player_index == expected_remote_player => Ok(()),
+            CompletionMessage::Ack { player_index } => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "completion barrier expected ACK from player {expected_remote_player}, got {player_index}"
+                ),
+            )),
+            CompletionMessage::Ready { .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "completion barrier expected ACK, got READY",
+            )),
+        }
+    }
+
+    fn write_message(
+        stream: &mut TcpStream,
+        message: CompletionMessage,
+        poll_start: Instant,
+        remaining_budget: Duration,
+    ) -> io::Result<()> {
+        let write_timeout = Self::io_timeout(poll_start, remaining_budget).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "completion barrier exhausted its existing timeout",
+            )
+        })?;
+        stream.set_nonblocking(false)?;
+        stream.set_write_timeout(Some(write_timeout))?;
+        stream.write_all(&message.encode()?)
+    }
+
+    fn remote_peer_index(&self, player_index: usize) -> Option<usize> {
+        if player_index >= self.state.ready.len() || player_index == self.local_player {
+            return None;
+        }
+        Some(if player_index < self.local_player {
+            player_index
+        } else {
+            player_index - 1
+        })
+    }
+
+    fn remote_player_index(&self, peer_index: usize) -> usize {
+        if peer_index < self.local_player {
+            peer_index
+        } else {
+            peer_index + 1
+        }
+    }
+
+    fn io_timeout(poll_start: Instant, remaining_budget: Duration) -> Option<Duration> {
+        let remaining = remaining_budget.checked_sub(poll_start.elapsed())?;
+        Self::bounded_io_timeout(remaining)
+    }
+
+    fn bounded_io_timeout(remaining: Duration) -> Option<Duration> {
+        if remaining.is_zero() {
+            return None;
+        }
+        Some(std::cmp::min(remaining, COMPLETION_BARRIER_IO_SLICE))
+    }
+
+    fn is_complete(&self) -> bool {
+        self.state.exchange_complete(&self.acknowledged_by_peer)
+    }
+
+    fn timeout_diagnostic(&self) -> String {
+        format!(
+            "pending_players={:?}, unacknowledged_peers={}, last_io_error={:?}",
+            self.state.pending_players(),
+            self.acknowledged_by_peer
+                .iter()
+                .filter(|acknowledged| !**acknowledged)
+                .count(),
+            self.last_io_error
+        )
+    }
 }
 
 #[repr(C)]
@@ -289,14 +627,18 @@ impl Config for TestConfig {
 
 struct TestGame {
     state: TestState,
+    target_frame: i32,
+    target_snapshot: Option<TestState>,
     rollback_count: u32,
     debug_log: DebugLog,
 }
 
 impl TestGame {
-    fn new(debug_enabled: bool) -> Self {
+    fn new(debug_enabled: bool, target_frame: i32) -> Self {
         Self {
             state: TestState::default(),
+            target_frame,
+            target_snapshot: None,
             rollback_count: 0,
             debug_log: DebugLog::new(debug_enabled),
         }
@@ -309,6 +651,7 @@ impl TestGame {
                     self.state = cell.load().unwrap();
                     self.rollback_count += 1;
                     self.debug_log.log_load(frame.as_i32(), self.state.value);
+                    self.observe_loaded_state(frame.as_i32());
                 },
                 FortressRequest::SaveGameState { cell, frame } => {
                     // Use a simple checksum for save - not used for final comparison
@@ -321,10 +664,85 @@ impl TestGame {
                     self.debug_log
                         .log_advance(self.state.frame, self.state.value, &inputs);
                     self.state.advance(&inputs);
+                    self.observe_advanced_state();
                 },
             }
         }
     }
+
+    fn observe_loaded_state(&mut self, frame: i32) {
+        if frame < self.target_frame {
+            // A rollback below the target invalidates any previously captured
+            // speculative target. A later re-simulation must replace it.
+            self.target_snapshot = None;
+        } else if frame == self.target_frame {
+            self.target_snapshot = Some(self.state.clone());
+        }
+    }
+
+    fn observe_advanced_state(&mut self) {
+        if self.state.frame == self.target_frame {
+            self.target_snapshot = Some(self.state.clone());
+        }
+    }
+
+    fn target_snapshot(&self) -> Option<&TestState> {
+        self.target_snapshot.as_ref()
+    }
+}
+
+fn target_state_checksum(state: &TestState) -> u64 {
+    let mut hasher = DeterministicHasher::new();
+    state.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum DriveOutcome {
+    Advanced,
+    NotRunning,
+}
+
+fn target_capture_ready(
+    drive_outcome: DriveOutcome,
+    game_frame: i32,
+    confirmed_frame: Frame,
+    target_frames: i32,
+) -> bool {
+    drive_outcome == DriveOutcome::Advanced
+        && target_completion_reached(game_frame, confirmed_frame, target_frames)
+}
+
+/// Drives one ordinary production-protocol frame for the test peer.
+///
+/// The completion barrier reuses this exact path after capturing the target
+/// checksum so pending input and connect-status gossip continue to flow until
+/// every peer reaches the target. The captured target result is unaffected by
+/// any drain frames.
+fn drive_session_frame(
+    session: &mut fortress_rollback::P2PSession<TestConfig>,
+    game: &mut TestGame,
+    local_handle: PlayerHandle,
+    player_index: usize,
+) -> Result<DriveOutcome, String> {
+    if session.current_state() != SessionState::Running {
+        return Ok(DriveOutcome::NotRunning);
+    }
+
+    // Input generation follows the session frame, not the rollback-sensitive
+    // game frame, exactly as it does during the measured target interval.
+    let session_frame = session.current_frame().as_i32();
+    let input = TestInput {
+        value: (session_frame as u32).wrapping_mul(player_index as u32 + 1),
+    };
+    session
+        .add_local_input(local_handle, input)
+        .map_err(|error| format!("Failed to add input: {error}"))?;
+    let requests = session
+        .advance_frame()
+        .map_err(|error| format!("Failed to advance frame: {error}"))?;
+    game.handle_requests(requests);
+    Ok(DriveOutcome::Advanced)
 }
 
 #[derive(Serialize)]
@@ -560,6 +978,9 @@ fn parse_args() -> Args {
                 i += 1;
                 result.sync_preset = Some(args[i].clone());
             },
+            "--completion-barrier" => {
+                result.completion_barrier = true;
+            },
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
             },
@@ -598,6 +1019,8 @@ struct Args {
     burst_loss_len: usize,
     // Sync configuration preset
     sync_preset: Option<String>,
+    /// Keep completed peers alive until every process reaches the same target.
+    completion_barrier: bool,
 }
 
 fn main() {
@@ -611,8 +1034,8 @@ fn main() {
         output_error("--peer is required (one or more times)");
         std::process::exit(1);
     }
-    if args.target_frames == 0 {
-        output_error("--frames is required");
+    if args.target_frames <= 0 {
+        output_error("--frames must be positive");
         std::process::exit(1);
     }
 
@@ -646,6 +1069,30 @@ fn output_error(msg: &str) {
 }
 
 fn run_test(args: &Args) -> TestResult {
+    let num_players = args.peers.len() + 1;
+    let mut completion_barrier = if args.completion_barrier {
+        match CompletionBarrier::bind(args, num_players) {
+            Ok(barrier) => Some(barrier),
+            Err(error) => {
+                return TestResult {
+                    success: false,
+                    final_frame: 0,
+                    final_value: 0,
+                    checksum: 0,
+                    rollbacks: 0,
+                    desync_detected: 0,
+                    error_kind: Some("io".to_string()),
+                    error: Some(format!("Failed to bind completion barrier: {error}")),
+                    debug_log: None,
+                    diagnostics: None,
+                    runtime: None,
+                };
+            },
+        }
+    } else {
+        None
+    };
+
     // Build chaos config
     let mut chaos_builder = ChaosConfig::builder();
     if args.packet_loss > 0.0 {
@@ -699,8 +1146,6 @@ fn run_test(args: &Args) -> TestResult {
     // Build session. The session has one local player (this process) plus one
     // remote player per `--peer` address, so an N-player mesh is N processes
     // each launched with N-1 `--peer` args.
-    let num_players = args.peers.len() + 1;
-
     // Select sync config preset based on network conditions
     let sync_config = match args.sync_preset.as_deref() {
         Some("lan") => SyncConfig::lan(),
@@ -820,7 +1265,7 @@ fn run_test(args: &Args) -> TestResult {
         },
     };
 
-    let mut game = TestGame::new(args.debug);
+    let mut game = TestGame::new(args.debug, args.target_frames);
     let mut event_summary = EventSummary::default();
     let start_time = Instant::now();
     let timeout = Duration::from_secs(if args.timeout_secs > 0 {
@@ -855,7 +1300,7 @@ fn run_test(args: &Args) -> TestResult {
                 desync_detected: event_summary.desync_detected,
                 error_kind: Some("timeout".to_string()),
                 error: Some(format!(
-                    "Timeout (current_frame={}, confirmed_frame={}, target={})",
+                    "Timeout (current_frame={}, confirmed_frame={}, target_frame_exclusive={})",
                     session.current_frame(),
                     session.confirmed_frame(),
                     args.target_frames
@@ -873,69 +1318,223 @@ fn run_test(args: &Args) -> TestResult {
         // Poll network to receive any pending inputs
         session.poll_remote_clients();
         drain_session_events(&mut session, &mut event_summary);
+        if let Some(barrier) = &mut completion_barrier {
+            barrier.poll(false, timeout.saturating_sub(start_time.elapsed()));
+        }
 
-        // Check for completion:
-        // We're done when:
-        // 1. Game state frame >= target
-        // 2. All inputs up to target are confirmed
-        // 3. We've continued polling to allow final rollbacks to complete
+        // Check whether the requested exclusive frame range is ready to capture:
+        // 1. Game state frame >= the requested frame count
+        // 2. All inputs in the exclusive range [0, target) are confirmed
         //
-        // The settle period ensures that if one peer received inputs slightly later
-        // and triggered a rollback, we give time for that rollback to complete.
+        // The settle period below then gives a peer that received inputs slightly
+        // later time to complete its final rollback without changing this oracle.
         let confirmed = session.confirmed_frame();
-        if game.state.frame >= args.target_frames && confirmed.as_i32() >= args.target_frames {
-            // IMPORTANT: Compute checksum BEFORE the settle phase!
-            // The settle phase may advance frames, causing set_last_confirmed_frame to
-            // discard inputs from the queue. We need to capture the checksum while
-            // all frames from [target_frames - 64, target_frames) are still available.
-            //
-            // The checksum is deterministic because:
-            // 1. confirmed_frame >= target_frames means all inputs up to target are confirmed
-            // 2. Both peers have the same confirmed inputs for these frames
-            // 3. We compute the checksum over a fixed window [target_frames - 64, target_frames)
-            let (checksum, checksum_diagnostics) =
-                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+        if target_completion_reached(game.state.frame, confirmed, args.target_frames) {
+            // Force one ordinary production-protocol drive before capture. If
+            // confirming the last target input scheduled a final rollback, this
+            // applies the Load/Advance requests now. TestGame clears a target
+            // snapshot on every rollback below target and replaces it only when
+            // re-simulation reaches target again, so absence fails closed.
+            let drive_outcome =
+                match drive_session_frame(&mut session, &mut game, local_handle, args.player_index)
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let (checksum, diagnostics) = compute_confirmed_checksum_with_diagnostics(
+                            &session,
+                            args.target_frames,
+                        );
+                        let runtime = runtime_diagnostics(
+                            &session,
+                            args.target_frames,
+                            start_time,
+                            &args.sync_preset,
+                            sync_config,
+                            &protocol_config,
+                            time_sync_config,
+                            &event_summary,
+                        );
+                        return TestResult {
+                            success: false,
+                            final_frame: game.state.frame,
+                            final_value: game.state.value,
+                            checksum,
+                            rollbacks: game.rollback_count,
+                            desync_detected: event_summary.desync_detected,
+                            error_kind: Some("session".to_string()),
+                            error: Some(format!("Final target rollback drive failed: {error}")),
+                            debug_log: if args.debug {
+                                Some(game.debug_log.entries)
+                            } else {
+                                None
+                            },
+                            diagnostics: Some(diagnostics),
+                            runtime: Some(runtime),
+                        };
+                    },
+                };
+            drain_session_events(&mut session, &mut event_summary);
+            if !target_capture_ready(
+                drive_outcome,
+                game.state.frame,
+                session.confirmed_frame(),
+                args.target_frames,
+            ) {
+                // Synchronizing means no flush occurred, and confirmed_frame
+                // may regress after topology updates. In either case resume the
+                // ordinary poll/drive loop without capturing or announcing.
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
 
-            let (confirmed_value, value_diagnostics) =
-                compute_confirmed_game_value_with_diagnostics::<TestConfig>(
-                    &session,
-                    args.target_frames,
-                );
+            let (checksum_diagnostics, target_state) = {
+                let (_, diagnostics) =
+                    compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+                let Some(target_state) = game.target_snapshot().cloned() else {
+                    let runtime = runtime_diagnostics(
+                        &session,
+                        args.target_frames,
+                        start_time,
+                        &args.sync_preset,
+                        sync_config,
+                        &protocol_config,
+                        time_sync_config,
+                        &event_summary,
+                    );
+                    return TestResult {
+                        success: false,
+                        final_frame: game.state.frame,
+                        final_value: game.state.value,
+                        checksum: 0,
+                        rollbacks: game.rollback_count,
+                        desync_detected: event_summary.desync_detected,
+                        error_kind: Some("target_snapshot".to_string()),
+                        error: Some(format!(
+                            "Target state snapshot missing after confirmed exclusive range [0, {})",
+                            args.target_frames
+                        )),
+                        debug_log: if args.debug {
+                            Some(game.debug_log.entries)
+                        } else {
+                            None
+                        },
+                        diagnostics: Some(diagnostics),
+                        runtime: Some(runtime),
+                    };
+                };
+                (diagnostics, target_state)
+            };
+            let checksum = target_state_checksum(&target_state);
+            let confirmed_value = target_state.value;
+
+            if let Some(barrier) = &mut completion_barrier {
+                barrier.poll(true, timeout.saturating_sub(start_time.elapsed()));
+            }
 
             // Continue polling for a settle period to ensure rollbacks complete.
             // During settle, we ONLY poll for network messages - we don't advance new frames.
             // This ensures both peers have finished processing all pending messages.
             // Note: 500ms is generous to handle slow CI VMs where scheduling delays can be significant.
             //
-            // IMPORTANT: We do NOT call advance_frame() during settle anymore!
-            // Advancing frames causes set_last_confirmed_frame to be called, which discards
-            // old inputs from the queue. This was causing checksum mismatches because peers
-            // would advance different amounts based on latency, resulting in different
-            // frames being available when computing the checksum.
+            // IMPORTANT: We do NOT call advance_frame() during this 500ms settle.
+            // This retains the established settle behavior independently of the
+            // retained target-state snapshot above. The optional completion barrier may
+            // drive later frames only after both are complete.
             let settle_start = Instant::now();
             let settle_duration = Duration::from_millis(500);
 
             while settle_start.elapsed() < settle_duration {
                 session.poll_remote_clients();
                 drain_session_events(&mut session, &mut event_summary);
+                if let Some(barrier) = &mut completion_barrier {
+                    barrier.poll(true, timeout.saturating_sub(start_time.elapsed()));
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
 
-            // Warn if diagnostics show missing frames (this helps debug desync issues)
-            if !checksum_diagnostics.frames_missing.is_empty() {
-                eprintln!(
-                    "WARNING: Missing {} frames in checksum computation: {:?}",
-                    checksum_diagnostics.frames_missing.len(),
-                    checksum_diagnostics.frames_missing
-                );
-            }
+            // Completion is local knowledge: this peer confirming frame N - 1
+            // does not prove every remote has received this peer's frame N - 1.
+            // After preserving the polling-only settle above, the test-only
+            // barrier keeps early finishers alive and drives ordinary drain
+            // frames so input/connect-status gossip continues until every
+            // process independently reports the same completion oracle. It uses
+            // the existing overall test timeout; no extra wall-clock allowance
+            // or retry-based acceptance is added.
+            if let Some(barrier) = &mut completion_barrier {
+                while !barrier.is_complete() {
+                    if start_time.elapsed() > timeout {
+                        let barrier_diagnostic = barrier.timeout_diagnostic();
+                        let runtime = runtime_diagnostics(
+                            &session,
+                            args.target_frames,
+                            start_time,
+                            &args.sync_preset,
+                            sync_config,
+                            &protocol_config,
+                            time_sync_config,
+                            &event_summary,
+                        );
+                        return TestResult {
+                            success: false,
+                            final_frame: game.state.frame,
+                            final_value: confirmed_value,
+                            checksum,
+                            rollbacks: game.rollback_count,
+                            desync_detected: event_summary.desync_detected,
+                            error_kind: Some("completion_barrier".to_string()),
+                            error: Some(format!(
+                                "Completion barrier timed out ({barrier_diagnostic})"
+                            )),
+                            debug_log: if args.debug {
+                                Some(game.debug_log.entries)
+                            } else {
+                                None
+                            },
+                            diagnostics: Some(checksum_diagnostics),
+                            runtime: Some(runtime),
+                        };
+                    }
 
-            // Sanity check: value_diagnostics and checksum_diagnostics should match
-            if value_diagnostics.frames_included != checksum_diagnostics.frames_included {
-                eprintln!(
-                    "WARNING: Diagnostics mismatch - value included {} frames, checksum included {}",
-                    value_diagnostics.frames_included, checksum_diagnostics.frames_included
-                );
+                    session.poll_remote_clients();
+                    drain_session_events(&mut session, &mut event_summary);
+                    barrier.poll(true, timeout.saturating_sub(start_time.elapsed()));
+                    if let Err(error) = drive_session_frame(
+                        &mut session,
+                        &mut game,
+                        local_handle,
+                        args.player_index,
+                    ) {
+                        let runtime = runtime_diagnostics(
+                            &session,
+                            args.target_frames,
+                            start_time,
+                            &args.sync_preset,
+                            sync_config,
+                            &protocol_config,
+                            time_sync_config,
+                            &event_summary,
+                        );
+                        return TestResult {
+                            success: false,
+                            final_frame: game.state.frame,
+                            final_value: confirmed_value,
+                            checksum,
+                            rollbacks: game.rollback_count,
+                            desync_detected: event_summary.desync_detected,
+                            error_kind: Some("session".to_string()),
+                            error: Some(format!("Completion drain failed: {error}")),
+                            debug_log: if args.debug {
+                                Some(game.debug_log.entries)
+                            } else {
+                                None
+                            },
+                            diagnostics: Some(checksum_diagnostics),
+                            runtime: Some(runtime),
+                        };
+                    }
+                    drain_session_events(&mut session, &mut event_summary);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
 
             let runtime = runtime_diagnostics(
@@ -951,7 +1550,7 @@ fn run_test(args: &Args) -> TestResult {
             return TestResult {
                 success: true,
                 final_frame: game.state.frame,
-                final_value: confirmed_value, // Use confirmed value, not speculative
+                final_value: confirmed_value,
                 checksum,
                 rollbacks: game.rollback_count,
                 desync_detected: event_summary.desync_detected,
@@ -967,88 +1566,353 @@ fn run_test(args: &Args) -> TestResult {
             };
         }
 
-        // Only advance if running
-        if session.current_state() == SessionState::Running {
-            // Generate deterministic input based on session's current frame (not game state frame!)
-            // This is critical: game.state.frame gets rewound during rollbacks, but input generation
-            // must use the session's frame to ensure deterministic behavior across peers.
-            let session_frame = session.current_frame().as_i32();
-            let input = TestInput {
-                value: (session_frame as u32).wrapping_mul(args.player_index as u32 + 1),
+        if let Err(error) =
+            drive_session_frame(&mut session, &mut game, local_handle, args.player_index)
+        {
+            let (checksum, diagnostics) =
+                compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
+            let runtime = runtime_diagnostics(
+                &session,
+                args.target_frames,
+                start_time,
+                &args.sync_preset,
+                sync_config,
+                &protocol_config,
+                time_sync_config,
+                &event_summary,
+            );
+            return TestResult {
+                success: false,
+                final_frame: game.state.frame,
+                final_value: game.state.value,
+                checksum,
+                rollbacks: game.rollback_count,
+                desync_detected: event_summary.desync_detected,
+                error_kind: Some("session".to_string()),
+                error: Some(error),
+                debug_log: if args.debug {
+                    Some(game.debug_log.entries)
+                } else {
+                    None
+                },
+                diagnostics: Some(diagnostics),
+                runtime: Some(runtime),
             };
-
-            if let Err(e) = session.add_local_input(local_handle, input) {
-                let (checksum, diagnostics) =
-                    compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
-                let runtime = runtime_diagnostics(
-                    &session,
-                    args.target_frames,
-                    start_time,
-                    &args.sync_preset,
-                    sync_config,
-                    &protocol_config,
-                    time_sync_config,
-                    &event_summary,
-                );
-                return TestResult {
-                    success: false,
-                    final_frame: game.state.frame,
-                    final_value: game.state.value,
-                    checksum,
-                    rollbacks: game.rollback_count,
-                    desync_detected: event_summary.desync_detected,
-                    error_kind: Some("session".to_string()),
-                    error: Some(format!("Failed to add input: {e}")),
-                    debug_log: if args.debug {
-                        Some(game.debug_log.entries)
-                    } else {
-                        None
-                    },
-                    diagnostics: Some(diagnostics),
-                    runtime: Some(runtime),
-                };
-            }
-
-            match session.advance_frame() {
-                Ok(requests) => {
-                    drain_session_events(&mut session, &mut event_summary);
-                    game.handle_requests(requests);
-                },
-                Err(e) => {
-                    let (checksum, diagnostics) =
-                        compute_confirmed_checksum_with_diagnostics(&session, args.target_frames);
-                    let runtime = runtime_diagnostics(
-                        &session,
-                        args.target_frames,
-                        start_time,
-                        &args.sync_preset,
-                        sync_config,
-                        &protocol_config,
-                        time_sync_config,
-                        &event_summary,
-                    );
-                    return TestResult {
-                        success: false,
-                        final_frame: game.state.frame,
-                        final_value: game.state.value,
-                        checksum,
-                        rollbacks: game.rollback_count,
-                        desync_detected: event_summary.desync_detected,
-                        error_kind: Some("session".to_string()),
-                        error: Some(format!("Failed to advance frame: {e}")),
-                        debug_log: if args.debug {
-                            Some(game.debug_log.entries)
-                        } else {
-                            None
-                        },
-                        diagnostics: Some(diagnostics),
-                        runtime: Some(runtime),
-                    };
-                },
-            }
         }
+        drain_session_events(&mut session, &mut event_summary);
 
         // Small sleep to avoid busy-waiting
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_oracle_uses_exclusive_target_input_range() {
+        struct Case {
+            name: &'static str,
+            game_frame: i32,
+            confirmed_frame: i32,
+            target_frames: i32,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "one_frame_target_confirms_frame_zero",
+                game_frame: 1,
+                confirmed_frame: 0,
+                target_frames: 1,
+                expected: true,
+            },
+            Case {
+                name: "hundred_frame_target_confirms_frame_ninety_nine",
+                game_frame: 100,
+                confirmed_frame: 99,
+                target_frames: 100,
+                expected: true,
+            },
+            Case {
+                name: "insufficient_game_frame_is_incomplete",
+                game_frame: 99,
+                confirmed_frame: 99,
+                target_frames: 100,
+                expected: false,
+            },
+            Case {
+                name: "insufficient_confirmed_frame_is_incomplete",
+                game_frame: 100,
+                confirmed_frame: 98,
+                target_frames: 100,
+                expected: false,
+            },
+            Case {
+                name: "zero_target_is_invalid",
+                game_frame: 0,
+                confirmed_frame: 0,
+                target_frames: 0,
+                expected: false,
+            },
+            Case {
+                name: "negative_target_is_invalid",
+                game_frame: 100,
+                confirmed_frame: 100,
+                target_frames: -1,
+                expected: false,
+            },
+            Case {
+                name: "minimum_target_does_not_overflow",
+                game_frame: 100,
+                confirmed_frame: 100,
+                target_frames: i32::MIN,
+                expected: false,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                target_completion_reached(
+                    case.game_frame,
+                    Frame::new(case.confirmed_frame),
+                    case.target_frames,
+                ),
+                case.expected,
+                "case {}",
+                case.name,
+            );
+        }
+    }
+
+    #[test]
+    fn completion_barrier_requires_every_distinct_player() {
+        struct Step {
+            name: &'static str,
+            player_index: usize,
+            newly_ready: bool,
+            complete: bool,
+            pending: &'static [usize],
+        }
+
+        let steps = [
+            Step {
+                name: "local_peer_alone_is_not_complete",
+                player_index: 1,
+                newly_ready: true,
+                complete: false,
+                pending: &[0, 2],
+            },
+            Step {
+                name: "first_remote_is_not_complete",
+                player_index: 0,
+                newly_ready: true,
+                complete: false,
+                pending: &[2],
+            },
+            Step {
+                name: "duplicate_announcement_is_idempotent",
+                player_index: 0,
+                newly_ready: false,
+                complete: false,
+                pending: &[2],
+            },
+            Step {
+                name: "out_of_range_announcement_is_ignored",
+                player_index: 3,
+                newly_ready: false,
+                complete: false,
+                pending: &[2],
+            },
+            Step {
+                name: "last_distinct_remote_completes_barrier",
+                player_index: 2,
+                newly_ready: true,
+                complete: true,
+                pending: &[],
+            },
+        ];
+
+        let mut state = CompletionBarrierState::new(3).expect("three-player barrier is valid");
+        for step in steps {
+            assert_eq!(
+                state.observe_ready(step.player_index),
+                step.newly_ready,
+                "newly-ready result for {}",
+                step.name
+            );
+            assert_eq!(
+                state.inbound_complete(),
+                step.complete,
+                "completion result for {}",
+                step.name
+            );
+            assert_eq!(
+                state.pending_players(),
+                step.pending,
+                "pending players for {}",
+                step.name
+            );
+        }
+    }
+
+    #[test]
+    fn completion_barrier_rejects_empty_participant_set() {
+        assert!(CompletionBarrierState::new(0).is_none());
+    }
+
+    #[test]
+    fn completion_barrier_requires_inbound_and_outbound_completion() {
+        let mut state = CompletionBarrierState::new(3).expect("three-player barrier is valid");
+        for player_index in 0..3 {
+            assert!(state.observe_ready(player_index));
+        }
+        assert!(state.inbound_complete());
+
+        assert!(
+            !state.exchange_complete(&[true, false]),
+            "all inbound announcements cannot hide an incomplete outbound announcement"
+        );
+        assert!(
+            !state.exchange_complete(&[true]),
+            "an incomplete outbound peer set cannot satisfy the barrier"
+        );
+        assert!(state.exchange_complete(&[true, true]));
+    }
+
+    #[test]
+    fn completion_barrier_partial_ready_gets_bounded_same_stream_ack() {
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("model the nonblocking barrier listener");
+        let listener_addr = listener.local_addr().expect("listener address");
+        let (prefix_sent_tx, prefix_sent_rx) = mpsc::channel();
+        let (finish_write_tx, finish_write_rx) = mpsc::channel();
+
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(listener_addr).expect("connect to barrier");
+            let ready = CompletionMessage::Ready { player_index: 0 }
+                .encode()
+                .expect("encode READY");
+            stream.write_all(&ready[..4]).expect("write READY prefix");
+            prefix_sent_tx.send(()).expect("signal prefix");
+            finish_write_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("wait to finish READY");
+            std::thread::sleep(Duration::from_millis(75));
+            stream.write_all(&ready[4..]).expect("write READY suffix");
+            CompletionBarrier::read_message(&mut stream, Duration::from_secs(1))
+                .expect("read same-stream ACK")
+        });
+
+        prefix_sent_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("client sent READY prefix");
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                },
+                Err(error) => panic!("accept barrier client: {error}"),
+            }
+        };
+
+        let mut state = CompletionBarrierState::new(2).expect("two-player barrier is valid");
+        state.observe_ready(1);
+        let mut acknowledged = [false];
+        assert!(!state.exchange_complete(&acknowledged));
+
+        let poll_start = Instant::now();
+        finish_write_tx.send(()).expect("release READY suffix");
+        let message = CompletionBarrier::read_message(&mut stream, COMPLETION_BARRIER_IO_SLICE)
+            .expect("blocking read accepts delayed READY suffix");
+        assert_eq!(message, CompletionMessage::Ready { player_index: 0 });
+        CompletionBarrier::write_message(
+            &mut stream,
+            CompletionMessage::Ack { player_index: 1 },
+            poll_start,
+            COMPLETION_BARRIER_IO_SLICE,
+        )
+        .expect("write bounded same-stream ACK");
+        assert!(
+            poll_start.elapsed() > Duration::from_millis(25),
+            "delayed split write must exceed the former unsafe 25ms slice"
+        );
+
+        assert_eq!(
+            client.join().expect("client thread"),
+            CompletionMessage::Ack { player_index: 1 }
+        );
+        state.observe_ready(0);
+        acknowledged[0] = true;
+        assert!(state.exchange_complete(&acknowledged));
+    }
+
+    #[test]
+    fn completion_barrier_io_is_bounded_by_slice_and_existing_budget() {
+        assert_eq!(CompletionBarrier::bounded_io_timeout(Duration::ZERO), None);
+        assert_eq!(
+            CompletionBarrier::bounded_io_timeout(Duration::from_millis(10)),
+            Some(Duration::from_millis(10))
+        );
+        assert_eq!(
+            CompletionBarrier::bounded_io_timeout(Duration::from_secs(10)),
+            Some(COMPLETION_BARRIER_IO_SLICE)
+        );
+    }
+
+    #[test]
+    fn target_snapshot_is_invalidated_by_rollback_below_target() {
+        let mut game = TestGame::new(false, 100);
+        game.state = TestState {
+            frame: 100,
+            value: 41,
+        };
+        game.observe_advanced_state();
+        assert_eq!(game.target_snapshot().map(|state| state.value), Some(41));
+
+        game.state = TestState {
+            frame: 99,
+            value: 40,
+        };
+        game.observe_loaded_state(99);
+        assert!(
+            game.target_snapshot().is_none(),
+            "rollback below target must not leave a vacuous/stale success snapshot"
+        );
+
+        game.state = TestState {
+            frame: 100,
+            value: 42,
+        };
+        game.observe_loaded_state(100);
+        assert_eq!(game.target_snapshot().map(|state| state.value), Some(42));
+    }
+
+    #[test]
+    fn target_capture_requires_an_advance_and_rechecked_confirmation() {
+        assert!(target_capture_ready(
+            DriveOutcome::Advanced,
+            100,
+            Frame::new(99),
+            100
+        ));
+        assert!(!target_capture_ready(
+            DriveOutcome::NotRunning,
+            100,
+            Frame::new(99),
+            100
+        ));
+        assert!(!target_capture_ready(
+            DriveOutcome::Advanced,
+            101,
+            Frame::new(98),
+            100
+        ));
     }
 }

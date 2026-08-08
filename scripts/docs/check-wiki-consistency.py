@@ -305,7 +305,7 @@ def validate_sync_script_sidebar_template(
                     + f" {sync_script_path.name}:generate_sidebar(): "
                     + f"Wiki-link [[{page_name}|{display_text}]] "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"Use standard markdown [Display](Page) syntax instead.",
+                    + "Use standard markdown [Display](Page) syntax instead.",
                     file=sys.stderr,
                 )
                 break  # Only report first problematic character per link
@@ -437,7 +437,7 @@ def validate_wiki_link_display_text(
                     red("ERROR:")
                     + f" _Sidebar.md:{line_num}: Wiki-link [[{page_name}|{display_text}]] "
                     + f"contains '{char}' in display text ({reason}). "
-                    + f"Use standard markdown [Display](Page) syntax instead.",
+                    + "Use standard markdown [Display](Page) syntax instead.",
                     file=sys.stderr,
                 )
                 break  # Only report first problematic character per link
@@ -491,7 +491,7 @@ def validate_wiki_structure_completeness(
     unmapped_files = docs_files - mapped_sources
 
     if verbose:
-        print(f"\nChecking WIKI_STRUCTURE completeness...")
+        print("\nChecking WIKI_STRUCTURE completeness...")
         print(f"  Found {len(docs_files)} docs source files")
         print(f"  Found {len(mapped_sources)} mappings in WIKI_STRUCTURE")
 

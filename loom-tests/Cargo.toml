@@ -11,11 +11,8 @@ publish = false
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
-# Minimal dependencies - just fortress-rollback and loom
-[dependencies]
-fortress-rollback = { path = ".." }
-
 [dev-dependencies]
+fortress-rollback = { path = ".." }
 loom = "0.7"
 
 # This crate only exists for loom testing

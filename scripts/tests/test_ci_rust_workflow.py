@@ -31,10 +31,10 @@ EMSCRIPTEN_DEPENDENCY_CHECK_PATH = REPO_ROOT / EMSCRIPTEN_DEPENDENCY_CHECK
 GODOT_FIXTURE = "tests/godot-emscripten"
 GODOT_FIXTURE_PATH_FILTER = f"{GODOT_FIXTURE}/**"
 GODOT_EDITOR_SHA256 = (
-    "d0bc2113065e481c9c2c2b2c37daa4e8be3fe9e27f0ab9ab0b6096e9a37907f3"
+    "c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba"
 )
 GODOT_TEMPLATES_SHA256 = (
-    "3fbe2c0e2dec9d537ab9ec97bcf8da91dcf23357fc51f67092dd068d839290a8"
+    "86409db6200b6f8fd3230989c2d2002851f3dd18acf11d7bdbafddf5a0dd0f72"
 )
 GODOT_CACHE_KEY = (
     "godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA256 }}-"
@@ -366,7 +366,7 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
         if step.get("name") == "Install wasm-bindgen CLI for browser runtime tests"
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
-    assert install_step["uses"] == "taiki-e/install-action@v2.85.6"
+    assert install_step["uses"] == "taiki-e/install-action@v2.85.10"
     locked_bindgen = _locked_package_version("wasm-bindgen")
     assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"
 
@@ -445,7 +445,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     )
     assert (
         rust_step["uses"]
-        == "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c"
+        == "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
     )
     assert rust_step["with"]["toolchain"] == "nightly-2026-07-08"
     assert set(str(rust_step["with"]["components"]).split(",")) == {
@@ -462,7 +462,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
         emsdk_step["uses"]
         == "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984"
     )
-    assert str(emsdk_step["with"]["version"]) == "4.0.11"
+    assert str(emsdk_step["with"]["version"]) == "4.0.20"
     assert emsdk_step["with"]["actions-cache-folder"] == "emsdk-cache"
 
     node_step = next(step for step in steps if step.get("name") == "Install Node.js")
@@ -477,7 +477,7 @@ def test_godot_download_cache_contains_only_verified_runtime_files() -> None:
     job = workflow["jobs"]["godot-emscripten"]
     steps = job["steps"]
 
-    assert job["env"]["GODOT_VERSION"] == "4.6.3"
+    assert job["env"]["GODOT_VERSION"] == "4.7.1"
     assert job["env"]["GODOT_EDITOR_SHA256"] == GODOT_EDITOR_SHA256
     assert job["env"]["GODOT_TEMPLATES_SHA256"] == GODOT_TEMPLATES_SHA256
 

@@ -126,9 +126,11 @@ def fetch_versions(api_url: str | None = None) -> list[str]:
     page = 1
     while True:
         url = f"{api_url}?per_page=100&page={page}"
-        req = urllib.request.Request(url, headers=headers)
+        # api_url is derived from GitHub's API root or an explicit enterprise/
+        # test override; urllib still requires an audit marker for dynamic URLs.
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:  # noqa: S310
                 raw = resp.read()
                 try:
                     data = json.loads(raw.decode())

@@ -1,0 +1,90 @@
+name: CI - CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/**'
+      - 'scripts/**/*.py'
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/**'
+      - 'scripts/**/*.py'
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  schedule:
+    - cron: '30 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python, rust]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze
+        id: codeql
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+          output: codeql-results
+
+      - name: Upload CodeQL SARIF
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail on CodeQL findings
+        env:
+          SARIF_DIRECTORY: ${{ steps.codeql.outputs.sarif-output }}
+        run: |
+          mapfile -d '' reports < <(find "$SARIF_DIRECTORY" -type f -name '*.sarif' -print0)
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "CodeQL produced no SARIF reports to enforce." >&2
+            exit 1
+          fi
+
+          jq -s -e '
+            all(.[];
+              (type == "object")
+              and (.runs | type == "array")
+              and (.runs | length) > 0
+              and all(.runs[];
+                (type == "object")
+                and ((has("results") | not) or (.results | type == "array"))
+                and ((.results // []) | length) == 0
+              )
+            )
+          ' "${reports[@]}"
