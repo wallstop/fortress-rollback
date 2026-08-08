@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785773285083,
+  "lastUpdate": 1786222921528,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -10097,6 +10097,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1232,
             "range": "± 7",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "aaaaee44bbbcdd001989b9a5014245039c2a46e7",
+          "message": "ci: harden static analysis and network nightly (#288)\n\n## Summary\n\n- close #287 with blocking Ruff, checksum-verified ShellCheck,\nsecurity-extended CodeQL, and pinned cargo-shear across all four Cargo\nworkspaces\n- stabilize the recurring 3/4-peer Network Nightly failures with the\ncorrect exclusive-frame oracle, rollback-aware target snapshots,\nchecksum equality, and a bounded test-only READY/ACK completion barrier\n- incorporate and advance #286's action updates, refresh all compatible\ndependencies and fixture toolchains, and extend Dependabot coverage\n- make Dependabot auto-merge poll every raw transient required-check\nstate while failing closed on malformed GitHub CLI JSON\n\n## Root causes\n\nThe nightly harness treated a 100-frame exclusive range as if frame 100\nwere also required, then let peers exit independently before final\nN-peer gossip converged. The auto-merge helper classified raw\n`IN_PROGRESS` as a terminal failure and could fail open when `jq`\nrejected malformed state values inside a Bash `if` call chain.\n\n## Validation\n\n- formatting, workspace all-target check, and strict Clippy: pass\n- default all-target Nextest: 2,998 passed, 71 skipped\n- hot-join all-target Nextest: 3,252 passed, 72 skipped\n- Python repository suite: 2,063 passed\n- doctests: 168 passed, 54 intentionally ignored\n- exact Network Nightly 3/4-peer zero-retry soak: 20/20 passed across 10\niterations\n- agent preflight `--all --auto-fix`: all groups passed\n- four RustSec audits, cargo-deny, workspace-lock validation, and\ncargo-shear across all four roots: pass\n- Ruff, ShellCheck, actionlint, CodeQL predicate fixtures, shell\nportability, browser WASM, Emscripten, Godot API 4.7 Clippy, and wasm\nbrowser runtime: pass\n- adversarial review loops for network, static analysis, dependencies,\nauto-merge, and the integrated branch: zero remaining findings\n- exact-head hosted CI: 15/15 workflow groups green (83 jobs successful,\n3 policy skips)\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic production scan: PASS (no production Rust changes)\n- Determinism: PASS (retained target-state checksum asserted across\npeers)\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (test/CI/tooling-only)\n- CHANGELOG reviewed: N/A (no public or production behavior change)\n\nThe authoritative hosted Godot 4.7.1/Emscripten 4.0.20 job built and\nexercised both threaded and non-threaded Chromium exports successfully.\n\nCloses #287.\nSupersedes #286.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes affect merge gating, security scanning enforcement, and pinned\nCI action behavior across many workflows; production Rust library code\nis largely untouched, but a misconfigured CodeQL allowlist or auto-merge\nvalidator could block or incorrectly allow merges.\n> \n> **Overview**\n> **Hardens CI and tooling** with blocking static analysis, immutable\nthird-party action pins, a new CodeQL gate, and safer Dependabot\nauto-merge—plus bumps Godot/Emscripten fixture toolchains and lockfiles.\n> \n> **Static analysis:** Adds `ci-codeql.yml` (Actions/Python/Rust,\n`security-extended`, SARIF upload, blocking `jq` enforcement with a\nnarrow allowlist for known `ci-release-state.yml` findings).\n`ci-quality` gains a blocking **Ruff** job (`ruff.toml`), makes\n**cargo-shear** blocking with checksum-verified install and `--locked\n--deny-warnings` over every workspace from `workspace_locks.py`, and\nwidens path filters (`fuzz/**`, `loom-tests/**`, Python under `scripts`\nand `.github`). `ci-lint` adds checksum-pinned **ShellCheck** over all\ntracked `*.sh` files and expands triggers for `scripts/**` and shell\nscripts.\n> \n> **Supply chain / permissions:** Replaces mutable `@v*` / `@master` /\n`@stable` refs on third-party actions with **40-char commit pins**\nrepo-wide; many workflows now declare `permissions: contents: read`.\n**Dependabot** gains weekly groups for devcontainer Docker/features,\ndocs/release pip, and Godot Emscripten npm.\n> \n> **Auto-merge:** `enable-dependabot-automerge.sh` validates `gh pr\nchecks` JSON before classifying states, treats GitHub’s uppercase\n**accepted** vs **transient** states explicitly, and fails closed on\nmalformed responses (with expanded tests).\n> \n> **Fixtures / deps:** Godot browser CI moves to **4.7.1**, Emscripten\n**4.0.20**, `wasm-bindgen` **0.2.127**; `tests/godot-emscripten`\ntolerates the known threaded dlink console warning. Lockfiles and minor\nPython/shell cleanups; `loom-tests` depends on the main crate only as a\n**dev-dependency**. New contract tests in `test_ci_static_analysis.py`\nlock these policies.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n076c00bbc9042bbdae24e7b3683e1dca81f72898. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-08T13:54:18-07:00",
+          "tree_id": "7d285f9a90395dd4503e1fda3b3ef4f524ff9c4a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/aaaaee44bbbcdd001989b9a5014245039c2a46e7"
+        },
+        "date": 1786222921449,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 22,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 31,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 68,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 256,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 34,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 44,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 109,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 413,
+            "range": "± 47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 84,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 111,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 139,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 147,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 192,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 274,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 293,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 368,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 530,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 122,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 149,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 183,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 235,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 269,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 366,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 448,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 534,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 700,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 451,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 640,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 809,
+            "range": "± 45",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 954,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 72,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 95,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 469,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 795,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1220,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 71,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 243,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 943,
+            "range": "± 11",
             "unit": "ns/iter"
           }
         ]
