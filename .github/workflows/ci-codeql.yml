@@ -78,16 +78,19 @@ jobs:
 
           jq -s -e '
             def acknowledged_release_state_boundary:
-              (.ruleId == "actions/cache-poisoning/poisonable-step")
-              and (.locations[0].physicalLocation.artifactLocation.uri
+              (.locations[0].physicalLocation.artifactLocation.uri
                 == ".github/workflows/ci-release-state.yml")
-              and (.partialFingerprints.primaryLocationLineHash as $fingerprint
+              and ([
+                  .ruleId,
+                  .partialFingerprints.primaryLocationLineHash
+                ] | join("|") as $identity
                 | [
-                    "feef20c4e42596ef:1",
-                    "8d4fae92413ae178:1",
-                    "911ca217a17b7b20:1"
+                    "actions/cache-poisoning/poisonable-step|feef20c4e42596ef:1",
+                    "actions/cache-poisoning/poisonable-step|8d4fae92413ae178:1",
+                    "actions/cache-poisoning/poisonable-step|911ca217a17b7b20:1",
+                    "actions/untrusted-checkout/medium|bd8dc38829013265:1"
                   ]
-                | index($fingerprint) != null);
+                | index($identity) != null);
 
             all(.[];
               (type == "object")
@@ -99,7 +102,9 @@ jobs:
                 and all((.results // [])[]; acknowledged_release_state_boundary)
               )
             )
-            and ([.[].runs[].results[]?
-              | .partialFingerprints.primaryLocationLineHash]
+            and ([.[].runs[].results[]? | [
+                .ruleId,
+                .partialFingerprints.primaryLocationLineHash
+              ] | join("|")]
               | length == (unique | length))
           ' "${reports[@]}"

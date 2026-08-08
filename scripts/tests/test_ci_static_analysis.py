@@ -308,6 +308,7 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     assert "feef20c4e42596ef:1" in run
     assert "8d4fae92413ae178:1" in run
     assert "911ca217a17b7b20:1" in run
+    assert "bd8dc38829013265:1" in run
     assert "unique | length" in run
     assert enforcement.get("continue-on-error") is not True
 
@@ -325,6 +326,17 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
                 r'"uri":".github/workflows/ci-release-state.yml"}}}],'
                 r'"partialFingerprints":{'
                 r'"primaryLocationLineHash":"feef20c4e42596ef:1"}}]}]}',
+            ),
+            True,
+        ),
+        (
+            (
+                r'{"runs":[{"results":[{'
+                r'"ruleId":"actions/untrusted-checkout/medium",'
+                r'"locations":[{"physicalLocation":{"artifactLocation":{'
+                r'"uri":".github/workflows/ci-release-state.yml"}}}],'
+                r'"partialFingerprints":{'
+                r'"primaryLocationLineHash":"bd8dc38829013265:1"}}]}]}',
             ),
             True,
         ),
@@ -414,6 +426,7 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
         "clean",
         "clean-default-results",
         "acknowledged-trust-boundary",
+        "acknowledged-untrusted-checkout-boundary",
         "finding",
         "trust-boundary-wrong-fingerprint",
         "trust-boundary-cross-report-duplicate",
