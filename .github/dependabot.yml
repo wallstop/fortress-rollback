@@ -144,7 +144,9 @@ updates:
 
   # Development-container features
   - package-ecosystem: "devcontainers"
-    directory: "/.devcontainer"
+    # The devcontainers updater discovers .devcontainer/devcontainer.json
+    # relative to the configured directory, so it must start at repository root.
+    directory: "/"
     schedule:
       interval: "weekly"
     assignees:

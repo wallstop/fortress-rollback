@@ -465,16 +465,30 @@ def test_codeql_jq_predicate(
 
 def test_dependabot_tracks_devcontainer_images_and_features() -> None:
     config = _load_workflow(DEPENDABOT_CONFIG)
-    entries = [
+    docker_entries = [
         update
         for update in config["updates"]
-        if update.get("directory") == "/.devcontainer"
+        if update.get("package-ecosystem") == "docker"
+        and update.get("directory") == "/.devcontainer"
     ]
-    assert {entry["package-ecosystem"] for entry in entries} == {
-        "devcontainers",
-        "docker",
-    }
-    assert all(entry["schedule"]["interval"] == "weekly" for entry in entries)
+    feature_entries = [
+        update
+        for update in config["updates"]
+        if update.get("package-ecosystem") == "devcontainers"
+        and update.get("directory") == "/"
+    ]
+    all_feature_entries = [
+        update
+        for update in config["updates"]
+        if update.get("package-ecosystem") == "devcontainers"
+    ]
+    assert len(docker_entries) == 1
+    assert len(feature_entries) == 1
+    assert all_feature_entries == feature_entries
+    assert all(
+        entry["schedule"]["interval"] == "weekly"
+        for entry in [*docker_entries, *feature_entries]
+    )
 
 
 def test_ruff_subprocess_exceptions_are_scoped() -> None:

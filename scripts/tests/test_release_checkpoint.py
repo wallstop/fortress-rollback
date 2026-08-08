@@ -247,16 +247,12 @@ def test_absent_tag_accepts_previous_checkpoint_older_than_search_bound(
             "-m",
             f"intervening main commit {index}",
         )
-    _git(trusted, "cherry-pick", prepared)
-    # Publish the deliberately rewritten history to an empty remote. Replacing
-    # the populated fixture remote makes pack generation depend on its
-    # advertised old refs and has produced missing-object failures across Git
-    # versions, even with --no-thin.
-    replacement_remote = tmp_path / "replacement-origin.git"
-    _git(tmp_path, "init", "--bare", str(replacement_remote))
-    _git(trusted, "remote", "set-url", "origin", str(replacement_remote))
-    _git(trusted, "push", "--set-upstream", "origin", "main")
-    _git(trusted, "push", "origin", "refs/tags/v1.2.2")
+    # Recreate the prepared tree on the long first-parent history without
+    # publishing rewritten main. The resolver trusts the checked-out dispatch
+    # SHA and consults the remote only for immutable release tags, so pushing
+    # this synthetic history tested Git packing rather than checkpoint logic.
+    _git(trusted, "checkout", "refs/test/prepared-release", "--", ".")
+    _git(trusted, "commit", "-m", "prepare release 1.2.3 after long history")
 
     checkpoint = _resolve(trusted, tmp_path)
 
