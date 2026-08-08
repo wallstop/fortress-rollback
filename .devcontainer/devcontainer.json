@@ -16,7 +16,7 @@
 	// "image": "ghcr.io/wallstop/fortress-rollback/devcontainer:latest",
 	// Additional features (on top of what's in Dockerfile)
 	"features": {
-		"ghcr.io/devcontainers/features/powershell:1": {}
+		"ghcr.io/devcontainers/features/powershell:2": {}
 	},
 	"mounts": [
 		{
