@@ -52,5 +52,8 @@ return the repository to a fully green reviewed pull request and main branch.
 
 ## Publication
 
-- Pending commit, push, pull request, exact-head CI, reviewer convergence, merge, and post-merge
-  main verification.
+- PR #291 is open, ready, and cleanly mergeable. Its implementation head `8f8511a` passed all
+  seven path-relevant workflow groups, including the previously failing Documentation lane and
+  CodeQL. Cursor's exact-head summary found no issue, Copilot returned only its terminal reviewer
+  quota response, and no review threads exist.
+- Any progress-only closeout head must repeat the same required hosted gates before handoff.
