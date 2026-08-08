@@ -17,6 +17,8 @@ REQUIRED_STABLE_POLLS_REQUIRED="${REQUIRED_STABLE_POLLS_REQUIRED:-2}"
 NO_REQUIRED_CHECKS_REPORTED_MSG="no required checks reported"
 NO_REQUIRED_CHECKS_SENTINEL="-1"
 SOFT_FAIL_PROTECTED_BRANCH_RULES_EXIT_CODE=20
+REQUIRED_ACCEPTED_STATES_JSON='["SUCCESS","SKIPPED","NEUTRAL"]'
+REQUIRED_TRANSIENT_STATES_JSON='["EXPECTED","REQUESTED","WAITING","QUEUED","PENDING","IN_PROGRESS"]'
 
 if ! [[ "$REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "REQUIRED_CHECKS_APPEAR_TIMEOUT_SECONDS must be a non-negative integer." >&2
@@ -266,7 +268,10 @@ emit_required_checks_diagnostics() {
     local failed_checks
     local pending_checks
 
-    failed_checks="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+    failed_checks="$(jq -r \
+        --arg run_id "${GITHUB_RUN_ID:-}" \
+        --argjson accepted_states "$REQUIRED_ACCEPTED_STATES_JSON" \
+        --argjson transient_states "$REQUIRED_TRANSIENT_STATES_JSON" '
         [
             .[]?
             | select(
@@ -275,11 +280,9 @@ emit_required_checks_diagnostics() {
                     or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                 )
                 and (
-                    (.state // "" | ascii_downcase) != "success"
-                    and (.state // "" | ascii_downcase) != "pending"
-                    and (.state // "" | ascii_downcase) != "pass"
-                    and (.state // "" | ascii_downcase) != "skipping"
-                    and (.state // "" | ascii_downcase) != "neutral"
+                    (.state // "" | ascii_upcase) as $state
+                    | ($accepted_states | index($state)) == null
+                    and ($transient_states | index($state)) == null
                 )
             )
         ]
@@ -288,7 +291,9 @@ emit_required_checks_diagnostics() {
         | .[]?
     ' <<<"$checks_json")"
 
-    pending_checks="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+    pending_checks="$(jq -r \
+        --arg run_id "${GITHUB_RUN_ID:-}" \
+        --argjson transient_states "$REQUIRED_TRANSIENT_STATES_JSON" '
         [
             .[]?
             | select(
@@ -296,11 +301,14 @@ emit_required_checks_diagnostics() {
                     ($run_id | length) == 0
                     or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                 )
-                and ((.state // "" | ascii_downcase) == "pending")
+                and (
+                    (.state // "" | ascii_upcase) as $state
+                    | ($transient_states | index($state)) != null
+                )
             )
         ]
         | sort_by((.name // ""), (.link // ""))
-        | map("  - \(.name // "<unknown>") [pending] \(.link // "no-link")")
+        | map("  - \(.name // "<unknown>") [\(.state // "unknown")] \(.link // "no-link")")
         | .[]?
     ' <<<"$checks_json")"
 
@@ -312,6 +320,30 @@ emit_required_checks_diagnostics() {
     if [[ -n "$pending_checks" ]]; then
         echo "Required checks still pending:" >&2
         printf '%s\n' "$pending_checks" >&2
+    fi
+}
+
+validate_required_checks_response() {
+    # `gh pr checks --json` is external input. Validate every field used by the
+    # classifiers so jq type errors cannot collapse into empty arithmetic values.
+    local checks_json="$1"
+    local validation_result
+
+    if ! validation_result="$(jq -s -e '
+        length == 1
+        and (.[0]
+            | type == "array"
+            and all(.[];
+                type == "object"
+                and (.state | type == "string")
+                and (.name? | type == "null" or type == "string")
+                and (.link? | type == "null" or type == "string")
+            )
+        )
+    ' <<<"$checks_json" 2>&1)"; then
+        printf 'Invalid required checks response (malformed JSON or unexpected schema); refusing to enable auto-merge: %s\n' \
+            "$validation_result" >&2
+        return 1
     fi
 }
 
@@ -520,7 +552,9 @@ wait_for_required_checks_without_self() {
             return 1
         fi
 
-        required_total="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        validate_required_checks_response "$checks_json" || return 1
+
+        if ! required_total="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
             [
                 .[]?
                 | select(
@@ -528,20 +562,13 @@ wait_for_required_checks_without_self() {
                     or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                 )
             ] | length
-        ' <<<"$checks_json")"
-        required_pending="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
-            [
-                .[]?
-                | select(
-                    (
-                        ($run_id | length) == 0
-                        or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
-                    )
-                    and ((.state // "" | ascii_downcase) == "pending")
-                )
-            ] | length
-        ' <<<"$checks_json")"
-        required_failed="$(jq -r --arg run_id "${GITHUB_RUN_ID:-}" '
+        ' <<<"$checks_json")"; then
+            echo "Failed to evaluate required checks response; refusing to enable auto-merge." >&2
+            return 1
+        fi
+        if ! required_pending="$(jq -r \
+            --arg run_id "${GITHUB_RUN_ID:-}" \
+            --argjson transient_states "$REQUIRED_TRANSIENT_STATES_JSON" '
             [
                 .[]?
                 | select(
@@ -550,15 +577,37 @@ wait_for_required_checks_without_self() {
                         or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
                     )
                     and (
-                        (.state // "" | ascii_downcase) != "success"
-                        and (.state // "" | ascii_downcase) != "pending"
-                        and (.state // "" | ascii_downcase) != "pass"
-                        and (.state // "" | ascii_downcase) != "skipping"
-                        and (.state // "" | ascii_downcase) != "neutral"
+                        (.state // "" | ascii_upcase) as $state
+                        | ($transient_states | index($state)) != null
                     )
                 )
             ] | length
-        ' <<<"$checks_json")"
+        ' <<<"$checks_json")"; then
+            echo "Failed to evaluate required checks response; refusing to enable auto-merge." >&2
+            return 1
+        fi
+        if ! required_failed="$(jq -r \
+            --arg run_id "${GITHUB_RUN_ID:-}" \
+            --argjson accepted_states "$REQUIRED_ACCEPTED_STATES_JSON" \
+            --argjson transient_states "$REQUIRED_TRANSIENT_STATES_JSON" '
+            [
+                .[]?
+                | select(
+                    (
+                        ($run_id | length) == 0
+                        or ((.link // "") | contains("/actions/runs/\($run_id)/") | not)
+                    )
+                    and (
+                        (.state // "" | ascii_upcase) as $state
+                        | ($accepted_states | index($state)) == null
+                        and ($transient_states | index($state)) == null
+                    )
+                )
+            ] | length
+        ' <<<"$checks_json")"; then
+            echo "Failed to evaluate required checks response; refusing to enable auto-merge." >&2
+            return 1
+        fi
 
         if ((required_total == 0)); then
             echo "All required checks are self; falling back to non-self check-runs/statuses for gating."
