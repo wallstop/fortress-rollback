@@ -1,4 +1,6 @@
 name: CI - Rust
+permissions:
+  contents: read
 
 on:
   push:
@@ -68,7 +70,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable snapshot
         with:
           components: rustfmt, clippy
 
@@ -79,7 +81,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         continue-on-error: true
 
       - name: Verify sccache is working (Unix)
@@ -176,7 +178,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable snapshot
         with:
           components: clippy
 
@@ -420,7 +422,7 @@ jobs:
           echo "✅ MSRV versions match: $CARGO_MSRV"
 
       - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
           toolchain: ${{ steps.cargo-msrv.outputs.msrv }}
 
@@ -439,7 +441,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
           toolchain: stable
 
@@ -509,7 +511,7 @@ jobs:
 
       - name: Check semver compatibility
         id: semver
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
 
       # Surface an actionable explanation in the job summary when the gate trips,
       # so the fix (bump + document, or revert) is visible without reading logs.
@@ -558,7 +560,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain with WASM target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable snapshot
         with:
           targets: ${{ matrix.target }}
           components: clippy
@@ -570,9 +572,9 @@ jobs:
 
       - name: Install wasm-bindgen CLI for browser runtime tests
         if: matrix.target == 'wasm32-unknown-unknown'
-        uses: taiki-e/install-action@v2.85.6
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
-          tool: wasm-bindgen-cli@0.2.126
+          tool: wasm-bindgen-cli@0.2.127
 
       - name: Check WASM build (no default features)
         run: cargo check --target ${{ matrix.target }} --no-default-features
@@ -613,23 +615,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      GODOT_VERSION: "4.6.3"
-      GODOT_RELEASE: "4.6.3-stable"
-      GODOT_TEMPLATE_VERSION: "4.6.3.stable"
-      GODOT_EDITOR_ARCHIVE: "Godot_v4.6.3-stable_linux.x86_64.zip"
-      GODOT_TEMPLATES_ARCHIVE: "Godot_v4.6.3-stable_export_templates.tpz"
-      GODOT_EDITOR_SHA256: "d0bc2113065e481c9c2c2b2c37daa4e8be3fe9e27f0ab9ab0b6096e9a37907f3"
-      GODOT_TEMPLATES_SHA256: "3fbe2c0e2dec9d537ab9ec97bcf8da91dcf23357fc51f67092dd068d839290a8"
-      GODOT_EDITOR_VERSION: "4.6.3.stable.official.7d41c59c4"
-      GODOT_ROOT: ${{ github.workspace }}/.godot-ci/godot-4.6.3
-      GODOT4_BIN: ${{ github.workspace }}/.godot-ci/godot-4.6.3/Godot_v4.6.3-stable_linux.x86_64
-      XDG_DATA_HOME: ${{ github.workspace }}/.godot-ci/godot-4.6.3/xdg-data
+      GODOT_VERSION: "4.7.1"
+      GODOT_RELEASE: "4.7.1-stable"
+      GODOT_TEMPLATE_VERSION: "4.7.1.stable"
+      GODOT_EDITOR_ARCHIVE: "Godot_v4.7.1-stable_linux.x86_64.zip"
+      GODOT_TEMPLATES_ARCHIVE: "Godot_v4.7.1-stable_export_templates.tpz"
+      GODOT_EDITOR_SHA256: "c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba"
+      GODOT_TEMPLATES_SHA256: "86409db6200b6f8fd3230989c2d2002851f3dd18acf11d7bdbafddf5a0dd0f72"
+      GODOT_EDITOR_VERSION: "4.7.1.stable.official.a13da4feb"
+      GODOT_ROOT: ${{ github.workspace }}/.godot-ci/godot-4.7.1
+      GODOT4_BIN: ${{ github.workspace }}/.godot-ci/godot-4.7.1/Godot_v4.7.1-stable_linux.x86_64
+      XDG_DATA_HOME: ${{ github.workspace }}/.godot-ci/godot-4.7.1/xdg-data
 
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Godot Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master snapshot
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
           toolchain: nightly-2026-07-08
           components: clippy,rust-src,rustfmt
@@ -644,7 +646,7 @@ jobs:
       - name: Install Emscripten SDK
         uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
         with:
-          version: "4.0.11"
+          version: "4.0.20"
           actions-cache-folder: emsdk-cache
 
       - name: Install Node.js
@@ -780,7 +782,7 @@ jobs:
             arm64-${{ runner.os }}-cargo-
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable snapshot
 
       - name: Install cross
         uses: ./.github/actions/install-cargo-tool

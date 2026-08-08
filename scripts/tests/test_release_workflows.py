@@ -428,7 +428,10 @@ def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
     assert "name: Version Sync Check" in text
     assert '"**/Cargo.lock"' in text
     assert '"scripts/release/**"' in text
-    assert "dtolnay/rust-toolchain@stable" in text
+    assert (
+        "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c"
+        in text
+    )
     assert "scripts/release/workspace_locks.py check" in text
     assert "--no-deps" not in text
 

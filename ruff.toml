@@ -1,0 +1,35 @@
+target-version = "py311"
+
+[lint]
+# E4/E7/E9 and F catch syntax-adjacent correctness defects. S adds Bandit-style
+# security checks. Existing subprocess uses are explicitly scoped below so new
+# production scripts receive S603/S607 coverage by default.
+select = ["E4", "E7", "E9", "F", "S"]
+ignore = ["E402"]
+
+[lint.per-file-ignores]
+"scripts/tests/**/*.py" = ["S101", "S603", "S607"]
+"scripts/tests/test_install_cargo_tool_action.py" = ["S108"]
+"scripts/build/check-cargo-hack.py" = ["S607"]
+"scripts/build/run-cargo-clippy.py" = ["S607"]
+"scripts/build/run-cargo-fmt.py" = ["S603", "S607"]
+"scripts/ci/agent-preflight.py" = ["S603", "S607"]
+"scripts/ci/sync-issue-template-versions.py" = ["S607"]
+"scripts/docs/check-rustdoc-links.py" = ["S603"]
+"scripts/hooks/actionlint.py" = ["S603"]
+"scripts/hooks/agent-typos.py" = ["S603"]
+"scripts/hooks/agent-vale-advisory.py" = ["S603"]
+"scripts/hooks/check-advance-frame-error-handling.py" = ["S607"]
+"scripts/hooks/check-no-tla-tools-cache.py" = ["S603", "S607"]
+"scripts/hooks/check-wire-golden-immutable.py" = ["S603", "S607"]
+"scripts/hooks/markdownlint.py" = ["S603"]
+"scripts/hooks/vale.py" = ["S603"]
+"scripts/pre-commit.py" = ["S603", "S607"]
+"scripts/release/prepare_release.py" = ["S603", "S607"]
+"scripts/release/publish_state.py" = ["S607"]
+"scripts/release/release_branch.py" = ["S603", "S607"]
+"scripts/release/release_checkpoint.py" = ["S603", "S607"]
+"scripts/release/release_state.py" = ["S603", "S607"]
+"scripts/release/release_state_ci.py" = ["S603", "S607"]
+"scripts/release/workspace_locks.py" = ["S603"]
+"scripts/verification/verify-sync-handshake-traces.py" = ["S603"]

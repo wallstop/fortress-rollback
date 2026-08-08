@@ -288,7 +288,7 @@ should_exclude_file() {
 
     # Exclude paths containing these directories
     case "$file" in
-        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/fuzz/target/*|*/site/*)
+        */target/*|*/.git/*|*/node_modules/*|*/.tla-tools/*|*/proptest-regressions/*|*/mutants.out*/*|*/.venv/*|*/site/*)
             EXCLUDE_REASON="excluded generated/tooling directory"
             return 0  # true = exclude
             ;;

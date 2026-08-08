@@ -193,10 +193,10 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
                 file=sys.stderr,
             )
         print(
-            f"  remedy: fold each entry into the matching '### Added' entry "
-            f"that introduces the affected feature and delete the '### Fixed' "
-            f"subsection, OR prefix the entry with '**Pre-existing:**' if it "
-            f"fixes behavior that already shipped in a released version.",
+            "  remedy: fold each entry into the matching '### Added' entry "
+            "that introduces the affected feature and delete the '### Fixed' "
+            "subsection, OR prefix the entry with '**Pre-existing:**' if it "
+            "fixes behavior that already shipped in a released version.",
             file=sys.stderr,
         )
         print(f"  see: {_RULE_REFERENCE}", file=sys.stderr)
@@ -218,9 +218,9 @@ def check_file(filepath: Path, repo_root: Path | None = None) -> bool:
                 file=sys.stderr,
             )
         print(
-            f"  remedy: fold each entry into the existing '### Added' entry "
-            f"for the same feature, OR prefix the entry with '**Breaking:**' "
-            f"if it is a breaking change to an already-released type.",
+            "  remedy: fold each entry into the existing '### Added' entry "
+            "for the same feature, OR prefix the entry with '**Breaking:**' "
+            "if it is a breaking change to an already-released type.",
             file=sys.stderr,
         )
         print(f"  see: {_RULE_REFERENCE}", file=sys.stderr)

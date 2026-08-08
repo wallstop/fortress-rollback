@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-readonly FIXTURE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIXTURE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly FIXTURE_ROOT
 readonly MANIFEST_PATH="${FIXTURE_ROOT}/Cargo.toml"
 readonly GODOT_PROJECT="${FIXTURE_ROOT}/godot"
 readonly GODOT_BIN_DIR="${GODOT_PROJECT}/bin"
@@ -11,7 +12,7 @@ readonly NIGHTLY="nightly-2026-07-08"
 readonly TARGET="wasm32-unknown-emscripten"
 readonly LIBRARY_NAME="fortress_godot_probe"
 readonly GODOT_BIN="${GODOT4_BIN:-godot4}"
-readonly GODOT_VERSION="4.6.3.stable.official.7d41c59c4"
+readonly GODOT_VERSION="4.7.1.stable.official.a13da4feb"
 readonly COMMON_RUSTFLAGS="-C panic=abort -C link-args=-sSIDE_MODULE=2 -C llvm-args=-enable-emscripten-cxx-exceptions=0 -Z default-visibility=hidden -Z link-native-libraries=no"
 
 if ! command -v emcc >/dev/null 2>&1; then
@@ -32,8 +33,8 @@ if [[ "$("${GODOT_BIN}" --version)" != "${GODOT_VERSION}" ]]; then
     "${GODOT_BIN}" --version >&2
     exit 1
 fi
-if ! emcc --version | head -n 1 | grep -F '4.0.11' >/dev/null; then
-    printf 'error: Emscripten 4.0.11 is required\n' >&2
+if ! emcc --version | head -n 1 | grep -F '4.0.20' >/dev/null; then
+    printf 'error: Emscripten 4.0.20 is required\n' >&2
     emcc --version >&2
     exit 1
 fi

@@ -108,7 +108,8 @@ def _request_json(
     data = None
     if payload is not None:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    request = urllib.request.Request(
+    # API_ROOT is a fixed HTTPS origin and path is repository-generated.
+    request = urllib.request.Request(  # noqa: S310
         f"{API_ROOT}{path}",
         data=data,
         method=method,
@@ -121,7 +122,7 @@ def _request_json(
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         snippet = error.read(201).decode(errors="replace")[:200]

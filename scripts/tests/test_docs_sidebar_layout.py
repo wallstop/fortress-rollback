@@ -49,11 +49,12 @@ def test_desktop_primary_sidebar_hidden() -> None:
     content = _custom_css_path().read_text(encoding="utf-8")
 
     media_block = _extract_desktop_media_block(content)
+    has_display_none = re.search(r"display\s*:\s*none;", content) is not None
     assert media_block is not None, (
         f"Expected custom.css to contain {DESKTOP_MEDIA_QUERY}. "
         "Diagnostics: has selector="
         f"{'.md-sidebar--primary' in content}, "
-        f"has display none={re.search(r'display\s*:\s*none;', content) is not None}."
+        f"has display none={has_display_none}."
     )
 
     sidebar_rule_pattern = re.compile(

@@ -8,6 +8,7 @@ Material-specific syntax to GitHub Wiki-compatible markdown.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -436,7 +437,7 @@ class TestConvertGridCardsToList:
         assert "[Link One](page1.md)" in result
         assert "[Link Two](page2.md)" in result
         # Should have two list items
-        lines = [l for l in result.strip().split('\n') if l.strip().startswith('-')]
+        lines = [line for line in result.strip().split('\n') if line.strip().startswith('-')]
         assert len(lines) == 2
 
     def test_nested_divs(self) -> None:
@@ -610,8 +611,8 @@ Some content after that should be preserved'''
 
 </div>'''
         result = convert_grid_cards_to_list(content)
-        assert "https://example.com" in result
-        assert "[Visit](https://example.com)" in result
+        external_targets = re.findall(r"\]\((https?://[^)]+)\)", result)
+        assert external_targets == ["https://example.com"]
 
 
 class TestTransformOutsideCodeBlocks:
