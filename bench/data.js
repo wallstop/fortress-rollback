@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785773283190,
+  "lastUpdate": 1786222919685,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b877befafef0f289321bc83f26fa6108fbfbb88d",
-          "message": "Add freeze-frame convergence oracle (#208)\n\n## Summary\n- Record simulation harness applied `(input, InputStatus)` vectors by\nsimulated frame with rollback last-write-wins semantics.\n- Add an always-on oracle check for retired-slot freeze-frame\nconvergence across live `Running` survivors, including stable\nframe/value comparison and missing-freeze diagnostics.\n- Add negative controls for divergent freeze values, divergent freeze\nstarts, mixed `Some`/`None`, non-`Running` live peers, all-missing\nfreezes, missing-slot resets, value-change resets, and speculative tail\nbounds.\n\n## Validation\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo nextest run --no-capture --test simulation` - 135 passed, 10\nskipped\n- `cargo nextest run --no-capture` - 2404 passed, 57 skipped\n- `cargo nextest run --features hot-join --no-capture` - 2643 passed, 57\nskipped\n\n## Review\n- Adversarial sub-agent found one diagnostic precision issue in mixed\n`None`/`Some` order.\n- Fixed with `any_stable_freeze` gating and\n`oracle_does_not_report_missing_when_later_survivor_has_freeze_frame`.\n- Copilot found the divergence comparison should use the same live\n`Running` survivor set as missing-freeze diagnostics.\n- Fixed by iterating over `live_running_peers` and adding\n`oracle_ignores_non_running_live_peer_for_freeze_frame_comparison`.\n- Follow-up adversarial review reported zero issues.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation test harness and oracle validation;\nproduction rollback/session code is untouched.\n> \n> **Overview**\n> Adds **(e) freeze-frame convergence** to the simulation harness\noracle: when a player slot retires mid-run, every live **`Running`**\nsurvivor must agree on the stable frame and frozen input value where\nthat slot begins presenting **`InputStatus::Disconnected`**.\n> \n> The harness **`SimGameStub`** now records per-simulated-frame applied\n`(input, InputStatus)` vectors with rollback **last-write-wins**\nsemantics (same as recorded state), and the runner feeds those maps into\n**`finalize_with_applied_inputs`**. Older unit tests keep calling\n**`finalize`**, which leaves (e) inert via an empty applied-inputs\nslice.\n> \n> The oracle compares survivors only within each peer’s confirmed prefix\n(ignoring speculative disconnected tails), derives the freeze point from\nthe final stable trailing **`Disconnected`** run (value or missing-slot\nchanges reset it), and reports **`FreezeFrameDivergence`** or\n**`FreezeFrameMissing`** when appropriate. **`any_stable_freeze`**\navoids mis-firing the all-missing diagnostic when only the iteration\norder differs in mixed `None`/`Some` cases.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na3f19e0c259a22b83a53cbfdafa6731d3245bba5. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-06T19:20:27-07:00",
-          "tree_id": "175f39e0807ade3c1900c09a45983e2a5628c957",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b877befafef0f289321bc83f26fa6108fbfbb88d"
-        },
-        "date": 1783391070634,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 62,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 89,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 341,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 580,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 862,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 50744,
-            "range": "± 432",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 22038,
-            "range": "± 365",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 450,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 560,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4187,6 +4061,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3115,
             "range": "± 248",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "aaaaee44bbbcdd001989b9a5014245039c2a46e7",
+          "message": "ci: harden static analysis and network nightly (#288)\n\n## Summary\n\n- close #287 with blocking Ruff, checksum-verified ShellCheck,\nsecurity-extended CodeQL, and pinned cargo-shear across all four Cargo\nworkspaces\n- stabilize the recurring 3/4-peer Network Nightly failures with the\ncorrect exclusive-frame oracle, rollback-aware target snapshots,\nchecksum equality, and a bounded test-only READY/ACK completion barrier\n- incorporate and advance #286's action updates, refresh all compatible\ndependencies and fixture toolchains, and extend Dependabot coverage\n- make Dependabot auto-merge poll every raw transient required-check\nstate while failing closed on malformed GitHub CLI JSON\n\n## Root causes\n\nThe nightly harness treated a 100-frame exclusive range as if frame 100\nwere also required, then let peers exit independently before final\nN-peer gossip converged. The auto-merge helper classified raw\n`IN_PROGRESS` as a terminal failure and could fail open when `jq`\nrejected malformed state values inside a Bash `if` call chain.\n\n## Validation\n\n- formatting, workspace all-target check, and strict Clippy: pass\n- default all-target Nextest: 2,998 passed, 71 skipped\n- hot-join all-target Nextest: 3,252 passed, 72 skipped\n- Python repository suite: 2,063 passed\n- doctests: 168 passed, 54 intentionally ignored\n- exact Network Nightly 3/4-peer zero-retry soak: 20/20 passed across 10\niterations\n- agent preflight `--all --auto-fix`: all groups passed\n- four RustSec audits, cargo-deny, workspace-lock validation, and\ncargo-shear across all four roots: pass\n- Ruff, ShellCheck, actionlint, CodeQL predicate fixtures, shell\nportability, browser WASM, Emscripten, Godot API 4.7 Clippy, and wasm\nbrowser runtime: pass\n- adversarial review loops for network, static analysis, dependencies,\nauto-merge, and the integrated branch: zero remaining findings\n- exact-head hosted CI: 15/15 workflow groups green (83 jobs successful,\n3 policy skips)\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic production scan: PASS (no production Rust changes)\n- Determinism: PASS (retained target-state checksum asserted across\npeers)\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (test/CI/tooling-only)\n- CHANGELOG reviewed: N/A (no public or production behavior change)\n\nThe authoritative hosted Godot 4.7.1/Emscripten 4.0.20 job built and\nexercised both threaded and non-threaded Chromium exports successfully.\n\nCloses #287.\nSupersedes #286.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes affect merge gating, security scanning enforcement, and pinned\nCI action behavior across many workflows; production Rust library code\nis largely untouched, but a misconfigured CodeQL allowlist or auto-merge\nvalidator could block or incorrectly allow merges.\n> \n> **Overview**\n> **Hardens CI and tooling** with blocking static analysis, immutable\nthird-party action pins, a new CodeQL gate, and safer Dependabot\nauto-merge—plus bumps Godot/Emscripten fixture toolchains and lockfiles.\n> \n> **Static analysis:** Adds `ci-codeql.yml` (Actions/Python/Rust,\n`security-extended`, SARIF upload, blocking `jq` enforcement with a\nnarrow allowlist for known `ci-release-state.yml` findings).\n`ci-quality` gains a blocking **Ruff** job (`ruff.toml`), makes\n**cargo-shear** blocking with checksum-verified install and `--locked\n--deny-warnings` over every workspace from `workspace_locks.py`, and\nwidens path filters (`fuzz/**`, `loom-tests/**`, Python under `scripts`\nand `.github`). `ci-lint` adds checksum-pinned **ShellCheck** over all\ntracked `*.sh` files and expands triggers for `scripts/**` and shell\nscripts.\n> \n> **Supply chain / permissions:** Replaces mutable `@v*` / `@master` /\n`@stable` refs on third-party actions with **40-char commit pins**\nrepo-wide; many workflows now declare `permissions: contents: read`.\n**Dependabot** gains weekly groups for devcontainer Docker/features,\ndocs/release pip, and Godot Emscripten npm.\n> \n> **Auto-merge:** `enable-dependabot-automerge.sh` validates `gh pr\nchecks` JSON before classifying states, treats GitHub’s uppercase\n**accepted** vs **transient** states explicitly, and fails closed on\nmalformed responses (with expanded tests).\n> \n> **Fixtures / deps:** Godot browser CI moves to **4.7.1**, Emscripten\n**4.0.20**, `wasm-bindgen` **0.2.127**; `tests/godot-emscripten`\ntolerates the known threaded dlink console warning. Lockfiles and minor\nPython/shell cleanups; `loom-tests` depends on the main crate only as a\n**dev-dependency**. New contract tests in `test_ci_static_analysis.py`\nlock these policies.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n076c00bbc9042bbdae24e7b3683e1dca81f72898. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-08T13:54:18-07:00",
+          "tree_id": "7d285f9a90395dd4503e1fda3b3ef4f524ff9c4a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/aaaaee44bbbcdd001989b9a5014245039c2a46e7"
+        },
+        "date": 1786222918693,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 92683,
+            "range": "± 2737",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 28521,
+            "range": "± 1033",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 643,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 853,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6509,
+            "range": "± 364",
             "unit": "ns/iter"
           }
         ]
