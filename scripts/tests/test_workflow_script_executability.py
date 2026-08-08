@@ -43,7 +43,7 @@ WORKFLOWS_DIR = PROJECT_ROOT / ".github" / "workflows"
 # referencing real scripts still need those scripts executable for any
 # code path that runs them, and false positives have not arisen in
 # practice. If a future workflow legitimately documents a non-executable
-# script in a comment, prefer a ``# noqa``-style suppression at that site
+# script in a comment, prefer a targeted lint suppression at that site
 # over weakening this lint.
 _INVOCATION_RE = re.compile(r"(?:^|\s)([^\s]*?)\./([^\s'\"]+\.sh)\b")
 

@@ -436,7 +436,7 @@ class TestConvertGridCardsToList:
         assert "[Link One](page1.md)" in result
         assert "[Link Two](page2.md)" in result
         # Should have two list items
-        lines = [l for l in result.strip().split('\n') if l.strip().startswith('-')]
+        lines = [line for line in result.strip().split('\n') if line.strip().startswith('-')]
         assert len(lines) == 2
 
     def test_nested_divs(self) -> None:

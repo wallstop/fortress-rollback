@@ -3,11 +3,12 @@ name: CI - Code Quality
 # Additional static analysis tools for enhanced code quality
 # Includes:
 # - typos: Fast spell checker for source code
+# - Ruff: Python correctness and security linting
 # - cargo-spellcheck: Spelling and grammar in documentation
 # - cargo-shear: Fast unused dependency detection
 #
-# Note: typos is blocking. cargo-shear and cargo-spellcheck are advisory
-# diagnostics that report issues in the summary without blocking PRs.
+# Note: typos, Ruff, and cargo-shear are blocking. cargo-spellcheck remains an
+# advisory diagnostic because its natural-language findings require judgment.
 
 on:
   push:
@@ -15,12 +16,17 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'fuzz/**'
+      - 'loom-tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.cargo/config.toml'
       - '**.md'
       - '.typos.toml'
       - '.config/spellcheck.toml'
+      - 'ruff.toml'
+      - 'scripts/**/*.py'
+      - '.github/**/*.py'
       - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-quality.yml'
   pull_request:
@@ -28,18 +34,26 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'fuzz/**'
+      - 'loom-tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.cargo/config.toml'
       - '**.md'
       - '.typos.toml'
       - '.config/spellcheck.toml'
+      - 'ruff.toml'
+      - 'scripts/**/*.py'
+      - '.github/**/*.py'
       - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-quality.yml'
   schedule:
     # Run weekly on Sundays at 4 AM UTC (after safety checks at 3 AM)
     - cron: '0 4 * * 0'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: quality-${{ github.ref }}
@@ -62,9 +76,30 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check spelling with typos
-        uses: crate-ci/typos@v1.48.0
+        uses: crate-ci/typos@v1.49.0
         with:
           config: .typos.toml
+
+  # ============================================================================
+  # RUFF - PYTHON CORRECTNESS AND SECURITY LINTING
+  # ============================================================================
+  python-static-analysis:
+    name: Python Static Analysis (Ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Check Python scripts
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: "0.16.0"
+          args: check --output-format=github
+          src: >-
+            scripts
+            .github
 
   # ============================================================================
   # CARGO SHEAR - FAST UNUSED DEPENDENCY DETECTION
@@ -73,10 +108,6 @@ jobs:
     name: Unused Dependencies (cargo-shear)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      issues-found: ${{ steps.shear.outputs.issues-found }}
-      exit-code: ${{ steps.shear.outputs.exit-code }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -88,40 +119,35 @@ jobs:
         uses: ./.github/actions/install-cargo-tool
         with:
           tool: cargo-shear
+          version: "1.13.3"
 
       - name: Check for unused dependencies
-        id: shear
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           {
             echo "## Unused Dependencies Check (cargo-shear)"
             echo ""
-            echo "Fast regex-based detection of unused dependencies."
+            echo "Fast regex-based detection across every tracked Cargo workspace."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # cargo-shear is fast but may have false positives
-          # Run and capture output, but keep this job advisory.
-          shear_status=0
-          cargo shear --locked --color never 2>&1 | tee shear-output.txt || shear_status=$?
-          echo "exit-code=$shear_status" >> "$GITHUB_OUTPUT"
-
-          if [ "$shear_status" -eq 0 ]; then
-            echo "issues-found=false" >> "$GITHUB_OUTPUT"
-            echo "✅ No unused dependencies detected" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "issues-found=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "⚠️ Potentially unused dependencies detected:"
-              echo ""
-              echo "\`\`\`"
-              cat shear-output.txt
-              echo "\`\`\`"
-              echo ""
-              echo "Note: cargo-shear may have false positives. Verify with cargo-udeps under the repository-pinned nightly if needed."
-            } >> "$GITHUB_STEP_SUMMARY"
+          mapfile -t workspace_roots < <(
+            python3 scripts/release/workspace_locks.py list |
+              sed -n 's/^workspace_root=//p'
+          )
+          if [ "${#workspace_roots[@]}" -eq 0 ]; then
+            echo "No tracked Cargo workspaces discovered." >&2
+            exit 1
           fi
+
+          : > shear-output.txt
+          for workspace_root in "${workspace_roots[@]}"; do
+            echo "=== cargo-shear: $workspace_root ===" | tee -a shear-output.txt
+            cargo shear --locked --deny-warnings --color never "$workspace_root" \
+              2>&1 | tee -a shear-output.txt
+          done
+          echo "✅ No unused dependencies or cargo-shear warnings detected" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shear report
         uses: actions/upload-artifact@v7
@@ -225,7 +251,7 @@ jobs:
     name: Quality Summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [typos, unused-deps-fast, spellcheck]
+    needs: [typos, python-static-analysis, unused-deps-fast, spellcheck]
     if: always()
 
     steps:
@@ -258,18 +284,20 @@ jobs:
           {
             echo "## Code Quality Summary"
             echo ""
-            echo "Typos is blocking. cargo-shear and cargo-spellcheck are advisory diagnostics."
+            echo "Typos, Ruff, and cargo-shear are blocking. cargo-spellcheck is advisory."
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
             echo "| Spell Check (typos) | $(map_job_status '${{ needs.typos.result }}') |"
-            echo "| Unused Dependencies (cargo-shear) | $(map_advisory_status '${{ needs.unused-deps-fast.outputs.issues-found }}' '' '${{ needs.unused-deps-fast.result }}') |"
+            echo "| Python Static Analysis (Ruff) | $(map_job_status '${{ needs.python-static-analysis.result }}') |"
+            echo "| Unused Dependencies (cargo-shear) | $(map_job_status '${{ needs.unused-deps-fast.result }}') |"
             echo "| Documentation Spelling | $(map_advisory_status '${{ needs.spellcheck.outputs.issues-found }}' '${{ needs.spellcheck.outputs.issue-count }}' '${{ needs.spellcheck.result }}' '${{ needs.spellcheck.outputs.tool-failed }}') |"
             echo ""
             echo "### Recommendations"
             echo ""
             echo "- Review any warnings in the individual job logs"
             echo "- Run \`typos\` locally to check for spelling issues in source code"
-            echo "- Run \`cargo shear\` locally to check for unused dependencies"
+            echo "- Run \`ruff check scripts .github\` locally to check Python scripts"
+            echo "- Run \`cargo shear --locked --deny-warnings\` locally to check dependencies"
             echo "- Run \`cargo spellcheck fix\` to auto-fix spelling issues"
           } >> "$GITHUB_STEP_SUMMARY"

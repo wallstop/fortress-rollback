@@ -38,9 +38,6 @@ log_test() {
     TEST_RESULTS+=("$status: $name")
 }
 
-# Test case data structure: array of (name, expected_exit_code, env_setup, description)
-declare -a TEST_CASES
-
 # ==============================================================================
 # Test Case 1: Script exists and is executable
 # ==============================================================================

@@ -50,12 +50,13 @@ def probe_registry(
 ) -> RegistryResult:
     """Classify a crate version using the registry checksum."""
     url = f"{api_base.rstrip('/')}/crates/{crate_name}/{version}"
-    request = urllib.request.Request(
+    # api_base is the fixed crates.io API or a caller-supplied test server.
+    request = urllib.request.Request(  # noqa: S310
         url,
         headers={"User-Agent": f"fortress-rollback-release-workflow/{version}"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
             raw = response.read(MAX_REGISTRY_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         if error.code == 404:

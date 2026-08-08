@@ -8,6 +8,8 @@ on:
       - 'docker/docker-compose.yml'
       - '.pre-commit-config.yaml'
       - '.github/workflows/ci-lint.yml'
+      - 'scripts/**'
+      - '**/*.sh'
       - '**/Dockerfile*'
       - '.devcontainer/devcontainer.json'
   pull_request:
@@ -17,9 +19,14 @@ on:
       - 'docker/docker-compose.yml'
       - '.pre-commit-config.yaml'
       - '.github/workflows/ci-lint.yml'
+      - 'scripts/**'
+      - '**/*.sh'
       - '**/Dockerfile*'
       - '.devcontainer/devcontainer.json'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   # Validate GitHub Actions workflows and YAML files
@@ -40,6 +47,32 @@ jobs:
             .github/workflows/*.yml \
             docker/docker-compose.yml \
             .pre-commit-config.yaml
+
+      - name: Install ShellCheck
+        run: |
+          set -euo pipefail
+          shellcheck_version="0.11.0"
+          shellcheck_archive="$RUNNER_TEMP/shellcheck-v${shellcheck_version}.linux.x86_64.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$shellcheck_archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${shellcheck_version}/shellcheck-v${shellcheck_version}.linux.x86_64.tar.xz"
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $shellcheck_archive" \
+            | sha256sum --check
+          tar -xJf "$shellcheck_archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 \
+            "$RUNNER_TEMP/shellcheck-v${shellcheck_version}/shellcheck" \
+            /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Check shell scripts
+        run: |
+          set -euo pipefail
+          mapfile -d '' shell_scripts < <(git ls-files -z -- '*.sh')
+          if [ "${#shell_scripts[@]}" -eq 0 ]; then
+            echo "No tracked shell scripts found." >&2
+            exit 1
+          fi
+          shellcheck --severity=warning "${shell_scripts[@]}"
 
       - name: Install actionlint
         run: |
