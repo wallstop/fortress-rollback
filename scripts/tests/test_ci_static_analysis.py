@@ -187,7 +187,7 @@ def test_quality_tools_are_immutable_and_version_pinned() -> None:
         _steps(workflow, "python-static-analysis"), "Check Python scripts"
     )
     assert ruff["uses"] == RUFF_ACTION
-    assert ruff["with"]["version"] == "0.16.0"
+    assert ruff["with"]["version"] == "0.16.2"
     assert ruff.get("continue-on-error") is not True
 
     shear = _step_by_name(
