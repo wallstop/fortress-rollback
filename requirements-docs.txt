@@ -1,6 +1,6 @@
 # Documentation build dependencies for MkDocs
 # Using ~= (compatible release) constraints to allow patch updates
 # while preventing breaking changes from major version updates.
-mkdocs~=1.6.0
-mkdocs-material~=9.7.0
-pymdown-extensions~=11.0.0
+mkdocs~=1.6.1
+mkdocs-material~=9.7.7
+pymdown-extensions~=11.0.1
