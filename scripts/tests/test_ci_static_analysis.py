@@ -39,15 +39,14 @@ THIRD_PARTY_ACTION_PINS = {
     "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
     "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",
-    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+    "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e",
     "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
-    "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
     "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984",
     "lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8",
     "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
     "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
     "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
-    "taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad",
+    "taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532",
 }
 FORBIDDEN_MUTABLE_ACTION_REFS = {
     "Swatinem/rust-cache@v2",

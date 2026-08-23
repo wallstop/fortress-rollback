@@ -72,6 +72,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Install cargo-nextest
@@ -180,6 +181,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           components: clippy
 
       - name: Install cargo-nextest
@@ -562,6 +564,7 @@ jobs:
       - name: Install Rust toolchain with WASM target
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
           components: clippy
 
@@ -783,6 +786,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
+        with:
+          toolchain: stable
 
       - name: Install cross
         uses: ./.github/actions/install-cargo-tool
