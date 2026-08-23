@@ -564,6 +564,8 @@ fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
     let mut buffer: Vec<u8> = Vec::new();
     buffer.reserve_exact(4096);
     buffer.reserve_exact(8192);
+    assert_eq!(buffer.len(), 0);
+    assert_eq!(buffer.capacity(), 8192);
     let stats = region.change();
     assert_eq!(stats.allocations, 1, "{stats:?}");
     assert_eq!(stats.reallocations, 1, "{stats:?}");
