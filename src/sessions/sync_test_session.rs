@@ -257,9 +257,7 @@ impl<T: Config> SyncTestSession<T> {
                 .add_local_input(PlayerHandle::new(player), input);
         }
         // Clear values while retaining the constructor-owned player slots.
-        for input in &mut self.local_inputs {
-            *input = None;
-        }
+        self.local_inputs.fill(None);
 
         // save the current frame in the synchronization layer
         // we can skip all the saving if the check_distance is 0

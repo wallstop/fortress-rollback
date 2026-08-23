@@ -1,6 +1,12 @@
 //! Long-running deterministic boundedness soak.
 
 #![allow(clippy::expect_used, clippy::panic)]
+#![allow(
+    // The per-hour RSS diagnostic line is intentional test telemetry for CI
+    // debugging; the soak has no tracing subscriber installed.
+    clippy::print_stderr,
+    clippy::disallowed_macros
+)]
 
 use crate::common::sim_net::{LinkPolicy, SimNet};
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
@@ -11,10 +17,22 @@ use fortress_rollback::{
     P2PSession, PeerMetrics, PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder,
     SessionState, SpectatorSession,
 };
+use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
+use std::alloc::System;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+
+// Live-heap oracle instrumentation. Counting the system allocator makes the
+// soak's boundedness assertions exact (net allocated-minus-freed bytes) and
+// independent of kernel residency artifacts. Raw RSS was removed as an oracle
+// after it failed intermittently on identical code
+// (`four_million_frame_soak...`, ~+1.16 MB per virtual hour on some CI days
+// while passing locally and on other CI days) because transparent-huge-page,
+// glibc-arena, and MADV_FREE residency effects move RSS without any live leak.
+#[global_allocator]
+static SOAK_MEMORY: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const TARGET_CONFIRMED_FRAMES: i32 = 4_000_000;
 const CHECKPOINT_FRAMES: i32 = 50_000;
@@ -25,8 +43,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_STEPS_PER_TARGET_FRAME: i64 = 8;
 const MAX_CHECKSUM_HISTORY: usize = 32;
 const PENDING_OUTPUT_LIMIT: u64 = 128;
-const RSS_HOURLY_GROWTH_PERCENT: u64 = 5;
-const RSS_TOTAL_GROWTH_PERCENT: u64 = 10;
+/// Ceiling on net outstanding-heap growth per post-warmup virtual hour.
+///
+/// Steady-state soak traffic allocates and frees continuously but nets ~zero
+/// at each checkpoint boundary; the ceiling exists to catch leaks, not churn.
+/// Measured per-hour deltas are bounded by ±49 KB across the N=2 and N=4
+/// phases (alternating-sign oscillation, no trend), so this ceiling keeps a
+/// margin of more than 5x over legitimate churn while still catching any leak
+/// at or above one 4 KiB page every ~90 confirmed frames.
+const HOURLY_LIVE_HEAP_GROWTH_CEILING_BYTES: i64 = 262_144;
 
 fn target_confirmed_frames() -> i32 {
     std::env::var("FORTRESS_SOAK_TARGET_FRAMES")
@@ -106,6 +131,21 @@ struct PeerSlot {
     observer: Arc<CollectingObserver>,
 }
 
+/// One measurement window over the counting global allocator.
+struct LiveHeapWindow {
+    since_frame: i32,
+    region: Region<'static, System>,
+}
+
+impl LiveHeapWindow {
+    fn open(since_frame: i32) -> Self {
+        Self {
+            since_frame,
+            region: Region::new(SOAK_MEMORY),
+        }
+    }
+}
+
 struct SoakRun {
     clock: TestClock,
     net: SimNet<Message>,
@@ -123,8 +163,7 @@ struct SoakRun {
     drop_commit_observers: BTreeSet<usize>,
     high_water: ContainerHighWater,
     last_high_water_change_frame: i32,
-    rss_baseline: Option<u64>,
-    rss_last_hour: Option<(i32, u64)>,
+    live_heap_window: Option<LiveHeapWindow>,
 }
 
 fn addr(index: usize) -> SocketAddr {
@@ -220,8 +259,7 @@ impl SoakRun {
             drop_commit_observers: BTreeSet::new(),
             high_water: ContainerHighWater::default(),
             last_high_water_change_frame: 0,
-            rss_baseline: None,
-            rss_last_hour: None,
+            live_heap_window: None,
         })
     }
 
@@ -323,48 +361,42 @@ impl SoakRun {
         if self.high_water != previous_high_water {
             self.last_high_water_change_frame = confirmed;
         }
-        self.check_rss(confirmed);
+        self.check_memory(confirmed);
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    fn check_rss(&mut self, confirmed: i32) {
+    /// Asserts the net live-heap footprint does not grow across one virtual
+    /// hour. Unlike the previous raw-RSS assertion, this counts exact
+    /// allocated-minus-freed bytes, so allocator arena retention, transparent
+    /// huge pages, and kernel page reclaim cannot produce false failures (the
+    /// intermittent `+1.16 MB` RSS signature on otherwise-identical CI days).
+    fn check_memory(&mut self, confirmed: i32) {
         if confirmed < WARMUP_FRAMES {
             return;
         }
-        let Some(rss) = read_rss_bytes() else {
+        let Some(window) = &mut self.live_heap_window else {
+            self.live_heap_window = Some(LiveHeapWindow::open(confirmed));
             return;
         };
-        if self.rss_baseline.is_none() {
-            self.rss_baseline = Some(rss);
-            self.rss_last_hour = Some((confirmed, rss));
+        if confirmed.saturating_sub(window.since_frame) < VIRTUAL_HOUR_FRAMES {
             return;
         }
-        let Some((previous_frame, previous_rss)) = self.rss_last_hour else {
-            self.rss_last_hour = Some((confirmed, rss));
-            return;
-        };
-        if confirmed.saturating_sub(previous_frame) < VIRTUAL_HOUR_FRAMES {
-            return;
-        }
+        let stats = window.region.change();
+        let net_live_bytes = net_live_heap_bytes(stats);
         assert!(
-            rss_growth_within_limit(previous_rss, rss, RSS_HOURLY_GROWTH_PERCENT),
-            "RSS grew by at least {RSS_HOURLY_GROWTH_PERCENT}% in one post-warmup virtual hour: \
-             {previous_rss} -> {rss} bytes"
+            net_live_bytes <= HOURLY_LIVE_HEAP_GROWTH_CEILING_BYTES,
+            "live heap grew by {net_live_bytes} bytes in one post-warmup virtual hour \
+             ending at frame {confirmed} (ceiling {HOURLY_LIVE_HEAP_GROWTH_CEILING_BYTES}): \
+             {stats:?}"
         );
-        let Some(baseline_rss) = self.rss_baseline else {
-            return;
-        };
-        assert!(
-            rss_growth_within_limit(baseline_rss, rss, RSS_TOTAL_GROWTH_PERCENT),
-            "RSS grew by at least {RSS_TOTAL_GROWTH_PERCENT}% from the first post-warmup sample: \
-             {baseline_rss} -> {rss} bytes"
+        eprintln!(
+            "soak(n={}) live-heap hour ending at frame {confirmed}: {net_live_bytes:+} bytes net \
+             (rss diagnostic: {} KiB)",
+            self.addrs.len(),
+            read_rss_kib().unwrap_or(0)
         );
-        self.rss_last_hour = Some((confirmed, rss));
+        self.live_heap_window = Some(LiveHeapWindow::open(confirmed));
     }
-
-    #[cfg(not(target_os = "linux"))]
-    fn check_rss(&mut self, _confirmed: i32) {}
 
     fn maybe_hot_join(&mut self, confirmed: i32, seed: u64) -> Result<(), FortressError> {
         if !self.periodic_hot_join
@@ -491,15 +523,60 @@ impl SoakRun {
 }
 
 #[cfg(target_os = "linux")]
-fn read_rss_bytes() -> Option<u64> {
+fn read_rss_kib() -> Option<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-    Some(resident_pages.saturating_mul(4096))
+    Some(resident_pages.saturating_mul(4))
 }
 
-fn rss_growth_within_limit(previous: u64, current: u64, growth_percent: u64) -> bool {
-    u128::from(current).saturating_mul(100)
-        < u128::from(previous).saturating_mul(u128::from(100_u64.saturating_add(growth_percent)))
+#[cfg(not(target_os = "linux"))]
+fn read_rss_kib() -> Option<u64> {
+    None
+}
+
+/// Net change in outstanding (allocated-but-not-freed) heap bytes over one
+/// measurement window.
+///
+/// stats_alloc embeds reallocation growth/shrink into
+/// `bytes_allocated`/`bytes_deallocated` (its `realloc` impl adds the
+/// difference to `bytes_allocated` on growth and to `bytes_deallocated` on
+/// shrink) and additionally keeps `bytes_reallocated` as an informational
+/// tally of the same deltas. Adding that tally here therefore double-counts
+/// growth; see
+/// [`stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes`] for
+/// the executable proof. Note this differs from `allocation_contract`'s
+/// `allocated_and_grown_bytes`, which deliberately sums the tally because it
+/// charges cumulative allocation pressure, not outstanding bytes.
+fn net_live_heap_bytes(stats: stats_alloc::Stats) -> i64 {
+    let allocated = i64::try_from(stats.bytes_allocated).unwrap_or(i64::MAX);
+    let deallocated = i64::try_from(stats.bytes_deallocated).unwrap_or(i64::MAX);
+    allocated.saturating_sub(deallocated)
+}
+
+#[test]
+fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
+    // Pins stats_alloc's realloc contract end-to-end: one exact allocation
+    // followed by one exact growth must leave net_live_heap_bytes equal to
+    // the final outstanding size even though bytes_reallocated also carries
+    // the growth delta. If the deltas were not embedded -- or were added
+    // again here -- this would report 12,288 instead of 8,192.
+    let region = Region::new(SOAK_MEMORY);
+    let mut buffer: Vec<u8> = Vec::new();
+    buffer.reserve_exact(4096);
+    buffer.reserve_exact(8192);
+    assert_eq!(buffer.len(), 0);
+    assert_eq!(buffer.capacity(), 8192);
+    let stats = region.change();
+    assert_eq!(stats.allocations, 1, "{stats:?}");
+    assert_eq!(stats.reallocations, 1, "{stats:?}");
+    assert_eq!(stats.bytes_allocated, 8_192, "{stats:?}");
+    assert_eq!(stats.bytes_deallocated, 0, "{stats:?}");
+    assert_eq!(stats.bytes_reallocated, 4_096, "{stats:?}");
+    assert_eq!(
+        net_live_heap_bytes(stats),
+        8_192,
+        "realloc growth must count exactly once toward outstanding bytes"
+    );
 }
 
 #[test]
@@ -518,13 +595,56 @@ fn high_water_tracks_each_bounded_container() {
 }
 
 #[test]
-fn rss_growth_gate_rejects_large_cumulative_growth() {
-    assert!(rss_growth_within_limit(100, 104, RSS_HOURLY_GROWTH_PERCENT));
-    assert!(!rss_growth_within_limit(
-        100,
-        105,
-        RSS_HOURLY_GROWTH_PERCENT
-    ));
-    assert!(rss_growth_within_limit(100, 109, RSS_TOTAL_GROWTH_PERCENT));
-    assert!(!rss_growth_within_limit(100, 110, RSS_TOTAL_GROWTH_PERCENT));
+fn net_live_heap_bytes_counts_unmatched_allocation_as_growth() {
+    let stats = stats_alloc::Stats {
+        allocations: 3,
+        deallocations: 0,
+        reallocations: 0,
+        bytes_allocated: 512,
+        bytes_deallocated: 0,
+        bytes_reallocated: 0,
+    };
+    assert_eq!(net_live_heap_bytes(stats), 512);
+}
+
+#[test]
+fn net_live_heap_bytes_cancels_balanced_churn_to_zero() {
+    let stats = stats_alloc::Stats {
+        allocations: 100,
+        deallocations: 100,
+        reallocations: 10,
+        bytes_allocated: 65_536,
+        bytes_deallocated: 65_536,
+        bytes_reallocated: 128,
+    };
+    assert_eq!(net_live_heap_bytes(stats), 0);
+}
+
+#[test]
+fn net_live_heap_bytes_does_not_double_count_reallocation_growth() {
+    // Mirrors stats_alloc's realloc contract: growing 100 -> 200 records
+    // +100 in BOTH bytes_allocated and bytes_reallocated. Adding the
+    // reallocation tally again would double-count the growth.
+    let stats = stats_alloc::Stats {
+        allocations: 1,
+        deallocations: 0,
+        reallocations: 1,
+        bytes_allocated: 200,
+        bytes_deallocated: 100,
+        bytes_reallocated: 100,
+    };
+    assert_eq!(net_live_heap_bytes(stats), 100);
+}
+
+#[test]
+fn net_live_heap_bytes_reports_shrinkage_as_negative() {
+    let stats = stats_alloc::Stats {
+        allocations: 1,
+        deallocations: 4,
+        reallocations: 0,
+        bytes_allocated: 16,
+        bytes_deallocated: 240,
+        bytes_reallocated: -32,
+    };
+    assert_eq!(net_live_heap_bytes(stats), -224);
 }

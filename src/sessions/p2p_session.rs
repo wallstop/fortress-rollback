@@ -1102,8 +1102,7 @@ impl<T: Config> P2PSession<T> {
         for endpoint in self.player_reg.remotes.values_mut() {
             let is_target = endpoint.handles().iter().any(|handle| {
                 u16::try_from(handle.as_usize())
-                    .ok()
-                    .is_some_and(|raw| targets.iter().any(|target| target.handle == raw))
+                    .is_ok_and(|raw| targets.iter().any(|target| target.handle == raw))
             });
             if !is_target && endpoint.is_running() {
                 endpoint.send_drop_control_message(message.clone());
@@ -3208,9 +3207,7 @@ impl<T: Config> P2PSession<T> {
             // advance the frame count
             self.sync_layer.advance_frame();
             // clear the local inputs after advancing the frame to allow new inputs to be ingested
-            for input in &mut self.local_inputs {
-                *input = None;
-            }
+            self.local_inputs.fill(None);
             requests.push(FortressRequest::AdvanceFrame { inputs });
 
             // Record the forward (visual) advance and sample confirmation lag:

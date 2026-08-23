@@ -247,12 +247,8 @@ impl TimeSync {
     #[cfg(test)]
     pub(crate) fn seed_average_for_tests(&mut self, target: i32) {
         let doubled = target.saturating_mul(2);
-        for slot in &mut self.remote {
-            *slot = doubled;
-        }
-        for slot in &mut self.local {
-            *slot = 0;
-        }
+        self.remote.fill(doubled);
+        self.local.fill(0);
         let count = i128::try_from(self.remote.len()).unwrap_or(i128::MAX);
         self.remote_sum = i128::from(doubled) * count;
         self.local_sum = 0;

@@ -398,6 +398,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
+        with:
+          toolchain: stable
 
       - name: Cache cargo registry and build
         uses: actions/cache@v6

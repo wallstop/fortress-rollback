@@ -72,6 +72,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Install cargo-nextest
@@ -180,6 +181,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           components: clippy
 
       - name: Install cargo-nextest
@@ -562,6 +564,7 @@ jobs:
       - name: Install Rust toolchain with WASM target
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
           components: clippy
 
@@ -572,7 +575,7 @@ jobs:
 
       - name: Install wasm-bindgen CLI for browser runtime tests
         if: matrix.target == 'wasm32-unknown-unknown'
-        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         with:
           tool: wasm-bindgen-cli@0.2.127
 
@@ -783,6 +786,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
+        with:
+          toolchain: stable
 
       - name: Install cross
         uses: ./.github/actions/install-cargo-tool

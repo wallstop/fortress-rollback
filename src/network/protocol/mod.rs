@@ -1728,7 +1728,7 @@ impl<T: Config> UdpProtocol<T> {
                 "Protocol is shutting down; dropping {} messages",
                 self.send_queue.len()
             );
-            self.send_queue.drain(..);
+            self.send_queue.clear();
             return;
         }
 

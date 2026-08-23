@@ -150,11 +150,26 @@ def test_prepare_uses_exact_python_and_hash_locked_test_dependencies() -> None:
     assert "--requirement scripts/release/requirements.txt" in text
     assert "pip install pytest" not in text
     assert "pytest==" in requirements
-    requirement_lines = [
-        line for line in requirements.splitlines() if line and not line.startswith(("#", " "))
-    ]
-    assert requirement_lines
-    assert requirements.count("--hash=sha256:") == len(requirement_lines)
+    # Every pin must carry at least one hash; a pin may legitimately carry
+    # several (multi-wheel releases such as py2.py3-none-any). Parse pin
+    # blocks -- a "name==version" line followed by its "--hash=" continuations
+    # -- instead of requiring an exact one-to-one line ratio.
+    hashes_for_current_pin = 0
+    saw_any_pin = False
+    for line in requirements.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith((" ", "\t")):
+            assert line.strip().startswith("--hash=sha256:"), f"unexpected continuation: {line}"
+            hashes_for_current_pin += 1
+        else:
+            if saw_any_pin:
+                assert hashes_for_current_pin >= 1, "pin without any --hash"
+            assert "==" in line, f"unpinned requirement: {line}"
+            saw_any_pin = True
+            hashes_for_current_pin = 0
+    assert saw_any_pin
+    assert hashes_for_current_pin >= 1, "pin without any --hash"
 
 
 def test_required_release_workflows_pin_python_runtime() -> None:
@@ -429,7 +444,7 @@ def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
     assert '"**/Cargo.lock"' in text
     assert '"scripts/release/**"' in text
     assert (
-        "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c"
+        "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
         in text
     )
     assert "scripts/release/workspace_locks.py check" in text
