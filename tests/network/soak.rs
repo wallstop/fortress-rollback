@@ -1,6 +1,12 @@
 //! Long-running deterministic boundedness soak.
 
 #![allow(clippy::expect_used, clippy::panic)]
+#![allow(
+    // The per-hour RSS diagnostic line is intentional test telemetry for CI
+    // debugging; the soak has no tracing subscriber installed.
+    clippy::print_stderr,
+    clippy::disallowed_macros
+)]
 
 use crate::common::sim_net::{LinkPolicy, SimNet};
 use crate::common::stubs::{GameStub, StubConfig, StubInput};
@@ -43,8 +49,8 @@ const PENDING_OUTPUT_LIMIT: u64 = 128;
 /// at each checkpoint boundary; the ceiling exists to catch leaks, not churn.
 /// Measured per-hour deltas are bounded by ±49 KB across the N=2 and N=4
 /// phases (alternating-sign oscillation, no trend), so this ceiling keeps a
-/// >5x margin over legitimate churn while still catching any leak at or above
-/// one 4 KiB page every ~90 confirmed frames.
+/// margin of more than 5x over legitimate churn while still catching any leak
+/// at or above one 4 KiB page every ~90 confirmed frames.
 const HOURLY_LIVE_HEAP_GROWTH_CEILING_BYTES: i64 = 262_144;
 
 fn target_confirmed_frames() -> i32 {
