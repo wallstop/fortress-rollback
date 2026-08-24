@@ -154,11 +154,13 @@ jobs:
           fi
           shard_indexes="$(jq -cn --argjson count "$shard_count" '[range(0; $count)]')"
 
-          echo "expected-mutants=$expected_mutants" >> "$GITHUB_OUTPUT"
-          echo "scope=$scope" >> "$GITHUB_OUTPUT"
-          echo "shard-count=$shard_count" >> "$GITHUB_OUTPUT"
-          echo "shard-indexes=$shard_indexes" >> "$GITHUB_OUTPUT"
-          echo "test-timeout=$TEST_TIMEOUT_SECONDS" >> "$GITHUB_OUTPUT"
+          {
+            echo "expected-mutants=$expected_mutants"
+            echo "scope=$scope"
+            echo "shard-count=$shard_count"
+            echo "shard-indexes=$shard_indexes"
+            echo "test-timeout=$TEST_TIMEOUT_SECONDS"
+          } >> "$GITHUB_OUTPUT"
 
           {
             echo "## Mutation Plan"
