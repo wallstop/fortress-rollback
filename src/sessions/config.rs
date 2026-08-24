@@ -2739,6 +2739,8 @@ mod tests {
 // The proofs verify these constraints hold for ANY valid configuration within
 // Kani's symbolic execution bounds.
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_config_proofs {
     use super::*;
 

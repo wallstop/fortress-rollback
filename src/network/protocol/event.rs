@@ -576,6 +576,8 @@ mod tests {
 // remaining practical for generic types.
 // =============================================================================
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_proofs {
     use super::*;
     use crate::frame_info::PlayerInput;

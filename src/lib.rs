@@ -4000,6 +4000,10 @@ mod tests {
 /// Run proofs with:
 ///   cargo kani --tests
 #[cfg(kani)]
+// cargo-mutants parses cfg-disabled code. The always-false cfg_attr is a
+// syntax-only skip marker so Nextest mutation runs do not claim Kani proofs as
+// missed; Kani remains their executable verification owner.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_proofs {
     use super::*;
 

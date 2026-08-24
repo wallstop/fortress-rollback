@@ -257,6 +257,64 @@ jobs:
           retention-days: 7
 
   # ============================================================================
+  # PYTHON INSTALLER BENCHMARK - pip vs uv (issue #281)
+  # ============================================================================
+  # Informational: produces the red-green evidence base for adopting uv.
+  # Fails only when a measurement cannot be trusted; timings never gate merges.
+  python-installer-benchmark:
+    name: Python Installer Benchmark (pip vs uv)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install pinned uv
+        run: |
+          set -euo pipefail
+          uv_version="0.12.5"
+          uv_archive="$RUNNER_TEMP/uv-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 3 \
+            --output "$uv_archive" \
+            "https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-x86_64-unknown-linux-musl.tar.gz"
+          echo "a4742988791c9aeae68c78150d6cba762062ad2a47e53738c2779d2b596bfcdb  $uv_archive" \
+            | sha256sum --check
+          tar -xzf "$uv_archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 \
+            "$RUNNER_TEMP/uv-x86_64-unknown-linux-musl/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Benchmark pip vs uv on repository manifests
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/benchmark_uv_vs_pip.py \
+            --repetitions 5 \
+            --output uv-vs-pip-report.json \
+            2> benchmark-human-summary.txt
+
+      - name: Write step summary
+        if: always()
+        run: |
+          {
+            echo "## Python Installer Benchmark (pip vs uv)"
+            echo ""
+            echo '```'
+            cat benchmark-human-summary.txt 2>/dev/null || echo "(benchmark did not complete)"
+            echo '```'
+            echo ""
+            echo "Full JSON report is attached as the \`uv-vs-pip-report\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: uv-vs-pip-report
+          path: uv-vs-pip-report.json
+          retention-days: 90
+
+  # ============================================================================
   # SUMMARY
   # ============================================================================
   quality-summary:

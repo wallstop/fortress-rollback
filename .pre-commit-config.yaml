@@ -331,3 +331,13 @@ repos:
         pass_filenames: false
         files: '^(\.github/ISSUE_TEMPLATE/bug_report\.yml|scripts/ci/sync-issue-template-versions\.py)$'
         stages: [pre-push]
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Benchmarks (manual: too slow for default hooks)
+      # ══════════════════════════════════════════════════════════════════════
+      - id: benchmark-uv-vs-pip
+        name: benchmark pip vs uv installs (issue #281 evidence)
+        entry: python scripts/ci/benchmark_uv_vs_pip.py
+        language: python
+        pass_filenames: false
+        stages: [manual]
