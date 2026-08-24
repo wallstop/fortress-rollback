@@ -1,6 +1,6 @@
 ---
 title: Fortress Rollback
-description: A correctness-first peer-to-peer rollback networking library for deterministic multiplayer games in Rust, hardened with formal verification.
+description: A correctness-first peer-to-peer rollback networking library for deterministic multiplayer games in Rust.
 ---
 
 <!-- SYNC: This source doc syncs to wiki/Home.md. -->
@@ -11,180 +11,51 @@ description: A correctness-first peer-to-peer rollback networking library for de
 
 # Fortress Rollback
 
-## *Deterministic Rollback Netcode Built on Correctness*
-
-Fortress Rollback is a **correctness-first** Rust library for peer-to-peer rollback networking in deterministic multiplayer games. It prioritizes safety, formal verification, and production reliability: 100% safe Rust, zero panics in production code, and machine-checked proofs of its trickiest invariants. It began as a hardened fork of [GGRS](https://github.com/gschup/ggrs) (itself inspired by the GGPO network SDK) and has since grown its own feature set — see [Fortress vs GGRS](fortress-vs-ggrs.md) for the full comparison.
-
----
-
-## :material-star-four-points: Key Features
-
-<!-- markdownlint-disable MD030 -->
-<div class="grid cards" markdown>
-
--   :material-shield-check:{ .lg .middle } **Zero-Panic Guarantee**
-
-    ---
-
-    100% safe Rust with no panics in production code. All operations return proper `Result` types—your game server won't crash from unexpected states.
-
-    [:octicons-arrow-right-24: Learn about error handling](user-guide.md#handling-requests)
-
--   :material-sync:{ .lg .middle } **Rollback Netcode**
-
-    ---
-
-    Peer-to-peer architecture with input prediction and rollback. Hides latency by predicting inputs and seamlessly correcting when actual inputs arrive.
-
-    [:octicons-arrow-right-24: Read the architecture](architecture.md)
-
--   :material-check-decagram:{ .lg .middle } **Formally Verified**
-
-    ---
-
-    Critical paths verified with TLA+ model checking, Z3 SMT proofs, and Kani for Rust. Protocol correctness proven, not just tested.
-
-    [:octicons-arrow-right-24: View specifications](specs/formal-spec.md)
-
--   :material-equal-box:{ .lg .middle } **Deterministic by Design**
-
-    ---
-
-    Same inputs = same outputs, guaranteed. Deterministic data structures, hashing, and RNG throughout. No hidden non-determinism.
-
-    [:octicons-arrow-right-24: Determinism model](specs/determinism-model.md)
-
--   :material-tune-variant:{ .lg .middle } **Runtime Input Delay**
-
-    ---
-
-    Adjust input delay at runtime via `P2PSession::set_input_delay` / `input_delay` as network conditions change, with strict monotonicity guarantees for remote peers.
-
-    [:octicons-arrow-right-24: Runtime input delay](user-guide.md#adjusting-input-delay-at-runtime)
-
--   :material-account-multiple-remove:{ .lg .middle } **Graceful Peer Drop**
-
-    ---
-
-    Opt in to graceful peer drop with `DisconnectBehavior::ContinueWithout` so the session keeps advancing when a peer disconnects, or remove peers explicitly with `P2PSession::remove_player`.
-
-    [:octicons-arrow-right-24: Graceful peer drop](user-guide.md#disconnect-behavior-and-graceful-peer-drop)
-
-</div>
-<!-- markdownlint-enable MD030 -->
-
----
-
-## :material-rocket-launch: Quick Start
-
-Get up and running with Fortress Rollback in minutes.
-
-<!-- markdownlint-disable MD046 -->
-=== "Cargo.toml"
-
-    ```toml
-    [dependencies]
-    fortress-rollback = "0.12"
-    serde = { version = "1.0", features = ["derive"] }
-    ```
-
-=== "Basic Session"
-
-    ```rust
-    use fortress_rollback::{
-        Config, FortressRequest, PlayerHandle, PlayerType,
-        SessionBuilder, UdpNonBlockingSocket,
-    };
-    use serde::{Deserialize, Serialize};
-    use std::net::SocketAddr;
-
-    // Define your input and state types
-    #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-    struct MyInput { buttons: u8 }
-
-    #[derive(Clone, Serialize, Deserialize)]
-    struct MyGameState { frame: i32, /* your state */ }
-
-    // Configure Fortress Rollback
-    struct MyConfig;
-    impl Config for MyConfig {
-        type Input = MyInput;
-        type State = MyGameState;
-        type Address = SocketAddr;
-    }
-
-    fn main() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a UDP socket and session
-        let socket = UdpNonBlockingSocket::bind_to_port(7000)?;
-        let remote: SocketAddr = "127.0.0.1:7001".parse()?;
-
-        let mut session = SessionBuilder::<MyConfig>::new()
-            .with_num_players(2)?
-            .add_player(PlayerType::Local, PlayerHandle::new(0))?
-            .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))?
-            .start_p2p_session(socket)?;
-
-        // Your game loop handles FortressRequests...
-        Ok(())
-    }
-    ```
-<!-- markdownlint-enable MD046 -->
-
----
-
-## :material-map-marker-path: Where to Go Next
-
-<!-- markdownlint-disable MD030 -->
-<div class="grid cards" markdown>
-
--   :material-book-open-variant:{ .lg .middle } **User Guide**
-
-    ---
-
-    Complete walkthrough of sessions, inputs, state management, and network events.
-
-    [:octicons-arrow-right-24: Start learning](user-guide.md)
-
--   :material-api:{ .lg .middle } **API Documentation**
-
-    ---
-
-    Full API reference with types, traits, and function signatures.
-
-    [:octicons-arrow-right-24: docs.rs](https://docs.rs/fortress-rollback)
-
--   :material-sitemap:{ .lg .middle } **Architecture**
-
-    ---
-
-    Deep dive into internal architecture, data flow, and protocol design.
-
-    [:octicons-arrow-right-24: Explore](architecture.md)
-
--   :material-source-pull:{ .lg .middle } **Contributing**
-
-    ---
-
-    Guidelines for contributors, including our zero-panic policy and testing requirements.
-
-    [:octicons-arrow-right-24: Contribute](contributing.md)
-
-</div>
-<!-- markdownlint-enable MD030 -->
-
----
-
-<!-- markdownlint-disable MD046 -->
-!!! info "Fork of GGRS"
-
-    Fortress Rollback is a hardened fork of [GGRS](https://github.com/gschup/ggrs) (Good Game Rollback System). It maintains API compatibility where possible while adding formal verification, eliminating panics, and fixing determinism bugs.
-
-    **Key improvements over GGRS:**
-
-    - :material-shield-check: All `panic!` and `assert!` converted to recoverable errors
-    - :material-sort-variant: Deterministic `BTreeMap`/`BTreeSet` instead of `HashMap`/`HashSet`
-    - :material-test-tube: ~2200 tests with ~92% code coverage
-    - :material-file-certificate: TLA+, Z3, and Kani formal verification
-
-    [:octicons-arrow-right-24: Full comparison](fortress-vs-ggrs.md)
-<!-- markdownlint-enable MD046 -->
+## Deterministic rollback netcode built on correctness
+
+Fortress Rollback is a safe Rust library for peer-to-peer rollback networking. Its request-driven
+API tells your game when to save state, load state, and simulate a frame. The library handles input
+prediction, rollback, synchronization, and transport protocol details.
+
+New to rollback netcode? Start locally. A `SyncTestSession` exercises the same save/load/advance
+contract without adding network setup, so determinism mistakes surface before connection problems.
+
+[Build your first session](getting-started.md){ .md-button .md-button--primary }
+[Browse maintained examples](https://github.com/wallstop/fortress-rollback/tree/main/examples){ .md-button }
+
+## Start here
+
+| What you want to do | Read |
+|---------------------|------|
+| Install the crate and run one deterministic loop | [Getting Started](getting-started.md) |
+| Integrate inputs, requests, events, and session types | [User Guide](user-guide.md) |
+| Choose latency, prediction, and input-delay settings | [Network Tuning](tuning.md) |
+| Validate a game before release | [Production Checklist](production-checklist.md) |
+| Look up a type or method | [API documentation](https://docs.rs/fortress-rollback) |
+
+## Common paths
+
+- **Connect real peers:** finish Getting Started, then use the
+  [P2P session guide](user-guide.md#setting-up-a-p2p-session) and
+  [configuration example](https://github.com/wallstop/fortress-rollback/blob/main/examples/configuration.rs).
+- **Handle rollback requests:** read [The Game Loop](user-guide.md#the-game-loop) and the
+  [request-handling example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs).
+- **Use another transport or platform:** see
+  [Custom Sockets](user-guide.md#custom-sockets) and
+  [Feature Flags](user-guide.md#feature-flags).
+- **Add spectators or hot-join:** start with [Spectator Sessions](user-guide.md#spectator-sessions)
+  or the [hot-join feature reference](user-guide.md#feature-flag-reference).
+- **Migrate from GGRS:** follow the [Migration Guide](migration.md) and compare behavior in
+  [Fortress vs GGRS](fortress-vs-ggrs.md).
+
+## Advanced reference
+
+The [architecture](architecture.md) explains internal data flow and protocol design. The
+[determinism model](specs/determinism-model.md), [API contracts](specs/api-contracts.md), and
+[threat model](threat-model.md) define the guarantees and caller responsibilities. Operational
+guides cover [replay](replay.md), [telemetry](telemetry.md),
+[desync response](desync-playbook.md), and [disconnect/rejoin response](reconnect-playbook.md).
+
+> [!NOTE]
+> Fortress Rollback is alpha software. Review the [changelog](changelog.md), test upgrades against
+> your game, and use the [production checklist](production-checklist.md) before release.

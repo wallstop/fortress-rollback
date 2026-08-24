@@ -4,6 +4,7 @@
 
 ## Documentation
 
+- [Getting Started](Getting-Started)
 - [User Guide](User-Guide)
 - [Match Replay](Replay)
 - [Session Telemetry](Telemetry)

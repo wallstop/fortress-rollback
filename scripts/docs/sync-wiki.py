@@ -77,6 +77,7 @@ ROOT_SKIP_FILES = {
 WIKI_STRUCTURE = {
     # Main pages
     "index.md": "Home",
+    "getting-started.md": "Getting-Started",
     "user-guide.md": "User-Guide",
     "architecture.md": "Architecture",
     "threat-model.md": "Threat-Model",
@@ -1100,6 +1101,7 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 
 ## Documentation
 
+- [Getting Started](Getting-Started)
 - [User Guide](User-Guide)
 - [Match Replay](Replay)
 - [Session Telemetry](Telemetry)

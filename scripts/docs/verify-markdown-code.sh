@@ -279,9 +279,15 @@ is_incomplete_snippet() {
     fi
 
     # References undefined generic types like MyConfig, GameConfig, etc.
-    # These are typically documentation examples
-    if echo "$code" | grep -qE '::<(My|Game|Your|Example|Test|Demo)[A-Z][a-z]*>'; then
-        echo "uses generic placeholder type (documentation example)"
+    # A complete program may define and use one of these conventional names,
+    # so skip only when the referenced type is absent from the same block.
+    local placeholder_type
+    placeholder_type=$(echo "$code" \
+        | grep -oE '::<(My|Game|Your|Example|Test|Demo)[A-Z][a-z]*>' \
+        | sed -n '1{s/^::<//;s/>$//;p;}' || true)
+    if [[ -n "$placeholder_type" ]] \
+        && ! echo "$code" | grep -qE "(struct|enum|type)[[:space:]]+$placeholder_type([^[:alnum:]_]|$)"; then
+        echo "uses undefined generic placeholder type (documentation example)"
         return 0
     fi
 
@@ -324,7 +330,7 @@ is_incomplete_snippet() {
     fi
 
     # References functions that are meant to be user-defined
-    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(handle_event|handle_requests|get_local_input|apply_input|compute_checksum|render)[[:space:]]*\('; then
+    if echo "$code" | grep -qE '(^|[^[:alnum:]_])(handle_event|handle_requests|get_local_input|apply_input|render)[[:space:]]*\('; then
         echo "references user-defined functions (documentation example)"
         return 0
     fi

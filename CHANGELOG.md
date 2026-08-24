@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** onboarding no longer makes new users choose between a 1,000-word README,
+  a duplicate docs-home program, and the full reference guide. The README and docs home now route
+  to one focused, compilable first-session guide, while advanced transport, platform, tuning,
+  operations, and contributor material stays on its canonical pages.
 - **Pre-existing:** warmed input-idle spectator polls now reuse bounded host scratch storage,
   and input events decoded from one packet share their immutable connection-status snapshot
   instead of cloning its player-count-sized buffer for every player. All-local `P2PSession`

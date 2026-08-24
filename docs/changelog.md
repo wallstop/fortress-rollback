@@ -2,7 +2,8 @@
 
 # Changelog
 
-The changelog has moved to the repository root: **[CHANGELOG.md](../CHANGELOG.md)**
+The changelog lives at the repository root:
+**[CHANGELOG.md](https://github.com/wallstop/fortress-rollback/blob/main/CHANGELOG.md)**
 
 This location (`CHANGELOG.md` at the repository root) is the standard location expected by:
 

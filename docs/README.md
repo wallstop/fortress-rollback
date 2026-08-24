@@ -6,7 +6,8 @@ This directory contains documentation for the Fortress Rollback library.
 
 | Document | Description |
 |----------|-------------|
-| [**User Guide**](user-guide.md) | **📘 Complete guide to integrating Fortress Rollback** |
+| [Getting Started](getting-started.md) | Install the crate and run a first deterministic session |
+| [User Guide](user-guide.md) | Complete guide to sessions, inputs, requests, events, and configuration |
 | [Migration Guide](migration.md) | Migrating from GGRS to Fortress Rollback |
 | [Fortress vs GGRS](fortress-vs-ggrs.md) | Comparison, bug fixes, and differences |
 
@@ -47,4 +48,4 @@ These documents are for contributors interested in the formal verification appro
 ## Related Resources
 
 - [Examples](../examples/README.md) — Working code examples with build instructions
-- [Root README](../README.md) — Project overview and quick start
+- [Root README](../README.md) — Project overview and documentation routes
