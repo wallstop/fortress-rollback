@@ -13,6 +13,7 @@ on:
       - 'deny.toml'
       - 'supply-chain/**'
       - 'scripts/ci/check-advisory-dispositions.py'
+      - 'scripts/tests/test_ci_security_workflow.py'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   pull_request:
@@ -25,6 +26,7 @@ on:
       - 'deny.toml'
       - 'supply-chain/**'
       - 'scripts/ci/check-advisory-dispositions.py'
+      - 'scripts/tests/test_ci_security_workflow.py'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
   workflow_dispatch:
@@ -38,9 +40,29 @@ env:
 jobs:
   # Supply chain security check using cargo-deny
   supply-chain-security:
-    name: Supply Chain Security
+    name: Supply Chain Security (${{ matrix.workspace }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workspace: root
+            manifest: Cargo.toml
+            lockfile: Cargo.lock
+            license-config: deny.toml
+          - workspace: fuzz
+            manifest: fuzz/Cargo.toml
+            lockfile: fuzz/Cargo.lock
+            license-config: supply-chain/deny-fuzz-licenses.toml
+          - workspace: loom
+            manifest: loom-tests/Cargo.toml
+            lockfile: loom-tests/Cargo.lock
+            license-config: deny.toml
+          - workspace: godot-emscripten
+            manifest: tests/godot-emscripten/Cargo.toml
+            lockfile: tests/godot-emscripten/Cargo.lock
+            license-config: supply-chain/deny-godot-licenses.toml
 
     steps:
       - uses: actions/checkout@v7
@@ -48,20 +70,28 @@ jobs:
       - name: Check advisory dispositions
         run: python3 scripts/ci/check-advisory-dispositions.py
 
+      - name: Install cargo-audit
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-audit
+
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-deny
 
-      - name: Check advisories
-        run: cargo deny check advisories
+      - name: RustSec audit (${{ matrix.workspace }})
+        env:
+          LOCKFILE: ${{ matrix.lockfile }}
+        run: cargo audit --file "$LOCKFILE"
 
-      - name: Check licenses
-        run: cargo deny check licenses
-
-      - name: Check bans
-        run: cargo deny check bans
-
-      - name: Check sources
-        run: cargo deny check sources
+      - name: Deny policy (${{ matrix.workspace }})
+        env:
+          LICENSE_CONFIG: ${{ github.workspace }}/${{ matrix.license-config }}
+          MANIFEST: ${{ matrix.manifest }}
+        run: |
+          cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources
+          cargo deny --manifest-path "$MANIFEST" --locked check --config "$LICENSE_CONFIG" licenses
 
   # Unsafe code audit via cargo-geiger
   # Only runs when dependencies change (Cargo.toml/Cargo.lock) or on schedule/manual trigger
@@ -210,11 +240,27 @@ jobs:
 
   # Dependency freshness check
   outdated:
-    name: Dependency Freshness
+    name: Dependency Freshness (${{ matrix.workspace }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     # Only run on schedule or manual trigger (not on every PR)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workspace: root
+            manifest: Cargo.toml
+            lockfile: Cargo.lock
+          - workspace: fuzz
+            manifest: fuzz/Cargo.toml
+            lockfile: fuzz/Cargo.lock
+          - workspace: loom
+            manifest: loom-tests/Cargo.toml
+            lockfile: loom-tests/Cargo.lock
+          - workspace: godot-emscripten
+            manifest: tests/godot-emscripten/Cargo.toml
+            lockfile: tests/godot-emscripten/Cargo.lock
 
     steps:
       - uses: actions/checkout@v7
@@ -231,7 +277,6 @@ jobs:
 
       - name: Cache cargo registry
         uses: actions/cache@v6
-        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
@@ -240,24 +285,24 @@ jobs:
           restore-keys: |
             outdated-${{ runner.os }}-cargo-
 
-      - name: Check for outdated dependencies
-        id: outdated
+      - name: Check for outdated dependencies (${{ matrix.workspace }})
+        env:
+          MANIFEST: ${{ matrix.manifest }}
+          REPORT: ${{ runner.temp }}/outdated-report.txt
+          WORKSPACE: ${{ matrix.workspace }}
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           {
-            echo "## Dependency Freshness Check"
+            echo "## Dependency Freshness Check: $WORKSPACE"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          if cargo outdated --root-deps-only --exit-code 1 2>&1 | tee outdated-report.txt; then
-            echo "✅ All direct dependencies are up to date!" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "⚠️ Some dependencies have newer versions available:"
-              echo ""
-              echo '```'
-              cat outdated-report.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-        continue-on-error: true  # Advisory, not blocking
+          cargo outdated --manifest-path "$MANIFEST" --root-deps-only 2>&1 | tee "$REPORT"
+          test -s "$REPORT"
+          {
+            echo "Dependency lag is advisory; command and report failures are blocking."
+            echo ""
+            echo '```'
+            cat "$REPORT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

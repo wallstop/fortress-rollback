@@ -1,0 +1,22 @@
+# License-only cargo-deny policy for the standalone fuzz workspace.
+# Advisory, ban, and source checks continue to use the root deny.toml.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+unused-allowed-license = "allow"
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys@0.4.13" },
+]
+
+[licenses.private]
+ignore = true

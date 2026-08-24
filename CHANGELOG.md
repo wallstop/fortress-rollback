@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** hosted supply-chain and scheduled dependency-freshness checks now cover the
+  root, Fuzz, Loom, and Godot Emscripten Cargo workspaces. Exact-version, workspace-selected
+  license exceptions keep test-only NCSA and MPL dependencies from weakening the production
+  policy, while missing commands or reports fail closed.
 - **Pre-existing:** the crates.io source archive now uses an anchored source allowlist
   instead of trying to enumerate every repository-only exclusion. Documentation, examples, CI,
   tooling, and configuration no longer inflate consumer downloads; repository routes in the
