@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `SyncTestSession::advance_frame` no longer prunes its checksum history once per checked
+  window frame (an O(check_distance²) `BTreeMap` scan per advance) and no longer allocates a
+  mismatch vector on frames whose whole window is consistent; the `MismatchedChecksum` error
+  payload still reports every divergent frame in the window.
+
 ## [0.12.0] - 2026-08-03
 
 ### Changed

@@ -221,14 +221,31 @@ impl<T: Config> SyncTestSession<T> {
         // if we advanced far enough into the game do comparisons and rollbacks
         let current_frame = self.sync_layer.current_frame();
         if self.check_distance > 0 && current_frame.as_i32() > self.check_distance as i32 {
-            // compare checksums of older frames to our checksum history (where only the first version of any checksum is recorded)
+            // compare checksums of older frames to our checksum history (where only
+            // the first version of any checksum is recorded)
+            //
+            // The prune runs once per advance, not once per checked frame: within
+            // this loop `sync_layer.current_frame()` is invariant, so per-frame
+            // prunes would repeat an idempotent O(history) scan and turn the
+            // window check into O(check_distance^2) BTreeMap work.
+            self.prune_checksum_history();
             let oldest_frame_to_check = current_frame.as_i32() - self.check_distance as i32;
-            let mismatched_frames: Vec<_> = (oldest_frame_to_check..=current_frame.as_i32())
-                .filter(|&frame_to_check| !self.checksums_consistent(Frame::new(frame_to_check)))
-                .map(Frame::new)
-                .collect();
-
-            if !mismatched_frames.is_empty() {
+            let window = oldest_frame_to_check..=current_frame.as_i32();
+            // The common case is a fully consistent window: probe without
+            // collecting so no mismatch vector is allocated per frame. On a
+            // mismatch, re-walk to report every inconsistent frame; re-running
+            // `checksums_consistent` is side-effect-idempotent for frames already
+            // recorded this step (no save/load happens between the two passes).
+            let has_mismatch = window
+                .clone()
+                .any(|frame_to_check| !self.checksums_consistent(Frame::new(frame_to_check)));
+            if has_mismatch {
+                let mismatched_frames: Vec<_> = window
+                    .filter(|&frame_to_check| {
+                        !self.checksums_consistent(Frame::new(frame_to_check))
+                    })
+                    .map(Frame::new)
+                    .collect();
                 return Err(FortressError::MismatchedChecksum {
                     current_frame,
                     mismatched_frames,
@@ -547,13 +564,24 @@ impl<T: Config> SyncTestSession<T> {
         EventDrain::from_drain(self.event_queue.drain(..))
     }
 
-    /// Updates the `checksum_history` and checks if the checksum is identical if it already has been recorded once
-    fn checksums_consistent(&mut self, frame_to_check: Frame) -> bool {
-        // remove entries older than the `check_distance`
+    /// Drops checksum-history entries older than the `check_distance` window.
+    ///
+    /// Callers must invoke this once per advance, before checking frames:
+    /// `sync_layer.current_frame()` is the prune bound and is invariant across
+    /// the window check.
+    fn prune_checksum_history(&mut self) {
         let oldest_allowed_frame = self.sync_layer.current_frame() - self.check_distance as i32;
         self.checksum_history
             .retain(|&k, _| k >= oldest_allowed_frame);
+    }
 
+    /// Checks whether the frame's recorded checksum matches its saved state.
+    ///
+    /// The first check of a frame records its current checksum and reports
+    /// consistent; later checks compare against that record. Re-running this for
+    /// a frame within one advance step is side-effect-idempotent (the history
+    /// entry inserted by the first run makes the second a pure comparison).
+    fn checksums_consistent(&mut self, frame_to_check: Frame) -> bool {
         match self.sync_layer.saved_state_by_frame(frame_to_check) {
             Some(latest_cell) => match self.checksum_history.get(&latest_cell.frame()) {
                 Some(&cs) => cs == latest_cell.checksum(),
@@ -1158,6 +1186,74 @@ mod tests {
             detected_mismatch,
             "Should have detected mismatched checksums"
         );
+    }
+
+    /// A checksum divergence must be reported with only in-window frames, and
+    /// the two-pass probe/collect path must produce the same payload as a
+    /// single-pass collect would (guards the hot-path rewrite).
+    #[test]
+    fn sync_test_mismatch_error_reports_every_divergent_window_frame() {
+        let check_distance: i32 = 4;
+        let mut session: SyncTestSession<TestConfig> =
+            SyncTestSession::new(1, 8, check_distance as usize, 0, None);
+
+        let mut game_state: Vec<u8> = Vec::new();
+        // Save-order-dependent checksums: once corruption begins, every
+        // resimulated (re-saved) frame disagrees with its originally recorded
+        // history value, exactly like a nondeterministic game callback.
+        let mut save_count = 0_u32;
+        let mut detected: Option<Vec<Frame>> = None;
+        'outer: for frame_num in 0..30_i32 {
+            session
+                .add_local_input(PlayerHandle::new(0), frame_num as u32)
+                .expect("should succeed");
+            match session.advance_frame() {
+                Ok(requests) => {
+                    for request in requests {
+                        match request {
+                            FortressRequest::SaveGameState { cell, frame } => {
+                                save_count += 1;
+                                let checksum = if save_count > 8 {
+                                    u128::from(save_count) * 1_000
+                                } else {
+                                    u128::try_from(frame.as_i32().max(0))
+                                        .expect("nonnegative frame fits u128")
+                                };
+                                cell.save(frame, Some(game_state.clone()), Some(checksum));
+                            },
+                            FortressRequest::LoadGameState { cell, .. } => {
+                                if let Some(loaded) = cell.load() {
+                                    game_state = loaded;
+                                }
+                            },
+                            FortressRequest::AdvanceFrame { .. } => {
+                                game_state.push(frame_num as u8);
+                            },
+                        }
+                    }
+                },
+                Err(FortressError::MismatchedChecksum {
+                    mismatched_frames, ..
+                }) => {
+                    detected = Some(mismatched_frames);
+                    break 'outer;
+                },
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        let mismatched_frames = detected.expect("divergent checksums must be detected");
+        assert!(!mismatched_frames.is_empty());
+        let current = session.current_frame().as_i32();
+        for frame in &mismatched_frames {
+            let f = frame.as_i32();
+            assert!(
+                (current - check_distance..=current).contains(&f),
+                "reported frame {f} outside checked window [{}, {}]",
+                current - check_distance,
+                current
+            );
+        }
     }
 
     #[test]
