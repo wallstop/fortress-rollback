@@ -144,7 +144,7 @@ where
     /// reordered PRE-drop connected snapshot carries the older pre-drop epoch and
     /// is rejected) — see [`Self::reactivation_provenance`]. Kept index-parallel
     /// with [`Self::hosts`]/[`Self::host_snapshots`] (entries are removed
-    /// together in [`Self::remove_disconnected_hosts`]).
+    /// together in [`Self::remove_disconnected_hosts_from`]).
     host_drop_witness: Vec<Vec<Option<DropWitness>>>,
     /// Per-host high-water [`ConnectionStatus::epoch`] generation:
     /// `host_status_epoch[host][player]` is the maximum epoch this spectator has

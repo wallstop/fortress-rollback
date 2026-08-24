@@ -161,7 +161,7 @@ fn assert_allocation_ceiling(
     );
 }
 
-fn warmed_synctest_frame_stats(num_players: usize) -> Stats {
+fn warmed_synctest_frame_stats(num_players: usize) -> [Stats; 3] {
     let mut session: SyncTestSession<AllocationConfig> = SessionBuilder::new()
         .with_num_players(num_players)
         .expect("configure allocation-contract player count")
@@ -177,24 +177,26 @@ fn warmed_synctest_frame_stats(num_players: usize) -> Stats {
             )
             .expect("add warm-up input");
     }
-    black_box(session.advance_frame().expect("advance warm-up frame"));
+    fulfill_save_requests(session.advance_frame().expect("advance warm-up frame"));
 
-    let (requests, stats) = measure(|| {
-        for player in 0..num_players {
-            session
-                .add_local_input(
-                    PlayerHandle::new(player),
-                    u32::try_from(player).expect("allocation-contract handle fits u32"),
-                )
-                .expect("add measured input");
-        }
-        black_box(session.advance_frame().expect("advance measured frame"))
-    });
-    black_box(requests);
-    stats
+    std::array::from_fn(|_| {
+        let (requests, stats) = measure(|| {
+            for player in 0..num_players {
+                session
+                    .add_local_input(
+                        PlayerHandle::new(player),
+                        u32::try_from(player).expect("allocation-contract handle fits u32"),
+                    )
+                    .expect("add measured input");
+            }
+            black_box(session.advance_frame().expect("advance measured frame"))
+        });
+        fulfill_save_requests(requests);
+        stats
+    })
 }
 
-fn warmed_all_local_p2p_frame_stats(num_players: usize) -> Stats {
+fn warmed_all_local_p2p_frame_stats(num_players: usize) -> [Stats; 3] {
     let mut builder = SessionBuilder::new()
         .with_num_players(num_players)
         .expect("configure allocation-contract P2P player count")
@@ -216,26 +218,23 @@ fn warmed_all_local_p2p_frame_stats(num_players: usize) -> Stats {
             )
             .expect("add P2P warm-up input");
     }
-    let warm_up_requests = session.advance_frame().expect("advance P2P warm-up frame");
-    for request in warm_up_requests {
-        if let FortressRequest::SaveGameState { cell, frame } = request {
-            cell.save(frame, Some(0), Some(0));
-        }
-    }
+    fulfill_save_requests(session.advance_frame().expect("advance P2P warm-up frame"));
 
-    let (requests, stats) = measure(|| {
-        for player in 0..num_players {
-            session
-                .add_local_input(
-                    PlayerHandle::new(player),
-                    u32::try_from(player).expect("allocation-contract handle fits u32"),
-                )
-                .expect("add measured P2P input");
-        }
-        black_box(session.advance_frame().expect("advance measured P2P frame"))
-    });
-    black_box(requests);
-    stats
+    std::array::from_fn(|_| {
+        let (requests, stats) = measure(|| {
+            for player in 0..num_players {
+                session
+                    .add_local_input(
+                        PlayerHandle::new(player),
+                        u32::try_from(player).expect("allocation-contract handle fits u32"),
+                    )
+                    .expect("add measured P2P input");
+            }
+            black_box(session.advance_frame().expect("advance measured P2P frame"))
+        });
+        fulfill_save_requests(requests);
+        stats
+    })
 }
 
 fn fulfill_save_requests(requests: fortress_rollback::RequestVec<AllocationConfig>) {
@@ -522,11 +521,11 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     // scale. N=2 and N=4 therefore touch no allocator; N=16 retains one exact
     // 128-byte spill for the returned 16-player InputVec above inline capacity.
     for (players, operation_ceiling, byte_ceiling) in [(2, 0, 0), (4, 0, 0), (16, 1, 128)] {
-        let first = warmed_synctest_frame_stats(players);
-        for repetition in 1..3 {
+        let repeated = warmed_synctest_frame_stats(players);
+        let first = repeated[0];
+        for (repetition, stats) in repeated.iter().enumerate().skip(1) {
             assert_eq!(
-                warmed_synctest_frame_stats(players),
-                first,
+                *stats, first,
                 "warmed {players}-player sync-test frame repetition {repetition}"
             );
         }
@@ -539,11 +538,11 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     }
 
     for (players, operation_ceiling, byte_ceiling) in [(2, 0, 0), (4, 0, 0), (16, 1, 128)] {
-        let first = warmed_all_local_p2p_frame_stats(players);
-        for repetition in 1..3 {
+        let repeated = warmed_all_local_p2p_frame_stats(players);
+        let first = repeated[0];
+        for (repetition, stats) in repeated.iter().enumerate().skip(1) {
             assert_eq!(
-                warmed_all_local_p2p_frame_stats(players),
-                first,
+                *stats, first,
                 "warmed {players}-player all-local P2P frame repetition {repetition}"
             );
         }

@@ -352,6 +352,10 @@ name = "p2p_session"
 harness = false
 
 [[bench]]
+name = "p2p_all_local"
+harness = false
+
+[[bench]]
 name = "compression"
 harness = false
 

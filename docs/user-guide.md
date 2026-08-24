@@ -2760,7 +2760,7 @@ use std::time::Duration;
 #     type State = ();
 #     type Address = SocketAddr;
 # }
-# fn build(socket: impl fortress_rollback::NonBlockingSocket<SocketAddr>)
+# fn build(socket: impl fortress_rollback::NonBlockingSocket<SocketAddr> + 'static)
 #   -> Result<(), Box<dyn std::error::Error>> {
 let addr1: SocketAddr = "127.0.0.1:7001".parse()?;
 let addr2: SocketAddr = "127.0.0.1:7002".parse()?;

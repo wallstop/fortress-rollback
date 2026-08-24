@@ -797,7 +797,7 @@ mod kani_proofs {
         let input: Event<TestConfig> = Event::Input {
             input: PlayerInput::new(Frame::new(0), TestInput { value: 0 }),
             player: PlayerHandle::new(0),
-            peer_connect_status: Vec::new(),
+            peer_connect_status: Vec::new().into(),
         };
         let disconnected: Event<TestConfig> = Event::Disconnected;
         let interrupted: Event<TestConfig> = Event::NetworkInterrupted {
@@ -943,7 +943,7 @@ mod kani_proofs {
         let event: Event<TestConfig> = Event::Input {
             input,
             player,
-            peer_connect_status: Vec::new(),
+            peer_connect_status: Vec::new().into(),
         };
 
         match event {
@@ -986,7 +986,7 @@ mod kani_proofs {
         let event: Event<TestConfig> = Event::Input {
             input,
             player,
-            peer_connect_status: Vec::new(),
+            peer_connect_status: Vec::new().into(),
         };
         let cloned = event.clone();
 
