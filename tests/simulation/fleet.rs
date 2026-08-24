@@ -4134,20 +4134,15 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
     );
     for peer in 0..2 {
         let lag_range = |start: u32, end: u32| {
-            let samples = skewed_report
+            let mut lags = skewed_report
                 .progress_samples
                 .iter()
-                .filter(|sample| (start..end).contains(&sample.step));
-            let minimum = samples
-                .clone()
-                .map(|sample| sample.confirmation_lag[peer])
-                .min()
-                .expect("steady-state phase has samples");
-            let maximum = samples
-                .map(|sample| sample.confirmation_lag[peer])
-                .max()
-                .expect("steady-state phase has samples");
-            (minimum, maximum)
+                .filter(|sample| (start..end).contains(&sample.step))
+                .map(|sample| sample.confirmation_lag[peer]);
+            let first = lags.next().expect("steady-state phase has samples");
+            lags.fold((first, first), |(minimum, maximum), lag| {
+                (minimum.min(lag), maximum.max(lag))
+            })
         };
         let third_quarter = lag_range(
             skewed.config.steps / 2,

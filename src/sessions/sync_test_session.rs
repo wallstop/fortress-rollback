@@ -229,17 +229,18 @@ impl<T: Config> SyncTestSession<T> {
             // prunes would repeat an idempotent O(history) scan and turn the
             // window check into O(check_distance^2) BTreeMap work.
             let oldest_frame_to_check = self.prune_checksum_history();
-            let window = oldest_frame_to_check..=current_frame.as_i32();
+            let newest_frame_to_check = current_frame.as_i32();
             // The common case is a fully consistent window: probe without
             // collecting so no mismatch vector is allocated per frame. On a
-            // mismatch, re-walk to report every inconsistent frame; re-running
-            // `checksums_consistent` is side-effect-idempotent for frames already
-            // recorded this step (no save/load happens between the two passes).
-            let has_mismatch = window
-                .clone()
+            // mismatch, construct a fresh full-window iterator to report every
+            // inconsistent frame. `any` short-circuits and consumes its range;
+            // re-running `checksums_consistent` is side-effect-idempotent for
+            // frames already recorded this step (no save/load happens between
+            // the two passes).
+            let has_mismatch = (oldest_frame_to_check..=newest_frame_to_check)
                 .any(|frame_to_check| !self.checksums_consistent(Frame::new(frame_to_check)));
             if has_mismatch {
-                let mismatched_frames: Vec<_> = window
+                let mismatched_frames: Vec<_> = (oldest_frame_to_check..=newest_frame_to_check)
                     .filter(|&frame_to_check| {
                         !self.checksums_consistent(Frame::new(frame_to_check))
                     })
