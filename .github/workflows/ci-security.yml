@@ -91,7 +91,7 @@ jobs:
           MANIFEST: ${{ matrix.manifest }}
         run: |
           cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources
-          cargo deny --manifest-path "$MANIFEST" --locked check --config "$LICENSE_CONFIG" licenses
+          cargo deny --manifest-path "$MANIFEST" --locked --config "$LICENSE_CONFIG" check licenses
 
   # Unsafe code audit via cargo-geiger
   # Only runs when dependencies change (Cargo.toml/Cargo.lock) or on schedule/manual trigger
