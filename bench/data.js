@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787511298524,
+  "lastUpdate": 1787604189711,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "c43fd3df301c3e268d1a89214e915c97c4d6efdd",
-          "message": "Advance M3 simulation hardening (#210)\n\n## Summary\n- add simulation spectator convergence oracle support\n- add preplanned spectator harness path and negative controls\n- keep M3 plan/progress current locally\n\n## Validation\n- `cargo fmt`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo test --test simulation spectator -- --nocapture`\n- `cargo test --test simulation -- --nocapture`\n- `cargo nextest run --no-capture`\n- `cargo nextest run --features hot-join --no-capture`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Large changes to simulation oracle and harness CI gates (spectator\ninvariants, fingerprint semantics, blessed sweep baselines); scope is\ntest infrastructure, not production session code in this diff.\n> \n> **Overview**\n> Extends the simulation harness for **M3 §6.2**: preplanned redundant\nspectators (`SimConfig::spectator_hosts`), a `SpectatorSession` drive\npath, and oracle checks that displayed inputs and `Disconnected` slots\nmatch the live mesh canon—including a **display-frame** post-drop floor\n(not schedule steps) with fleet regressions and negative controls.\n> \n> Generalizes the runner over a **`SimInput`** trait (`StubInput` /\n**`WideStubInput` 32B**) via `run_with_input`, compares inputs with\n**`InputFingerprint`** (full serialized bytes), and adds reviewed\n**violation allowlist** plumbing plus **`RunReport::violation_census`**\nand an ignored 200-seed Error+ census test.\n> \n> The **baseline sweep** now runs PR gate and full matrix cells at **4B\nand 32B**, bumps report schema/labels, and replaces **`sweep-v1.json`**\nwith **`sweep-v2.json`** (10 gate rows).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n62a905a362a1893a34cbd1a2469039acbffab408. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-07T12:30:46-07:00",
-          "tree_id": "d1a03e614f11758b804e3efb53607026bc614625",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/c43fd3df301c3e268d1a89214e915c97c4d6efdd"
-        },
-        "date": 1783452918798,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 461,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 700,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1053,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128870,
-            "range": "± 578",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 43684,
-            "range": "± 3552",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 84",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -4043,6 +3917,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3132,
             "range": "± 258",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4",
+          "message": "perf: streamline SyncTest and harden mutation CI (#301)\n\n## Summary\n\n- refresh all four Cargo workspace lockfiles through compatible\nminor/patch releases, with `syn` advanced to 3.0.4 and MSRV-blocked\nmajors explicitly left in place\n- add a hermetic pip-vs-uv benchmark, informational quality job,\nartifact, and manual pre-commit hook for #281\n- profile and streamline `SyncTestSession::advance_frame`: prune\nchecksum history once and avoid allocating a mismatch vector on the\nconsistent hot path\n- repair mutation CI after the latest-main timeout: pin cargo-mutants\n27.1.0, use exact-head diff scope for PR/push, dynamically shard the\n4,696-mutant full corpus on Linux, exclude formal-proof-only false\nmutants, and aggregate every shard fail-closed\n- complete the #287 tool-gap audit; track the two real follow-ups\nseparately in #299 (incremental Python typing) and #300\n(standalone-workspace supply-chain coverage)\n\n## Latest-main RCA\n\nThe post-merge main audit found 18 successful workflow runs plus one\ncancelled mutation run. The old workflow serially repeated 5,668 mutants\non Linux, macOS, and Windows; included 972 Kani-only mutants invisible\nto ordinary tests; used derived per-mutant timeouts up to 1,055 seconds;\nfloated cargo-mutants; passed a list-only runtime flag; parsed the wrong\nreport path; and swallowed failures.\n\nThis PR replaces that topology with one authoritative baseline and\nbounded exact-head shards. Diff/filtered runs reject every missed or\ntimed-out mutant. Full sweeps reject every timeout and require at least\nan 80% global mutation score. Missing artifacts, incomplete shard\nindexes/counts, contradictory exit statuses, infrastructure failures,\nand cancelled dependencies all fail the summary.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- strict workspace Clippy with `tokio,json`\n- default Nextest: 2,999 passed, 71 skipped\n- hot-join Nextest: 3,257 passed, 72 skipped\n- complete Python suite: 2,083 passed\n- mutation workflow/aggregator contracts: 14 passed\n- exact local mutation diff: 25 mutants; 10 caught, 15 unviable, 0\nmissed, 0 timed out\n- full production mutation listing: 4,696; 0 Kani/proof and 0\n`proof_vec` leaks\n- `cargo deny check` and `cargo audit --deny warnings`\n- `python3 scripts/ci/agent-preflight.py --all`\n- actionlint, workspace lock freshness, rustdoc, and doctests\n- final adversarial re-review: zero remaining findings\n\nCloses #281.\nCloses #287.\nAdvances #297; the remaining P2P/spectator sweep stays open.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes rollback checksum verification in\n`SyncTestSession::advance_frame` (two-pass logic with documented\nside-effect idempotency) plus CI now gates PRs on mutation results—both\naffect determinism testing and merge policy.\n> \n> **Overview**\n> **SyncTest hot path:** `SyncTestSession::advance_frame` now prunes\nchecksum history **once** per advance (via `prune_checksum_history`)\ninstead of repeating an O(history) `BTreeMap` retain on every frame in\nthe window, and uses an **`any()` probe** so the common all-consistent\ncase avoids building a mismatch `Vec`. Mismatch reporting and rollback\nbehavior are unchanged; new regression tests lock down multi-frame\n`MismatchedChecksum` payloads and pruning bounds.\n> \n> **Mutation CI:** Replaces the cross-platform serial workflow with a\n**baseline + dynamically sharded Linux** pipeline: PR/push runs\n**`--in-diff`** on changed `*.rs`, pins **cargo-mutants 27.1.0**, uses\nper-mutant timeouts and fail-closed aggregation via\n**`aggregate_mutation_results.py`** (zero missed/timeouts on\ndiff/filtered; ≥80% score on full sweeps). **Kani-only** code is\nexcluded from mutation (`proof_vec.rs`, `exclude_re`, `mutants::skip` on\nproof modules).\n> \n> **Tooling / evidence:** Adds a hermetic **pip vs uv** benchmark\nscript, informational quality CI job, manual pre-commit hook, and\ncontract tests; updates code-review guidance on iterator `clone()` vs\ncollection clone; folds min/max lag in simulation fleet tests to avoid\nredundant iterator clones. Lockfiles refresh minor/patch deps.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nce523fc26d521a5a5db61d036516ca654f03059f. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-24T13:35:07-07:00",
+          "tree_id": "206ec0183013bf3431ff81d54e8b1fdc1a4a8c7a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4"
+        },
+        "date": 1787604187841,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 38902,
+            "range": "± 122",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31189,
+            "range": "± 120",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1243,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2764,
+            "range": "± 183",
             "unit": "ns/iter"
           }
         ]
