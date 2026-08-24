@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787511300555,
+  "lastUpdate": 1787604193160,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -10805,6 +10805,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1371,
             "range": "± 7",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4",
+          "message": "perf: streamline SyncTest and harden mutation CI (#301)\n\n## Summary\n\n- refresh all four Cargo workspace lockfiles through compatible\nminor/patch releases, with `syn` advanced to 3.0.4 and MSRV-blocked\nmajors explicitly left in place\n- add a hermetic pip-vs-uv benchmark, informational quality job,\nartifact, and manual pre-commit hook for #281\n- profile and streamline `SyncTestSession::advance_frame`: prune\nchecksum history once and avoid allocating a mismatch vector on the\nconsistent hot path\n- repair mutation CI after the latest-main timeout: pin cargo-mutants\n27.1.0, use exact-head diff scope for PR/push, dynamically shard the\n4,696-mutant full corpus on Linux, exclude formal-proof-only false\nmutants, and aggregate every shard fail-closed\n- complete the #287 tool-gap audit; track the two real follow-ups\nseparately in #299 (incremental Python typing) and #300\n(standalone-workspace supply-chain coverage)\n\n## Latest-main RCA\n\nThe post-merge main audit found 18 successful workflow runs plus one\ncancelled mutation run. The old workflow serially repeated 5,668 mutants\non Linux, macOS, and Windows; included 972 Kani-only mutants invisible\nto ordinary tests; used derived per-mutant timeouts up to 1,055 seconds;\nfloated cargo-mutants; passed a list-only runtime flag; parsed the wrong\nreport path; and swallowed failures.\n\nThis PR replaces that topology with one authoritative baseline and\nbounded exact-head shards. Diff/filtered runs reject every missed or\ntimed-out mutant. Full sweeps reject every timeout and require at least\nan 80% global mutation score. Missing artifacts, incomplete shard\nindexes/counts, contradictory exit statuses, infrastructure failures,\nand cancelled dependencies all fail the summary.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- strict workspace Clippy with `tokio,json`\n- default Nextest: 2,999 passed, 71 skipped\n- hot-join Nextest: 3,257 passed, 72 skipped\n- complete Python suite: 2,083 passed\n- mutation workflow/aggregator contracts: 14 passed\n- exact local mutation diff: 25 mutants; 10 caught, 15 unviable, 0\nmissed, 0 timed out\n- full production mutation listing: 4,696; 0 Kani/proof and 0\n`proof_vec` leaks\n- `cargo deny check` and `cargo audit --deny warnings`\n- `python3 scripts/ci/agent-preflight.py --all`\n- actionlint, workspace lock freshness, rustdoc, and doctests\n- final adversarial re-review: zero remaining findings\n\nCloses #281.\nCloses #287.\nAdvances #297; the remaining P2P/spectator sweep stays open.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes rollback checksum verification in\n`SyncTestSession::advance_frame` (two-pass logic with documented\nside-effect idempotency) plus CI now gates PRs on mutation results—both\naffect determinism testing and merge policy.\n> \n> **Overview**\n> **SyncTest hot path:** `SyncTestSession::advance_frame` now prunes\nchecksum history **once** per advance (via `prune_checksum_history`)\ninstead of repeating an O(history) `BTreeMap` retain on every frame in\nthe window, and uses an **`any()` probe** so the common all-consistent\ncase avoids building a mismatch `Vec`. Mismatch reporting and rollback\nbehavior are unchanged; new regression tests lock down multi-frame\n`MismatchedChecksum` payloads and pruning bounds.\n> \n> **Mutation CI:** Replaces the cross-platform serial workflow with a\n**baseline + dynamically sharded Linux** pipeline: PR/push runs\n**`--in-diff`** on changed `*.rs`, pins **cargo-mutants 27.1.0**, uses\nper-mutant timeouts and fail-closed aggregation via\n**`aggregate_mutation_results.py`** (zero missed/timeouts on\ndiff/filtered; ≥80% score on full sweeps). **Kani-only** code is\nexcluded from mutation (`proof_vec.rs`, `exclude_re`, `mutants::skip` on\nproof modules).\n> \n> **Tooling / evidence:** Adds a hermetic **pip vs uv** benchmark\nscript, informational quality CI job, manual pre-commit hook, and\ncontract tests; updates code-review guidance on iterator `clone()` vs\ncollection clone; folds min/max lag in simulation fleet tests to avoid\nredundant iterator clones. Lockfiles refresh minor/patch deps.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nce523fc26d521a5a5db61d036516ca654f03059f. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-24T13:35:07-07:00",
+          "tree_id": "206ec0183013bf3431ff81d54e8b1fdc1a4a8c7a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4"
+        },
+        "date": 1787604193082,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 72,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 238,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 34,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 46,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 111,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 391,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 74,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 95,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 126,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 124,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 170,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 261,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 228,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 316,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 512,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 121,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 143,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 177,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 226,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 271,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 363,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 424,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 526,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 713,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 361,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 486,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 642,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 778,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 81,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 108,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 334,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 514,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 776,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 19,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 68,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 258,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 1064,
+            "range": "± 5",
             "unit": "ns/iter"
           }
         ]
