@@ -933,6 +933,8 @@ mod property_tests {
 // =============================================================================
 
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_proofs {
     use super::*;
 

@@ -3373,6 +3373,8 @@ mod sync_layer_tests {
 /// unroll. If a proof using kani::any() hangs or causes runner shutdown,
 /// concretize the parameter that flows into the loop bound.
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_sync_layer_proofs {
     use super::*;
     use serde::{Deserialize, Serialize};

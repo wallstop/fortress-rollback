@@ -4449,6 +4449,8 @@ mod property_tests {
 /// - `test_queue()` + `for i in 0..3`: unwind(10 + 3 + buffer) = unwind(15)
 /// - `test_queue()` + `for i in 0..5`: unwind(10 + 5 + buffer) = unwind(17)
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_input_queue_proofs {
     use super::*;
     use serde::{Deserialize, Serialize};

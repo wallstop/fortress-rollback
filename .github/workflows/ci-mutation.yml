@@ -2,36 +2,52 @@ name: CI - Mutation Testing
 permissions:
   contents: read
 
-# Mutation testing introduces bugs (mutants) to verify that tests catch them.
-# This helps identify gaps in test coverage and improve test quality.
-#
-# This workflow is designed to run on-demand or on a schedule since mutation
-# testing is computationally expensive and time-consuming.
+# PRs and pushes mutation-test only changed Rust lines. Monthly/manual full
+# sweeps use dynamically planned Linux shards; ordinary CI already owns
+# platform compatibility, so repeating the identical corpus on three OSes
+# adds cost without increasing mutation coverage.
 
 on:
-  # Manual trigger - allows running mutation tests on demand
   workflow_dispatch:
     inputs:
       file_filter:
-        description: 'File filter (e.g., src/sync_layer/mod.rs) - leave empty for all files'
+        description: 'File glob (for example src/sync_layer/mod.rs); empty runs the full corpus'
         required: false
         default: ''
-      timeout_multiplier:
-        description: 'Timeout multiplier (default: 10.0)'
+      test_timeout_seconds:
+        description: 'Per-mutant test timeout in seconds (30-300)'
         required: false
-        default: '10.0'
+        default: '180'
 
-  # Scheduled run - First day of month at 2 AM UTC
-  # Mutation testing is slow, so we run it infrequently
+  pull_request:
+    paths:
+      - '.cargo/mutants.toml'
+      - '.github/actions/install-cargo-tool/**'
+      - '.github/workflows/ci-mutation.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'scripts/ci/aggregate_mutation_results.py'
+      - 'scripts/tests/test_aggregate_mutation_results.py'
+      - 'scripts/tests/test_ci_mutation_workflow.py'
+      - 'src/**'
+      - 'tests/**'
+
   schedule:
     - cron: '0 2 1 * *'  # First day of month at 2 AM UTC
 
-  # Optional: Run on push to main for mutation testing config changes
   push:
     branches: [main]
     paths:
       - '.cargo/mutants.toml'
+      - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-mutation.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'scripts/ci/aggregate_mutation_results.py'
+      - 'scripts/tests/test_aggregate_mutation_results.py'
+      - 'scripts/tests/test_ci_mutation_workflow.py'
+      - 'src/**'
+      - 'tests/**'
 
 concurrency:
   group: mutation-${{ github.ref }}
@@ -42,22 +58,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ============================================================================
-  # MUTATION TESTING (Cross-Platform Matrix)
-  # ============================================================================
-  mutation-testing:
-    name: Mutation Testing (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 240  # 4 hours max (mutation testing is slow)
-
-    strategy:
-      fail-fast: false  # Run all OS variants even if one fails
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  baseline:
+    name: Mutation Baseline and Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      expected-mutants: ${{ steps.plan.outputs.expected-mutants }}
+      scope: ${{ steps.plan.outputs.scope }}
+      shard-count: ${{ steps.plan.outputs.shard-count }}
+      shard-indexes: ${{ steps.plan.outputs.shard-indexes }}
+      test-timeout: ${{ steps.plan.outputs.test-timeout }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout exact head
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
@@ -69,257 +86,285 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Install cargo-mutants
+      - name: Install pinned cargo-mutants
         uses: ./.github/actions/install-cargo-tool
         with:
           tool: cargo-mutants
+          version: 27.1.0
 
-      - name: Run baseline tests
+      - name: Run authoritative baseline
+        run: cargo nextest run --locked --all-targets --features tokio,json --no-capture
+
+      - name: Plan exact mutation corpus
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          FILE_FILTER: ${{ inputs.file_filter }}
+          TEST_TIMEOUT_SECONDS: ${{ inputs.test_timeout_seconds || '180' }}
         run: |
-          {
-            echo "## Mutation Testing - Baseline (${{ matrix.os }})"
-            echo ""
-            echo "Running baseline tests to ensure all tests pass before mutation testing..."
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
 
-          # Run tests with nextest (faster)
-          if cargo nextest run --all-targets --features tokio,json; then
-            echo "✅ Baseline tests passed" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "❌ Baseline tests failed"
-              echo ""
-              echo "Mutation testing requires all tests to pass first."
-              echo "Please fix failing tests before running mutation testing."
-            } >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! "$TEST_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
+            || [ "$TEST_TIMEOUT_SECONDS" -lt 30 ] \
+            || [ "$TEST_TIMEOUT_SECONDS" -gt 300 ]; then
+            echo "test_timeout_seconds must be an integer from 30 through 300"
             exit 1
           fi
-        shell: bash
 
-      - name: List mutations (dry run)
-        run: |
-          {
-            echo ""
-            echo "## Mutations to Test (${{ matrix.os }})"
-            echo ""
-            echo "Analyzing code to identify mutation opportunities..."
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # List mutations without running them
-          MUTATION_COUNT=$(cargo mutants --list --json \
-            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
-            | jq '. | length')
-
-          {
-            echo "📊 **Total mutations to test:** $MUTATION_COUNT"
-            echo ""
-            echo "<details>"
-            echo "<summary>Click to see mutation list</summary>"
-            echo ""
-            echo "\`\`\`"
-            cargo mutants --list \
-              ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }}
-            echo "\`\`\`"
-            echo ""
-            echo "</details>"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-        shell: bash
-
-      - name: Run mutation testing
-        id: mutants
-        run: |
-          set -o pipefail
-
-          {
-            echo ""
-            echo "## Mutation Testing Results (${{ matrix.os }})"
-            echo ""
-            echo "Testing each mutation to see if tests catch it..."
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # Run mutation testing with configuration from .cargo/mutants.toml
-          # The config file specifies:
-          # - test_tool = "nextest" (faster test execution)
-          # - features = ["tokio", "json"] (core features only)
-          # - exclude_globs (skip examples, benchmarks, test utilities)
-          # - timeout_multiplier (prevent infinite loops)
-
-          TIMEOUT_MULTIPLIER="${{ github.event.inputs.timeout_multiplier || '10.0' }}"
-
-          # Run mutation testing and capture output
-          if cargo mutants \
-            --timeout-multiplier "$TIMEOUT_MULTIPLIER" \
-            --output mutants-out \
-            --json \
-            ${{ github.event.inputs.file_filter && format('-f {0}', github.event.inputs.file_filter) || '' }} \
-            2>&1 | tee mutants.log; then
-
-            echo "mutation_status=success" >> "$GITHUB_OUTPUT"
-
-            # Parse results
-            CAUGHT=$(jq -r '.outcomes | map(select(.outcome == "caught")) | length' mutants-out/mutants.json)
-            MISSED=$(jq -r '.outcomes | map(select(.outcome == "missed")) | length' mutants-out/mutants.json)
-            TIMEOUT=$(jq -r '.outcomes | map(select(.outcome == "timeout")) | length' mutants-out/mutants.json)
-            UNVIABLE=$(jq -r '.outcomes | map(select(.outcome == "unviable")) | length' mutants-out/mutants.json)
-            TOTAL=$(jq -r '.outcomes | length' mutants-out/mutants.json)
-
-            # Calculate mutation score (caught / (caught + missed))
-            if [ "$((CAUGHT + MISSED))" -gt 0 ]; then
-              SCORE=$(echo "scale=2; $CAUGHT * 100 / ($CAUGHT + $MISSED)" | bc)
-            else
-              SCORE="N/A"
+          filter_args=()
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            scope="full"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -z "$FILE_FILTER" ]; then
+            scope="full"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            scope="filtered"
+            filter_args+=(--file "$FILE_FILTER")
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            scope="diff"
+            if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "pull_request mutation scope requires a 40-character base SHA"
+              exit 1
             fi
-
-            {
-              echo "### Summary (${{ matrix.os }})"
-              echo ""
-              echo "| Metric | Count |"
-              echo "|--------|-------|"
-              echo "| ✅ Caught (tests detected mutation) | $CAUGHT |"
-              echo "| ❌ Missed (tests didn't detect mutation) | $MISSED |"
-              echo "| ⏱️ Timeout (mutation caused infinite loop) | $TIMEOUT |"
-              echo "| 🚫 Unviable (mutation didn't compile) | $UNVIABLE |"
-              echo "| 📊 **Total** | **$TOTAL** |"
-              echo "| 🎯 **Mutation Score** | **${SCORE}%** |"
-              echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
-
-            # Report missed mutations (these indicate test gaps)
-            if [ "$MISSED" -gt 0 ]; then
-              {
-                echo "### ⚠️ Missed Mutations (Test Gaps)"
-                echo ""
-                echo "These mutations were not caught by tests. Consider adding tests for:"
-                echo ""
-                echo "<details>"
-                echo "<summary>Click to see details</summary>"
-                echo ""
-                echo "\`\`\`"
-                jq -r '.outcomes[] | select(.outcome == "missed") | "\(.file):\(.line) - \(.function)"' \
-                  mutants-out/mutants.json | head -50
-                echo "\`\`\`"
-                echo ""
-                echo "</details>"
-                echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
+            git diff --binary --unified=0 "$BASE_SHA" HEAD -- '*.rs' > mutation-scope.diff
+            filter_args+=(--in-diff mutation-scope.diff)
+          elif [ "$EVENT_NAME" = "push" ]; then
+            scope="diff"
+            if [[ ! "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              echo "push mutation scope requires a nonzero 40-character before SHA"
+              exit 1
             fi
-
-            # Success criteria: mutation score >= 80%
-            if [ "$MISSED" -gt 0 ] && [ "$SCORE" != "N/A" ]; then
-              SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
-              if [ "$SCORE_INT" -lt 80 ]; then
-                {
-                  echo "⚠️ **Mutation score is below 80% threshold**"
-                  echo ""
-                  echo "While this doesn't fail the build, consider improving test coverage."
-                } >> "$GITHUB_STEP_SUMMARY"
-              fi
-            fi
-
+            git diff --binary --unified=0 "$BEFORE_SHA" HEAD -- '*.rs' > mutation-scope.diff
+            filter_args+=(--in-diff mutation-scope.diff)
           else
-            echo "mutation_status=failure" >> "$GITHUB_OUTPUT"
-            {
-              echo "❌ Mutation testing encountered errors"
-              echo ""
-              echo "See logs for details."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "unsupported mutation event: $EVENT_NAME"
+            exit 1
           fi
-        continue-on-error: true
-        shell: bash
 
-      - name: Upload mutation report
+          cargo mutants --list --json "${filter_args[@]}" > mutation-list.json
+          expected_mutants="$(jq 'length' mutation-list.json)"
+          shard_count="$(( (expected_mutants + 49) / 50 ))"
+          if [ "$shard_count" -lt 1 ]; then
+            shard_count="1"
+          elif [ "$shard_count" -gt 96 ]; then
+            echo "planned corpus needs $shard_count shards; maximum is 96"
+            exit 1
+          fi
+          shard_indexes="$(jq -cn --argjson count "$shard_count" '[range(0; $count)]')"
+
+          echo "expected-mutants=$expected_mutants" >> "$GITHUB_OUTPUT"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "shard-count=$shard_count" >> "$GITHUB_OUTPUT"
+          echo "shard-indexes=$shard_indexes" >> "$GITHUB_OUTPUT"
+          echo "test-timeout=$TEST_TIMEOUT_SECONDS" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Mutation Plan"
+            echo ""
+            echo "- Scope: $scope"
+            echo "- Mutants: $expected_mutants"
+            echo "- Shards: $shard_count (target: at most 50 mutants each)"
+            echo "- Per-mutant timeout: ${TEST_TIMEOUT_SECONDS}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-plan
+          path: |
+            mutation-list.json
+            mutation-scope.diff
+          if-no-files-found: warn
+          retention-days: 30
+
+  mutation-testing:
+    name: Mutation Testing (${{ matrix.shard-index }}/${{ needs.baseline.outputs.shard-count }})
+    needs: [baseline]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard-index: ${{ fromJSON(needs.baseline.outputs.shard-indexes) }}
+
+    steps:
+      - name: Checkout exact head
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable snapshot
+        with:
+          toolchain: stable
+
+      - name: Install nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Install pinned cargo-mutants
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-mutants
+          version: 27.1.0
+
+      - name: Run bounded mutation shard
+        id: mutants
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          FILE_FILTER: ${{ inputs.file_filter }}
+          MUTATION_SCOPE: ${{ needs.baseline.outputs.scope }}
+          SHARD_COUNT: ${{ needs.baseline.outputs.shard-count }}
+          SHARD_INDEX: ${{ matrix.shard-index }}
+          TEST_TIMEOUT_SECONDS: ${{ needs.baseline.outputs.test-timeout }}
+        run: |
+          set -euo pipefail
+
+          filter_args=()
+          case "$MUTATION_SCOPE" in
+            diff)
+              if [ "$EVENT_NAME" = "pull_request" ]; then
+                git diff --binary --unified=0 "$BASE_SHA" HEAD -- '*.rs' > mutation-scope.diff
+              elif [ "$EVENT_NAME" = "push" ]; then
+                git diff --binary --unified=0 "$BEFORE_SHA" HEAD -- '*.rs' > mutation-scope.diff
+              else
+                echo "diff scope is invalid for event $EVENT_NAME"
+                exit 1
+              fi
+              filter_args+=(--in-diff mutation-scope.diff)
+              ;;
+            filtered)
+              filter_args+=(--file "$FILE_FILTER")
+              ;;
+            full)
+              ;;
+            *)
+              echo "unknown mutation scope: $MUTATION_SCOPE"
+              exit 1
+              ;;
+          esac
+
+          shard="${SHARD_INDEX}/${SHARD_COUNT}"
+          cargo mutants --list --json --sharding round-robin \
+            --shard "$shard" "${filter_args[@]}" > mutation-list.json
+          selected_mutants="$(jq 'length' mutation-list.json)"
+
+          set +e
+          cargo mutants \
+            --no-shuffle \
+            --sharding round-robin \
+            --shard "$shard" \
+            --baseline=skip \
+            --timeout "$TEST_TIMEOUT_SECONDS" \
+            --in-place \
+            --output mutants-out \
+            --annotations github \
+            "${filter_args[@]}" 2>&1 | tee mutants.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          command_status="${pipeline_status[0]}"
+          tee_status="${pipeline_status[1]}"
+          set -e
+
+          if [ "$tee_status" -ne 0 ]; then
+            command_status="70"
+          fi
+
+          outcomes="mutants-out/mutants.out/outcomes.json"
+          if [ ! -f "$outcomes" ] && [ "$selected_mutants" -eq 0 ] \
+            && [ "$command_status" -eq 0 ]; then
+            mkdir -p "$(dirname "$outcomes")"
+            printf '%s\n' \
+              '{"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}' \
+              > "$outcomes"
+          fi
+
+          jq -n \
+            --argjson shard_index "$SHARD_INDEX" \
+            --argjson shard_count "$SHARD_COUNT" \
+            --argjson selected_mutants "$selected_mutants" \
+            --argjson command_status "$command_status" \
+            '{shard_index: $shard_index, shard_count: $shard_count,
+              selected_mutants: $selected_mutants, command_status: $command_status}' \
+            > mutation-status.json
+
+          {
+            echo "## Mutation Shard $shard"
+            echo ""
+            echo "- Selected mutants: $selected_mutants"
+            echo "- cargo-mutants status: $command_status"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$command_status" in
+            0|2|3)
+              ;;
+            *)
+              echo "cargo-mutants failed with infrastructure/usage status $command_status"
+              exit "$command_status"
+              ;;
+          esac
+
+      - name: Upload mutation shard
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: mutation-report-${{ matrix.os }}
+          name: mutation-report-${{ matrix.shard-index }}-of-${{ needs.baseline.outputs.shard-count }}
           path: |
+            mutation-list.json
+            mutation-scope.diff
+            mutation-status.json
             mutants-out/
             mutants.log
+          if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload missed mutations
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: missed-mutations-${{ matrix.os }}
-          path: mutants-out/mutants.json
-          retention-days: 30
-
-  # ============================================================================
-  # SUMMARY
-  # ============================================================================
   mutation-summary:
     name: Mutation Testing Summary
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [mutation-testing]
+    timeout-minutes: 10
+    needs: [baseline, mutation-testing]
     if: always()
 
     steps:
-      - name: Generate summary
-        run: |
-          map_status() {
-            case "$1" in
-              success) echo "✅ Passed" ;;
-              failure) echo "❌ Failed" ;;
-              skipped) echo "⏭️ Skipped" ;;
-              cancelled) echo "🚫 Cancelled" ;;
-              *) echo "❓ Unknown" ;;
-            esac
-          }
+      - name: Checkout exact head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-          {
-            echo "## Mutation Testing Summary (Cross-Platform)"
-            echo ""
-            echo "Mutation testing helps identify gaps in test coverage by introducing"
-            echo "bugs and verifying that tests catch them."
-            echo ""
-            echo "### Platform Results"
-            echo ""
-            echo "| Platform | Status |"
-            echo "|----------|--------|"
-            echo "| Ubuntu | $(map_status '${{ needs.mutation-testing.result }}') |"
-            echo "| macOS | $(map_status '${{ needs.mutation-testing.result }}') |"
-            echo "| Windows | $(map_status '${{ needs.mutation-testing.result }}') |"
-            echo ""
-            echo "### What is Mutation Testing?"
-            echo ""
-            echo "Mutation testing works by:"
-            echo "1. Making small changes to the code (mutations)"
-            echo "2. Running the test suite for each mutation"
-            echo "3. Checking if any test fails (catches the mutation)"
-            echo "4. If no test fails, the mutation is 'missed' - indicating a test gap"
-            echo ""
-            echo "### Interpreting Results"
-            echo ""
-            echo "- **Caught**: Tests detected the mutation ✅"
-            echo "- **Missed**: Tests didn't detect the mutation ⚠️ (test gap)"
-            echo "- **Timeout**: Mutation caused infinite loop ⏱️"
-            echo "- **Unviable**: Mutation didn't compile 🚫"
-            echo ""
-            echo "**Mutation Score** = Caught / (Caught + Missed) × 100%"
-            echo ""
-            echo "Target: ≥80% mutation score"
-            echo ""
-            echo "### Running Locally"
-            echo ""
-            echo "\`\`\`bash"
-            echo "# Install cargo-mutants"
-            echo "cargo install cargo-mutants"
-            echo ""
-            echo "# Run mutation testing on all code"
-            echo "cargo mutants"
-            echo ""
-            echo "# Test a specific file"
-            echo "cargo mutants -f src/sync_layer/mod.rs"
-            echo ""
-            echo "# List mutations without running"
-            echo "cargo mutants --list"
-            echo "\`\`\`"
-            echo ""
-            echo "See \`.cargo/mutants.toml\` for configuration."
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Download mutation shards
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mutation-report-*
+          path: mutation-artifacts
+
+      - name: Aggregate mutation policy
+        env:
+          EXPECTED_MUTANTS: ${{ needs.baseline.outputs.expected-mutants }}
+          EXPECTED_SHARDS: ${{ needs.baseline.outputs.shard-count }}
+          MUTATION_SCOPE: ${{ needs.baseline.outputs.scope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/aggregate_mutation_results.py mutation-artifacts \
+            --expected-shards "$EXPECTED_SHARDS" \
+            --expected-mutants "$EXPECTED_MUTANTS" \
+            --scope "$MUTATION_SCOPE" \
+            --minimum-score 80 \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Require successful baseline and shard jobs
+        env:
+          BASELINE_RESULT: ${{ needs.baseline.result }}
+          SHARD_RESULT: ${{ needs.mutation-testing.result }}
+        run: |
+          set -euo pipefail
+          if [ "$BASELINE_RESULT" != "success" ] || [ "$SHARD_RESULT" != "success" ]; then
+            echo "baseline=$BASELINE_RESULT shards=$SHARD_RESULT"
+            exit 1
+          fi

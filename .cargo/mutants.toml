@@ -62,9 +62,21 @@ exclude_globs = [
     "tests/**/common/**/*.rs",
     "tests/**/test_*.rs",
 
+    # Kani-only fixed-capacity proof backing. These items are compiled only
+    # under cfg(kani), so ordinary Nextest mutation runs cannot observe them.
+    # Their behavior is covered by the registered Kani harness fleet instead.
+    "src/proof_vec.rs",
+
     # Generated code (if any)
     # "src/generated/**/*.rs",
 ]
+
+# cargo-mutants parses cfg(kani) proof modules even though its ordinary
+# Nextest build excludes them. Mutating those functions therefore produces
+# guaranteed false "missed" results after a complete test-suite run per
+# mutant. Keep formal proof bodies in the Kani fleet and mutation-test the
+# production code they constrain.
+exclude_re = ["kani.*proof"]
 
 # ============================================================================
 # Timeout Configuration

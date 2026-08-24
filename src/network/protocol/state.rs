@@ -328,6 +328,8 @@ mod tests {
 // ProtocolState is a simple unit enum (no data), so no loop unwinding is needed.
 // =============================================================================
 #[cfg(kani)]
+// Syntax-only cargo-mutants skip marker; Kani owns this cfg-disabled proof module.
+#[cfg_attr(any(), mutants::skip)]
 mod kani_proofs {
     use super::*;
 
