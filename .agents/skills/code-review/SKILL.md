@@ -103,6 +103,16 @@ Code in `advance_frame`, `SyncLayer::advance_frame`, input queues, and protocol 
 - No `clone()` where a reference suffices
 - Prefer `SmallVec` over `Vec` for bounded collections
 
+Classify a `clone()` by its receiver before flagging it. Cloning a range or a
+cloneable iterator adapter snapshots traversal state; it does not clone the
+backing collection or its elements. This can be necessary when a consuming,
+short-circuiting adapter such as `any()` is followed by a full second pass. Make
+intent explicit by constructing two fresh ranges/iterators when that is clearer.
+For independent aggregates such as `min()` and `max()`, prefer one `fold()` pass
+when it remains readable. If a repeated predicate memoizes or records state,
+verify and document that the second pass is side-effect-idempotent rather than
+calling it pure.
+
 ### 2C. Test Coverage
 
 - Does the PR include tests for new functionality?
