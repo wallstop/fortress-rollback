@@ -228,8 +228,7 @@ impl<T: Config> SyncTestSession<T> {
             // this loop `sync_layer.current_frame()` is invariant, so per-frame
             // prunes would repeat an idempotent O(history) scan and turn the
             // window check into O(check_distance^2) BTreeMap work.
-            self.prune_checksum_history();
-            let oldest_frame_to_check = current_frame.as_i32() - self.check_distance as i32;
+            let oldest_frame_to_check = self.prune_checksum_history();
             let window = oldest_frame_to_check..=current_frame.as_i32();
             // The common case is a fully consistent window: probe without
             // collecting so no mismatch vector is allocated per frame. On a
@@ -569,10 +568,11 @@ impl<T: Config> SyncTestSession<T> {
     /// Callers must invoke this once per advance, before checking frames:
     /// `sync_layer.current_frame()` is the prune bound and is invariant across
     /// the window check.
-    fn prune_checksum_history(&mut self) {
+    fn prune_checksum_history(&mut self) -> i32 {
         let oldest_allowed_frame = self.sync_layer.current_frame() - self.check_distance as i32;
         self.checksum_history
             .retain(|&k, _| k >= oldest_allowed_frame);
+        oldest_allowed_frame.as_i32()
     }
 
     /// Checks whether the frame's recorded checksum matches its saved state.
@@ -1207,6 +1207,32 @@ mod tests {
             session
                 .add_local_input(PlayerHandle::new(0), frame_num as u32)
                 .expect("should succeed");
+
+            // Build the expected error payload independently from
+            // `checksums_consistent`, before `advance_frame` can record any
+            // previously unseen checksums. Missing history/state is consistent;
+            // only an existing unequal pair belongs in the payload.
+            let current = session.current_frame().as_i32();
+            let expected_mismatches: Vec<_> = if current > check_distance {
+                (current - check_distance..=current)
+                    .map(Frame::new)
+                    .filter(|&frame| {
+                        session
+                            .sync_layer
+                            .saved_state_by_frame(frame)
+                            .and_then(|cell| {
+                                session
+                                    .checksum_history
+                                    .get(&cell.frame())
+                                    .map(|&recorded| recorded != cell.checksum())
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             match session.advance_frame() {
                 Ok(requests) => {
                     for request in requests {
@@ -1235,6 +1261,11 @@ mod tests {
                 Err(FortressError::MismatchedChecksum {
                     mismatched_frames, ..
                 }) => {
+                    assert!(
+                        expected_mismatches.len() > 1,
+                        "fixture must exercise a multi-frame mismatch"
+                    );
+                    assert_eq!(mismatched_frames, expected_mismatches);
                     detected = Some(mismatched_frames);
                     break 'outer;
                 },
@@ -1243,7 +1274,6 @@ mod tests {
         }
 
         let mismatched_frames = detected.expect("divergent checksums must be detected");
-        assert!(!mismatched_frames.is_empty());
         let current = session.current_frame().as_i32();
         for frame in &mismatched_frames {
             let f = frame.as_i32();
@@ -1513,6 +1543,20 @@ mod tests {
         // The session should complete successfully even with many frames
         // because old checksums are pruned
         assert_eq!(session.current_frame(), Frame::new(50));
+        // Pruning happens before the final advance, so its bound is based on
+        // the frame immediately preceding `current_frame()`.
+        let oldest_allowed = session.current_frame() - check_distance as i32 - 1;
+        assert!(
+            session
+                .checksum_history
+                .keys()
+                .all(|&frame| frame >= oldest_allowed),
+            "checksum history retained a frame older than {oldest_allowed}"
+        );
+        assert!(
+            session.checksum_history.len() <= check_distance + 1,
+            "checksum history exceeded the inclusive rollback window"
+        );
     }
 
     // ==========================================
