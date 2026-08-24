@@ -633,7 +633,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "resolve":
-            result = resolve_release_branch(
+            branch_result = resolve_release_branch(
                 args.repo_root,
                 remote=args.remote,
                 default_branch=args.default_branch,
@@ -645,12 +645,12 @@ def main() -> int:
             _write_outputs(
                 args.github_output,
                 {
-                    "exists": str(result.exists).lower(),
-                    "branch": result.branch,
-                    "base_sha": result.base_sha,
-                    "branch_sha": result.branch_sha or "",
-                    "replace_sha": result.replace_sha or "",
-                    "release_date": result.release_date,
+                    "exists": str(branch_result.exists).lower(),
+                    "branch": branch_result.branch,
+                    "base_sha": branch_result.base_sha,
+                    "branch_sha": branch_result.branch_sha or "",
+                    "replace_sha": branch_result.replace_sha or "",
+                    "release_date": branch_result.release_date,
                 },
             )
         elif args.command == "verify-default":
@@ -670,7 +670,7 @@ def main() -> int:
                 expected_branch_sha=args.expected_branch_sha,
             )
         else:
-            result = ensure_release_pr(
+            pull_result = ensure_release_pr(
                 repository=args.repository,
                 base=args.base,
                 head=args.head,
@@ -681,9 +681,9 @@ def main() -> int:
             _write_outputs(
                 args.github_output,
                 {
-                    "created": str(result.created).lower(),
-                    "url": result.url,
-                    "number": str(result.number or ""),
+                    "created": str(pull_result.created).lower(),
+                    "url": pull_result.url,
+                    "number": str(pull_result.number or ""),
                 },
             )
     except ReleaseBranchError as error:

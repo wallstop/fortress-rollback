@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Production Python under `scripts/` now passes strict mypy at the Python 3.10 compatibility floor.
+  The exact checker/stub toolchain is blocking in pre-commit and hosted quality CI, with tests kept
+  outside the annotation campaign and narrow suppressions limited to typed external boundaries.
 - `SyncTestSession::advance_frame` no longer prunes its checksum history once per checked
   window frame (an O(check_distance²) `BTreeMap` scan per advance) and no longer allocates a
   mismatch vector on frames whose whole window is consistent; the `MismatchedChecksum` error

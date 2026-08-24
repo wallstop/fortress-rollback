@@ -50,7 +50,8 @@ def supports_color() -> bool:
         try:
             import ctypes
 
-            kernel32 = ctypes.windll.kernel32
+            # typeshed omits this Windows-only dynamic loader on non-Windows hosts.
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
             return True
         except (AttributeError, OSError):

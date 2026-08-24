@@ -15,6 +15,7 @@ This is the CI and pre-commit source of truth for local link validation.
 import os
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -269,6 +270,8 @@ def check_markdown_link(
     ):
         return True, ""
 
+    anchor: str | None = None
+
     # Skip special links
     if link_target.startswith("#"):
         # Anchor link within the same file
@@ -344,7 +347,7 @@ def clean_link_target(link_target: str) -> str:
     return link_target.split(maxsplit=1)[0] if link_target else ""
 
 
-def iter_markdown_links(content: str):
+def iter_markdown_links(content: str) -> Iterator[tuple[str | None, str]]:
     """Yield ``(link_text, link_target)`` pairs from Markdown-like content.
 
     ``link_text`` is ``None`` for link forms that have no inline text (reference
@@ -378,7 +381,7 @@ def iter_markdown_links(content: str):
         yield None, clean_link_target(match.group(1))
 
 
-def iter_markdown_link_targets(content: str):
+def iter_markdown_link_targets(content: str) -> Iterator[str]:
     """Yield local-link candidate targets from Markdown-like content."""
     for _link_text, link_target in iter_markdown_links(content):
         yield link_target

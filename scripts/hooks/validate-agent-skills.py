@@ -10,7 +10,8 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:  # pragma: no cover - exercised only in dependency-poor environments
-    yaml = None
+    # The optional-module sentinel deliberately replaces the imported module binding.
+    yaml = None  # type: ignore[assignment]
 
 
 MAX_SKILL_LINES = 500

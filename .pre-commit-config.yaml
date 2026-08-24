@@ -86,6 +86,17 @@ repos:
         language: python
         types: [python]
 
+      - id: mypy
+        name: type-check production Python
+        entry: mypy --config-file mypy.ini
+        language: python
+        additional_dependencies:
+          - mypy==2.3.1
+          - tomli==2.4.1
+          - types-PyYAML==6.0.12.20260815
+        pass_filenames: false
+        files: '^(scripts/(?!tests/).*\.py|mypy\.ini)$'
+
       - id: advisory-dispositions
         name: check advisory dispositions
         entry: python scripts/ci/check-advisory-dispositions.py

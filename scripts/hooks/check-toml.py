@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Python 3.11+ has tomllib built-in
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
     HAS_TOML = True
 except ImportError:
     try:

@@ -196,10 +196,10 @@ def mask_non_code(text: str) -> str:
             continue
 
         if text[cursor] == "'":
-            end = char_literal_end(text, cursor)
-            if end is not None:
-                blank_range(chars, cursor, end)
-                cursor = end
+            char_end = char_literal_end(text, cursor)
+            if char_end is not None:
+                blank_range(chars, cursor, char_end)
+                cursor = char_end
                 continue
 
         cursor += 1
@@ -496,14 +496,14 @@ def check_delegated_mesh_contracts(path: Path, function: RustFunction) -> list[F
 def collect_rust_files(repo_root: Path, explicit_files: list[str]) -> list[Path]:
     """Collect Rust files to scan."""
     if explicit_files:
-        files = []
+        selected_files: list[Path] = []
         for raw_path in explicit_files:
             path = Path(raw_path)
             if not path.is_absolute():
                 path = repo_root / path
             if path.suffix == ".rs" and path.exists():
-                files.append(path)
-        return sorted(set(files))
+                selected_files.append(path)
+        return sorted(set(selected_files))
 
     files: list[Path] = []
     for dirname in SCAN_DIRS:
