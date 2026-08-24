@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo-banner.svg" alt="Fortress Rollback" width="600">
+  <img src="https://raw.githubusercontent.com/wallstop/fortress-rollback/main/docs/assets/logo-banner.svg" alt="Fortress Rollback" width="600">
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@ To see a complete deterministic loop first, clone this repository and run:
 cargo run --example sync_test
 ```
 
-Then follow [Build Your First Session](docs/getting-started.md). It starts without networking so
+Then follow [Build Your First Session](https://wallstop.github.io/fortress-rollback/getting-started/). It starts without networking so
 you can prove that your simulation survives rollback before debugging transport or peer setup.
 
 ## The Integration Loop
@@ -50,25 +50,27 @@ Every game follows the same four steps:
 3. Poll the session, submit every local player's input, and call `advance_frame`.
 4. Fulfill every returned `FortressRequest` in order: save, load, or advance game state.
 
-The [first-session guide](docs/getting-started.md) shows this loop as a runnable program. The
-[request-handling example](examples/request_handling.rs) shows the manual and macro forms.
+The [first-session guide](https://wallstop.github.io/fortress-rollback/getting-started/) shows this
+loop as a runnable program. The [request-handling example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)
+shows the manual and macro forms.
 
 ## Choose the Right Guide
 
 | Goal | Canonical page |
 |------|----------------|
-| Build a first deterministic session | [Getting Started](docs/getting-started.md) |
-| Integrate sessions, requests, and events | [User Guide](docs/user-guide.md) |
-| Run maintained examples | [Examples](examples/README.md) |
-| Tune latency, prediction, and input delay | [Network Tuning](docs/tuning.md) |
-| Add browser, engine, or custom transport support | [Platforms and custom sockets](docs/user-guide.md#web--wasm-integration) |
-| Prepare a game for release | [Production Checklist](docs/production-checklist.md) |
+| Build a first deterministic session | [Getting Started](https://wallstop.github.io/fortress-rollback/getting-started/) |
+| Integrate sessions, requests, and events | [User Guide](https://wallstop.github.io/fortress-rollback/user-guide/) |
+| Run maintained examples | [Examples](https://github.com/wallstop/fortress-rollback/tree/main/examples) |
+| Tune latency, prediction, and input delay | [Network Tuning](https://wallstop.github.io/fortress-rollback/tuning/) |
+| Add browser, engine, or custom transport support | [Platforms and custom sockets](https://wallstop.github.io/fortress-rollback/user-guide/#custom-sockets) |
+| Prepare a game for release | [Production Checklist](https://wallstop.github.io/fortress-rollback/production-checklist/) |
 | Understand the public API | [docs.rs](https://docs.rs/fortress-rollback/latest/fortress_rollback/) |
-| Migrate from GGRS | [Migration Guide](docs/migration.md) |
+| Migrate from GGRS | [Migration Guide](https://wallstop.github.io/fortress-rollback/migration/) |
 
-For protocol internals and guarantees, see the [architecture](docs/architecture.md),
-[determinism model](docs/specs/determinism-model.md), and
-[threat model](docs/threat-model.md).
+For protocol internals and guarantees, see the
+[architecture](https://wallstop.github.io/fortress-rollback/architecture/),
+[determinism model](https://wallstop.github.io/fortress-rollback/specs/determinism-model/), and
+[threat model](https://wallstop.github.io/fortress-rollback/threat-model/).
 
 ## Network Requirements
 
@@ -76,7 +78,7 @@ The deterministic simulation fleet validates full-mesh correctness and liveness 
 under documented profiles. This result is not a production endorsement: full meshes above eight
 players exceed attested industry practice. Measure your game-state cost, input width, topology,
 bandwidth, stalls, and target hardware before choosing a supported tier. Start with the measured
-profiles in [Network Tuning](docs/tuning.md).
+profiles in [Network Tuning](https://wallstop.github.io/fortress-rollback/tuning/).
 
 ## Project Notes
 

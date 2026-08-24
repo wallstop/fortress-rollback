@@ -24,11 +24,11 @@ def test_readme_stays_a_short_route_map() -> None:
     assert "Contributing" not in headings
 
     for target in (
-        "docs/getting-started.md",
-        "docs/user-guide.md",
-        "examples/README.md",
-        "docs/tuning.md",
-        "docs/production-checklist.md",
+        "https://wallstop.github.io/fortress-rollback/getting-started/",
+        "https://wallstop.github.io/fortress-rollback/user-guide/",
+        "https://github.com/wallstop/fortress-rollback/tree/main/examples",
+        "https://wallstop.github.io/fortress-rollback/tuning/",
+        "https://wallstop.github.io/fortress-rollback/production-checklist/",
     ):
         assert f"]({target}" in readme
 

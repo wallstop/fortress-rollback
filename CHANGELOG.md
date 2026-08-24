@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** the crates.io source archive now uses an anchored source allowlist
+  instead of trying to enumerate every repository-only exclusion. Documentation, examples, CI,
+  tooling, and configuration no longer inflate consumer downloads; repository routes in the
+  packaged README remain absolute and usable from crates.io.
 - **Pre-existing:** onboarding no longer makes new users choose between a 1,000-word README,
   a duplicate docs-home program, and the full reference guide. The README and docs home now route
   to one focused, compilable first-session guide, while advanced transport, platform, tuning,
