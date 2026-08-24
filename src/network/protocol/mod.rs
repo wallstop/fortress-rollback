@@ -2857,20 +2857,26 @@ impl<T: Config> UdpProtocol<T> {
             // at most one extra resend per `running_retry_interval`, benign.
             if !staged_frames.is_empty() {
                 self.running_last_input_recv = self.now();
-            }
-            for staged in staged_frames {
-                let peer_connect_status = body.peer_connect_status.clone();
-                self.recv_inputs
-                    .insert(staged.input_data.frame, staged.input_data);
+                // Every event decoded from this packet observes the same immutable
+                // status snapshot. Allocate it once for the packet and share it
+                // across frames/players instead of cloning an N-player Vec into
+                // every per-player event. Keep this inside the progress branch:
+                // duplicate/nudge packets that stage no frames must not allocate.
+                let peer_connect_status: Arc<[ConnectionStatus]> =
+                    Arc::from(body.peer_connect_status.as_slice());
+                for staged in staged_frames {
+                    self.recv_inputs
+                        .insert(staged.input_data.frame, staged.input_data);
 
-                for (player_input, &player_handle) in
-                    staged.player_inputs.into_iter().zip(self.handles.iter())
-                {
-                    self.event_queue.push_back(Event::Input {
-                        input: player_input,
-                        player: player_handle,
-                        peer_connect_status: peer_connect_status.clone(),
-                    });
+                    for (player_input, &player_handle) in
+                        staged.player_inputs.into_iter().zip(self.handles.iter())
+                    {
+                        self.event_queue.push_back(Event::Input {
+                            input: player_input,
+                            player: player_handle,
+                            peer_connect_status: Arc::clone(&peer_connect_status),
+                        });
+                    }
                 }
             }
 
@@ -10766,8 +10772,12 @@ mod property_tests {
             // Count Input events
             let input_events: Vec<_> = protocol.event_queue.iter()
                 .filter_map(|e| {
-                    if let Event::Input { player, .. } = e {
-                        Some(*player)
+                    if let Event::Input {
+                        player,
+                        peer_connect_status,
+                        ..
+                    } = e {
+                        Some((*player, peer_connect_status))
                     } else {
                         None
                     }
@@ -10783,9 +10793,19 @@ mod property_tests {
                 num_players
             );
 
+            for pair in input_events.windows(2) {
+                prop_assert!(
+                    Arc::ptr_eq(pair[0].1, pair[1].1),
+                    "all player events decoded from one packet must share its immutable status snapshot"
+                );
+            }
+
             // Verify each handle received exactly one event
             for handle in &handles {
-                let count = input_events.iter().filter(|&&h| h == *handle).count();
+                let count = input_events
+                    .iter()
+                    .filter(|(event_handle, _)| event_handle == handle)
+                    .count();
                 prop_assert_eq!(
                     count,
                     1,

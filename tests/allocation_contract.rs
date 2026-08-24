@@ -18,16 +18,18 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
+use fortress_rollback::__internal::{ConnectionStatus, Event, PlayerInput};
 use fortress_rollback::network::codec;
 use fortress_rollback::{
-    Config, DesyncDetection, FortressRequest, Message, MessageKind, NonBlockingSocket, P2PSession,
-    PlayerHandle, SessionBuilder, SessionState, SyncTestSession,
+    Config, DesyncDetection, FortressRequest, Frame, Message, MessageKind, NonBlockingSocket,
+    P2PSession, PlayerHandle, SessionBuilder, SessionState, SyncTestSession,
 };
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+#[derive(Clone)]
 struct AllocationConfig;
 
 impl Config for AllocationConfig {
@@ -396,6 +398,45 @@ fn warmed_networked_p2p_send_stats(num_players: usize) -> Stats {
     stats
 }
 
+fn warmed_spectator_poll_stats(num_hosts: usize) -> Stats {
+    let hosts: Vec<_> = (0..num_hosts)
+        .map(|index| {
+            let port = 32_001_u16
+                .checked_add(u16::try_from(index).expect("allocation host index fits u16"))
+                .expect("allocation host port stays in range");
+            SocketAddr::from(([127, 0, 0, 1], port))
+        })
+        .collect();
+    let mut session = SessionBuilder::<AllocationConfig>::new()
+        .with_num_players(2)
+        .expect("configure allocation-contract spectator player count")
+        .start_spectator_session_multi(&hosts, AllocationSocket)
+        .expect("construct allocation-contract spectator session");
+
+    session.poll_remote_clients();
+    let ((), stats) = measure(|| {
+        session.poll_remote_clients();
+        black_box(())
+    });
+    stats
+}
+
+fn input_event_snapshot_clone_stats(num_players: usize) -> Stats {
+    let event: Event<AllocationConfig> = Event::Input {
+        input: PlayerInput::new(Frame::new(0), 0),
+        player: PlayerHandle::new(0),
+        peer_connect_status: vec![ConnectionStatus::default(); num_players].into(),
+    };
+    let mut clones = Vec::with_capacity(num_players);
+    let ((), stats) = measure(|| {
+        for _ in 0..num_players {
+            clones.push(black_box(&event).clone());
+        }
+    });
+    black_box(clones);
+    stats
+}
+
 /// Allocation contracts are measured together so the instrumented allocator
 /// cannot observe concurrently running tests in this integration-test process.
 #[test]
@@ -536,6 +577,31 @@ fn warmed_hot_paths_obey_allocation_contracts() {
             first,
             operation_ceiling,
             byte_ceiling,
+        );
+    }
+
+    // An input-idle spectator still polls every render/network tick. Once its
+    // host-indexed scratch space is warmed, that no-message/no-event path must
+    // retain and reuse the bounded storage instead of allocating per poll.
+    for hosts in [1, 4] {
+        let first = warmed_spectator_poll_stats(hosts);
+        for repetition in 1..3 {
+            assert_eq!(
+                warmed_spectator_poll_stats(hosts),
+                first,
+                "warmed {hosts}-host spectator poll repetition {repetition}"
+            );
+        }
+        assert_zero_allocations(&format!("warmed {hosts}-host spectator poll"), first);
+    }
+
+    // Every player event decoded from one Input frame observes the same
+    // immutable connection-status snapshot. Cloning that internal event must
+    // share the snapshot instead of duplicating its player-count-sized buffer.
+    for players in [2, 4, 16] {
+        assert_zero_allocations(
+            &format!("{players}-player input-event snapshot clones"),
+            input_event_snapshot_clone_stats(players),
         );
     }
 }

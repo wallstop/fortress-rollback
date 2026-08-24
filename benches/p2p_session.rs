@@ -231,6 +231,74 @@ fn bench_advance_frame_with_rollback(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the real all-local P2P frame path at supported player scales.
+///
+/// This covers local-input staging, confirmation, sync-layer input assembly,
+/// request construction, and the endpoint-free poll fast path. It complements
+/// the SyncTest rows above with the production session type used by games.
+fn bench_all_local_p2p_frame(c: &mut Criterion) {
+    let mut group = c.benchmark_group("P2PSession");
+
+    for num_players in [2, 4, 16] {
+        group.bench_with_input(
+            BenchmarkId::new("all_local_advance_frame", num_players),
+            &num_players,
+            |b, &num_players| {
+                let mut builder = SessionBuilder::<BenchConfig>::new()
+                    .with_num_players(num_players)
+                    .expect("configure all-local P2P benchmark");
+                for player in 0..num_players {
+                    builder = builder
+                        .add_local_player(player)
+                        .expect("add all-local P2P benchmark player");
+                }
+                let mut session = builder
+                    .start_p2p_session(BenchSocket)
+                    .expect("create all-local P2P benchmark session");
+                let mut state = BenchState::default();
+
+                b.iter(|| {
+                    for player in 0..num_players {
+                        session
+                            .add_local_input(
+                                PlayerHandle::new(player),
+                                BenchInput {
+                                    buttons: u8::try_from(player).unwrap_or(u8::MAX),
+                                    stick_x: 0,
+                                    stick_y: 0,
+                                },
+                            )
+                            .expect("add all-local benchmark input");
+                    }
+
+                    for request in session
+                        .advance_frame()
+                        .expect("advance all-local P2P benchmark frame")
+                    {
+                        match request {
+                            FortressRequest::SaveGameState { cell, frame } => {
+                                cell.save(frame, Some(state.clone()), None);
+                            },
+                            FortressRequest::LoadGameState { cell, .. } => {
+                                if let Some(saved) = cell.load() {
+                                    state = saved;
+                                }
+                            },
+                            FortressRequest::AdvanceFrame { inputs } => {
+                                state.frame = state.frame.saturating_add(1);
+                                black_box(inputs);
+                            },
+                        }
+                    }
+                    black_box(&state);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// Number of iterations for sub-microsecond benchmarks.
 ///
 /// Sub-10ns operations have high variance due to timer resolution, CPU frequency
@@ -369,6 +437,7 @@ criterion_group!(
     benches,
     bench_advance_frame_no_rollback,
     bench_advance_frame_with_rollback,
+    bench_all_local_p2p_frame,
     bench_message_serialization,
     bench_metrics_and_wire_length,
 );

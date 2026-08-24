@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mismatch vector on frames whose whole window is consistent; the `MismatchedChecksum` error
   payload still reports every divergent frame in the window.
 
+### Fixed
+
+- **Pre-existing:** warmed input-idle spectator polls now reuse bounded host scratch storage,
+  and input events decoded from one packet share their immutable connection-status snapshot
+  instead of cloning its player-count-sized buffer for every player. All-local `P2PSession`
+  polling also skips endpoint-only bookkeeping after retaining socket diagnostics. The measured
+  one- and four-host spectator path and N=2/4/16 event-clone contract perform zero allocations;
+  a 300,000-frame N=2 all-local profile executes 15.6% fewer instructions.
+
 ## [0.12.0] - 2026-08-03
 
 ### Changed
