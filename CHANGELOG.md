@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-25
+
 ### Changed
 
 - `SyncTestSession::advance_frame` no longer prunes its checksum history once per checked
@@ -840,7 +842,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.12"
+fortress-rollback = "0.13"
 ```
 
 ### Import Path Change
@@ -900,7 +902,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/wallstop/fortress-rollback/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/wallstop/fortress-rollback/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/wallstop/fortress-rollback/compare/v0.9.0...v0.10.0
