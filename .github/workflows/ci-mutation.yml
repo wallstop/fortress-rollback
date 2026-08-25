@@ -144,7 +144,14 @@ jobs:
           fi
 
           cargo mutants --list --json "${filter_args[@]}" > mutation-list.json
-          expected_mutants="$(jq 'length' mutation-list.json)"
+          if [ ! -s mutation-list.json ]; then
+            printf '%s\n' '[]' > mutation-list.json
+          fi
+          expected_mutants="$(jq -e '
+            if type == "array" then length
+            else error("mutation list must be a JSON array")
+            end
+          ' mutation-list.json)"
           shard_count="$(( (expected_mutants + 49) / 50 ))"
           if [ "$shard_count" -lt 1 ]; then
             shard_count="1"
@@ -257,7 +264,14 @@ jobs:
           shard="${SHARD_INDEX}/${SHARD_COUNT}"
           cargo mutants --list --json --sharding round-robin \
             --shard "$shard" "${filter_args[@]}" > mutation-list.json
-          selected_mutants="$(jq 'length' mutation-list.json)"
+          if [ ! -s mutation-list.json ]; then
+            printf '%s\n' '[]' > mutation-list.json
+          fi
+          selected_mutants="$(jq -e '
+            if type == "array" then length
+            else error("mutation list must be a JSON array")
+            end
+          ' mutation-list.json)"
 
           set +e
           cargo mutants \
