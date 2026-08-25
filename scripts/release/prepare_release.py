@@ -24,7 +24,7 @@ from release_policy import (
 )
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
 except ImportError:
     import tomli as tomllib
 

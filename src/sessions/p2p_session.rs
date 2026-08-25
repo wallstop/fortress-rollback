@@ -3281,6 +3281,14 @@ impl<T: Config> P2PSession<T> {
             }
         }
 
+        // An all-local session has no protocol endpoints to update, poll, or
+        // flush. Keep socket receive/unknown-source accounting above so a
+        // misrouted custom adapter remains observable, then skip the otherwise
+        // inert floor, drop, event-staging, and telemetry passes below.
+        if self.player_reg.remotes.is_empty() && self.player_reg.spectators.is_empty() {
+            return;
+        }
+
         // update frame information between remote players
         for remote_endpoint in self.player_reg.remotes.values_mut() {
             if remote_endpoint.is_running() {
@@ -12677,6 +12685,38 @@ mod tests {
         assert_eq!(warnings, 1, "draining events must not re-arm the warning");
     }
 
+    #[test]
+    fn endpoint_free_poll_preserves_unknown_source_diagnostics() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let unknown = test_addr(9999);
+        let messages = Arc::new(std::sync::Mutex::new(vec![(
+            unknown,
+            sync_request_message(),
+        )]));
+        let socket = QueuedReceiveSocket {
+            messages: Arc::clone(&messages),
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .unwrap()
+            .start_p2p_session(socket)
+            .unwrap();
+
+        session.poll_remote_clients();
+
+        assert_eq!(session.metrics().unknown_source_packets, 1);
+        assert!(observer.violations().iter().any(|violation| {
+            violation.severity == ViolationSeverity::Warning
+                && violation.kind == ViolationKind::NetworkProtocol
+                && violation.message.contains(&unknown.to_string())
+        }));
+    }
+
     // Helper function to create a local-only P2P session for testing (no network)
     fn create_local_only_session() -> P2PSession<TestConfig> {
         SessionBuilder::new()
@@ -12783,7 +12823,7 @@ mod tests {
                 Event::Input {
                     input: PlayerInput::new(Frame::new(frame), frame as u8),
                     player: PlayerHandle::new(1),
-                    peer_connect_status: vec![ConnectionStatus::default(); 2],
+                    peer_connect_status: vec![ConnectionStatus::default(); 2].into(),
                 },
                 Arc::clone(&handles),
                 test_addr(8080),
@@ -12795,7 +12835,7 @@ mod tests {
             Event::Input {
                 input: PlayerInput::new(Frame::new(3), 3),
                 player: PlayerHandle::new(1),
-                peer_connect_status: vec![ConnectionStatus::default(); 2],
+                peer_connect_status: vec![ConnectionStatus::default(); 2].into(),
             },
             handles,
             test_addr(8080),
@@ -26986,7 +27026,7 @@ mod tests {
                     Event::Input {
                         input: PlayerInput::new(Frame::new(claim.as_i32() + 5), 7),
                         player: PlayerHandle::new(0),
-                        peer_connect_status: vec![ConnectionStatus::default(); 3],
+                        peer_connect_status: vec![ConnectionStatus::default(); 3].into(),
                     },
                     Arc::clone(&handles),
                     addr_a(),
@@ -27006,7 +27046,7 @@ mod tests {
                     Event::Input {
                         input: PlayerInput::new(Frame::new(serve_s.as_i32() - 1), 7),
                         player: PlayerHandle::new(0),
-                        peer_connect_status: vec![ConnectionStatus::default(); 3],
+                        peer_connect_status: vec![ConnectionStatus::default(); 3].into(),
                     },
                     Arc::clone(&handles),
                     addr_a(),

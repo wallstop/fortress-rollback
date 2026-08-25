@@ -4,6 +4,11 @@
 import re
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE = REPO_ROOT / ".github" / "workflows" / "release-prepare.yml"
 PUBLISH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
@@ -326,7 +331,9 @@ def test_release_state_is_generated_in_pr_and_verified_before_package() -> None:
     assert "trusted/scripts/release/release_state.py" in publish
     assert '--repo-root "${GITHUB_WORKSPACE}/candidate" verify' in publish
     assert text_order(publish, "Verify immutable reviewed release state", "cargo package --locked")
-    assert '"release-state.json"' in CARGO_MANIFEST.read_text(encoding="utf-8")
+    with CARGO_MANIFEST.open("rb") as manifest_file:
+        package = tomllib.load(manifest_file)["package"]
+    assert all("release-state.json" not in pattern for pattern in package["include"])
 
 
 def text_order(text: str, first: str, second: str) -> bool:

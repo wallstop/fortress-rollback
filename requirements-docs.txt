@@ -3,4 +3,4 @@
 # while preventing breaking changes from major version updates.
 mkdocs~=1.6.1
 mkdocs-material~=9.7.7
-pymdown-extensions~=11.0.1
+pymdown-extensions~=11.0.2

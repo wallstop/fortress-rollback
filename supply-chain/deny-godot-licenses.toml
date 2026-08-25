@@ -1,0 +1,29 @@
+# License-only cargo-deny policy for the standalone Godot Emscripten probe.
+# Advisory, ban, and source checks continue to use the root deny.toml.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+unused-allowed-license = "allow"
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "gdextension-api@0.5.1" },
+    { allow = ["MPL-2.0"], crate = "godot@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-bindings@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-cell@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-codegen@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-core@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-ffi@0.5.5" },
+    { allow = ["MPL-2.0"], crate = "godot-macros@0.5.5" },
+]
+
+[licenses.private]
+ignore = true

@@ -33,7 +33,7 @@ where
 {
     frame: Frame,
     inputs: Vec<Option<PlayerInput<I>>>,
-    status: Vec<ConnectionStatus>,
+    status: Arc<[ConnectionStatus]>,
 }
 
 impl<I> HostFrameSnapshot<I>
@@ -43,7 +43,7 @@ where
     fn new(
         frame: Frame,
         num_players: usize,
-        status: Vec<ConnectionStatus>,
+        status: Arc<[ConnectionStatus]>,
     ) -> Result<Self, FortressError> {
         let mut inputs = Vec::new();
         inputs
@@ -144,7 +144,7 @@ where
     /// reordered PRE-drop connected snapshot carries the older pre-drop epoch and
     /// is rejected) — see [`Self::reactivation_provenance`]. Kept index-parallel
     /// with [`Self::hosts`]/[`Self::host_snapshots`] (entries are removed
-    /// together in [`Self::remove_disconnected_hosts`]).
+    /// together in [`Self::remove_disconnected_hosts_from`]).
     host_drop_witness: Vec<Vec<Option<DropWitness>>>,
     /// Per-host high-water [`ConnectionStatus::epoch`] generation:
     /// `host_status_epoch[host][player]` is the maximum epoch this spectator has
@@ -193,6 +193,16 @@ where
     /// Cross-host comparisons must ignore these hosts so same-poll failover
     /// cannot falsely latch divergence against a host that is no longer connected.
     disconnecting_hosts: Vec<usize>,
+    /// Host indices whose disconnect event has already been handled this poll.
+    ///
+    /// Constructor-reserved to the immutable host-count bound and cleared after
+    /// every poll so the input-idle hot path does not allocate scratch storage.
+    disconnected_hosts: Vec<usize>,
+    /// Per-host event batches staged before same-poll disconnect handling.
+    ///
+    /// Constructor-reserved to the immutable host-count bound. Draining with
+    /// `pop_front` preserves host order and retains the allocation for reuse.
+    host_event_batches: VecDeque<HostEventBatch<T>>,
 }
 
 impl<T: Config> SpectatorSession<T> {
@@ -318,6 +328,19 @@ impl<T: Config> SpectatorSession<T> {
             .try_reserve_exact(event_queue_size)
             .map_err(|_err| allocation_failed("spectator.event_queue", event_queue_size))?;
 
+        let mut disconnecting_hosts = Vec::new();
+        disconnecting_hosts
+            .try_reserve_exact(hosts.len())
+            .map_err(|_err| allocation_failed("spectator.disconnecting_hosts", hosts.len()))?;
+        let mut disconnected_hosts = Vec::new();
+        disconnected_hosts
+            .try_reserve_exact(hosts.len())
+            .map_err(|_err| allocation_failed("spectator.disconnected_hosts", hosts.len()))?;
+        let mut host_event_batches = VecDeque::new();
+        host_event_batches
+            .try_reserve_exact(hosts.len())
+            .map_err(|_err| allocation_failed("spectator.host_event_batches", hosts.len()))?;
+
         Ok(Self {
             state: SessionState::Synchronizing,
             num_players,
@@ -344,7 +367,9 @@ impl<T: Config> SpectatorSession<T> {
             event_discard_warned: false,
             unknown_source_warned: false,
             spectator_divergence: None,
-            disconnecting_hosts: Vec::new(),
+            disconnecting_hosts,
+            disconnected_hosts,
+            host_event_batches,
         })
     }
 
@@ -1018,9 +1043,14 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         // alloc-bound: disconnected host indices are deduplicated on insertion,
-        // so this vector is bounded by the number of hosts present at poll start.
-        let mut disconnected_hosts = Vec::new();
-        if disconnected_hosts.try_reserve_exact(hosts_len).is_err() {
+        // so this retained vector is bounded by the number of hosts present at
+        // construction (hosts can only be removed).
+        self.disconnected_hosts.clear();
+        if self
+            .disconnected_hosts
+            .try_reserve_exact(hosts_len)
+            .is_err()
+        {
             report_violation_to!(
                 &self.violation_observer,
                 ViolationSeverity::Error,
@@ -1033,9 +1063,14 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         // alloc-bound: one drained event batch is stored per host present at
-        // poll start, so this collection is bounded by `hosts_len`.
-        let mut host_event_batches = Vec::new();
-        if host_event_batches.try_reserve_exact(hosts_len).is_err() {
+        // poll start, so this retained collection is bounded by the immutable
+        // construction-time host count.
+        self.host_event_batches.clear();
+        if self
+            .host_event_batches
+            .try_reserve_exact(hosts_len)
+            .is_err()
+        {
             report_violation_to!(
                 &self.violation_observer,
                 ViolationSeverity::Error,
@@ -1086,14 +1121,14 @@ impl<T: Config> SpectatorSession<T> {
                 addr
             };
 
-            host_event_batches.push(HostEventBatch {
+            self.host_event_batches.push_back(HostEventBatch {
                 host_index,
                 addr,
                 events: host_events,
             });
         }
 
-        for batch in &host_event_batches {
+        for batch in &self.host_event_batches {
             if !batch
                 .events
                 .iter()
@@ -1106,16 +1141,16 @@ impl<T: Config> SpectatorSession<T> {
             }
         }
 
-        for batch in host_event_batches {
+        while let Some(batch) = self.host_event_batches.pop_front() {
             for event in batch.events {
-                if disconnected_hosts.contains(&batch.host_index) {
+                if self.disconnected_hosts.contains(&batch.host_index) {
                     continue;
                 }
                 if let Some(host_index) =
                     self.handle_event(batch.host_index, event, batch.addr.clone())
                 {
-                    if !disconnected_hosts.contains(&host_index) {
-                        disconnected_hosts.push(host_index);
+                    if !self.disconnected_hosts.contains(&host_index) {
+                        self.disconnected_hosts.push(host_index);
                     }
                 }
             }
@@ -1125,7 +1160,9 @@ impl<T: Config> SpectatorSession<T> {
         // used during event handling above (before removal), so removing entries now
         // is safe. The shared `host_connect_status` is not per-host, so removal does
         // not disturb it.
-        self.remove_disconnected_hosts(disconnected_hosts);
+        let mut disconnected_hosts = std::mem::take(&mut self.disconnected_hosts);
+        self.remove_disconnected_hosts_from(&mut disconnected_hosts);
+        self.disconnected_hosts = disconnected_hosts;
         self.disconnecting_hosts.clear();
         self.try_commit_ready_frames();
 
@@ -1135,7 +1172,12 @@ impl<T: Config> SpectatorSession<T> {
         }
     }
 
+    #[cfg(test)]
     fn remove_disconnected_hosts(&mut self, mut disconnected_hosts: Vec<usize>) {
+        self.remove_disconnected_hosts_from(&mut disconnected_hosts);
+    }
+
+    fn remove_disconnected_hosts_from(&mut self, disconnected_hosts: &mut Vec<usize>) {
         if disconnected_hosts.is_empty() {
             return;
         }
@@ -1143,7 +1185,7 @@ impl<T: Config> SpectatorSession<T> {
         let hosts_len = self.hosts.len();
         disconnected_hosts.sort_unstable();
         disconnected_hosts.dedup();
-        for &host_index in &disconnected_hosts {
+        for &host_index in disconnected_hosts.iter() {
             if host_index >= hosts_len {
                 report_violation_to!(
                     &self.violation_observer,
@@ -1156,16 +1198,17 @@ impl<T: Config> SpectatorSession<T> {
             }
         }
 
-        retain_surviving_hosts(&mut self.hosts, &disconnected_hosts);
-        retain_surviving_hosts(&mut self.host_snapshots, &disconnected_hosts);
+        retain_surviving_hosts(&mut self.hosts, disconnected_hosts);
+        retain_surviving_hosts(&mut self.host_snapshots, disconnected_hosts);
         // Keep the disconnect-witness table index-parallel with `hosts`: a
         // surviving host's witness rows must follow it to its new index, or a
         // promoted host would inherit the removed host's drop provenance and a
         // stale-connected gossip could wrongly pass the reactivation gate.
-        retain_surviving_hosts(&mut self.host_drop_witness, &disconnected_hosts);
+        retain_surviving_hosts(&mut self.host_drop_witness, disconnected_hosts);
         // The epoch watermark is likewise per-host and must follow its host to
         // the new index alongside the witness it discriminates.
-        retain_surviving_hosts(&mut self.host_status_epoch, &disconnected_hosts);
+        retain_surviving_hosts(&mut self.host_status_epoch, disconnected_hosts);
+        disconnected_hosts.clear();
     }
 
     /// Returns the current frame of a session.
@@ -1980,14 +2023,17 @@ impl<T: Config> SpectatorSession<T> {
         self.last_recv_frame = frame;
     }
 
-    fn handle_host_input(
+    fn handle_host_input<S>(
         &mut self,
         host_index: usize,
         input: PlayerInput<T::Input>,
         player: PlayerHandle,
-        status_snapshot: Vec<ConnectionStatus>,
+        status_snapshot: S,
         addr: T::Address,
-    ) {
+    ) where
+        S: Into<Arc<[ConnectionStatus]>>,
+    {
+        let status_snapshot = status_snapshot.into();
         // Validate frame before using as index - negative frames would wrap around
         if input.frame.is_null() || input.frame.as_i32() < 0 {
             report_violation!(
@@ -4488,15 +4534,17 @@ mod tests {
             session.host_snapshots[0][frame0_index]
                 .as_ref()
                 .unwrap()
-                .status,
-            status0
+                .status
+                .as_ref(),
+            status0.as_slice()
         );
         assert_eq!(
             session.host_snapshots[0][frame1_index]
                 .as_ref()
                 .unwrap()
-                .status,
-            status1
+                .status
+                .as_ref(),
+            status1.as_slice()
         );
     }
 

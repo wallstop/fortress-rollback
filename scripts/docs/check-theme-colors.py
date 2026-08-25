@@ -256,7 +256,7 @@ def relative_luminance(hex_color: str) -> float:
     def channel(value: float) -> float:
         if value <= 0.03928:
             return value / 12.92
-        return ((value + 0.055) / 1.055) ** 2.4
+        return float(((value + 0.055) / 1.055) ** 2.4)
 
     return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
 

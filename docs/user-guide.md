@@ -62,101 +62,19 @@ This guide walks you through integrating Fortress Rollback into your game. By th
 
 ## Quick Start
 
-Here's a minimal example to get you started:
+Start with [Build Your First Session](getting-started.md). That focused guide installs the crate,
+runs a complete deterministic `SyncTestSession`, and explains how to switch the same game loop to
+real P2P peers.
 
-```rust
-use fortress_rollback::{
-    Config, FortressRequest, Frame, InputStatus, NonBlockingSocket,
-    PlayerHandle, PlayerType, SessionBuilder, SessionState,
-    UdpNonBlockingSocket,
-};
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+The core integration contract is short:
 
-// 1. Define your input type
-#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-struct MyInput {
-    buttons: u8,
-}
+1. Define fixed-width input and deterministic state types.
+2. Poll network sessions every game tick.
+3. Submit input for every local player before calling `advance_frame`.
+4. Fulfill every returned save, load, and advance request once, in order.
 
-// 2. Define your game state (Clone required for rollback, Serialize/Deserialize needed for checksums)
-#[derive(Clone, Serialize, Deserialize)]
-struct MyGameState {
-    frame: i32,
-    player_x: f32,
-    player_y: f32,
-}
-
-// 3. Create your config type
-struct MyConfig;
-impl Config for MyConfig {
-    type Input = MyInput;
-    type State = MyGameState;
-    type Address = SocketAddr;
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 4. Create a session
-    let socket = UdpNonBlockingSocket::bind_to_port(7000)?;
-    let remote_addr: SocketAddr = "127.0.0.1:7001".parse()?;
-
-    let mut session = SessionBuilder::<MyConfig>::new()
-        .with_num_players(2)?
-        .add_player(PlayerType::Local, PlayerHandle::new(0))?
-        .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
-        .start_p2p_session(socket)?;
-
-    // 5. Game loop
-    let mut game_state = MyGameState {
-        frame: 0,
-        player_x: 0.0,
-        player_y: 0.0,
-    };
-
-    loop {
-        // Poll for network messages
-        session.poll_remote_clients();
-
-        // Only process frames when synchronized
-        if session.current_state() == SessionState::Running {
-            // Add local input
-            // Tip: For cleaner player handle management, see the
-            // "Player Handle Convenience Methods" section below
-            let input = MyInput { buttons: 0 }; // Get real input here
-            session.add_local_input(PlayerHandle::new(0), input)?;
-
-            // Advance the frame
-            for request in session.advance_frame()? {
-                match request {
-                    FortressRequest::SaveGameState { cell, frame } => {
-                        cell.save(frame, Some(game_state.clone()), None);
-                    }
-                    FortressRequest::LoadGameState { cell, .. } => {
-                        // LoadGameState is only requested for previously saved frames
-                        if let Some(state) = cell.load() {
-                            game_state = state;
-                        }
-                    }
-                    FortressRequest::AdvanceFrame { inputs } => {
-                        // Apply inputs to your game state
-                        game_state.frame += 1;
-                        // ... update game_state based on inputs
-                    }
-                }
-            }
-        }
-
-        // Render and sleep...
-    }
-}
-```
-
-> **📚 See Also — Reduce Boilerplate & Catch Bugs**
->
-> - **[`handle_requests!` macro](#using-the-handle_requests-macro)** — Eliminate match boilerplate with a concise macro
-> - **[`compute_checksum()`](#computing-checksums)** — Enable desync detection with built-in deterministic hashing
-> - **[Config Presets](#syncconfig-presets)** — Use `SyncConfig::lan()`, `ProtocolConfig::competitive()`, etc. for common network conditions
-> - **[Request Handling Example](../examples/request_handling.rs)** — Complete example showing both manual matching and macro usage
+Return here after the first session runs. The sections below cover player mapping, event handling,
+network tuning, custom transports, spectators, hot-join, telemetry, and every configuration option.
 
 ---
 
@@ -2408,7 +2326,8 @@ impl NonBlockingSocket<MyPeerId> for MyWebSocketTransport {
 }
 ```
 
-See the [custom socket example](../examples/custom_socket.rs) for a complete implementation guide.
+See the [custom socket example](https://github.com/wallstop/fortress-rollback/blob/main/examples/custom_socket.rs)
+for a complete implementation guide.
 
 WebSockets already preserve message boundaries, so the adapter above should use `encode` and
 `decode_message`. A raw byte stream such as TCP does not. For TCP, send
@@ -2841,7 +2760,7 @@ use std::time::Duration;
 #     type State = ();
 #     type Address = SocketAddr;
 # }
-# fn build(socket: impl fortress_rollback::NonBlockingSocket<SocketAddr>)
+# fn build(socket: impl fortress_rollback::NonBlockingSocket<SocketAddr> + 'static)
 #   -> Result<(), Box<dyn std::error::Error>> {
 let addr1: SocketAddr = "127.0.0.1:7001".parse()?;
 let addr2: SocketAddr = "127.0.0.1:7002".parse()?;

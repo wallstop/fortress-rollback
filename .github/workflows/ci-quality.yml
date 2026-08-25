@@ -25,6 +25,7 @@ on:
       - '.typos.toml'
       - '.config/spellcheck.toml'
       - 'ruff.toml'
+      - 'mypy.ini'
       - 'scripts/**/*.py'
       - '.github/**/*.py'
       - '.github/actions/install-cargo-tool/**'
@@ -43,6 +44,7 @@ on:
       - '.typos.toml'
       - '.config/spellcheck.toml'
       - 'ruff.toml'
+      - 'mypy.ini'
       - 'scripts/**/*.py'
       - '.github/**/*.py'
       - '.github/actions/install-cargo-tool/**'
@@ -100,6 +102,34 @@ jobs:
           src: >-
             scripts
             .github
+
+  # ============================================================================
+  # MYPY - STRICT PRODUCTION PYTHON TYPE CHECKING
+  # ============================================================================
+  python-type-check:
+    name: Python Type Check (mypy, Python 3.10 floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Python 3.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Install pinned type checker
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check \
+            mypy==2.3.1 \
+            tomli==2.4.1 \
+            types-PyYAML==6.0.12.20260815
+
+      - name: Type-check production Python
+        run: mypy --config-file mypy.ini
 
   # ============================================================================
   # CARGO SHEAR - FAST UNUSED DEPENDENCY DETECTION
@@ -321,7 +351,7 @@ jobs:
     name: Quality Summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [typos, python-static-analysis, unused-deps-fast, spellcheck]
+    needs: [typos, python-static-analysis, python-type-check, unused-deps-fast, spellcheck]
     if: always()
 
     steps:
@@ -354,12 +384,13 @@ jobs:
           {
             echo "## Code Quality Summary"
             echo ""
-            echo "Typos, Ruff, and cargo-shear are blocking. cargo-spellcheck is advisory."
+            echo "Typos, Ruff, mypy, and cargo-shear are blocking. cargo-spellcheck is advisory."
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
             echo "| Spell Check (typos) | $(map_job_status '${{ needs.typos.result }}') |"
             echo "| Python Static Analysis (Ruff) | $(map_job_status '${{ needs.python-static-analysis.result }}') |"
+            echo "| Python Type Check (mypy) | $(map_job_status '${{ needs.python-type-check.result }}') |"
             echo "| Unused Dependencies (cargo-shear) | $(map_job_status '${{ needs.unused-deps-fast.result }}') |"
             echo "| Documentation Spelling | $(map_advisory_status '${{ needs.spellcheck.outputs.issues-found }}' '${{ needs.spellcheck.outputs.issue-count }}' '${{ needs.spellcheck.result }}' '${{ needs.spellcheck.outputs.tool-failed }}') |"
             echo ""
@@ -368,6 +399,7 @@ jobs:
             echo "- Review any warnings in the individual job logs"
             echo "- Run \`typos\` locally to check for spelling issues in source code"
             echo "- Run \`ruff check scripts .github\` locally to check Python scripts"
+            echo "- Run \`mypy --config-file mypy.ini\` locally to type-check production Python"
             echo "- Run \`cargo shear --locked --deny-warnings\` locally to check dependencies"
             echo "- Run \`cargo spellcheck fix\` to auto-fix spelling issues"
           } >> "$GITHUB_STEP_SUMMARY"

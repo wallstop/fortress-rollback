@@ -8,12 +8,12 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
+    import tomli as tomllib
 
 
 ADVISORY_RE = re.compile(r"RUSTSEC-\d{4}-\d{4}")
@@ -50,7 +50,7 @@ def _load_toml(repo_root: Path, path: Path) -> dict[str, Any]:
         detail = error.strerror if isinstance(error, OSError) else str(error)
         raise RuntimeError(f"{display}:0: cannot read TOML: {detail}") from error
     try:
-        return tomllib.loads(content)
+        return cast(dict[str, Any], tomllib.loads(content))
     except tomllib.TOMLDecodeError as error:
         line = getattr(error, "lineno", None)
         if not isinstance(line, int) or line < 1:
@@ -367,11 +367,11 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     try:
         errors = check_repository(repo_root)
-    except RuntimeError as error:
-        print(error, file=sys.stderr)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
         return 1
-    for error in errors:
-        print(error, file=sys.stderr)
+    for issue in errors:
+        print(issue, file=sys.stderr)
     if errors:
         return 1
     print("advisory dispositions are current and complete")

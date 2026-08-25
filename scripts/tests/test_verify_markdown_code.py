@@ -72,6 +72,22 @@ TYPE_ALIAS_EXCERPT_BLOCK = textwrap.dedent(
     """
 ).strip()
 
+DEFINED_PLACEHOLDER_TYPE_BLOCK = textwrap.dedent(
+    """
+    ```rust
+    struct GameConfig;
+
+    fn accepts_config<T>() {
+        let _ = std::mem::size_of::<T>();
+    }
+
+    fn main() {
+        accepts_config::<GameConfig>();
+    }
+    ```
+    """
+).strip()
+
 
 def _write_md(path: Path, body: str) -> Path:
     path.write_text(body + "\n", encoding="utf-8")
@@ -115,6 +131,10 @@ def _build_tree(tmp_path: Path) -> dict[str, Path]:
         tree_root / "type_alias_excerpt.md",
         f"# Type alias excerpt\n\n{TYPE_ALIAS_EXCERPT_BLOCK}\n",
     )
+    defined_placeholder_type = _write_md(
+        tree_root / "defined_placeholder_type.md",
+        f"# Defined placeholder type\n\n{DEFINED_PLACEHOLDER_TYPE_BLOCK}\n",
+    )
 
     only_good_dir = tmp_path / "only_good"
     only_good_dir.mkdir()
@@ -135,6 +155,7 @@ def _build_tree(tmp_path: Path) -> dict[str, Path]:
         "bad": bad,
         "no_run": no_run,
         "type_alias_excerpt": type_alias_excerpt,
+        "defined_placeholder_type": defined_placeholder_type,
         "tree_root": tree_root,
         "only_good": only_good,
         "only_good_dir": only_good_dir,
@@ -181,6 +202,15 @@ CASES: tuple[Case, ...] = (
         args_builder=lambda paths: ["--verbose", str(paths["type_alias_excerpt"])],
         expected_exit=0,
         expected_substrings=("contains API declaration excerpt",),
+    ),
+    Case(
+        name="defined_placeholder_type_is_compiled",
+        args_builder=lambda paths: [
+            "--verbose",
+            str(paths["defined_placeholder_type"]),
+        ],
+        expected_exit=0,
+        expected_substrings=("Rust blocks compiled:       1",),
     ),
 )
 

@@ -17,77 +17,16 @@ keywords = ["gamedev", "networking", "ggpo", "rollback"]
 categories = ["network-programming", "game-development"]
 documentation = "https://docs.rs/fortress-rollback"
 publish = ["crates-io"]
-exclude = [
-    # Build/CI artifacts
-    ".tla-tools/",
-    ".devcontainer/",
-    ".github/",
-    "docker/",
-    "scripts/",
-    "specs/",
-    "proptest-regressions/",
-    "actionlint",
-    # Security scanning baseline (development only)
-    ".secrets.baseline",
-    # Mutation testing artifacts (can be very large ~1GB+)
-    "mutants.out/",
-    # TLA+ model checker output
-    "states/",
-    "states.dot",
-    # Development config files (not needed by users)
-    ".cargo/",
-    ".config/",
-    ".claude/",
-    ".cursorrules",
-    ".dockerignore",
-    ".agents/",
-    ".markdown-link-check.json",
-    ".markdownlint.json",
-    ".pre-commit-config.yaml",
-    ".z3-trace",
-    "clippy.toml",
-    "deny.toml",
-    "rustfmt.toml",
-    # CI/tooling configuration files (only used for development workflows)
-    ".lychee.toml",
-    ".typos.toml",
-    ".vale.ini",
-    ".vale/",
-    "codecov.yml",
-    "Cross.toml",
-    "mkdocs.yml",
-    "requirements-docs.txt",
-    # Python virtual environment and cache (for TLA+ tooling)
-    ".venv/",
-    ".pytest_cache/",
-    # Session progress tracking files
-    "progress/",
-    # Reviewed release-state proof is repository automation metadata
-    "release-state.json",
-    # GitHub wiki mirror
-    "wiki/",
-    # LLM instruction files (for contributing to this project, not for users)
-    "AGENTS.md",
-    "CLAUDE.md",
-    # Development planning document (not for users)
-    "PLAN.md",
-    # Note: .cursorrules is already excluded above with development config files
-    # Note: llms.txt is intentionally NOT excluded - it helps AI tools understand
-    # the library API for users integrating Fortress Rollback into their projects
-    # Supply chain audits (cargo-vet metadata)
-    "supply-chain/",
-    # Tests are large and users can clone repo to run them
-    "tests/",
-    # Benchmarks - users can clone repo to run them
-    "benches/",
-    "loom-tests/",
-    "fuzz/",
-    # Documentation that's development-focused (user-guide and architecture are kept)
-    "docs/ggrs-changelog-archive.md",
-    "docs/contributing.md",
-    "docs/code-of-conduct.md",
-    # Cargo.lock not needed for library crates (now excluded since no binaries in main crate)
-    "Cargo.lock",
+# The crates.io archive is a source distribution, not a repository snapshot.
+# Keep this allowlist explicit so new CI, documentation, test, and tool files cannot
+# silently increase every consumer download. The one external fixture is required by
+# an inline source test, keeping the packaged library self-testable.
+include = [
+    "/src/**/*.rs",
+    "/tests/network/wire_golden_legacy_0_9.rs",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
 ]
 
 [badges]
@@ -410,6 +349,10 @@ harness = false
 
 [[bench]]
 name = "p2p_session"
+harness = false
+
+[[bench]]
+name = "p2p_all_local"
 harness = false
 
 [[bench]]

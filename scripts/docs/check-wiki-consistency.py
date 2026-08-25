@@ -49,7 +49,8 @@ def supports_color() -> bool:
         try:
             import ctypes
 
-            kernel32 = ctypes.windll.kernel32
+            # typeshed omits this Windows-only dynamic loader on non-Windows hosts.
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             # Enable ANSI escape sequences on Windows 10+
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
             return True
@@ -328,7 +329,7 @@ def get_docs_source_files(docs_dir: Path) -> set[str]:
         "README.md",  # docs/README.md is redundant with index.md
     }
 
-    source_files = set()
+    source_files: set[str] = set()
 
     if not docs_dir.exists():
         return source_files

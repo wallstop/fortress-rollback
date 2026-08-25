@@ -65,6 +65,7 @@ validates:
 
 - **Code formatting**: `rustfmt` for changed Rust files
 - **Markdown formatting**: `markdownlint` for consistent documentation
+- **Python types**: strict mypy for every production module under `scripts/`
 - **General hygiene**: Trailing whitespace, YAML/TOML syntax, merge conflicts
 
 Slow full-repository checks such as `cargo clippy`, `cargo doc`, link
@@ -92,6 +93,9 @@ pre-commit run --hook-stage manual check-derive-bounds --all-files
 # Run a specific hook
 pre-commit run markdownlint --all-files
 
+# Type-check all production Python at the supported Python 3.10 floor
+mypy --config-file mypy.ini
+
 # Run the link checker script directly
 python3 scripts/docs/check-links.py --verbose
 
@@ -110,6 +114,19 @@ python3 scripts/docs/check-links.py --verbose
 # Check a specific directory
 ./scripts/docs/check-code-fence-syntax.sh docs/
 ```
+
+### Python Type Checker
+
+Strict mypy 2.3.1 checks production Python under `scripts/`. Ruff and pytest continue to cover
+`scripts/tests/` without requiring test annotations.
+The configuration targets Python 3.10, so code accepted by the gate remains compatible with both
+Python 3.10 and 3.11; keep the repository's `tomllib`/`tomli` fallback when reading TOML.
+
+We selected the checker from a strict-mode comparison over the same 58 production files. Mypy
+reported 34 diagnostics across 15 files after import-path normalization and reached zero with
+narrow boundary annotations. Pyright 1.1.411 reported 495 strict errors; its warm scan took about
+4.2 seconds here versus 0.2–0.4 seconds for mypy. Pyright's larger migration and second runtime did
+not provide distinct enough signal to justify maintaining both tools.
 
 ### Bypassing Hooks (Emergencies Only)
 

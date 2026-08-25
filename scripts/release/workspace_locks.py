@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
 except ImportError:
     import tomli as tomllib
 
@@ -317,14 +317,14 @@ def check_structure(repo_root: Path) -> tuple[WorkspaceRoot, ...]:
         for package in packages:
             if not isinstance(package, dict) or "source" in package:
                 continue
-            name = package.get("name")
-            if not isinstance(name, str) or name not in local_versions:
+            package_name = package.get("name")
+            if not isinstance(package_name, str) or package_name not in local_versions:
                 continue
-            expected_version, manifest_path = local_versions[name]
+            expected_version, manifest_path = local_versions[package_name]
             locked_version = package.get("version")
             if locked_version != expected_version:
                 raise WorkspaceLockError(
-                    f"{_relative(repo_root, root.lock)}: local path package {name!r} "
+                    f"{_relative(repo_root, root.lock)}: local path package {package_name!r} "
                     f"version {locked_version!r} does not match "
                     f"{_display_manifest(repo_root, manifest_path)} version "
                     f"{expected_version!r}"

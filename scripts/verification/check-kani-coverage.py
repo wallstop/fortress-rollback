@@ -41,7 +41,7 @@ def _display_path(path: Path, project_root: Path) -> Path:
 
 def find_source_proofs(project_root: Path) -> set[str]:
     """Find all proof function names in source code."""
-    proofs = set()
+    proofs: set[str] = set()
     src_dir = project_root / "src"
 
     if not src_dir.exists():
@@ -74,7 +74,7 @@ def find_source_proofs(project_root: Path) -> set[str]:
 
 def find_script_proofs(project_root: Path) -> set[str]:
     """Find all proof names referenced in verify-kani.sh."""
-    proofs = set()
+    proofs: set[str] = set()
     verify_script = project_root / "scripts" / "verification" / "verify-kani.sh"
 
     if not verify_script.exists():
