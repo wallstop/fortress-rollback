@@ -16,34 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Production Python under `scripts/` now passes strict mypy at the Python 3.10 compatibility floor.
-  The exact checker/stub toolchain is blocking in pre-commit and hosted quality CI, with tests kept
-  outside the annotation campaign and narrow suppressions limited to typed external boundaries.
 - `SyncTestSession::advance_frame` no longer prunes its checksum history once per checked
   window frame (an O(check_distance²) `BTreeMap` scan per advance) and no longer allocates a
   mismatch vector on frames whose whole window is consistent; the `MismatchedChecksum` error
   payload still reports every divergent frame in the window.
+- Warmed input-idle spectator polls now reuse bounded host scratch storage, and input events
+  decoded from one packet share their immutable connection-status snapshot instead of cloning its
+  player-count-sized buffer for every player. All-local `P2PSession` polling also skips
+  endpoint-only bookkeeping after retaining socket diagnostics. The measured one- and four-host
+  spectator path and N=2/4/16 event-clone contract perform zero allocations; a 300,000-frame N=2
+  all-local profile executes 15.6% fewer instructions.
 
 ### Fixed
 
-- **Pre-existing:** hosted supply-chain and scheduled dependency-freshness checks now cover the
-  root, Fuzz, Loom, and Godot Emscripten Cargo workspaces. Exact-version, workspace-selected
-  license exceptions keep test-only NCSA and MPL dependencies from weakening the production
-  policy, while missing commands or reports fail closed.
 - **Pre-existing:** the crates.io source archive now uses an anchored source allowlist
   instead of trying to enumerate every repository-only exclusion. Documentation, examples, CI,
   tooling, and configuration no longer inflate consumer downloads; repository routes in the
   packaged README remain absolute and usable from crates.io.
-- **Pre-existing:** onboarding no longer makes new users choose between a 1,000-word README,
-  a duplicate docs-home program, and the full reference guide. The README and docs home now route
-  to one focused, compilable first-session guide, while advanced transport, platform, tuning,
-  operations, and contributor material stays on its canonical pages.
-- **Pre-existing:** warmed input-idle spectator polls now reuse bounded host scratch storage,
-  and input events decoded from one packet share their immutable connection-status snapshot
-  instead of cloning its player-count-sized buffer for every player. All-local `P2PSession`
-  polling also skips endpoint-only bookkeeping after retaining socket diagnostics. The measured
-  one- and four-host spectator path and N=2/4/16 event-clone contract perform zero allocations;
-  a 300,000-frame N=2 all-local profile executes 15.6% fewer instructions.
 
 ## [0.12.0] - 2026-08-03
 
