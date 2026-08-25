@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 try:
@@ -34,6 +37,29 @@ def named_step(text: str, name: str) -> str:
     )
     ends = [end for end in (next_step, next_job) if end != -1]
     return text[start : min(ends) if ends else len(text)]
+
+
+def mutation_list_fragment(step: str, count_variable: str) -> str:
+    """Extract the producer and normalization fragment from a workflow step."""
+    lines = step.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if "cargo mutants --list --json" in line
+    )
+    end = next(
+        index
+        for index, line in enumerate(lines[start:], start=start)
+        if line.strip() == "' mutation-list.json)\""
+    )
+    fragment = textwrap.dedent("\n".join(lines[start : end + 1]))
+    return (
+        "set -euo pipefail\n"
+        "filter_args=()\n"
+        'shard="0/1"\n'
+        f"{fragment}\n"
+        f'printf "count=%s\\n" "${{{count_variable}}}"\n'
+    )
 
 
 def test_workflow_pins_tool_and_runs_linux_only() -> None:
@@ -80,6 +106,59 @@ def test_runtime_flags_are_reproducible_and_list_only_json() -> None:
     assert 'pipeline_status=("${PIPESTATUS[@]}")' in step
     assert 'command_status="${pipeline_status[0]}"' in step
     assert 'tee_status="${pipeline_status[1]}"' in step
+
+
+def test_mutant_list_normalization_behavior(tmp_path: Path) -> None:
+    fake_cargo = tmp_path / "cargo"
+    fake_cargo.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "${FAKE_MUTANT_LIST_MODE}" in
+  zero) exit 0 ;;
+  valid) printf '%s\\n' '[{}, {}]' ;;
+  malformed) printf '%s\\n' '{' ;;
+  non_array) printf '%s\\n' '{}' ;;
+  producer_failure) exit 42 ;;
+  *) exit 64 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+
+    cases = (
+        ("zero", 0, "count=0\n"),
+        ("valid", 0, "count=2\n"),
+        ("malformed", None, ""),
+        ("non_array", None, ""),
+        ("producer_failure", 42, ""),
+    )
+    steps = (
+        ("Plan exact mutation corpus", "expected_mutants"),
+        ("Run bounded mutation shard", "selected_mutants"),
+    )
+    for step_name, count_variable in steps:
+        fragment = mutation_list_fragment(named_step(workflow_text(), step_name), count_variable)
+        for mode, expected_status, expected_output in cases:
+            env["FAKE_MUTANT_LIST_MODE"] = mode
+            result = subprocess.run(
+                ["bash", "-c", fragment],
+                cwd=tmp_path,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+            context = f"{step_name}/{mode}: {result.stderr}"
+            if expected_status is None:
+                assert result.returncode != 0, context
+            else:
+                assert result.returncode == expected_status, context
+            assert result.stdout == expected_output, context
 
 
 def test_baseline_and_summary_are_fail_closed() -> None:
