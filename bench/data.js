@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787620652096,
+  "lastUpdate": 1787673899706,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bd69b090f97b0b582b2a36f9116f60ca8349d16f",
-          "message": "Add hot-join lifecycle simulation op (#212)\n\n## Summary\n\nAdds the M3 `ScheduleEvent::HotJoin { slot }` lifecycle operation to the\ndeterministic simulation harness.\n\n- Bumps the simulation schedule schema to v8 and round-trips `HotJoin`\nevents.\n- Wires hot-join schedules through the public `start_hot_join_session`\npath with a deterministic coordinator, fresh `SimSocket`, and explicit\nfeature/config validation.\n- Models hot-joined slots as replacement generations instead of\npermanent dead-mask entries.\n- Adds regressions proving the clean-drop returning-slot path, fail-loud\nbehavior after prior runtime retirement, and settled pre-handoff oracle\ncoverage.\n\n## Validation\n\n- `cargo fmt`\n- `cargo nextest run --features hot-join --no-capture\nhot_join_reactivates_cleanly_dropped_slot > /tmp/hotjoin-sim.txt 2>&1`\n- `cargo nextest run --features hot-join --no-capture simulation::fleet\n> /tmp/hotjoin-fleet.txt 2>&1` (54 passed)\n- `cargo test --test simulation --no-run > /tmp/simulation-no-run.txt\n2>&1`\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n> /tmp/clippy-hotjoin.txt 2>&1`\n- `python3 scripts/ci/agent-preflight.py --auto-fix >\n/tmp/agent-preflight.txt 2>&1`\n\n## Notes\n\n`PLAN.md` and `progress/session-83-m3-hotjoin-lifecycle-op.md` are\nupdated locally, but both paths are ignored by this repository's\n`.gitignore`, so they are not included in the PR diff.\n\nResiduals recorded locally: slot-0 fixed-order and N-peer hot-join DST\ncoverage remain future census/random-generator work.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes lifecycle orchestration and oracle canonical-input semantics\nfor hot-join; impact is mostly confined to simulation tests behind the\n`hot-join` feature, but mistakes could mask real determinism or handoff\nbugs.\n> \n> **Overview**\n> Introduces **`ScheduleEvent::HotJoin`** (schedule schema **v8**) and\nruns it through the simulation harness via **`start_hot_join_session`**,\nwith **`with_hot_join(true)`** on coordinator peers and static\nvalidation (feature flag, `input_delay == 0`, `max_prediction >= 1`).\n> \n> Hot-join is modeled as a **replacement generation** at the same\nslot—not a permanent dead-peer mask: the oracle gains\n**`begin_replacement_generation`** to drop trailing handoff-window\nconfirmed-input authorship, the game stub prunes state on snapshot load,\nand the drive loop defers confirmed-input sampling until the replacement\n**`LoadGameState`** completes. Runtime errors surface as\n**`hot_join_slot_unavailable`** (e.g. after **`GracefulRemove`**).\n> \n> Fleet tests cover clean-slot reactivation, fail-loud behavior on an\nalready-retired slot, and that pre-handoff **`StateDivergence`** is\nstill detected.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nd92c93d43164648341a058d5445c63f18e183d7a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-07T15:52:16-07:00",
-          "tree_id": "79f4fae49a524e705a2c4a3d9907c31028f75e80",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bd69b090f97b0b582b2a36f9116f60ca8349d16f"
-        },
-        "date": 1783465030255,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 463,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 706,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1047,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 127859,
-            "range": "± 1542",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 43852,
-            "range": "± 3549",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 105",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3899,6 +3773,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3138,
             "range": "± 272",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "304587157+wallstop-auto-releaser[bot]@users.noreply.github.com",
+            "name": "wallstop-auto-releaser[bot]",
+            "username": "wallstop-auto-releaser[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9db0f8abd2bfb829f243c6e2fae6ce8b2fce4af5",
+          "message": "Prepare v0.13.0 release (#309)\n\nAutomated preparation for Fortress Rollback v0.13.0.\n\nCloses #227\n\nAfter this PR is green and merged, run **Release - Publish Crate** on\n`main` with `0.13.0`.\n\nCo-authored-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-25T08:56:50-07:00",
+          "tree_id": "becff0175ba3c23cb8c27f978102aad4b0831bc9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9db0f8abd2bfb829f243c6e2fae6ce8b2fce4af5"
+        },
+        "date": 1787673895662,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 52050,
+            "range": "± 68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 42690,
+            "range": "± 219",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1601,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3137,
+            "range": "± 237",
             "unit": "ns/iter"
           }
         ]
