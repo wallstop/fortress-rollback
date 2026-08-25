@@ -28,7 +28,7 @@ Add the library and Serde derives to your game:
 
 ```toml
 [dependencies]
-fortress-rollback = "0.12"
+fortress-rollback = "0.13"
 serde = { version = "1", features = ["derive"] }
 ```
 
