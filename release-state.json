@@ -1,9 +1,9 @@
 {
   "bump": "minor",
   "crate_name": "fortress-rollback",
-  "previous_version": "0.11.0",
-  "release_date": "2026-08-03",
+  "previous_version": "0.12.0",
+  "release_date": "2026-08-25",
   "schema_version": 1,
-  "source_sha256": "de0914b4ff2f5c02087b4bc9e67c39d2e886e9ee20898b1d706659626f7a0a3e",
-  "target_version": "0.12.0"
+  "source_sha256": "af1f9731aa5aee52b66f81131a56d7f6aefa6a1bcd9e0a24c428ce461bbb29fd",
+  "target_version": "0.13.0"
 }

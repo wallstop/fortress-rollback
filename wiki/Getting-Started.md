@@ -12,7 +12,7 @@ Add Fortress Rollback and Serde derives:
 
 ```toml
 [dependencies]
-fortress-rollback = "0.12"
+fortress-rollback = "0.13"
 serde = { version = "1", features = ["derive"] }
 ```
 
