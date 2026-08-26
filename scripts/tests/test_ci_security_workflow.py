@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -45,6 +46,36 @@ EXPECTED_LICENSE_EXCEPTIONS = {
 
 def _workflow() -> dict:
     return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+
+def _run_unsafe_audit_producer(
+    tmp_path: Path, output: str, status: int
+) -> subprocess.CompletedProcess[str]:
+    cargo_stub = tmp_path / "cargo"
+    cargo_stub.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"${GEIGER_STUB_OUTPUT:?}\"\n"
+        "exit \"${GEIGER_STUB_STATUS:?}\"\n",
+        encoding="utf-8",
+    )
+    cargo_stub.chmod(0o755)
+    audit_step = next(
+        step
+        for step in _workflow()["jobs"]["unsafe-audit"]["steps"]
+        if step.get("name") == "Audit unsafe code in dependencies"
+    )
+    return subprocess.run(
+        ["bash", "-c", audit_step["run"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "GEIGER_STUB_OUTPUT": output,
+            "GEIGER_STUB_STATUS": str(status),
+        },
+    )
 
 
 def _workspace_matrix(job: dict) -> dict[str, tuple[str, str]]:
@@ -156,6 +187,12 @@ def test_unsafe_audit_excludes_only_bundled_z3_from_feature_census() -> None:
     assert job["timeout-minutes"] == 20
 
 
+def test_unsafe_audit_runs_for_pull_requests() -> None:
+    job = _workflow()["jobs"]["unsafe-audit"]
+
+    assert "github.event_name == 'pull_request'" in str(job["if"])
+
+
 def test_unsafe_audit_cache_tracks_manifest_and_workflow_contract() -> None:
     job = _workflow()["jobs"]["unsafe-audit"]
     report_cache = next(
@@ -177,9 +214,40 @@ def test_unsafe_audit_report_verification_is_ansi_free_and_non_vacuous() -> None
         step for step in job["steps"] if step.get("name") == "Verify no unsafe in library code"
     )
     verify_run = verify_step["run"]
+    audit_run = audit_step["run"]
 
     assert audit_step["env"]["CARGO_TERM_COLOR"] == "never"
+    assert "PIPESTATUS[0]" in audit_run
+    assert "|| true" not in audit_run
+    assert "Found [1-9][0-9]* warnings" in audit_run
+    assert "touch geiger-report.complete" in audit_run
+    assert "test -f geiger-report.complete" in verify_run
     assert 'test -n "$root_row"' in verify_run
     assert 'unsafe_total="$(' in verify_run
     assert 'if [ "$unsafe_total" -ne 0 ]' in verify_run
     assert "grep -v \"0/0\"" not in verify_run
+
+
+def test_unsafe_audit_accepts_geiger_warning_exit_after_complete_report(
+    tmp_path: Path,
+) -> None:
+    result = _run_unsafe_audit_producer(
+        tmp_path,
+        "0/0 0/0 0/0 0/0 0/0 fortress-rollback\nerror: Found 2 warnings",
+        1,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "geiger-report.complete").is_file()
+
+
+def test_unsafe_audit_rejects_failed_partial_geiger_report(tmp_path: Path) -> None:
+    result = _run_unsafe_audit_producer(
+        tmp_path,
+        "0/0 0/0 0/0 0/0 0/0 fortress-rollback\nerror: could not compile dependency",
+        1,
+    )
+
+    assert result.returncode != 0
+    assert "producer failed" in result.stdout
+    assert not (tmp_path / "geiger-report.complete").exists()

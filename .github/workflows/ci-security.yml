@@ -94,8 +94,9 @@ jobs:
           cargo deny --manifest-path "$MANIFEST" --locked --config "$LICENSE_CONFIG" check licenses
 
   # Unsafe code audit via cargo-geiger
-  # Only runs when dependencies change (Cargo.toml/Cargo.lock) or on schedule/manual trigger
-  # Skips entirely on PR/push when only .rs files change (dependencies unchanged)
+  # Runs on every PR because the pull_request payload does not include changed
+  # paths. Pushes remain limited to dependency changes; schedules/manual runs
+  # provide recurring coverage.
   unsafe-audit:
     name: Unsafe Code Audit
     runs-on: ubuntu-latest
@@ -103,6 +104,7 @@ jobs:
     if: |
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
       contains(toJSON(github.event.commits.*.modified), 'Cargo.toml') ||
       contains(toJSON(github.event.commits.*.modified), 'Cargo.lock') ||
       contains(toJSON(github.event.commits.*.added), 'Cargo.toml') ||
@@ -153,15 +155,30 @@ jobs:
         uses: actions/cache@v6
         continue-on-error: true
         with:
-          path: geiger-report.txt
-          key: geiger-report-v2-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci-security.yml') }}
+          path: |
+            geiger-report.txt
+            geiger-report.complete
+          key: geiger-report-v3-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci-security.yml') }}
 
       - name: Audit unsafe code in dependencies
         if: steps.geiger-cache.outputs.cache-hit != 'true'
         run: |
+          set -u -o pipefail
           # Keep the ordinary Z3 dependency visible, but do not compile bundled Z3 from
           # source: cold native builds repeatedly exhausted this job's 20-minute budget.
-          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt || true
+          rm -f geiger-report.complete
+          set +e
+          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt
+          geiger_status="${PIPESTATUS[0]}"
+          set -e
+          if [ "${geiger_status}" -eq 1 ] \
+            && grep -Eq '^error: Found [1-9][0-9]* warnings$' geiger-report.txt; then
+            echo "cargo-geiger completed with its expected warning exit"
+          elif [ "${geiger_status}" -ne 0 ]; then
+            echo "ERROR: cargo-geiger producer failed with status ${geiger_status}"
+            exit "${geiger_status}"
+          fi
+          touch geiger-report.complete
         env:
           CARGO_TERM_COLOR: never
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
@@ -173,12 +190,14 @@ jobs:
       - name: Display cached geiger report
         if: steps.geiger-cache.outputs.cache-hit == 'true'
         run: |
+          test -f geiger-report.complete
           echo "Using cached geiger report (dependencies unchanged)"
           cat geiger-report.txt
 
       - name: Verify no unsafe in library code
         run: |
           set -euo pipefail
+          test -f geiger-report.complete
           root_row="$(
             awk '
               $6 == "fortress-rollback" &&
