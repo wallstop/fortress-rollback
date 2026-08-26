@@ -126,8 +126,8 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
 USER vscode
 
 # Keep global npm installs writable by the remote user. Explicit @latest tags
-# resolve when the image is built; lifecycle hooks refresh them again on every
-# create/start so a cached image does not pin stale AI CLI versions.
+# resolve when the image is built; the post-create hook refreshes them again so
+# a cached image does not pin stale AI CLI versions.
 ENV NPM_CONFIG_PREFIX=/home/vscode/.local
 ENV NPM_CONFIG_CACHE=/home/vscode/.cache/npm
 ENV PATH=/home/vscode/.local/bin:${PATH}

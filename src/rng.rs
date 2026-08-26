@@ -244,11 +244,20 @@ pub trait Rng {
     /// Generates a random boolean with the given probability of being `true`.
     ///
     /// `probability` should be in the range `[0.0, 1.0]`.
-    /// Values outside this range are clamped.
+    /// Values outside this range are clamped; `NaN` behaves as `0.0`.
     fn gen_bool(&mut self, probability: f64) -> bool {
-        let p = probability.clamp(0.0, 1.0);
-        let threshold = (p * f64::from(u32::MAX)) as u32;
-        self.next_u32() < threshold
+        if probability.is_nan() || probability <= 0.0 {
+            return false;
+        }
+        if probability >= 1.0 {
+            return true;
+        }
+
+        // A u32 has 2^32 equiprobable values. Scaling by the full sample-space
+        // size makes 0.5 split it exactly and keeps both endpoint contracts total.
+        let sample_space = f64::from(u32::MAX) + 1.0;
+        let threshold = (probability * sample_space) as u64;
+        u64::from(self.next_u32()) < threshold
     }
 
     /// Fills the given slice with random bytes.
@@ -564,6 +573,27 @@ mod tests {
         // Should be roughly 5000, allow variance
         assert!(true_count > 4500, "Too few trues: {true_count}");
         assert!(true_count < 5500, "Too many trues: {true_count}");
+    }
+
+    #[test]
+    fn test_gen_bool_one_is_true_for_maximum_sample() {
+        struct MaximumRng;
+
+        impl Rng for MaximumRng {
+            fn next_u32(&mut self) -> u32 {
+                u32::MAX
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        assert!(MaximumRng.gen_bool(1.0));
+        assert!(MaximumRng.gen_bool(f64::INFINITY));
+        assert!(!MaximumRng.gen_bool(0.0));
+        assert!(!MaximumRng.gen_bool(f64::NEG_INFINITY));
+        assert!(!MaximumRng.gen_bool(f64::NAN));
     }
 
     #[test]
