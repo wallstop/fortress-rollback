@@ -8,26 +8,27 @@
 
 **Version:** 1.0
 **Date:** December 6, 2025
-**Status:** Complete
+**Status:** Maintained high-impact subset
 
-This document specifies preconditions, postconditions, and invariants for all public APIs. It complements formal-spec.md and serves as a reference for verification and documentation.
+This document specifies preconditions, postconditions, and invariants for selected high-impact public APIs. Rustdoc remains the authoritative reference for the complete public surface. This document complements formal-spec.md with behavioral contracts that benefit from a consolidated view.
 
 ---
 
 ## Table of Contents
 
 1. [Contract Notation](#contract-notation)
-2. [SessionBuilder](#sessionbuilder)
-3. [P2PSession](#p2psession)
-4. [SpectatorSession](#spectatorsession)
-5. [SyncTestSession](#synctestsession)
-6. [GameStateCell](#gamestatecell)
-7. [Request Handling](#request-handling)
-8. [Error Catalog](#error-catalog)
-9. [Event Catalog](#event-catalog)
-10. [Network Stream Framing](#network-stream-framing)
-11. [Cross-Cutting Invariants](#cross-cutting-invariants)
-12. [Revision History](#revision-history)
+2. [Frame](#frame)
+3. [SessionBuilder](#sessionbuilder)
+4. [P2PSession](#p2psession)
+5. [SpectatorSession](#spectatorsession)
+6. [SyncTestSession](#synctestsession)
+7. [GameStateCell](#gamestatecell)
+8. [Request Handling](#request-handling)
+9. [Error Catalog](#error-catalog)
+10. [Event Catalog](#event-catalog)
+11. [Network Stream Framing](#network-stream-framing)
+12. [Cross-Cutting Invariants](#cross-cutting-invariants)
+13. [Revision History](#revision-history)
 
 ---
 
@@ -41,6 +42,27 @@ Each API is documented with:
 - **Errors**: Conditions that cause specific errors
 - **Panics**: Should always be "Never" for public APIs
 - **Invariants**: Properties preserved across the call
+
+---
+
+## Frame
+
+### Arithmetic operators and `From<usize>`
+
+**Pre:** None
+
+**Post:**
+
+- `Frame + i32`, `Frame + Frame`, `Frame += i32`, `Frame - i32`,
+  `Frame - Frame`, and `Frame -= i32` saturate at the `i32` numeric bounds.
+- `Frame % i32` returns the primitive remainder when defined and `0` for a zero
+  divisor or `i32::MIN % -1`.
+- `Frame::from(usize)` saturates at `Frame::new(i32::MAX)`; callers that need to
+  detect overflow use `Frame::from_usize` or `Frame::try_from_usize`.
+
+**Errors:** None. The operator traits and `From` conversion cannot return errors.
+
+**Panics:** Never
 
 ---
 

@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pre-existing:** legacy `Frame` arithmetic operators now saturate at the `i32` bounds instead of panicking on overflow. Remainder returns `0` for its two undefined primitive-integer cases (a zero divisor and `i32::MIN % -1`), and the discouraged `From<usize>` conversion saturates at `i32::MAX` instead of wrapping into a negative frame. The existing checked and fallible APIs remain the preferred choices when callers need to detect invalid arithmetic.
+- **Pre-existing:** `Rng::gen_range` and `Rng::gen_range_usize` now treat every empty exclusive range, including reversed bounds, as invalid: they report the existing configuration violation and return the start bound. Previously reversed bounds wrapped the span and could return an arbitrary value outside the requested range.
+- **Pre-existing:** custom `RandomValue` implementations may now call the thread-local `random()` function recursively. The thread-local generator is borrowed only around primitive sample generation, preventing the prior `RefCell already borrowed` panic while preserving the same shared random stream.
+
 ## [0.13.0] - 2026-08-25
 
 ### Changed

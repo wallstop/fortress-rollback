@@ -535,6 +535,11 @@ pub const NULL_FRAME: i32 = -1;
 /// - Arithmetic operations for frame calculations
 /// - Compile-time prevention of accidentally mixing frames with other integers
 ///
+/// The convenience `+`, `-`, `+=`, and `-=` implementations saturate at the
+/// `i32` bounds. Remainder returns `0` when the primitive operation is undefined
+/// (a zero divisor or `i32::MIN % -1`). Use the checked or `try_*` methods when
+/// overflow or an invalid operand must be reported to the caller.
+///
 /// # Examples
 ///
 /// ```
@@ -1205,14 +1210,17 @@ impl std::fmt::Display for Frame {
     }
 }
 
-// Arithmetic operations
+// Arithmetic operations. These legacy convenience operators are total: they
+// saturate at the numeric bounds rather than inheriting primitive-integer
+// overflow panics. Callers that need to detect overflow should use `try_add`,
+// `try_sub`, or the corresponding `checked_*` methods.
 
 impl std::ops::Add<i32> for Frame {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: i32) -> Self::Output {
-        Self(self.0 + rhs)
+        self.saturating_add(rhs)
     }
 }
 
@@ -1221,14 +1229,14 @@ impl std::ops::Add<Self> for Frame {
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
+        self.saturating_add(rhs.0)
     }
 }
 
 impl std::ops::AddAssign<i32> for Frame {
     #[inline]
     fn add_assign(&mut self, rhs: i32) {
-        self.0 += rhs;
+        *self = self.saturating_add(rhs);
     }
 }
 
@@ -1237,7 +1245,7 @@ impl std::ops::Sub<i32> for Frame {
 
     #[inline]
     fn sub(self, rhs: i32) -> Self::Output {
-        Self(self.0 - rhs)
+        self.saturating_sub(rhs)
     }
 }
 
@@ -1246,14 +1254,14 @@ impl std::ops::Sub<Self> for Frame {
 
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        self.0 - rhs.0
+        self.0.saturating_sub(rhs.0)
     }
 }
 
 impl std::ops::SubAssign<i32> for Frame {
     #[inline]
     fn sub_assign(&mut self, rhs: i32) {
-        self.0 -= rhs;
+        *self = self.saturating_sub(rhs);
     }
 }
 
@@ -1262,7 +1270,9 @@ impl std::ops::Rem<i32> for Frame {
 
     #[inline]
     fn rem(self, rhs: i32) -> Self::Output {
-        self.0 % rhs
+        // `checked_rem` rejects both zero and `i32::MIN % -1`. The operator
+        // cannot return an error, so use a deterministic neutral fallback.
+        self.0.checked_rem(rhs).unwrap_or(0)
     }
 }
 
@@ -1286,8 +1296,8 @@ impl From<Frame> for i32 {
 ///
 /// # ⚠️ Discouraged
 ///
-/// **Soft-deprecated**: This conversion silently truncates values larger
-/// than `i32::MAX`. For safe conversion with overflow detection, use
+/// **Soft-deprecated**: This conversion saturates values larger than
+/// `i32::MAX`. For conversion with overflow detection, use
 /// [`Frame::from_usize()`] or [`Frame::try_from_usize()`] instead.
 ///
 /// This impl cannot use `#[deprecated]` because Rust doesn't support that attribute
@@ -1296,7 +1306,10 @@ impl From<Frame> for i32 {
 impl From<usize> for Frame {
     #[inline]
     fn from(value: usize) -> Self {
-        Self(value as i32)
+        match i32::try_from(value) {
+            Ok(value) => Self(value),
+            Err(_) => Self(i32::MAX),
+        }
     }
 }
 
@@ -3540,6 +3553,33 @@ mod tests {
         let frame = Frame::new(135);
         let remainder = frame % 128;
         assert_eq!(remainder, 7);
+    }
+
+    #[test]
+    fn frame_operators_are_total_at_numeric_boundaries() {
+        assert_eq!(Frame::new(i32::MAX) + 1, Frame::new(i32::MAX));
+        assert_eq!(Frame::new(i32::MAX) + Frame::new(1), Frame::new(i32::MAX));
+
+        let mut added = Frame::new(i32::MAX);
+        added += 1;
+        assert_eq!(added, Frame::new(i32::MAX));
+
+        assert_eq!(Frame::new(i32::MIN) - 1, Frame::new(i32::MIN));
+        assert_eq!(Frame::new(i32::MIN) - Frame::new(1), i32::MIN);
+
+        let mut subtracted = Frame::new(i32::MIN);
+        subtracted -= 1;
+        assert_eq!(subtracted, Frame::new(i32::MIN));
+
+        assert_eq!(Frame::new(7) % 0, 0);
+        assert_eq!(Frame::new(i32::MIN) % -1, 0);
+    }
+
+    #[test]
+    fn legacy_usize_conversion_saturates_instead_of_truncating() {
+        let too_large = (i32::MAX as usize).saturating_add(1);
+        assert_eq!(Frame::from(too_large), Frame::new(i32::MAX));
+        assert_eq!(Frame::from(usize::MAX), Frame::new(i32::MAX));
     }
 
     #[test]

@@ -143,8 +143,7 @@ pub trait Rng {
     /// # Empty Range Behavior
     /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range(&mut self, range: std::ops::Range<u32>) -> u32 {
-        let span = range.end.wrapping_sub(range.start);
-        if span == 0 {
+        if range.is_empty() {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::Configuration,
@@ -154,13 +153,14 @@ pub trait Rng {
             );
             return range.start;
         }
+        let span = range.end - range.start;
 
         // Use rejection sampling to avoid bias
         let threshold = span.wrapping_neg() % span;
         loop {
             let random_value = self.next_u32();
             if random_value >= threshold {
-                return range.start.wrapping_add(random_value % span);
+                return range.start + random_value % span;
             }
         }
     }
@@ -170,8 +170,7 @@ pub trait Rng {
     /// # Empty Range Behavior
     /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range_usize(&mut self, range: std::ops::Range<usize>) -> usize {
-        let span = range.end.wrapping_sub(range.start);
-        if span == 0 {
+        if range.is_empty() {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::Configuration,
@@ -181,6 +180,7 @@ pub trait Rng {
             );
             return range.start;
         }
+        let span = range.end - range.start;
 
         if span <= u32::MAX as usize {
             // Use 32-bit arithmetic for smaller ranges
@@ -188,9 +188,7 @@ pub trait Rng {
             loop {
                 let random_value = self.next_u32();
                 if random_value >= threshold {
-                    return range
-                        .start
-                        .wrapping_add((random_value % span as u32) as usize);
+                    return range.start + (random_value % span as u32) as usize;
                 }
             }
         } else {
@@ -200,7 +198,7 @@ pub trait Rng {
             loop {
                 let random_value = self.next_u64();
                 if random_value >= threshold {
-                    return range.start.wrapping_add((random_value % span64) as usize);
+                    return range.start + (random_value % span64) as usize;
                 }
             }
         }
@@ -385,12 +383,14 @@ thread_local! {
 /// let value: u32 = random();
 /// let coin_flip: bool = random();
 /// ```
+///
+/// Custom [`RandomValue`] implementations may call `random()` recursively. The
+/// thread-local generator is borrowed only while producing each primitive
+/// sample, so user code is never invoked while its storage is borrowed.
 #[must_use]
 pub fn random<T: RandomValue>() -> T {
-    THREAD_RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        T::random(&mut *rng)
-    })
+    let mut rng = thread_rng();
+    T::random(&mut rng)
 }
 
 /// Returns a reference to the thread-local RNG.
@@ -618,6 +618,22 @@ mod tests {
     }
 
     #[test]
+    fn test_random_value_can_call_random_recursively() {
+        struct RecursiveRandom;
+
+        impl RandomValue for RecursiveRandom {
+            fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
+                let _outer = rng.next_u32();
+                let nested: u32 = random();
+                let _ = nested;
+                Self
+            }
+        }
+
+        let _: RecursiveRandom = random();
+    }
+
+    #[test]
     fn test_seedable_from_entropy() {
         // Just verify it doesn't panic
         let _rng = Pcg32::from_entropy();
@@ -739,6 +755,17 @@ mod tests {
         assert_eq!(result, u32::MAX, "Empty range at MAX should return MAX");
     }
 
+    /// Reversed exclusive ranges are empty and use the same deterministic
+    /// fallback as equal-bound ranges.
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_gen_range_reversed_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        assert_eq!(rng.gen_range(100..50), 100);
+        assert_eq!(rng.gen_range(u32::MAX..0), u32::MAX);
+    }
+
     /// Tests that gen_range_usize with an empty range returns start
     /// instead of panicking. A violation is reported via telemetry.
     #[test]
@@ -752,6 +779,17 @@ mod tests {
         // Test with different start values
         let result = rng.gen_range_usize(0..0);
         assert_eq!(result, 0, "Empty range at 0 should return 0");
+    }
+
+    /// Reversed exclusive ranges are empty and use the same deterministic
+    /// fallback as equal-bound ranges.
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_gen_range_usize_reversed_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        assert_eq!(rng.gen_range_usize(100..50), 100);
+        assert_eq!(rng.gen_range_usize(usize::MAX..0), usize::MAX);
     }
 
     /// Tests that gen_range_i64_inclusive with an invalid range (start > end)
