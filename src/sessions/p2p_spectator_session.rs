@@ -2794,7 +2794,7 @@ mod tests {
         assert!(session.peer_metrics(1).is_none());
     }
 
-    /// Regression for defect D9 (PLAN.md §2) on the **spectator** session: its
+    /// Regression for hardening defect D9 on the **spectator** session: its
     /// event-queue trim used to discard undrained events silently, just like
     /// the P2P session. The overflow now increments [`SessionMetrics`] (total +
     /// per-[`EventKind`](crate::metrics::EventKind)) and reports a single

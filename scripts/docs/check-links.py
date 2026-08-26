@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 SKIP_DIRS = {".claude", ".git", "node_modules", "progress", "target"}
-SKIP_MARKDOWN_FILES = {"PLAN.md", "pr-description.md"}
+SKIP_MARKDOWN_FILES = {"pr-description.md"}
 
 
 class LinkCheckResult(NamedTuple):

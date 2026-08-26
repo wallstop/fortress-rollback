@@ -211,3 +211,9 @@ Structure core logic as pure state transitions (old state + input = new state + 
 | Maximum control | Manual (sled-style) |
 | Lock-free data structures | loom |
 | Quick time mocking | tokio-test |
+
+## Project Fleet Search Roadmap
+
+For the approved post-audit sequence, experiment gates, and rejection criteria, use the
+[fleet-search roadmap](references/fleet-search-roadmap.md). Keep experiment results in session
+records rather than growing `PLAN.md`.

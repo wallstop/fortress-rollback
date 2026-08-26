@@ -252,6 +252,19 @@ def is_spellcheck_surface_file(path: str) -> bool:
     return Path(path).suffix in SPELLCHECK_EXTENSIONS
 
 
+def is_plan_hygiene_surface_file(path: str) -> bool:
+    """Return True for the active plan, its policy, and its executable contract."""
+    return path in {
+        ".agents/skills/dev-pipeline/SKILL.md",
+        ".agents/skills/dst/SKILL.md",
+        ".agents/skills/dst/references/fleet-search-roadmap.md",
+        ".agents/skills/fortress-development/SKILL.md",
+        "PLAN.md",
+        "scripts/hooks/check-plan-hygiene.py",
+        "scripts/tests/test_plan_hygiene.py",
+    }
+
+
 def git_output_lines(repo_root: Path, args: list[str]) -> set[str]:
     """Run git and return non-empty output lines.
 
@@ -336,6 +349,26 @@ def plan_checks(
     spellcheck_changed = any(
         is_spellcheck_surface_file(path) for path in changed_files
     )
+    plan_hygiene_changed = any(
+        is_plan_hygiene_surface_file(path) for path in changed_files
+    )
+
+    if run_all or plan_hygiene_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="plan-hygiene",
+                description="keep PLAN.md limited to active and ordered future work",
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/hooks/check-plan-hygiene.py",
+                ],
+                fix_hint=(
+                    "Move completed work and evidence to progress/session-*.md, "
+                    "move reusable context to its owning skill or docs, and keep "
+                    "only active or approved future tasks in PLAN.md."
+                ),
+            )
+        )
 
     if run_all or any(is_sync_version_surface_file(path) for path in changed_files):
         checks.append(

@@ -9482,7 +9482,6 @@ mod tests {
 // ============================================================================
 //
 // These tests verify invariants of the UDP protocol state machine using proptest.
-// See PLAN.md item 2.5 for context.
 //
 // # Invariants Tested
 //

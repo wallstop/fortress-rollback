@@ -56,6 +56,13 @@ Structured workflow from planning through shipping for fortress-rollback. Each p
 | CI/tooling            | No               | No               |
 | Kani proof            | Brief            | No               |
 
+### Plan Lifecycle
+
+Use `PLAN.md` only to order active and approved future work. Keep detailed scope in its issue or PR.
+On completion, remove the task from the plan and write the outcome and evidence to a
+`progress/session-*.md` record. Follow the canonical
+[plan-hygiene policy](../fortress-development/SKILL.md#plan-hygiene).
+
 ---
 
 ## Prerequisites

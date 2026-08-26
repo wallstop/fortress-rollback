@@ -208,6 +208,24 @@ Before implementation, run the design entrance checks in [dev-pipeline.md](../de
 
 Before opening PRs, run [review-readiness.md](../review-readiness/SKILL.md). For high-risk changes or post-incident hardening, use [adversarial-handoff.md](../adversarial-handoff/SKILL.md) with [adversarial-review.md](../adversarial-review/SKILL.md).
 
+## Plan Hygiene
+
+`PLAN.md` is an execution queue, not a project archive. Keep only approved in-progress work and
+ordered future work. Each item needs an outcome, enough ordering/dependency information to choose
+the next task, and a falsifiable exit criterion. Link to the canonical issue or focused skill for
+scope and technical context.
+
+When work finishes, remove it from `PLAN.md` in the same change and record its result, red/green
+evidence, decisions, and verification under `progress/session-*.md`. Put reusable engineering rules
+in the relevant Agent Skill, user-facing behavior in `docs/`, architecture decisions in the design
+decision log, and detailed tracked scope in an issue. Do not put completed milestones, session/PR/CI
+narration, research digests, bibliographies, reusable policy, or speculative parking lots in the
+plan. Promote a new idea only when it has maintainer priority and a data-gathering entrance gate.
+
+Run `python3 scripts/hooks/check-plan-hygiene.py`. The check intentionally caps the plan at 120
+lines and 1,000 words, rejects completed checkboxes, and permits only `In progress` and `Future`
+top-level plan sections.
+
 ## Test Writing
 
 Use **Arrange-Act-Assert** pattern. Name tests: `what_condition_expected_behavior` (e.g., `parse_empty_input_returns_none`).

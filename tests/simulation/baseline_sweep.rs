@@ -478,7 +478,7 @@ fn assert_close(cell: &str, field: &str, actual: f64, expected: f64, rel: f64, a
 /// Compares the gate cells to the checked-in [`baseline_path`] ledger, or
 /// regenerates it when `FORTRESS_SWEEP_BLESS` is set. Correctness columns
 /// (`desync_incidents`) are exact; cost/behavior columns compare within
-/// tolerance (plan §5.3: bytes ±5%, rollbacks ±10%), since a wire-format change
+/// tolerance (bytes ±5%, rollbacks ±10%), since a wire-format change
 /// (M5's +6 B/packet) shows up here as a reviewed, over-tolerance delta.
 fn check_or_bless_baseline(reports: &[CellReport]) {
     let current: Vec<BaselineCell> = reports.iter().map(BaselineCell::from_report).collect();

@@ -49,7 +49,6 @@ class TestSkippedMarkdownPaths:
             ".claude/worktrees/agent/wiki/Home.md",
             "target/doc/readme.md",
             "node_modules/package/README.md",
-            "PLAN.md",
             "pr-description.md",
         ],
     )
@@ -60,6 +59,10 @@ class TestSkippedMarkdownPaths:
     def test_docs_markdown_is_checked(self) -> None:
         """Project documentation remains in scope."""
         assert not should_skip_markdown_file(Path("docs/contributing.md"))
+
+    def test_active_plan_is_checked(self) -> None:
+        """The lean active plan's links must remain valid."""
+        assert not should_skip_markdown_file(Path("PLAN.md"))
 
     @pytest.mark.parametrize(
         "path",

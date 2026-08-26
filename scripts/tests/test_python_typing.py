@@ -32,7 +32,7 @@ def test_strict_config_checks_every_production_script_at_python_310_floor() -> N
     assert options["files"] == "scripts"
     assert options["exclude"] == "^scripts/tests/"
     assert "ignore_errors" not in options
-    assert len(_production_python()) == 58
+    assert len(_production_python()) == 59
 
 
 def test_ci_type_check_is_pinned_blocking_and_in_the_required_summary() -> None:

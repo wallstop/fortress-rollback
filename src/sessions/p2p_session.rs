@@ -13107,7 +13107,7 @@ mod tests {
         assert_eq!(DEFAULT_MAX_EVENT_QUEUE_SIZE, 100);
     }
 
-    /// Regression for defect D9 (PLAN.md §2): event-queue overflow used to
+    /// Regression for hardening defect D9: event-queue overflow used to
     /// discard the oldest event — even a durable `Disconnected` — with
     /// **zero** telemetry (no violation, no counter, nothing an application
     /// could use to learn an event was lost). The M2 metrics layer makes the
@@ -13116,7 +13116,7 @@ mod tests {
     /// reports one rate-limited `Warning` violation per overflow episode.
     ///
     /// This is the green successor to the red-documentation test that pinned
-    /// the silent behavior (PLAN.md §21.3): the final assertions flipped from
+    /// the silent behavior: the final assertions flipped from
     /// "no telemetry" to "telemetry recorded" once the fix landed.
     #[test]
     fn event_queue_overflow_records_discard_telemetry() {
