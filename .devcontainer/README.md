@@ -120,6 +120,10 @@ days. The cleanup only removes derived Cargo artifacts; source files and Cargo's
 download cache remain untouched. Registry failures and cleanup failures never
 block container startup.
 
+For safety, automatic cleanup operates only on the exact `target/` directory
+under the resolved workspace. A `CARGO_TARGET_DIR` elsewhere is never cleaned
+automatically, even when it contains Cargo's standard cache marker.
+
 You can tune or disable the policy through container environment variables:
 
 | Variable                               | Default | Purpose                                       |

@@ -599,6 +599,7 @@ class TestDevcontainerBootstrapScript:
         env = _bootstrap_env(
             tmp_path,
             CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
             FORTRESS_TARGET_DIR=str(target_dir),
             FORTRESS_TARGET_MAX_BYTES="1",
             FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS="0",
@@ -633,6 +634,7 @@ class TestDevcontainerBootstrapScript:
         env = _bootstrap_env(
             tmp_path,
             CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
             FORTRESS_TARGET_DIR=str(target_dir),
             FORTRESS_TARGET_MAX_BYTES=str(1024 * 1024),
             DEVCONTAINER_SKIP_TOOL_REFRESH="1",
@@ -670,6 +672,7 @@ class TestDevcontainerBootstrapScript:
         env = _bootstrap_env(
             tmp_path,
             CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
             FORTRESS_TARGET_DIR=str(target_dir),
             FORTRESS_TARGET_MAX_BYTES="1",
             FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS="7",
@@ -714,7 +717,7 @@ class TestDevcontainerBootstrapScript:
         )
 
         assert result.returncode == 0
-        assert "Refusing unsafe target directory" in result.stderr
+        assert "Refusing unmanaged target directory" in result.stderr
         assert not cargo_log.exists()
 
     def test_refuses_unmarked_cleanup_target(self, tmp_path: Path) -> None:
@@ -723,13 +726,14 @@ class TestDevcontainerBootstrapScript:
         bin_dir.mkdir()
         _write_cargo_stub(bin_dir)
         cargo_log = tmp_path / "cargo.log"
-        target_dir = tmp_path / "shared-cache"
-        target_dir.mkdir()
+        target_dir = tmp_path / "workspace" / "target"
+        target_dir.mkdir(parents=True)
         (target_dir / "unrelated-data").write_bytes(b"oversized")
 
         env = _bootstrap_env(
             tmp_path,
             CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
             FORTRESS_TARGET_DIR=str(target_dir),
             FORTRESS_TARGET_MAX_BYTES="1",
             DEVCONTAINER_SKIP_TOOL_REFRESH="1",
@@ -746,5 +750,78 @@ class TestDevcontainerBootstrapScript:
 
         assert result.returncode == 0
         assert "missing Cargo cache marker" in result.stderr
+        assert not cargo_log.exists()
+        assert (target_dir / "unrelated-data").exists()
+
+    def test_refuses_marked_workspace_parent_as_cleanup_target(
+        self, tmp_path: Path
+    ) -> None:
+        """A generic cache marker must not authorize cleaning the workspace itself."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        cargo_log = tmp_path / "cargo.log"
+        workspace_dir = tmp_path / "projects" / "workspace"
+        workspace_dir.mkdir(parents=True)
+        parent_dir = workspace_dir.parent
+        (parent_dir / "source.rs").write_bytes(b"source")
+        _mark_cargo_target(parent_dir)
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace_dir),
+            FORTRESS_TARGET_DIR=str(parent_dir),
+            FORTRESS_TARGET_MAX_BYTES="1",
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Refusing unmanaged target directory" in result.stderr
+        assert not cargo_log.exists()
+        assert (parent_dir / "source.rs").exists()
+
+    def test_refuses_marked_arbitrary_cleanup_target(self, tmp_path: Path) -> None:
+        """A generic cache marker must not authorize an unrelated directory."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        cargo_log = tmp_path / "cargo.log"
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        target_dir = tmp_path / "shared-cache"
+        target_dir.mkdir()
+        (target_dir / "unrelated-data").write_bytes(b"oversized")
+        _mark_cargo_target(target_dir)
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace_dir),
+            FORTRESS_TARGET_DIR=str(target_dir),
+            FORTRESS_TARGET_MAX_BYTES="1",
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Refusing unmanaged target directory" in result.stderr
         assert not cargo_log.exists()
         assert (target_dir / "unrelated-data").exists()

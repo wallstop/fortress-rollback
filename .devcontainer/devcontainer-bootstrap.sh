@@ -146,17 +146,15 @@ cleanup_target_if_needed() {
         return 0
     fi
 
-    local resolved_target resolved_workspace resolved_home
+    local resolved_target resolved_workspace managed_target
     resolved_target="$(realpath -m "${TARGET_DIR}")"
     resolved_workspace="$(realpath -m "${WORKSPACE_DIR}")"
-    resolved_home="$(realpath -m "${HOME}")"
+    managed_target="$(realpath -m "${resolved_workspace}/target")"
 
-    case "${resolved_target}" in
-        /|"${resolved_workspace}"|"${resolved_home}")
-            warn "Refusing unsafe target directory: ${resolved_target}"
-            return 0
-            ;;
-    esac
+    if [ "${resolved_target}" != "${managed_target}" ]; then
+        warn "Refusing unmanaged target directory: ${resolved_target}"
+        return 0
+    fi
 
     local cargo_cache_marker
     cargo_cache_marker="${resolved_target}/CACHEDIR.TAG"
