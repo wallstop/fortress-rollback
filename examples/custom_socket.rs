@@ -67,7 +67,13 @@ pub struct ChannelSocket {
     /// Channel for receiving messages from other peers
     receiver: Mutex<Receiver<(ChannelPeerId, Message)>>,
     /// Senders to other peers, keyed by their peer ID
-    peer_senders: Mutex<Vec<(ChannelPeerId, SyncSender<(ChannelPeerId, Message)>)>>,
+    peer_senders: Vec<(ChannelPeerId, SyncSender<(ChannelPeerId, Message)>)>,
+    /// Number of newest packets dropped because a destination queue was full.
+    dropped_full_messages: usize,
+    /// Number of packets dropped because a destination receiver disconnected.
+    dropped_disconnected_messages: usize,
+    /// Number of packets dropped because no route matched the destination.
+    dropped_unroutable_messages: usize,
 }
 
 impl ChannelSocket {
@@ -85,13 +91,19 @@ impl ChannelSocket {
         let socket1 = ChannelSocket {
             local_id: peer1_id,
             receiver: Mutex::new(rx1),
-            peer_senders: Mutex::new(vec![(peer2_id, tx2)]),
+            peer_senders: vec![(peer2_id, tx2)],
+            dropped_full_messages: 0,
+            dropped_disconnected_messages: 0,
+            dropped_unroutable_messages: 0,
         };
 
         let socket2 = ChannelSocket {
             local_id: peer2_id,
             receiver: Mutex::new(rx2),
-            peer_senders: Mutex::new(vec![(peer1_id, tx1)]),
+            peer_senders: vec![(peer1_id, tx1)],
+            dropped_full_messages: 0,
+            dropped_disconnected_messages: 0,
+            dropped_unroutable_messages: 0,
         };
 
         (socket1, socket2)
@@ -103,35 +115,48 @@ impl ChannelSocket {
     pub fn local_id(&self) -> ChannelPeerId {
         self.local_id
     }
+
+    /// Returns the number of newest packets dropped due to full peer queues.
+    #[must_use]
+    pub fn dropped_full_messages(&self) -> usize {
+        self.dropped_full_messages
+    }
+
+    /// Returns the number of packets dropped because a peer disconnected.
+    #[must_use]
+    pub fn dropped_disconnected_messages(&self) -> usize {
+        self.dropped_disconnected_messages
+    }
+
+    /// Returns the number of packets dropped because no route matched.
+    #[must_use]
+    pub fn dropped_unroutable_messages(&self) -> usize {
+        self.dropped_unroutable_messages
+    }
 }
 
 impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
     fn send_to(&mut self, msg: &Message, addr: &ChannelPeerId) {
-        let Ok(senders) = self.peer_senders.lock() else {
-            eprintln!("ChannelSocket routing lock was poisoned; dropping packet");
-            return;
-        };
-        for (peer_id, sender) in senders.iter() {
+        for (peer_id, sender) in &self.peer_senders {
             if peer_id == addr {
                 // Clone the message since we might send to multiple peers
                 // In a real network socket, you'd serialize once and send bytes
                 match sender.try_send((self.local_id, msg.clone())) {
                     Ok(()) => {},
                     Err(TrySendError::Full(_)) => {
-                        eprintln!("ChannelSocket peer {addr:?} queue full; dropping newest packet");
+                        self.dropped_full_messages = self.dropped_full_messages.saturating_add(1);
                     },
                     Err(TrySendError::Disconnected(_)) => {
-                        eprintln!("ChannelSocket peer {addr:?} disconnected; dropping packet");
+                        self.dropped_disconnected_messages =
+                            self.dropped_disconnected_messages.saturating_add(1);
                     },
                 }
                 return;
             }
         }
-        // Silently drop messages to unknown peers (like UDP would)
-        println!(
-            "Warning: No route to peer {:?} from {:?}",
-            addr, self.local_id
-        );
+        // Drop messages to unknown peers like UDP would, while retaining a
+        // non-blocking diagnostic counter for application telemetry.
+        self.dropped_unroutable_messages = self.dropped_unroutable_messages.saturating_add(1);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(ChannelPeerId, Message)> {
@@ -144,7 +169,6 @@ impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
         }
 
         let Ok(receiver) = self.receiver.lock() else {
-            eprintln!("ChannelSocket receive lock was poisoned; leaving packets queued");
             return messages;
         };
 
@@ -252,19 +276,16 @@ impl NonBlockingSocket<WebSocketPeerId> for WebSocketAdapter {
     fn send_to(&mut self, msg: &Message, addr: &WebSocketPeerId) {
         // Serialize the message using Fortress Rollback's deterministic codec.
         let Ok(bytes) = codec::encode(msg) else {
-            eprintln!("Failed to serialize message");
             return;
         };
-
-        // Send via WebSocket (pseudocode)
-        println!("Would send {} bytes to peer {:?}", bytes.len(), addr.0);
 
         // In practice:
         // if let Some(ws) = self.connections.get_mut(addr) {
         //     if ws.send(WebSocketMessage::Binary(bytes)).is_err() {
-        //         eprintln!("WebSocket peer {addr:?} disconnected; dropping packet");
+        //         self.disconnected_messages += 1;
         //     }
         // }
+        let _ = (bytes, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(WebSocketPeerId, Message)> {
@@ -420,5 +441,20 @@ mod tests {
         }
         assert_eq!(received, MAX_CHANNEL_QUEUED_MESSAGES);
         assert_eq!(receiver.receive_all_messages(), Vec::new());
+        assert_eq!(sender.dropped_full_messages(), 1);
+    }
+
+    #[test]
+    fn channel_socket_disconnected_and_unroutable_drops_are_counted() {
+        let (mut sender, receiver) = ChannelSocket::create_pair();
+        let message = keep_alive_message();
+        let disconnected_peer = receiver.local_id();
+        drop(receiver);
+
+        sender.send_to(&message, &disconnected_peer);
+        sender.send_to(&message, &ChannelPeerId(999));
+
+        assert_eq!(sender.dropped_disconnected_messages(), 1);
+        assert_eq!(sender.dropped_unroutable_messages(), 1);
     }
 }

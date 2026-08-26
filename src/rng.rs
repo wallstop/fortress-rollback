@@ -244,8 +244,10 @@ pub trait Rng {
     /// Generates a random boolean with the given probability of being `true`.
     ///
     /// `probability` should be in the range `[0.0, 1.0]`.
-    /// Values outside this range are clamped; `NaN` behaves as `0.0`.
+    /// Values outside this range are clamped; `NaN` behaves as `0.0`. Every
+    /// call consumes exactly one `u32` sample, including endpoint values.
     fn gen_bool(&mut self, probability: f64) -> bool {
+        let random_value = self.next_u32();
         if probability.is_nan() || probability <= 0.0 {
             return false;
         }
@@ -257,7 +259,7 @@ pub trait Rng {
         // size makes 0.5 split it exactly and keeps both endpoint contracts total.
         let sample_space = f64::from(u32::MAX) + 1.0;
         let threshold = (probability * sample_space) as u64;
-        u64::from(self.next_u32()) < threshold
+        u64::from(random_value) < threshold
     }
 
     /// Fills the given slice with random bytes.
@@ -594,6 +596,51 @@ mod tests {
         assert!(!MaximumRng.gen_bool(0.0));
         assert!(!MaximumRng.gen_bool(f64::NEG_INFINITY));
         assert!(!MaximumRng.gen_bool(f64::NAN));
+    }
+
+    #[test]
+    fn gen_bool_every_probability_consumes_exactly_one_sample() {
+        struct CountingRng {
+            calls: usize,
+        }
+
+        impl Rng for CountingRng {
+            fn next_u32(&mut self) -> u32 {
+                self.calls += 1;
+                u32::MAX
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        for probability in [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            0.5,
+            1.0,
+            f64::INFINITY,
+        ] {
+            let mut rng = CountingRng { calls: 0 };
+            let _ = rng.gen_bool(probability);
+            assert_eq!(rng.calls, 1, "probability={probability:?}");
+        }
+    }
+
+    #[test]
+    fn gen_bool_endpoints_preserve_the_seeded_stream_position() {
+        for probability in [f64::NAN, 0.0, 1.0, f64::INFINITY] {
+            let mut actual = Pcg32::seed_from_u64(42);
+            let mut expected = Pcg32::seed_from_u64(42);
+
+            let _ = actual.gen_bool(probability);
+            let _ = expected.next_u32();
+
+            assert_eq!(actual.next_u32(), expected.next_u32());
+        }
     }
 
     #[test]
