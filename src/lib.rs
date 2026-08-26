@@ -3572,7 +3572,8 @@ mod tests {
         assert_eq!(subtracted, Frame::new(i32::MIN));
 
         assert_eq!(Frame::new(7) % 0, 0);
-        assert_eq!(Frame::new(i32::MIN) % -1, 0);
+        let negative_one = std::hint::black_box(-1);
+        assert_eq!(Frame::new(i32::MIN) % negative_one, 0);
     }
 
     #[test]
