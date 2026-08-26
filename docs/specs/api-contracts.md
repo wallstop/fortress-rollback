@@ -6,8 +6,8 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.0
-**Date:** December 6, 2025
+**Version:** 1.3
+**Date:** August 26, 2026
 **Status:** Maintained high-impact subset
 
 This document specifies preconditions, postconditions, and invariants for selected high-impact public APIs. Rustdoc remains the authoritative reference for the complete public surface. This document complements formal-spec.md with behavioral contracts that benefit from a consolidated view.
@@ -977,7 +977,7 @@ fallible reservation, malformed/trailing message bytes, poisoned state, and inco
 
 **Panics:** Never
 
-**Invariant:** Stream framing is a transport envelope only. It does not change protocol-v1
+**Invariant:** Stream framing is a transport envelope only. It does not change protocol-v2
 datagram bytes, rollback determinism, or the `Message` body format.
 
 ### `NonBlockingSocket::send_to(message, address)`
@@ -991,12 +991,12 @@ not wait for a socket-wide outbound buffer to empty after each message.
 
 ## Cross-Cutting Invariants
 
-These invariants are preserved across ALL public API calls:
+Relevant session and transport APIs preserve these invariants:
 
 1. **INV-3 (Input Immutability):** Confirmed inputs never change
-2. **INV-4 (Queue Bounds):** `0 ≤ queue.length ≤ 128`
-3. **INV-5 (Index Validity):** `head, tail ∈ [0, 128)`
-4. **INV-11 (No Panics):** All errors are `Result::Err`, never panic
+2. **INV-4 (Queue Bounds):** `0 ≤ queue.length ≤ configured queue capacity`
+3. **INV-5 (Index Validity):** Every occupied queue index stays within its configured capacity
+4. **INV-11 (No Panics):** Caller-controlled input follows documented error or fallback semantics
 
 ---
 
@@ -1004,6 +1004,7 @@ These invariants are preserved across ALL public API calls:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.3     | 2026-08-26 | Scoped the ledger to its maintained high-impact subset; added total `Frame` arithmetic and conversion contracts; corrected configurable queue invariants and protocol-v2 framing terminology. |
 | 1.2     | 2026-07-12 | Added bounded TCP/byte-stream framing contracts for `codec::encode_framed` and `FrameDecoder`. |
 | 1.1     | 2026-05-07 | Added contracts for runtime input delay (`P2PSession::set_input_delay`, `P2PSession::input_delay`), configurable disconnect behavior (`SessionBuilder::with_disconnect_behavior`, `P2PSession::disconnect_behavior`), and explicit graceful peer removal (`P2PSession::remove_player`). Documented new `InvalidRequestKind`/`InternalErrorKind` variants and the new `FortressEvent::PeerDropped` and `FortressEvent::InputDelayRecommendation` events. Added Event Catalog. |
 | 1.0     | 2025-12-06 | Complete API contracts                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
