@@ -863,3 +863,75 @@ class TestDevcontainerBootstrapScript:
         assert "Refusing symlink target directory" in result.stderr
         assert not cargo_log.exists()
         assert (external_target / "unrelated-data").exists()
+
+    def test_huge_target_max_bytes_skips_cleanup(self, tmp_path: Path) -> None:
+        """An oversized digit string must not reach Bash arithmetic or Cargo."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        cargo_log = tmp_path / "cargo.log"
+        target_dir = tmp_path / "workspace" / "target"
+        target_dir.mkdir(parents=True)
+        artifact = target_dir / "artifact"
+        artifact.write_bytes(b"preserve")
+        _mark_cargo_target(target_dir)
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
+            FORTRESS_TARGET_DIR=str(target_dir),
+            FORTRESS_TARGET_MAX_BYTES="9" * 1000,
+            FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS="0",
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "FORTRESS_TARGET_MAX_BYTES" in result.stderr
+        assert not cargo_log.exists()
+        assert artifact.read_bytes() == b"preserve"
+
+    def test_huge_target_clean_min_age_skips_cleanup(self, tmp_path: Path) -> None:
+        """An oversized age must not reach Bash arithmetic, find, or Cargo."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        cargo_log = tmp_path / "cargo.log"
+        target_dir = tmp_path / "workspace" / "target"
+        target_dir.mkdir(parents=True)
+        artifact = target_dir / "artifact"
+        artifact.write_bytes(b"preserve")
+        _mark_cargo_target(target_dir)
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
+            FORTRESS_TARGET_DIR=str(target_dir),
+            FORTRESS_TARGET_MAX_BYTES="1",
+            FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS="9" * 1000,
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS" in result.stderr
+        assert not cargo_log.exists()
+        assert artifact.read_bytes() == b"preserve"

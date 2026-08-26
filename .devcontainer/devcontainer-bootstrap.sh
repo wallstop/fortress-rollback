@@ -16,6 +16,7 @@ TARGET_CLEAN_MIN_AGE_DAYS="${FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS:-7}"
 NPM_REFRESH_TIMEOUT_SECONDS="${FORTRESS_NPM_REFRESH_TIMEOUT_SECONDS:-120}"
 MAINTENANCE_CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/fortress-rollback"
 TARGET_CLEAN_STAMP="${MAINTENANCE_CACHE_DIR}/last-target-clean"
+MAX_SAFE_INTEGER_DIGITS=18
 
 log() {
     printf '[devcontainer-bootstrap] %s\n' "$*"
@@ -30,6 +31,10 @@ is_nonnegative_integer() {
         ''|*[!0-9]*) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+is_bounded_nonnegative_integer() {
+    is_nonnegative_integer "$1" && [ "${#1}" -le "${MAX_SAFE_INTEGER_DIGITS}" ]
 }
 
 run_with_timeout() {
@@ -137,12 +142,12 @@ cleanup_target_if_needed() {
         return 0
     fi
 
-    if ! is_nonnegative_integer "${TARGET_MAX_BYTES}"; then
-        warn "FORTRESS_TARGET_MAX_BYTES must be a non-negative integer; skipping cleanup."
+    if ! is_bounded_nonnegative_integer "${TARGET_MAX_BYTES}"; then
+        warn "FORTRESS_TARGET_MAX_BYTES must fit the supported non-negative integer range; skipping cleanup."
         return 0
     fi
-    if ! is_nonnegative_integer "${TARGET_CLEAN_MIN_AGE_DAYS}"; then
-        warn "FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS must be a non-negative integer; skipping cleanup."
+    if ! is_bounded_nonnegative_integer "${TARGET_CLEAN_MIN_AGE_DAYS}"; then
+        warn "FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS must fit the supported non-negative integer range; skipping cleanup."
         return 0
     fi
 
@@ -187,12 +192,19 @@ cleanup_target_if_needed() {
         return 0
     fi
 
-    if [ "${TARGET_CLEAN_MIN_AGE_DAYS}" -gt 0 ] \
-        && [ -f "${TARGET_CLEAN_STAMP}" ] \
-        && find "${TARGET_CLEAN_STAMP}" -mtime "-${TARGET_CLEAN_MIN_AGE_DAYS}" -print -quit \
-            | grep -q .; then
-        log "Cargo target exceeds the limit, but cleanup ran within ${TARGET_CLEAN_MIN_AGE_DAYS} days."
-        return 0
+    if [ "${TARGET_CLEAN_MIN_AGE_DAYS}" -gt 0 ] && [ -f "${TARGET_CLEAN_STAMP}" ]; then
+        local recent_clean_stamp
+        if ! recent_clean_stamp="$(
+            find "${TARGET_CLEAN_STAMP}" \
+                -mtime "-${TARGET_CLEAN_MIN_AGE_DAYS}" -print -quit
+        )"; then
+            warn "Could not validate the target cleanup interval; skipping cleanup."
+            return 0
+        fi
+        if [ -n "${recent_clean_stamp}" ]; then
+            log "Cargo target exceeds the limit, but cleanup ran within ${TARGET_CLEAN_MIN_AGE_DAYS} days."
+            return 0
+        fi
     fi
 
     if ! command -v cargo >/dev/null 2>&1; then

@@ -158,8 +158,14 @@ jobs:
           rm -f geiger-report.complete
           set +e
           cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt
-          geiger_status="${PIPESTATUS[0]}"
+          pipeline_status=("${PIPESTATUS[@]}")
+          geiger_status="${pipeline_status[0]}"
+          tee_status="${pipeline_status[1]}"
           set -e
+          if [ "${tee_status}" -ne 0 ]; then
+            echo "ERROR: cargo-geiger report writer failed with status ${tee_status}"
+            exit "${tee_status}"
+          fi
           if [ "${geiger_status}" -eq 1 ]; then
             geiger_error_count="$(
               awk '/^error:/ { count++ } END { print count + 0 }' geiger-report.txt

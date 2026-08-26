@@ -49,7 +49,7 @@ def _workflow() -> dict:
 
 
 def _run_unsafe_audit_producer(
-    tmp_path: Path, output: str, status: int
+    tmp_path: Path, output: str, status: int, *, tee_status: int = 0
 ) -> subprocess.CompletedProcess[str]:
     cargo_stub = tmp_path / "cargo"
     cargo_stub.write_text(
@@ -59,6 +59,15 @@ def _run_unsafe_audit_producer(
         encoding="utf-8",
     )
     cargo_stub.chmod(0o755)
+    if tee_status != 0:
+        tee_stub = tmp_path / "tee"
+        tee_stub.write_text(
+            "#!/bin/sh\n"
+            "/usr/bin/tee \"$@\"\n"
+            "exit \"${TEE_STUB_STATUS:?}\"\n",
+            encoding="utf-8",
+        )
+        tee_stub.chmod(0o755)
     audit_step = next(
         step
         for step in _workflow()["jobs"]["unsafe-audit"]["steps"]
@@ -74,6 +83,7 @@ def _run_unsafe_audit_producer(
             "PATH": f"{tmp_path}:/usr/bin:/bin",
             "GEIGER_STUB_OUTPUT": output,
             "GEIGER_STUB_STATUS": str(status),
+            "TEE_STUB_STATUS": str(tee_status),
         },
     )
 
@@ -239,7 +249,8 @@ def test_unsafe_audit_report_verification_is_ansi_free_and_non_vacuous() -> None
     audit_run = audit_step["run"]
 
     assert audit_step["env"]["CARGO_TERM_COLOR"] == "never"
-    assert "PIPESTATUS[0]" in audit_run
+    assert 'pipeline_status=("${PIPESTATUS[@]}")' in audit_run
+    assert 'tee_status="${pipeline_status[1]}"' in audit_run
     assert "|| true" not in audit_run
     assert "Found [1-9][0-9]* warnings" in audit_run
     assert "touch geiger-report.complete" in audit_run
@@ -291,6 +302,19 @@ def test_unsafe_audit_rejects_warning_summary_followed_by_fatal_error(
 
     assert result.returncode != 0
     assert "incomplete or fatal output" in result.stdout
+    assert not (tmp_path / "geiger-report.complete").exists()
+
+
+def test_unsafe_audit_rejects_report_writer_failure(tmp_path: Path) -> None:
+    result = _run_unsafe_audit_producer(
+        tmp_path,
+        "0/0 0/0 0/0 0/0 0/0 :) fortress-rollback 0.13.0",
+        0,
+        tee_status=74,
+    )
+
+    assert result.returncode == 74
+    assert "report writer failed with status 74" in result.stdout
     assert not (tmp_path / "geiger-report.complete").exists()
 
 
