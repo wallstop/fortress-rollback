@@ -373,6 +373,21 @@ def _write_npm_stub(tmp_path: Path) -> Path:
     return npm_path
 
 
+def _write_node_stub(tmp_path: Path) -> Path:
+    """Create the minimal Node stub used to read an installed package version."""
+    node_path = tmp_path / "node"
+    node_path.write_text(
+        "#!/bin/bash\n"
+        "set -eu\n"
+        "package_json=\"${3:?}\"\n"
+        "sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+        "\"${package_json}\"\n",
+        encoding="utf-8",
+    )
+    node_path.chmod(0o755)
+    return node_path
+
+
 def _write_cargo_stub(tmp_path: Path) -> Path:
     """Create a cargo stub that records cleanup requests."""
     cargo_path = tmp_path / "cargo"
@@ -491,6 +506,7 @@ class TestDevcontainerBootstrapScript:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         _write_npm_stub(bin_dir)
+        _write_node_stub(bin_dir)
         npm_log = tmp_path / "npm.log"
         npm_prefix = tmp_path / ".local"
         for package_path in (
