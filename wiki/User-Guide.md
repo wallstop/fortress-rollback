@@ -2032,9 +2032,11 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
 | `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
+| `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
-| `loom`                    | Enables Loom-compatible synchronization primitives    | Concurrency testing               | `loom` crate        |
+| `loom`                    | No-op compatibility name; use `cfg(loom)`             | Existing development manifests    | None                |
 | `graphical-examples`      | Deprecated no-op compatibility flag                   | Existing downstream feature lists | None                |
+| `trace-validation`        | Records bounded internal protocol events              | Development/trace verification    | None                |
 | `z3-verification`         | Enables Z3 formal verification tests                  | Development/CI verification       | `z3` crate (system) |
 | `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
 
@@ -2115,7 +2117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**Note:** When used with the `sync-send` feature, `TokioUdpSocket` automatically implements `Send + Sync`.
+`start_p2p_session` moves the adapter into the session. After that move, poll and advance the
+session from the Tokio task; application code cannot call the adapter's `recv_all`,
+`send_to_async`, or readiness helpers. Those async helpers support standalone adapter and custom
+transport integrations before session ownership. With `sync-send`, `TokioUdpSocket` implements
+`Send + Sync`.
 
 #### `json`
 
@@ -2164,9 +2170,22 @@ fortress-rollback = { version = "0.13", features = ["paranoid"] }
 
 **Performance note:** Enabling `paranoid` may impact performance due to additional runtime checks. Use it temporarily for debugging rather than in shipped builds.
 
+#### `hot-join`
+
+Enables reserved-slot joins and rejoins in a running session. The player count and input wire
+width remain fixed; the host transfers a bounded state snapshot into a reserved or gracefully
+dropped slot. This feature adds `Serialize + DeserializeOwned` bounds to `Config::State`.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.13", features = ["hot-join"] }
+```
+
 #### `loom`
 
-Enables [Loom](https://github.com/tokio-rs/loom)-compatible synchronization primitives for deterministic concurrency testing. When enabled, internal synchronization primitives switch from `parking_lot` to Loom's equivalents.
+The Cargo feature named `loom` is a no-op compatibility marker. The actual deterministic
+concurrency build uses the compiler configuration flag `cfg(loom)`, which switches internal
+synchronization primitives from `parking_lot` to Loom's equivalents.
 
 **Note:** This is a compile-time flag (`cfg(loom)`) and should not be enabled in Cargo.toml. Instead, it's used via `RUSTFLAGS`:
 
@@ -2181,6 +2200,11 @@ See `loom-tests/README.md` for details on running concurrency tests.
 ### Development/Contributor Feature Flags
 
 These feature flags are primarily for library development and CI, not typical user applications.
+
+#### `trace-validation`
+
+Enables bounded internal protocol-event recording for TLA+ trace validation. This unstable
+verification surface compiles out of normal builds and is not intended for application logic.
 
 #### `z3-verification`
 

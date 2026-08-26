@@ -243,8 +243,9 @@ The `sync-send` feature flag remains compatible. Fortress Rollback adds several 
 | `tokio`              | Async Tokio UDP socket adapter         | ✅               |
 | `json`               | JSON serialization for telemetry types | ✅               |
 | `paranoid`           | Runtime invariant checking             | ✅               |
-| `loom`               | Concurrency testing                    | ✅               |
+| `loom`               | No-op compatibility name; actual tests use `cfg(loom)` | ✅               |
 | `z3-verification`    | Formal verification tests              | ✅               |
+| `trace-validation`   | Bounded internal protocol trace recording for verification | ✅               |
 | `graphical-examples` | Deprecated no-op compatibility flag    | ✅ (enables nothing) |
 | `hot-join`           | Peers can join/rejoin a running session via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`) | ✅               |
 | `z3-verification-bundled` | `z3-verification` with a bundled Z3 build (no system Z3 needed) | ✅               |

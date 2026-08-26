@@ -280,8 +280,8 @@ trace-validation = []
 hot-join = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
-# Enable loom-compatible synchronization primitives for concurrency testing
-# NOTE: This changes the internal sync primitives from parking_lot to std/loom
+# No-op compatibility marker. Actual Loom builds use RUSTFLAGS="--cfg loom";
+# retaining this name avoids breaking existing development feature lists.
 loom = []
 # Enable Z3 formal verification tests (requires system Z3: apt install libz3-dev)
 z3-verification = ["dep:z3"]
