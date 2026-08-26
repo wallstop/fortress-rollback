@@ -248,17 +248,16 @@ pub trait Rng {
     /// call consumes exactly one `u32` sample, including endpoint values.
     fn gen_bool(&mut self, probability: f64) -> bool {
         let random_value = self.next_u32();
-        if probability.is_nan() || probability <= 0.0 {
-            return false;
-        }
-        if probability >= 1.0 {
-            return true;
-        }
+        let bounded_probability = if probability.is_nan() {
+            0.0
+        } else {
+            probability.clamp(0.0, 1.0)
+        };
 
         // A u32 has 2^32 equiprobable values. Scaling by the full sample-space
         // size makes 0.5 split it exactly and keeps both endpoint contracts total.
         let sample_space = f64::from(u32::MAX) + 1.0;
-        let threshold = (probability * sample_space) as u64;
+        let threshold = (bounded_probability * sample_space) as u64;
         u64::from(random_value) < threshold
     }
 
@@ -498,6 +497,32 @@ fn timing_entropy_seed() -> u64 {
 mod tests {
     use super::*;
 
+    struct ScriptedRng<const N: usize> {
+        samples: [u32; N],
+        consumed: usize,
+    }
+
+    impl<const N: usize> ScriptedRng<N> {
+        const fn new(samples: [u32; N]) -> Self {
+            Self {
+                samples,
+                consumed: 0,
+            }
+        }
+    }
+
+    impl<const N: usize> Rng for ScriptedRng<N> {
+        fn next_u32(&mut self) -> u32 {
+            let sample = self.samples[self.consumed];
+            self.consumed += 1;
+            sample
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32())
+        }
+    }
+
     #[test]
     fn test_pcg32_deterministic() {
         let mut rng1 = Pcg32::seed_from_u64(12345);
@@ -553,6 +578,14 @@ mod tests {
             assert!(val >= 10);
             assert!(val < 20);
         }
+    }
+
+    #[test]
+    fn gen_range_uses_the_exact_span() {
+        let mut rng = ScriptedRng::new([9]);
+
+        assert_eq!(rng.gen_range(10..20), 19);
+        assert_eq!(rng.consumed, 1);
     }
 
     #[test]
@@ -641,6 +674,17 @@ mod tests {
 
             assert_eq!(actual.next_u32(), expected.next_u32());
         }
+    }
+
+    #[test]
+    fn gen_bool_half_probability_has_an_exact_midpoint() {
+        let mut below_midpoint = ScriptedRng::new([(1_u32 << 31) - 1]);
+        let mut at_midpoint = ScriptedRng::new([1_u32 << 31]);
+
+        assert!(below_midpoint.gen_bool(0.5));
+        assert!(!at_midpoint.gen_bool(0.5));
+        assert_eq!(below_midpoint.consumed, 1);
+        assert_eq!(at_midpoint.consumed, 1);
     }
 
     #[test]
@@ -745,6 +789,28 @@ mod tests {
             assert!(val >= 10);
             assert!(val < 20);
         }
+    }
+
+    #[test]
+    fn gen_range_usize_rejects_below_threshold_then_maps_exactly() {
+        // For a span of six, 2^32 mod 6 is four. The first sample is rejected;
+        // the sample equal to the threshold is accepted and maps to offset four.
+        let mut rng = ScriptedRng::new([3, 4]);
+
+        assert_eq!(rng.gen_range_usize(10..16), 14);
+        assert_eq!(rng.consumed, 2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn gen_range_usize_large_span_rejects_then_maps_exactly() {
+        // For a span of 2^32 + 1, 2^64 mod span is one. The first u64 sample
+        // is rejected; the sample equal to the threshold is accepted.
+        let end = (u32::MAX as usize) + 12;
+        let mut rng = ScriptedRng::new([0, 0, 0, 1]);
+
+        assert_eq!(rng.gen_range_usize(10..end), 11);
+        assert_eq!(rng.consumed, 4);
     }
 
     #[test]
