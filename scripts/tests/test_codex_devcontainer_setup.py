@@ -692,6 +692,48 @@ class TestDevcontainerBootstrapScript:
         assert "cleanup ran within 7 days" in result.stdout
         assert not cargo_log.exists()
 
+    def test_cleanup_interval_check_failure_skips_cleanup(self, tmp_path: Path) -> None:
+        """A failed age check must not fall through to destructive cleanup."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        find_stub = bin_dir / "find"
+        find_stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        find_stub.chmod(0o755)
+        cargo_log = tmp_path / "cargo.log"
+        target_dir = tmp_path / "workspace" / "target"
+        target_dir.mkdir(parents=True)
+        artifact = target_dir / "artifact"
+        artifact.write_bytes(b"preserve")
+        _mark_cargo_target(target_dir)
+        stamp_dir = tmp_path / ".cache" / "fortress-rollback"
+        stamp_dir.mkdir(parents=True)
+        (stamp_dir / "last-target-clean").touch()
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(tmp_path / "workspace"),
+            FORTRESS_TARGET_DIR=str(target_dir),
+            FORTRESS_TARGET_MAX_BYTES="1",
+            FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS="7",
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Could not validate the target cleanup interval" in result.stderr
+        assert not cargo_log.exists()
+        assert artifact.read_bytes() == b"preserve"
+
     def test_refuses_broad_cleanup_target(self, tmp_path: Path) -> None:
         """Cleanup must never accept a filesystem root as its target."""
         bin_dir = tmp_path / "bin"

@@ -152,7 +152,8 @@ jobs:
 
       - name: Audit unsafe code in dependencies
         run: |
-          set -u -o pipefail
+          set -u
+          set -o pipefail
           # Keep the ordinary Z3 dependency visible, but do not compile bundled Z3 from
           # source: cold native builds repeatedly exhausted this job's 20-minute budget.
           rm -f geiger-report.complete
