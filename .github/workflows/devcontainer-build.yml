@@ -7,6 +7,7 @@
 #   "image": "ghcr.io/wallstop/fortress-rollback/devcontainer:latest"
 #
 # The image is rebuilt:
+# - On pull requests that change the image or this workflow (build only)
 # - On pushes to main that change .devcontainer/ files
 # - Weekly (Sundays at 2am UTC) to pick up tool updates
 # - Manually via workflow_dispatch
@@ -14,6 +15,11 @@
 name: Build DevContainer Image
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.devcontainer/**'
+      - '.github/workflows/devcontainer-build.yml'
   push:
     branches: [main]
     paths:
@@ -46,6 +52,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -67,7 +74,7 @@ jobs:
         with:
           context: .
           file: .devcontainer/Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

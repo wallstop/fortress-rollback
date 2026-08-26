@@ -117,7 +117,6 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     bash /tmp/nodesource_setup.sh && \
     rm /tmp/nodesource_setup.sh && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g markdownlint-cli markdown-link-check @openai/codex@latest && \
     pip3 install --no-cache-dir --break-system-packages pre-commit && \
     rm -rf /var/lib/apt/lists/*
 
@@ -125,6 +124,21 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
 # Layer 4: Rust toolchains and components (as vscode user)
 # ============================================================================
 USER vscode
+
+# Keep global npm installs writable by the remote user. Explicit @latest tags
+# resolve when the image is built; lifecycle hooks refresh them again on every
+# create/start so a cached image does not pin stale AI CLI versions.
+ENV NPM_CONFIG_PREFIX=/home/vscode/.local
+ENV NPM_CONFIG_CACHE=/home/vscode/.cache/npm
+ENV PATH=/home/vscode/.local/bin:${PATH}
+RUN mkdir -p "${NPM_CONFIG_PREFIX}/bin" "${NPM_CONFIG_PREFIX}/lib/node_modules" "${NPM_CONFIG_CACHE}" && \
+    npm install --global --no-audit --no-fund \
+        markdownlint-cli@latest \
+        markdown-link-check@latest \
+        @nanocollective/nanocoder@latest \
+        opencode-ai@latest \
+        @openai/codex@latest && \
+    npm cache clean --force
 
 # Install Rust nightly toolchain (required for Miri and some Kani features)
 RUN rustup install nightly && \

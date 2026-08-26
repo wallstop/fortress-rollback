@@ -162,6 +162,8 @@ check_tool "yamllint" "yamllint --version" "false"
 echo ""
 
 echo "AI Tooling:"
+check_tool "nanocoder" "nanocoder --version" "false"
+check_tool "opencode" "opencode --version" "false"
 check_tool "codex" "codex --version" "false"
 echo ""
 
