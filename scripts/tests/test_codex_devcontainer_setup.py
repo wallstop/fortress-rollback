@@ -825,3 +825,41 @@ class TestDevcontainerBootstrapScript:
         assert "Refusing unmanaged target directory" in result.stderr
         assert not cargo_log.exists()
         assert (target_dir / "unrelated-data").exists()
+
+    def test_refuses_marked_external_symlink_target(self, tmp_path: Path) -> None:
+        """The managed target path must not redirect cleanup through a symlink."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_cargo_stub(bin_dir)
+        cargo_log = tmp_path / "cargo.log"
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        external_target = tmp_path / "external-target"
+        external_target.mkdir()
+        (external_target / "unrelated-data").write_bytes(b"oversized")
+        _mark_cargo_target(external_target)
+        target_link = workspace_dir / "target"
+        target_link.symlink_to(external_target, target_is_directory=True)
+
+        env = _bootstrap_env(
+            tmp_path,
+            CARGO_STUB_LOG=str(cargo_log),
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace_dir),
+            FORTRESS_TARGET_DIR=str(target_link),
+            FORTRESS_TARGET_MAX_BYTES="1",
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Refusing symlink target directory" in result.stderr
+        assert not cargo_log.exists()
+        assert (external_target / "unrelated-data").exists()

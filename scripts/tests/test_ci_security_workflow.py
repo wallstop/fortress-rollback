@@ -78,6 +78,25 @@ def _run_unsafe_audit_producer(
     )
 
 
+def _run_unsafe_audit_verifier(
+    tmp_path: Path, report: str
+) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "geiger-report.txt").write_text(report, encoding="utf-8")
+    (tmp_path / "geiger-report.complete").touch()
+    verify_step = next(
+        step
+        for step in _workflow()["jobs"]["unsafe-audit"]["steps"]
+        if step.get("name") == "Verify no unsafe in library code"
+    )
+    return subprocess.run(
+        ["bash", "-c", verify_step["run"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _workspace_matrix(job: dict) -> dict[str, tuple[str, str]]:
     entries = job["strategy"]["matrix"]["include"]
     return {
@@ -193,16 +212,19 @@ def test_unsafe_audit_runs_for_pull_requests() -> None:
     assert "github.event_name == 'pull_request'" in str(job["if"])
 
 
-def test_unsafe_audit_cache_tracks_manifest_and_workflow_contract() -> None:
+def test_unsafe_audit_report_is_recomputed_for_every_run() -> None:
     job = _workflow()["jobs"]["unsafe-audit"]
-    report_cache = next(
-        step for step in job["steps"] if step.get("id") == "geiger-cache"
+    audit_step = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Audit unsafe code in dependencies"
     )
-    key = report_cache["with"]["key"]
 
-    assert "**/Cargo.lock" in key
-    assert "**/Cargo.toml" in key
-    assert ".github/workflows/ci-security.yml" in key
+    assert "if" not in audit_step
+    assert all(step.get("id") != "geiger-cache" for step in job["steps"])
+    assert all(
+        step.get("name") != "Display cached geiger report" for step in job["steps"]
+    )
 
 
 def test_unsafe_audit_report_verification_is_ansi_free_and_non_vacuous() -> None:
@@ -225,6 +247,8 @@ def test_unsafe_audit_report_verification_is_ansi_free_and_non_vacuous() -> None
     assert 'test -n "$root_row"' in verify_run
     assert 'unsafe_total="$(' in verify_run
     assert 'if [ "$unsafe_total" -ne 0 ]' in verify_run
+    assert '$7 == "fortress-rollback"' in verify_run
+    assert '$6 == ":)"' in verify_run
     assert "grep -v \"0/0\"" not in verify_run
 
 
@@ -233,7 +257,8 @@ def test_unsafe_audit_accepts_geiger_warning_exit_after_complete_report(
 ) -> None:
     result = _run_unsafe_audit_producer(
         tmp_path,
-        "0/0 0/0 0/0 0/0 0/0 fortress-rollback\nerror: Found 2 warnings",
+        "0/0 0/0 0/0 0/0 0/0 :) fortress-rollback 0.13.0\n"
+        "error: Found 2 warnings",
         1,
     )
 
@@ -251,3 +276,31 @@ def test_unsafe_audit_rejects_failed_partial_geiger_report(tmp_path: Path) -> No
     assert result.returncode != 0
     assert "producer failed" in result.stdout
     assert not (tmp_path / "geiger-report.complete").exists()
+
+
+def test_unsafe_audit_rejects_warning_summary_followed_by_fatal_error(
+    tmp_path: Path,
+) -> None:
+    result = _run_unsafe_audit_producer(
+        tmp_path,
+        "0/0 0/0 0/0 0/0 0/0 :) fortress-rollback 0.13.0\n"
+        "error: Found 2 warnings\n"
+        "error: could not compile dependency",
+        1,
+    )
+
+    assert result.returncode != 0
+    assert "incomplete or fatal output" in result.stdout
+    assert not (tmp_path / "geiger-report.complete").exists()
+
+
+def test_unsafe_audit_verifier_accepts_real_geiger_safety_column(
+    tmp_path: Path,
+) -> None:
+    result = _run_unsafe_audit_verifier(
+        tmp_path,
+        "0/0 0/0 0/1 0/0 0/0 :) fortress-rollback 0.13.0\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No unsafe code in fortress-rollback library" in result.stdout

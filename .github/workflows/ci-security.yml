@@ -150,18 +150,7 @@ jobs:
           restore-keys: |
             geiger-${{ runner.os }}-cargo-
 
-      - name: Check cached geiger report
-        id: geiger-cache
-        uses: actions/cache@v6
-        continue-on-error: true
-        with:
-          path: |
-            geiger-report.txt
-            geiger-report.complete
-          key: geiger-report-v3-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci-security.yml') }}
-
       - name: Audit unsafe code in dependencies
-        if: steps.geiger-cache.outputs.cache-hit != 'true'
         run: |
           set -u -o pipefail
           # Keep the ordinary Z3 dependency visible, but do not compile bundled Z3 from
@@ -171,12 +160,33 @@ jobs:
           cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt
           geiger_status="${PIPESTATUS[0]}"
           set -e
-          if [ "${geiger_status}" -eq 1 ] \
-            && grep -Eq '^error: Found [1-9][0-9]* warnings$' geiger-report.txt; then
+          if [ "${geiger_status}" -eq 1 ]; then
+            geiger_error_count="$(
+              awk '/^error:/ { count++ } END { print count + 0 }' geiger-report.txt
+            )"
+            if [ "${geiger_error_count}" -ne 1 ] \
+              || ! awk '
+                NF { last = $0 }
+                END { exit(last ~ /^error: Found [1-9][0-9]* warnings$/ ? 0 : 1) }
+              ' geiger-report.txt; then
+              echo "ERROR: cargo-geiger producer failed: warning exit included incomplete or fatal output"
+              exit "${geiger_status}"
+            fi
             echo "cargo-geiger completed with its expected warning exit"
           elif [ "${geiger_status}" -ne 0 ]; then
             echo "ERROR: cargo-geiger producer failed with status ${geiger_status}"
             exit "${geiger_status}"
+          fi
+          if ! awk '
+            $7 == "fortress-rollback" &&
+            ($6 == ":)" || $6 == "?" || $6 == "!") &&
+            $1 ~ /^[0-9]+\/[0-9]+$/ && $2 ~ /^[0-9]+\/[0-9]+$/ &&
+            $3 ~ /^[0-9]+\/[0-9]+$/ && $4 ~ /^[0-9]+\/[0-9]+$/ &&
+            $5 ~ /^[0-9]+\/[0-9]+$/ { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' geiger-report.txt; then
+            echo "ERROR: cargo-geiger did not produce a complete fortress-rollback root row"
+            exit 1
           fi
           touch geiger-report.complete
         env:
@@ -187,20 +197,14 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      - name: Display cached geiger report
-        if: steps.geiger-cache.outputs.cache-hit == 'true'
-        run: |
-          test -f geiger-report.complete
-          echo "Using cached geiger report (dependencies unchanged)"
-          cat geiger-report.txt
-
       - name: Verify no unsafe in library code
         run: |
           set -euo pipefail
           test -f geiger-report.complete
           root_row="$(
             awk '
-              $6 == "fortress-rollback" &&
+              $7 == "fortress-rollback" &&
+              ($6 == ":)" || $6 == "?" || $6 == "!") &&
               $1 ~ /^[0-9]+\/[0-9]+$/ && $2 ~ /^[0-9]+\/[0-9]+$/ &&
               $3 ~ /^[0-9]+\/[0-9]+$/ && $4 ~ /^[0-9]+\/[0-9]+$/ &&
               $5 ~ /^[0-9]+\/[0-9]+$/ { row = $0 }

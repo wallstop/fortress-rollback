@@ -147,9 +147,15 @@ cleanup_target_if_needed() {
     fi
 
     local resolved_target resolved_workspace managed_target
-    resolved_target="$(realpath -m "${TARGET_DIR}")"
     resolved_workspace="$(realpath -m "${WORKSPACE_DIR}")"
-    managed_target="$(realpath -m "${resolved_workspace}/target")"
+    managed_target="${resolved_workspace}/target"
+
+    if [ -L "${managed_target}" ]; then
+        warn "Refusing symlink target directory: ${managed_target}"
+        return 0
+    fi
+
+    resolved_target="$(realpath -m "${TARGET_DIR}")"
 
     if [ "${resolved_target}" != "${managed_target}" ]; then
         warn "Refusing unmanaged target directory: ${resolved_target}"
