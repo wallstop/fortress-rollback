@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -135,3 +136,50 @@ def test_license_exceptions_are_exact_and_lockfile_scoped() -> None:
             if package in packages
         }
         assert containing_locks == {expected_lock}
+
+
+def test_unsafe_audit_excludes_only_bundled_z3_from_feature_census() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["unsafe-audit"]
+    run_blocks = "\n".join(str(step.get("run", "")) for step in job["steps"])
+    feature_match = re.search(r'--features "([^"]+)"', run_blocks)
+    assert feature_match is not None
+
+    with (ROOT / "Cargo.toml").open("rb") as manifest_file:
+        manifest_features = set(tomllib.load(manifest_file)["features"])
+
+    assert set(feature_match.group(1).split()) == manifest_features - {
+        "z3-verification-bundled"
+    }
+    assert "--all-features" not in run_blocks
+    assert "cargo geiger --locked" in run_blocks
+    assert job["timeout-minutes"] == 20
+
+
+def test_unsafe_audit_cache_tracks_manifest_and_workflow_contract() -> None:
+    job = _workflow()["jobs"]["unsafe-audit"]
+    report_cache = next(
+        step for step in job["steps"] if step.get("id") == "geiger-cache"
+    )
+    key = report_cache["with"]["key"]
+
+    assert "**/Cargo.lock" in key
+    assert "**/Cargo.toml" in key
+    assert ".github/workflows/ci-security.yml" in key
+
+
+def test_unsafe_audit_report_verification_is_ansi_free_and_non_vacuous() -> None:
+    job = _workflow()["jobs"]["unsafe-audit"]
+    audit_step = next(
+        step for step in job["steps"] if step.get("name") == "Audit unsafe code in dependencies"
+    )
+    verify_step = next(
+        step for step in job["steps"] if step.get("name") == "Verify no unsafe in library code"
+    )
+    verify_run = verify_step["run"]
+
+    assert audit_step["env"]["CARGO_TERM_COLOR"] == "never"
+    assert 'test -n "$root_row"' in verify_run
+    assert 'unsafe_total="$(' in verify_run
+    assert 'if [ "$unsafe_total" -ne 0 ]' in verify_run
+    assert "grep -v \"0/0\"" not in verify_run

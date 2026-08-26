@@ -154,12 +154,16 @@ jobs:
         continue-on-error: true
         with:
           path: geiger-report.txt
-          key: geiger-report-${{ hashFiles('**/Cargo.lock') }}
+          key: geiger-report-v2-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci-security.yml') }}
 
       - name: Audit unsafe code in dependencies
         if: steps.geiger-cache.outputs.cache-hit != 'true'
-        run: cargo geiger --all-features --lib 2>&1 | tee geiger-report.txt || true
+        run: |
+          # Keep the ordinary Z3 dependency visible, but do not compile bundled Z3 from
+          # source: cold native builds repeatedly exhausted this job's 20-minute budget.
+          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt || true
         env:
+          CARGO_TERM_COLOR: never
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
@@ -174,12 +178,37 @@ jobs:
 
       - name: Verify no unsafe in library code
         run: |
-          # Check that our library has 0 unsafe usage
-          if grep -E "^[0-9]+/[0-9]+ .* fortress-rollback" geiger-report.txt | grep -v "0/0"; then
-            echo "ERROR: Unsafe code detected in fortress-rollback library!"
+          set -euo pipefail
+          root_row="$(
+            awk '
+              $6 == "fortress-rollback" &&
+              $1 ~ /^[0-9]+\/[0-9]+$/ && $2 ~ /^[0-9]+\/[0-9]+$/ &&
+              $3 ~ /^[0-9]+\/[0-9]+$/ && $4 ~ /^[0-9]+\/[0-9]+$/ &&
+              $5 ~ /^[0-9]+\/[0-9]+$/ { row = $0 }
+              END { print row }
+            ' geiger-report.txt
+          )"
+          if ! test -n "$root_row"; then
+            echo "ERROR: cargo-geiger report does not contain the fortress-rollback root row"
             exit 1
           fi
-          echo "✓ No unsafe code in fortress-rollback library"
+          unsafe_total="$(
+            printf '%s\n' "$root_row" | awk '
+              {
+                total = 0
+                for (field = 1; field <= 5; field++) {
+                  split($field, counts, "/")
+                  total += counts[1]
+                }
+                print total
+              }
+            '
+          )"
+          if [ "$unsafe_total" -ne 0 ]; then
+            echo "ERROR: Unsafe code detected in fortress-rollback library: $root_row"
+            exit 1
+          fi
+          echo "No unsafe code in fortress-rollback library: $root_row"
 
   # Unused dependencies check
   unused-deps:
