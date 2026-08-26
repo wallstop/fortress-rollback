@@ -338,6 +338,29 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
     )
 
 
+def test_hot_join_clippy_covers_supported_feature_composition() -> None:
+    """User-facing additive features must compile together across all targets."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["hot-join"]["steps"]
+    clippy_step = next(
+        step for step in steps if step.get("name") == "Run hot-join clippy"
+    )
+    commands = _shell_commands(clippy_step)
+
+    assert len(commands) == 1
+    assert "--workspace" in commands[0]
+    assert "--all-targets" in commands[0]
+    assert _feature_set(commands[0]) == frozenset(
+        {
+            "hot-join",
+            "tokio",
+            "json",
+            "sync-send",
+            "paranoid",
+            "trace-validation",
+        }
+    )
+
 def test_wasm_job_rejects_browser_dependencies_only_on_emscripten() -> None:
     """The JS bridge ban must not reject legitimate browser dependencies."""
     workflow = _load_ci_rust_workflow()

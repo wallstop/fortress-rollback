@@ -29,7 +29,7 @@ cargo run --example configuration
 
 Demonstrates how to implement the `NonBlockingSocket` trait for custom networking transports:
 
-- Channel-based socket for local testing
+- Channel-based socket for local testing, with a bounded queue and drop-newest overflow policy
 - WebSocket adapter skeleton
 - Matchbox 0.14 browser adapter guidance using a raw channel and the Fortress codec pattern
 

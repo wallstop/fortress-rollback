@@ -9,7 +9,8 @@
 //! 1. **Transport-agnostic**: Fortress Rollback doesn't care how messages are delivered
 //! 2. **UDP-like semantics**: Messages should be unordered and unreliable (the library handles retries)
 //! 3. **Non-blocking**: `receive_all_messages()` must return immediately, never block
-//! 4. **Bounded receive batches**: return a capped batch each poll and leave excess queued
+//! 4. **Bounded buffering**: cap both internal queues and each returned receive batch
+//! 5. **Explicit overflow policy**: this example drops the newest packet, matching UDP loss
 //!
 //! ## Included Examples
 //!
@@ -30,11 +31,12 @@
 
 use fortress_rollback::{network::codec, Message, NonBlockingSocket};
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::Mutex;
 
 const MAX_WEBSOCKET_MESSAGES_PER_POLL: usize = 64;
 const MAX_CHANNEL_MESSAGES_PER_POLL: usize = 64;
+const MAX_CHANNEL_QUEUED_MESSAGES: usize = 256;
 
 // =============================================================================
 // Example 1: Channel-Based Socket (for local testing)
@@ -54,16 +56,18 @@ pub struct ChannelPeerId(pub u32);
 ///
 /// ## How It Works
 ///
-/// Each `ChannelSocket` has a sender for outgoing messages and a receiver
-/// for incoming messages. You create pairs of connected sockets using
+/// Each `ChannelSocket` has a bounded sender for outgoing messages and a
+/// synchronized receiver for incoming messages. When a peer's queue is full,
+/// the newest packet is dropped rather than blocking or growing memory without
+/// bound. You create pairs of connected sockets using
 /// `ChannelSocket::create_pair()`.
 pub struct ChannelSocket {
     /// Our own peer ID
     local_id: ChannelPeerId,
     /// Channel for receiving messages from other peers
-    receiver: Receiver<(ChannelPeerId, Message)>,
+    receiver: Mutex<Receiver<(ChannelPeerId, Message)>>,
     /// Senders to other peers, keyed by their peer ID
-    peer_senders: Arc<Mutex<Vec<(ChannelPeerId, Sender<(ChannelPeerId, Message)>)>>>,
+    peer_senders: Mutex<Vec<(ChannelPeerId, SyncSender<(ChannelPeerId, Message)>)>>,
 }
 
 impl ChannelSocket {
@@ -72,22 +76,22 @@ impl ChannelSocket {
     /// Returns two sockets that can send messages to each other.
     #[must_use]
     pub fn create_pair() -> (Self, Self) {
-        let (tx1, rx1) = mpsc::channel();
-        let (tx2, rx2) = mpsc::channel();
+        let (tx1, rx1) = mpsc::sync_channel(MAX_CHANNEL_QUEUED_MESSAGES);
+        let (tx2, rx2) = mpsc::sync_channel(MAX_CHANNEL_QUEUED_MESSAGES);
 
         let peer1_id = ChannelPeerId(1);
         let peer2_id = ChannelPeerId(2);
 
         let socket1 = ChannelSocket {
             local_id: peer1_id,
-            receiver: rx1,
-            peer_senders: Arc::new(Mutex::new(vec![(peer2_id, tx2)])),
+            receiver: Mutex::new(rx1),
+            peer_senders: Mutex::new(vec![(peer2_id, tx2)]),
         };
 
         let socket2 = ChannelSocket {
             local_id: peer2_id,
-            receiver: rx2,
-            peer_senders: Arc::new(Mutex::new(vec![(peer1_id, tx1)])),
+            receiver: Mutex::new(rx2),
+            peer_senders: Mutex::new(vec![(peer1_id, tx1)]),
         };
 
         (socket1, socket2)
@@ -111,8 +115,14 @@ impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
             if peer_id == addr {
                 // Clone the message since we might send to multiple peers
                 // In a real network socket, you'd serialize once and send bytes
-                if sender.send((self.local_id, msg.clone())).is_err() {
-                    eprintln!("ChannelSocket peer {addr:?} disconnected; dropping packet");
+                match sender.try_send((self.local_id, msg.clone())) {
+                    Ok(()) => {},
+                    Err(TrySendError::Full(_)) => {
+                        eprintln!("ChannelSocket peer {addr:?} queue full; dropping newest packet");
+                    },
+                    Err(TrySendError::Disconnected(_)) => {
+                        eprintln!("ChannelSocket peer {addr:?} disconnected; dropping packet");
+                    },
                 }
                 return;
             }
@@ -133,9 +143,14 @@ impl NonBlockingSocket<ChannelPeerId> for ChannelSocket {
             return messages;
         }
 
+        let Ok(receiver) = self.receiver.lock() else {
+            eprintln!("ChannelSocket receive lock was poisoned; leaving packets queued");
+            return messages;
+        };
+
         // Drain a bounded batch without blocking; excess remains queued.
         while messages.len() < MAX_CHANNEL_MESSAGES_PER_POLL {
-            match self.receiver.try_recv() {
+            match receiver.try_recv() {
                 Ok(msg) => messages.push(msg),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -367,4 +382,43 @@ fn demo_websocket_adapter() {
         adapter.incoming.len()
     );
     println!("\nSee the source code for implementation details.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keep_alive_message() -> Message {
+        let mut bytes = vec![0xF5, 0x52, 2, 0];
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&7_u32.to_le_bytes());
+        // In tests: the fixed KeepAlive wire fixture must remain decodable.
+        codec::decode(&bytes)
+            .expect("KeepAlive fixture should decode")
+            .0
+    }
+
+    #[test]
+    fn channel_socket_is_send_and_sync() {
+        const fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ChannelSocket>();
+    }
+
+    #[test]
+    fn channel_socket_full_queue_drops_newest_packet() {
+        let (mut sender, mut receiver) = ChannelSocket::create_pair();
+        let message = keep_alive_message();
+        let peer = receiver.local_id();
+
+        for _ in 0..=MAX_CHANNEL_QUEUED_MESSAGES {
+            sender.send_to(&message, &peer);
+        }
+
+        let mut received = 0;
+        for _ in 0..(MAX_CHANNEL_QUEUED_MESSAGES / MAX_CHANNEL_MESSAGES_PER_POLL) {
+            received += receiver.receive_all_messages().len();
+        }
+        assert_eq!(received, MAX_CHANNEL_QUEUED_MESSAGES);
+        assert_eq!(receiver.receive_all_messages(), Vec::new());
+    }
 }

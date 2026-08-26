@@ -198,7 +198,7 @@ jobs:
         run: cargo nextest run --profile ci --features hot-join --no-capture
 
       - name: Run hot-join clippy
-        run: cargo clippy --workspace --all-targets --features hot-join,tokio,json -- -D warnings
+        run: cargo clippy --workspace --all-targets --features hot-join,tokio,json,sync-send,paranoid,trace-validation -- -D warnings
 
   # Miri undefined behavior check (cross-platform, optimized)
   #
