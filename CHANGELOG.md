@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creation. This supersedes the 0.9 behavior that constructed unreachable duplicate endpoints.
   Exhaustive `InvalidRequestKind` matches need arms for both variants.
 
+### Removed
+
+- **Breaking:** the unused `__internal::rle_encode` and `__internal::rle_decode` duplicate aliases
+  are removed at the 0.14 semver boundary. Use the existing supported `rle::encode` and
+  `rle::decode` paths. Encoded bytes and decode behavior are unchanged.
+
 ### Fixed
 
 - **Pre-existing:** legacy `Frame` arithmetic operators now saturate at the `i32` bounds instead of panicking on overflow. Remainder returns `0` for its two undefined primitive-integer cases (a zero divisor and `i32::MIN % -1`), and the discouraged `From<usize>` conversion saturates at `i32::MAX` instead of wrapping into a negative frame. The existing checked and fallible APIs remain the preferred choices when callers need to detect invalid arithmetic.

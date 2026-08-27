@@ -410,9 +410,6 @@ pub mod __internal {
         HandshakeTraceAction, HandshakeTraceConfig, HandshakeTraceEvent, HandshakeTraceOverflow,
     };
 
-    // RLE compression (internal implementation)
-    pub use crate::rle::{decode as rle_decode, encode as rle_encode};
-
     // Session internals
     pub use crate::sessions::player_registry::PlayerRegistry;
 

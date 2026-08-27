@@ -94,6 +94,7 @@ WIKI_STRUCTURE = {
     "desync-playbook.md": "Desync-Playbook",
     "reconnect-playbook.md": "Reconnect-Playbook",
     "tuning.md": "Tuning",
+    "api/public-api-census.md": "Public-API-Census",
     # Specs directory
     "specs/formal-spec.md": "Formal-Specification",
     "specs/determinism-model.md": "Determinism-Model",
@@ -409,8 +410,15 @@ def convert_links(content: str, source_file: str, wiki_structure: dict[str, str]
             if "assets/" in resolved or resolved.startswith("assets"):
                 # Assets are copied to wiki/assets/, so use relative path from wiki root
                 new_link = f"[{link_text}](assets/{PurePosixPath(resolved).name})"
-                result = result[: link_match.start] + new_link + result[link_match.end :]
-                logger.debug(f"  Asset link: {link_match.full_match} -> {new_link}")
+                category = "Asset"
+            else:
+                # Wiki pages are flattened and do not carry arbitrary docs data
+                # files. Keep those links usable through their canonical GitHub
+                # location instead of leaving a broken wiki-relative target.
+                new_link = f"[{link_text}]({GITHUB_BLOB_URL}/docs/{resolved}{anchor})"
+                category = "Docs file"
+            result = result[: link_match.start] + new_link + result[link_match.end :]
+            logger.debug(f"  {category} link: {link_match.full_match} -> {new_link}")
             continue
 
         # Remove .md extension for matching
@@ -1119,6 +1127,7 @@ def generate_sidebar(wiki_structure: dict[str, str]) -> str:
 - [Formal Specification](Formal-Specification)
 - [Determinism Model](Determinism-Model)
 - [API Contracts](API-Contracts)
+- [Public API Census](Public-API-Census)
 - [Spec Divergences](Spec-Divergences)
 
 ## Reference

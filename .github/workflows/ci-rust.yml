@@ -17,6 +17,9 @@ on:
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
+      - 'scripts/api/public_api_census.py'
+      - 'scripts/tests/test_public_api_census.py'
+      - 'docs/api/public-api-*.tsv'
       - 'tests/godot-emscripten/**'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-rust.yml'
@@ -34,6 +37,9 @@ on:
       - 'scripts/verification/verify-kani.sh'
       - 'scripts/verification/check-kani-coverage.sh'
       - 'scripts/ci/check-emscripten-dependencies.sh'
+      - 'scripts/api/public_api_census.py'
+      - 'scripts/tests/test_public_api_census.py'
+      - 'docs/api/public-api-*.tsv'
       - 'tests/godot-emscripten/**'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-rust.yml'
@@ -43,6 +49,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  public-api-census:
+    name: Public API Census
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: public-api-census-${{ steps.nightly.outputs.toolchain }}
+          cache-paths: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/public-api-census
+
+      - name: Verify checked public API snapshot
+        run: python3 scripts/api/public_api_census.py --check
+
   # Quick validation that all Kani proofs are in tier lists
   kani-coverage:
     name: Kani Proof Coverage

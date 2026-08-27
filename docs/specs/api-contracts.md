@@ -6,7 +6,7 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.5
+**Version:** 1.6
 **Date:** August 27, 2026
 **Status:** Maintained high-impact subset
 
@@ -52,6 +52,10 @@ Each API is documented with:
 This ledger records dispositioned rows from the active public API and integration audit. It grows
 with that audit; absence from this maintained high-impact subset is not an implicit approval.
 
+The exact one-to-one semver inventory lives in the
+[public API census](../api/public-api-census.md). Its generated snapshot includes callable hidden
+items and aliases that rendered rustdoc omits; this table remains the behavioral-contract subset.
+
 | Owner / surface | Features / platforms | Usage evidence | Risk hypothesis | Disposition / evidence |
 | --- | --- | --- | --- | --- |
 | `SessionBuilder::{try_,}start_spectator_session{,_multi}` | Core; native and WASM with a compatible socket | Spectator session tests, `sync-send`, `hot-join`, browser compile | `Option` erased startup errors; empty or duplicate failover hosts created ambiguous/unreachable sessions | Keep legacy `Option` wrappers; add exact Result APIs and pre-endpoint host validation. Issue #310 regressions cover exact errors, stable duplicate indices, and unchanged host order. |
@@ -60,6 +64,7 @@ with that audit; absence from this maintained high-impact subset is not an impli
 | `{SessionMetrics,PeerMetrics,HotJoinMetrics,SpecViolation,InvariantViolation}::{try_,}to_json{,_pretty}` | `json`; all targets supported by `serde_json` | Metrics/telemetry tests and operator documentation | `Option<String>` erased serializer/allocation causes; direct `serde_json::to_string` could not make output reservation fallible | Add shared exact-count, fallible-reserve Result APIs with source-preserving `JsonSerializationError`; keep `Option` wrappers as explicit `.ok()` compatibility behavior. Failure injection and byte-identity regressions cover both formats. |
 | `TokioUdpSocket` after `P2PSession` ownership | `tokio`; native Linux, macOS, and Windows | Adapter units and compile matrix previously; real loopback session matrix now | Socket helpers worked before ownership, but no runtime oracle proved the synchronous session driver after the move | A bounded ten-second test moves two ephemeral adapters into sessions, synchronizes without sleeps as an oracle, confirms four frames, checks peer traffic, and asserts deterministic convergence. Issue #312 CI runs it on all three native operating systems and retains failure logs. |
 | Raw-byte browser `NonBlockingSocket` adapter | Browser `wasm32-unknown-unknown` only; excluded from Emscripten | Custom-socket example and browser compile previously; browser runner now | Compile-only coverage could miss clock/runtime, malformed decode, unbounded draining, or session-handshake failures | A browser-run bounded raw channel uses `codec::{encode,decode_message}`, rejects injected malformed packets, limits each receive call to eight attempts, synchronizes two sessions, and confirms two convergent frames. Target-specific dependencies remain browser-only. |
+| Complete callable public path census | No-default and complete production-API feature profiles | Pinned rustdoc JSON, source reachability graph, checked snapshot, parser fixtures, and cargo-semver-checks | Rendered rustdoc omitted callable hidden modules, associated items, and aliases; accidental path removal could evade review | Keep 2,709 current symbol rows (2,703 textual paths), including associated paths beneath aliases, under explicit owner, availability, usage, risk, and disposition rows. Retain compatibility and verification paths unless a reviewed migration records their replacement; issue #313 removes only two unused `__internal` RLE aliases at the 0.14 boundary. |
 
 ---
 
@@ -1107,6 +1112,7 @@ Relevant session and transport APIs preserve these invariants:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.6     | 2026-08-27 | Linked the exact pinned rustdoc-JSON census, retained hidden/alias dispositions, and reviewed removal ledger from issue #313. |
 | 1.5     | 2026-08-27 | Added Tokio-owned session and browser raw-transport runtime dispositions from issue #312, including timeout, malformed-packet, bounded-polling, and native/browser/Emscripten target evidence. |
 | 1.4     | 2026-08-27 | Added the dispositioned public API audit ledger and fallible JSON/compression contracts, including compatibility fallback and byte-stability guarantees. |
 | 1.3     | 2026-08-26 | Scoped the ledger to its maintained high-impact subset; added total `Frame` arithmetic and conversion contracts; corrected configurable queue invariants and protocol-v2 framing terminology. |

@@ -58,6 +58,20 @@ let spectator = match SessionBuilder::<GameConfig>::new()
 matches. Remove repeated addresses instead of relying on the former first-match
 routing behavior.
 
+The public-surface census also removed two unused aliases from the explicitly
+unstable `__internal` namespace. Replace them with the supported module paths:
+
+```rust
+// Before
+use fortress_rollback::__internal::{rle_decode, rle_encode};
+
+// After
+use fortress_rollback::rle::{decode, encode};
+```
+
+The functions and their wire-compatible bytes are unchanged; only the duplicate
+callable paths were removed.
+
 ## Upgrading from 0.11
 
 The Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries are removed.
@@ -91,6 +105,7 @@ requests and state in the application crate.
 - **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
 - **Current wire protocol:** canonical hot-join membership generations require protocol v2; v1/v2 peers intentionally reject one another, so upgrade every participant together.
 - **Spectator startup after 0.13:** prefer the `try_start_spectator_session*` methods, and supply a nonempty list of unique failover hosts.
+- **Public-surface cleanup after 0.13:** replace `__internal::{rle_encode,rle_decode}` with `rle::{encode,decode}`.
 - **New in 0.10:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [0.10 section](#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes

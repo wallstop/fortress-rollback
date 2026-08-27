@@ -933,6 +933,16 @@ class TestConvertLinks:
         expected = "[Code](https://github.com/wallstop/fortress-rollback/blob/main/src/lib.rs)"
         assert result == expected
 
+    def test_docs_data_file_converts_to_canonical_github_url(self) -> None:
+        """Flattened wiki pages must not retain docs-relative data links."""
+        content = "[Snapshot](public-api-snapshot.tsv)"
+        result = convert_links(content, "api/public-api-census.md", WIKI_STRUCTURE)
+        expected = (
+            "[Snapshot](https://github.com/wallstop/fortress-rollback/blob/main/"
+            "docs/api/public-api-snapshot.tsv)"
+        )
+        assert result == expected
+
     def test_relative_link_from_nested_source(self) -> None:
         """Relative links with ../ from nested source files should resolve correctly."""
         content = "[API](../architecture.md)"

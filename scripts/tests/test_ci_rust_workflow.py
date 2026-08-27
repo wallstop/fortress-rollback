@@ -230,6 +230,38 @@ def test_semver_failure_summary_distinguishes_infra_from_api_breaks() -> None:
     assert "found a breaking public-API change" not in summary
 
 
+def test_public_api_census_uses_pinned_nightly_and_checked_snapshot() -> None:
+    """Callable hidden paths must be rebuilt by the canonical nightly gate."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["public-api-census"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 10
+
+    steps = job["steps"]
+    nightly = next(
+        step for step in steps if step.get("name") == "Install pinned Rust nightly"
+    )
+    assert nightly["id"] == "nightly"
+    assert nightly["uses"] == "./.github/actions/install-pinned-nightly"
+
+    cache = next(step for step in steps if step.get("name") == "Setup Rust cache")
+    assert "steps.nightly.outputs.toolchain" in cache["with"]["cache-key"]
+    assert "target/public-api-census" in cache["with"]["cache-paths"].splitlines()
+
+    census = next(
+        step for step in steps if step.get("name") == "Verify checked public API snapshot"
+    )
+    assert census["run"] == "python3 scripts/api/public_api_census.py --check"
+
+    expected_paths = {
+        "scripts/api/public_api_census.py",
+        "scripts/tests/test_public_api_census.py",
+        "docs/api/public-api-*.tsv",
+    }
+    for event in ("push", "pull_request"):
+        assert expected_paths <= _workflow_paths(workflow, event)
+
+
 @pytest.mark.parametrize("workflow_path", CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS)
 @pytest.mark.parametrize("event", ("push", "pull_request"))
 def test_cargo_heavy_workflows_trigger_on_cargo_config_changes(
