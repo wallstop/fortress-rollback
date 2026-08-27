@@ -125,7 +125,7 @@ impl<T: Config> PlayerRegistry<T> {
             (None, _) => Err(InvalidRequestKind::NoLocalPlayers.into()),
             (Some(handle), None) => Ok(handle),
             (Some(_), Some(_)) => {
-                let count = 2 + iter.count();
+                let count = 2_usize.saturating_add(iter.count());
                 Err(InvalidRequestKind::MultipleLocalPlayers { count }.into())
             },
         }
@@ -199,7 +199,7 @@ impl<T: Config> PlayerRegistry<T> {
             (None, _) => Err(InvalidRequestKind::NoRemotePlayers.into()),
             (Some(handle), None) => Ok(handle),
             (Some(_), Some(_)) => {
-                let count = 2 + iter.count();
+                let count = 2_usize.saturating_add(iter.count());
                 Err(InvalidRequestKind::MultipleRemotePlayers { count }.into())
             },
         }

@@ -460,7 +460,17 @@ impl<T: Config> InputQueue<T> {
                 frame: next_frame,
                 input: last_input.input,
             };
-            if !self.add_input_by_frame(filler, next_frame, reclaim_before) {
+            let inserted = self.add_input_by_frame(filler, next_frame, reclaim_before);
+            if !inserted || self.last_added_frame != next_frame {
+                if inserted {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "add_input_by_frame retained frame {} but last_added_frame is {}",
+                        next_frame,
+                        self.last_added_frame
+                    );
+                }
                 self.head = snapshot_head;
                 self.tail = snapshot_tail;
                 self.length = snapshot_length;
@@ -478,16 +488,6 @@ impl<T: Config> InputQueue<T> {
                     kind: InternalErrorKind::InputQueueGapFillFailed { frame: next_frame },
                 });
             }
-            // `add_input_by_frame` is the only mutator that updates
-            // `last_added_frame`; this is a debug-only sanity check that the
-            // invariant holds. In release builds it is compiled out — a real
-            // mismatch would have been reported by `add_input_by_frame` via
-            // `report_violation!` and surfaced through the `false` return
-            // above.
-            debug_assert_eq!(
-                self.last_added_frame, next_frame,
-                "add_input_by_frame must advance last_added_frame to next_frame"
-            );
         }
 
         self.frame_delay = delay;
@@ -785,11 +785,26 @@ impl<T: Config> InputQueue<T> {
     /// [`Self::validate_freeze_at_cut`] without introducing a second fallible
     /// phase.
     pub(crate) fn freeze_at_prevalidated_cut(&mut self, cut: Frame) {
-        debug_assert_eq!(self.validate_freeze_at_cut(cut), Ok(()));
-        if let Ok(input) = self.retained_confirmed_input(cut) {
-            self.last_confirmed_input = Some(input.input);
-            self.frozen = true;
-        }
+        let Ok(()) = self.validate_freeze_at_cut(cut) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "freeze_at_prevalidated_cut called with invalid cut {}",
+                cut
+            );
+            return;
+        };
+        let Ok(input) = self.retained_confirmed_input(cut) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "prevalidated freeze cut {} was no longer retained",
+                cut
+            );
+            return;
+        };
+        self.last_confirmed_input = Some(input.input);
+        self.frozen = true;
     }
 
     /// Discards confirmed frames **before** the given `frame` from the queue.
@@ -2716,6 +2731,33 @@ mod input_queue_tests {
             queue.confirmed_input(Frame::new(4)).is_err(),
             "failed gap fill must not leave a filler frame behind"
         );
+    }
+
+    /// At the terminal frame, saturating frame addition can produce a candidate
+    /// equal to `last_added_frame`. A rejected insert must still fail the whole
+    /// delay update even though that equality makes the postcondition appear to
+    /// hold.
+    #[test]
+    fn frame_delay_increase_at_maximum_frame_reports_rejected_insert() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid queue length");
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 7 })),
+            Frame::new(0)
+        );
+        queue.last_added_frame = Frame::new(i32::MAX);
+        let before = queue.clone();
+
+        let error = queue
+            .set_frame_delay(1)
+            .expect_err("a rejected saturated filler must fail the delay update");
+        assert!(matches!(
+            error,
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::InputQueueGapFillFailed { frame }
+            } if frame == Frame::new(i32::MAX)
+        ));
+        assert_queue_unchanged(&queue, &before);
     }
 
     /// A full recovery batch may need every ring slot for frames at or after

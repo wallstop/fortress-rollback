@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-07-08
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2709
-# textual-paths=2703
+# symbols=2713
+# textual-paths=2707
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -848,6 +848,7 @@ fortress_rollback::SyncConfig::running_retry_interval	struct_field	no-default+al
 fortress_rollback::SyncConfig::stress_test	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/config.rs
 fortress_rollback::SyncConfig::sync_retry_interval	struct_field	no-default+all-features	yes	sessions	public-data-shape	exhaustive-data-shape	keep-supported	-	src/sessions/config.rs
 fortress_rollback::SyncConfig::sync_timeout	struct_field	no-default+all-features	yes	sessions	public-data-shape	exhaustive-data-shape	keep-supported	-	src/sessions/config.rs
+fortress_rollback::SyncConfig::validate	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/config.rs
 fortress_rollback::SyncHealth	enum	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/sync_health.rs
 fortress_rollback::SyncHealth::DesyncDetected	variant	no-default+all-features	yes	sessions	public-data-shape	exhaustive-data-shape	keep-supported	-	src/sessions/sync_health.rs
 fortress_rollback::SyncHealth::DesyncDetected::frame	struct_field	no-default+all-features	yes	sessions	public-data-shape	exhaustive-data-shape	keep-supported	-	src/sessions/sync_health.rs
@@ -2137,6 +2138,7 @@ fortress_rollback::prelude::SyncConfig::running_retry_interval	struct_field	no-d
 fortress_rollback::prelude::SyncConfig::stress_test	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::stress_test	src/sessions/config.rs
 fortress_rollback::prelude::SyncConfig::sync_retry_interval	struct_field	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_retry_interval	src/sessions/config.rs
 fortress_rollback::prelude::SyncConfig::sync_timeout	struct_field	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_timeout	src/sessions/config.rs
+fortress_rollback::prelude::SyncConfig::validate	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::validate	src/sessions/config.rs
 fortress_rollback::prelude::SyncTestSession	alias	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncTestSession	src/prelude.rs
 fortress_rollback::prelude::SyncTestSession::add_local_input	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncTestSession::add_local_input	src/sessions/sync_test_session.rs
 fortress_rollback::prelude::SyncTestSession::advance_frame	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncTestSession::advance_frame	src/sessions/sync_test_session.rs
@@ -2332,6 +2334,7 @@ fortress_rollback::sessions::builder::SyncConfig::running_retry_interval	struct_
 fortress_rollback::sessions::builder::SyncConfig::stress_test	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::stress_test	src/sessions/config.rs
 fortress_rollback::sessions::builder::SyncConfig::sync_retry_interval	struct_field	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_retry_interval	src/sessions/config.rs
 fortress_rollback::sessions::builder::SyncConfig::sync_timeout	struct_field	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_timeout	src/sessions/config.rs
+fortress_rollback::sessions::builder::SyncConfig::validate	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::validate	src/sessions/config.rs
 fortress_rollback::sessions::config	module	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/config.rs
 fortress_rollback::sessions::config::ClockFn	alias	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::ClockFn	src/sessions/config.rs
 fortress_rollback::sessions::config::DisconnectBehavior	alias	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::DisconnectBehavior	src/sessions/config.rs
@@ -2394,6 +2397,7 @@ fortress_rollback::sessions::config::SyncConfig::running_retry_interval	struct_f
 fortress_rollback::sessions::config::SyncConfig::stress_test	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::stress_test	src/sessions/config.rs
 fortress_rollback::sessions::config::SyncConfig::sync_retry_interval	struct_field	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_retry_interval	src/sessions/config.rs
 fortress_rollback::sessions::config::SyncConfig::sync_timeout	struct_field	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::sync_timeout	src/sessions/config.rs
+fortress_rollback::sessions::config::SyncConfig::validate	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SyncConfig::validate	src/sessions/config.rs
 fortress_rollback::sessions::event_drain	module	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/event_drain.rs
 fortress_rollback::sessions::event_drain::EventDrain	alias	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::EventDrain	src/sessions/event_drain.rs
 fortress_rollback::sessions::hot_join	module	all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/hot_join.rs

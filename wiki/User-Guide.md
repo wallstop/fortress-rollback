@@ -3450,8 +3450,8 @@ This section documents all configuration options available when building a sessi
 | `with_fps(fps)`                          | 60                            | Expected frames per second for timing                                                              |
 | `with_save_mode(mode)`                   | `EveryFrame`                  | How often to save state for rollback                                                               |
 | `with_desync_detection_mode(mode)`       | `On { interval: 60 }`         | Checksum comparison between peers                                                                  |
-| `with_disconnect_timeout(duration)`      | 2000ms                        | Time before disconnecting unresponsive peer                                                        |
-| `with_disconnect_notify_delay(duration)` | 500ms                         | Time before warning about potential disconnect                                                     |
+| `with_disconnect_timeout(duration)`      | 2000ms                        | Time before disconnecting unresponsive peer; must be at least the notification delay                |
+| `with_disconnect_notify_delay(duration)` | 500ms                         | Time before warning about potential disconnect; must not exceed the disconnect timeout              |
 | `with_disconnect_behavior(behavior)`     | `Halt`                        | Action on auto-timeout: `Halt` (legacy) or `ContinueWithout` (graceful drop)                       |
 | `with_check_distance(frames)`            | 2                             | Frames to resimulate in SyncTestSession                                                            |
 | `with_violation_observer(observer)`      | None                          | Custom observer for spec violations                                                                |
@@ -3487,7 +3487,19 @@ let config = SyncConfig {
     keepalive_interval: Duration::from_millis(200),  // Keepalive interval (default: 200ms)
     ..Default::default()  // Forward compatibility
 };
+
+config.validate()?;
 ```
+
+Network session startup calls `SyncConfig::validate()` automatically. The
+required sync roundtrip count must be at least one, and sync retry, running
+retry, keepalive, and configured sync-timeout intervals must each be at least
+one millisecond. Very large intervals remain valid and are compared as elapsed
+durations without constructing an overflowing absolute deadline.
+
+The disconnect notification delay must not exceed the disconnect timeout.
+Rollback and spectator session startup reject an invalid pair before creating
+protocol endpoints.
 
 **Presets:**
 

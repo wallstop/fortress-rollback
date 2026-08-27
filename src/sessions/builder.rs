@@ -331,7 +331,7 @@ impl<T: Config> SessionBuilder<T> {
         // check if the player handle is valid for the given player type
         match player_type {
             PlayerType::Local => {
-                self.local_players += 1;
+                self.local_players = self.local_players.saturating_add(1);
                 if !player_handle.is_valid_player_for(self.num_players) {
                     return Err(InvalidRequestKind::InvalidLocalPlayerHandle {
                         handle: player_handle,
@@ -799,13 +799,21 @@ impl<T: Config> SessionBuilder<T> {
         self
     }
 
-    /// Sets the disconnect timeout. The session will automatically disconnect from a remote peer if it has not received a packet in the timeout window.
+    /// Sets the disconnect timeout. The session will automatically disconnect
+    /// from a remote peer if it has not received a packet in the timeout window.
+    ///
+    /// Network session startup rejects a timeout shorter than the configured
+    /// disconnect notification delay.
     pub fn with_disconnect_timeout(mut self, timeout: Duration) -> Self {
         self.disconnect_timeout = timeout;
         self
     }
 
-    /// Sets the time before the first notification will be sent in case of a prolonged period of no received packages.
+    /// Sets the time before the first notification will be sent in case of a
+    /// prolonged period with no received packets.
+    ///
+    /// Network session startup rejects a notification delay greater than the
+    /// configured disconnect timeout.
     pub fn with_disconnect_notify_delay(mut self, notify_delay: Duration) -> Self {
         self.disconnect_notify_start = notify_delay;
         self
@@ -842,7 +850,8 @@ impl<T: Config> SessionBuilder<T> {
     /// Sets the synchronization protocol configuration.
     ///
     /// This allows fine-tuning the sync handshake behavior for different network
-    /// conditions. See [`SyncConfig`] for available options and presets.
+    /// conditions. See [`SyncConfig`] for available options, presets, and the
+    /// validation applied automatically at network session startup.
     ///
     /// # Example
     ///
@@ -1342,13 +1351,23 @@ impl<T: Config> SessionBuilder<T> {
         self.input_queue_config
             .validate_frame_delay(self.input_delay)?;
         self.validate_rollback_window_storage()?;
+        self.sync_config.validate()?;
         self.protocol_config.validate()?;
+        super::config::validate_disconnect_timing(
+            self.disconnect_timeout,
+            self.disconnect_notify_start,
+        )?;
         self.validate_network_desync_detection()?;
         Ok(())
     }
 
     fn validate_spectator_config(&self) -> Result<(), FortressError> {
+        self.sync_config.validate()?;
         self.protocol_config.validate()?;
+        super::config::validate_disconnect_timing(
+            self.disconnect_timeout,
+            self.disconnect_notify_start,
+        )?;
         self.spectator_config.validate()?;
         self.validate_network_desync_detection()
     }
@@ -1486,7 +1505,7 @@ impl<T: Config> SessionBuilder<T> {
         // 2-machine shapes are completely unaffected.
         #[cfg(feature = "hot-join")]
         if self.accept_hot_join || !self.reserved_slots.is_empty() {
-            let mesh_machines = 1 + self.distinct_remote_machine_count();
+            let mesh_machines = 1_usize.saturating_add(self.distinct_remote_machine_count());
             if mesh_machines >= 3 {
                 // Mirror of runtime gate R2a: `S = L = last_saved_frame`
                 // requires saved state at exactly the last-sent frame, which
@@ -2590,6 +2609,83 @@ mod tests {
         let builder =
             SessionBuilder::<TestConfig>::new().with_sync_config(SyncConfig::high_latency());
         assert_eq!(builder.sync_config, SyncConfig::high_latency());
+    }
+
+    #[test]
+    fn rollback_config_rejects_nonfunctional_sync_timing() {
+        let cases = [
+            (
+                SyncConfig {
+                    num_sync_packets: 0,
+                    ..SyncConfig::default()
+                },
+                "num_sync_packets",
+            ),
+            (
+                SyncConfig {
+                    sync_retry_interval: Duration::ZERO,
+                    ..SyncConfig::default()
+                },
+                "sync_retry_interval",
+            ),
+            (
+                SyncConfig {
+                    sync_timeout: Some(Duration::ZERO),
+                    ..SyncConfig::default()
+                },
+                "sync_timeout",
+            ),
+            (
+                SyncConfig {
+                    running_retry_interval: Duration::ZERO,
+                    ..SyncConfig::default()
+                },
+                "running_retry_interval",
+            ),
+            (
+                SyncConfig {
+                    keepalive_interval: Duration::ZERO,
+                    ..SyncConfig::default()
+                },
+                "keepalive_interval",
+            ),
+        ];
+
+        for (sync_config, expected_field) in cases {
+            let error = SessionBuilder::<TestConfig>::new()
+                .with_sync_config(sync_config)
+                .validate_rollback_config()
+                .expect_err("nonfunctional sync timing must fail before endpoint construction");
+            match error {
+                FortressError::InvalidRequestStructured {
+                    kind:
+                        InvalidRequestKind::ConfigValueOutOfRange { field, .. }
+                        | InvalidRequestKind::DurationConfigOutOfRange { field, .. },
+                } => assert_eq!(field, expected_field),
+                other => panic!("expected structured config error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_config_rejects_disconnect_notification_after_timeout() {
+        let error = SessionBuilder::<TestConfig>::new()
+            .with_disconnect_timeout(Duration::from_secs(1))
+            .with_disconnect_notify_delay(Duration::from_secs(2))
+            .validate_rollback_config()
+            .expect_err("notification delay after timeout cannot produce a valid warning window");
+
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::DurationConfigOutOfRange {
+                    field: "disconnect_notify_delay",
+                    min_ms: 0,
+                    max_ms: 1_000,
+                    actual_ms: 2_000,
+                }
+            }
+        ));
     }
 
     #[cfg(feature = "trace-validation")]

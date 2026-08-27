@@ -504,10 +504,6 @@ impl SessionMetrics {
 
     /// Records one rollback that re-simulated `depth` frames.
     pub(crate) fn record_rollback(&mut self, depth: usize) {
-        debug_assert!(
-            depth > 0,
-            "record_rollback called with depth 0 — not a real rollback"
-        );
         if depth == 0 {
             return;
         }

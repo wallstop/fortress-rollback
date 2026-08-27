@@ -538,6 +538,12 @@ MessageBody =
     | Goodbye { reason: u8 }                            -- fixed wire tag 17
 ```
 
+Floor-round serial zero means “no round yet.” Emitted serials advance from
+`1` through `u32::MAX`, then return to `1`; half-range serial comparison orders
+post-wrap replies ahead of pre-wrap state while rejecting reordered stale
+packets. The protocol retains only one pending request, keeping comparisons
+inside the unambiguous half range.
+
 ---
 
 ## Safety Properties

@@ -2184,12 +2184,15 @@ impl<T: Config> P2PSession<T> {
     }
 
     fn coordinated_drop_apply_commit(&mut self, commit: DropCommit) -> Result<(), DropAbortReason> {
-        let (target_addr, targets, participants, local_participant) = {
+        let (target_addr, targets, local_participant) = {
             let active = self
                 .coordinated_drop
                 .active
                 .as_ref()
                 .ok_or(DropAbortReason::ParticipantLost)?;
+            if active.participants.is_empty() {
+                return Err(DropAbortReason::ConflictingHistory);
+            }
             if active.operation != commit.operation
                 || active.cut != Some(commit.cut)
                 || active.cut_digest != Some(commit.cut_digest)
@@ -2201,7 +2204,6 @@ impl<T: Config> P2PSession<T> {
             (
                 active.target_addr.clone(),
                 active.targets.clone(),
-                active.participants.clone(),
                 active.local_participant,
             )
         };
@@ -2295,10 +2297,6 @@ impl<T: Config> P2PSession<T> {
             active.committed_acks.insert(local_participant);
         }
 
-        // The exact participant vector is consumed above as the commit
-        // certificate; retain this assertion as a compile-visible guard against
-        // accidentally weakening the all-ready comparison during refactors.
-        debug_assert!(!participants.is_empty());
         Ok(())
     }
 
@@ -2727,7 +2725,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // initial session state - if there are no endpoints, we don't need a synchronization phase
-        let state = if players.remotes.len() + players.spectators.len() == 0 {
+        let state = if players.remotes.is_empty() && players.spectators.is_empty() {
             SessionState::Running
         } else {
             SessionState::Synchronizing
@@ -12111,7 +12109,7 @@ impl<T: Config> P2PSession<T> {
                         ViolationKind::NetworkProtocol,
                         "Received input from invalid player handle {} (max={})",
                         player,
-                        self.num_players - 1
+                        self.num_players.saturating_sub(1)
                     );
                     return;
                 }
@@ -12992,6 +12990,51 @@ mod tests {
                 .is_some_and(|status| status.disconnected),
             "the committed operation must freeze the remote slot"
         );
+    }
+
+    #[test]
+    fn coordinated_drop_commit_rejects_empty_participant_certificate() {
+        let mut session = create_two_player_session();
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: 0,
+        };
+        let cut = Frame::new(0);
+        let cut_digest = 0_u64;
+        let now = session.coordinated_drop_now();
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(8080),
+            targets: Vec::new(),
+            participants: Vec::new(),
+            local_participant: 0,
+            held_at: cut,
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready: std::collections::BTreeSet::new(),
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(cut),
+            cut_digest: Some(cut_digest),
+            pending_commit: None,
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+
+        let result = session.coordinated_drop_apply_commit(DropCommit {
+            operation,
+            cut,
+            cut_digest,
+        });
+
+        assert_eq!(result, Err(DropAbortReason::ConflictingHistory));
     }
 
     #[cfg(feature = "hot-join")]

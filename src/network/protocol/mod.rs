@@ -38,7 +38,7 @@ use crate::network::messages::{
 };
 use crate::rle;
 use crate::rng::{random, Pcg32, Rng, SeedableRng};
-use crate::sessions::config::{ProtocolConfig, SyncConfig};
+use crate::sessions::config::{validate_disconnect_timing, ProtocolConfig, SyncConfig};
 use crate::telemetry::{ViolationKind, ViolationSeverity};
 use crate::time_sync::{TimeSync, TimeSyncConfig};
 use crate::{report_violation, safe_frame_add, safe_frame_sub};
@@ -52,9 +52,34 @@ use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
 use std::hash::Hasher;
-use std::ops::Add;
 use std::sync::Arc;
 use web_time::{Duration, Instant};
+
+const FLOOR_ROUND_SERIAL_HALF_RANGE: u32 = 1 << 31;
+
+/// Returns whether `candidate` is newer than `baseline` in the wrapping
+/// floor-round serial space. Zero is reserved for "no round yet" and is never
+/// emitted. Comparisons are unambiguous while fewer than half the serial space
+/// is outstanding, which the single-pending-request protocol guarantees.
+fn floor_round_seq_is_newer(candidate: u32, baseline: u32) -> bool {
+    if candidate == 0 {
+        return false;
+    }
+    if baseline == 0 {
+        return true;
+    }
+    let distance = candidate.wrapping_sub(baseline);
+    distance != 0 && distance < FLOOR_ROUND_SERIAL_HALF_RANGE
+}
+
+fn next_floor_round_seq(current: u32) -> u32 {
+    let next = current.wrapping_add(1);
+    if next == 0 {
+        1
+    } else {
+        next
+    }
+}
 
 use super::network_stats::NetworkStats;
 
@@ -291,7 +316,7 @@ where
     // constants
     disconnect_timeout: Duration,
     disconnect_notify_start: Duration,
-    shutdown_timeout: Instant,
+    shutdown_started_at: Instant,
     fps: usize,
     conn_id: u32,
 
@@ -321,36 +346,30 @@ where
     /// reorder-immune reply channel** (`roundFloor`). Parallel to
     /// [`Self::peer_connect_status`] (index = handle, length `num_players`),
     /// `Frame::NULL`-seeded. Written ONLY by [`Self::on_floor_reply`] for an
-    /// ACCEPTED reply — one whose `round_seq` is STRICTLY NEWER than the latest
-    /// accepted ([`Self::floor_reply_seq`]), does NOT exceed the latest request
-    /// issued ([`Self::floor_request_seq`]), and reports a floor for EVERY slot.
+    /// ACCEPTED reply — one whose `round_seq` is strictly newer in serial order
+    /// than the latest accepted ([`Self::floor_reply_seq`]), is not serial-newer
+    /// than the latest request issued ([`Self::floor_request_seq`]), and reports
+    /// a floor for every slot.
     /// A reordered stale reply (older/equal `round_seq`), an unsolicited one
     /// (`round_seq` beyond any issued request), or a short/incomplete `floors`
     /// vector is dropped — which is what keeps this cache reorder-immune and
     /// prevents a partial reply from leaving a slot reading a stale prior round.
     /// An accepted reply (its length checked first) fully rewrites every slot.
     round_floor: Vec<Frame>,
-    /// Monotonic per-request sequence number, bumped on every outgoing
-    /// [`FloorRequest`] ([`Self::send_floor_request`]) and stamped on it. Lets the
-    /// observer order this relay's replies and drop reordered stale ones (accept
-    /// only a strictly-newer `round_seq`) as well as unsolicited/forged ones (a
-    /// reply must not echo a `round_seq` beyond this latest issued request).
-    ///
-    /// Wraps at [`u32::MAX`] (`wrapping_add`); past the wrap a low post-wrap seq
-    /// would fail the strictly-newer test against the high pre-wrap
-    /// [`Self::floor_reply_seq`] and stall this endpoint's round. Unreachable in
-    /// practice: the round only re-issues inside the relay topology, at most once
-    /// per keepalive interval, so a wrap needs ~2³² re-issues (years of continuous
-    /// post-drop traffic) — the same astronomically-rare framing as the protocol
-    /// packet-filter `conn_id` era counter and the connect-status `epoch`.
+    /// Wrapping per-request serial number, bumped on every outgoing
+    /// [`FloorRequest`] ([`Self::send_floor_request`]) and stamped on it. Zero is
+    /// reserved for "none yet"; after [`u32::MAX`] the next serial is one.
+    /// Half-range serial comparison keeps post-wrap replies ordered and rejects
+    /// reordered pre-wrap packets.
     floor_request_seq: u32,
     /// The `round_seq` of the latest ACCEPTED [`FloorReply`] (`0` = none yet).
     /// `round_floor` always holds the floors of this reply.
     floor_reply_seq: u32,
     /// The [`Self::floor_request_seq`] value snapshotted at the most recent
     /// prune ([`Self::reset_floor_freshness`]). A reply counts as **post-prune
-    /// fresh** only when `floor_reply_seq > floor_prune_seq` — i.e. it answers a
-    /// request issued AFTER the prune, so it captures the relay's SETTLED floor
+    /// fresh** only when `floor_reply_seq` is serial-newer than
+    /// `floor_prune_seq` — i.e. it answers a request issued after the prune, so
+    /// it captures the relay's settled floor
     /// (the spec's `ackFresh`, reset on every `Prune`). [`Self::floor_round_is_fresh`].
     floor_prune_seq: u32,
     /// Set every poll by [`Self::set_floor_request_needed`]: `true` when the
@@ -822,6 +841,10 @@ impl<T: Config> UdpProtocol<T> {
         protocol_config: ProtocolConfig,
         time_sync_config: TimeSyncConfig,
     ) -> Result<Self, FortressError> {
+        sync_config.validate()?;
+        protocol_config.validate()?;
+        validate_disconnect_timing(disconnect_timeout, disconnect_notify_start)?;
+
         // Compute initial time using custom clock if configured, or Instant::now()
         let now = match &protocol_config.clock {
             Some(clock_fn) => clock_fn(),
@@ -923,7 +946,7 @@ impl<T: Config> UdpProtocol<T> {
             // constants
             disconnect_timeout,
             disconnect_notify_start,
-            shutdown_timeout: now,
+            shutdown_started_at: now,
             fps,
             conn_id,
 
@@ -1080,7 +1103,7 @@ impl<T: Config> UdpProtocol<T> {
             return Err(FortressError::NotSynchronized);
         }
 
-        let elapsed = self.now() - self.stats_start_time;
+        let elapsed = self.now().saturating_duration_since(self.stats_start_time);
         let seconds = elapsed.as_secs();
         if seconds == 0 {
             return Err(FortressError::NotSynchronized);
@@ -1285,30 +1308,30 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// Test-only: seeds this endpoint's [`round_floor`](Self::round_floor) reply
-    /// cache for a slot AND marks the round **post-prune fresh** (a reply seq
-    /// strictly above the prune threshold), as if a fresh post-prune `FloorReply`
+    /// cache for a slot AND marks the round **post-prune fresh** (a reply serial
+    /// newer than the prune threshold), as if a fresh post-prune `FloorReply`
     /// had been accepted. Lets session-level tests pin a known post-prune round
     /// outcome without driving a request/response exchange. Out-of-range handles
     /// ignored.
     ///
     /// Keeps the request seq consistent: a reply can only be accepted for a
-    /// request actually issued, so `floor_request_seq` is bumped to at least the
-    /// new `floor_reply_seq`. Without this the helper would leave the impossible
-    /// `floor_reply_seq > floor_request_seq` state, which POISONS the endpoint —
-    /// every subsequent real [`on_floor_reply`](Self::on_floor_reply) is dropped
-    /// because the solicitation guard becomes unsatisfiable (a valid reply seq
-    /// must be both `> floor_reply_seq` and `<= floor_request_seq`).
+    /// request actually issued, so `floor_request_seq` advances to the reply
+    /// when needed. Without this the helper would leave the impossible state in
+    /// which the reply serial is newer than the request and poison subsequent
+    /// solicitation checks.
     #[cfg(test)]
     pub(crate) fn set_round_floor_for_tests(&mut self, handle: PlayerHandle, floor: Frame) {
         if let Some(slot) = self.round_floor.get_mut(handle.as_usize()) {
             *slot = floor;
         }
-        // Mark fresh: a reply seq strictly above the prune threshold.
-        self.floor_reply_seq = self.floor_prune_seq.wrapping_add(1);
+        // Mark fresh: a reply serial newer than the prune threshold.
+        self.floor_reply_seq = next_floor_round_seq(self.floor_prune_seq);
         // A reply is only accepted for an issued request, so keep the request
-        // seq at least as high as the accepted reply seq (no poisoned endpoint).
-        self.floor_request_seq = self.floor_request_seq.max(self.floor_reply_seq);
-        self.debug_assert_floor_round_invariants();
+        // serial at least as new as the accepted reply (no poisoned endpoint).
+        if floor_round_seq_is_newer(self.floor_reply_seq, self.floor_request_seq) {
+            self.floor_request_seq = self.floor_reply_seq;
+        }
+        self.check_floor_round_invariants();
     }
 
     /// Test-only: deterministically seeds this endpoint's rolling frame-advantage
@@ -1345,7 +1368,7 @@ impl<T: Config> UdpProtocol<T> {
 
         self.state = ProtocolState::Disconnected;
         // schedule the timeout which will lead to shutdown
-        self.shutdown_timeout = self.now().add(self.protocol_config.shutdown_delay)
+        self.shutdown_started_at = self.now();
     }
 
     /// Closes this side of a live link and sends a best-effort v1 Goodbye.
@@ -1524,7 +1547,7 @@ impl<T: Config> UdpProtocol<T> {
                 if self.handshake_failed.is_none() {
                     // Check for sync timeout if configured (emit event only once)
                     if let Some(timeout) = self.sync_config.sync_timeout {
-                        let elapsed = now - self.stats_start_time;
+                        let elapsed = now.saturating_duration_since(self.stats_start_time);
                         if elapsed > timeout && !self.sync_timeout_event_sent {
                             self.sync_timeout_event_sent = true;
                             self.event_queue.push_back(Event::SyncTimeout {
@@ -1541,7 +1564,9 @@ impl<T: Config> UdpProtocol<T> {
                     }
 
                     // some time has passed, let us send another sync request
-                    if self.last_send_time + self.sync_config.sync_retry_interval < now {
+                    if now.saturating_duration_since(self.last_send_time)
+                        > self.sync_config.sync_retry_interval
+                    {
                         self.send_sync_request();
                     }
                 }
@@ -1550,7 +1575,9 @@ impl<T: Config> UdpProtocol<T> {
                 // resend pending inputs, if some time has passed without sending or
                 // receiving NEW inputs (progress-free duplicates and connect-status
                 // nudges do not refresh the pacer — see the gate in `on_input`)
-                if self.running_last_input_recv + self.sync_config.running_retry_interval < now {
+                if now.saturating_duration_since(self.running_last_input_recv)
+                    > self.sync_config.running_retry_interval
+                {
                     self.send_pending_output(connect_status);
                     self.running_last_input_recv = now;
                 }
@@ -1580,8 +1607,10 @@ impl<T: Config> UdpProtocol<T> {
                 if self.connect_status_nudge
                     && self.pending_output.is_empty()
                     && self.last_acked_input.frame.is_valid()
-                    && self.last_input_send_time + self.sync_config.keepalive_interval < now
-                    && self.last_nudge_time + self.sync_config.keepalive_interval < now
+                    && now.saturating_duration_since(self.last_input_send_time)
+                        > self.sync_config.keepalive_interval
+                    && now.saturating_duration_since(self.last_nudge_time)
+                        > self.sync_config.keepalive_interval
                     && self.send_connect_status_nudge(connect_status)
                 {
                     self.last_nudge_time = now;
@@ -1598,29 +1627,35 @@ impl<T: Config> UdpProtocol<T> {
                 // A dedicated timer keeps quality reports / keepalives from
                 // starving it.
                 if self.floor_request_needed
-                    && self.last_floor_request_time + self.sync_config.keepalive_interval < now
+                    && now.saturating_duration_since(self.last_floor_request_time)
+                        > self.sync_config.keepalive_interval
                 {
                     self.send_floor_request();
                     self.last_floor_request_time = now;
                 }
 
                 // periodically send a quality report
-                if self.running_last_quality_report + self.protocol_config.quality_report_interval
-                    < now
+                if now.saturating_duration_since(self.running_last_quality_report)
+                    > self.protocol_config.quality_report_interval
                 {
                     self.send_quality_report();
                 }
 
                 // send keep alive packet if we didn't send a packet for some time
-                if self.last_send_time + self.sync_config.keepalive_interval < now {
+                if now.saturating_duration_since(self.last_send_time)
+                    > self.sync_config.keepalive_interval
+                {
                     self.send_keep_alive();
                 }
 
                 // trigger a NetworkInterrupted event if we didn't receive a packet for some time
                 if !self.disconnect_notify_sent
-                    && self.last_recv_time + self.disconnect_notify_start < now
+                    && now.saturating_duration_since(self.last_recv_time)
+                        > self.disconnect_notify_start
                 {
-                    let duration: Duration = self.disconnect_timeout - self.disconnect_notify_start;
+                    let duration = self
+                        .disconnect_timeout
+                        .saturating_sub(self.disconnect_notify_start);
                     self.event_queue.push_back(Event::NetworkInterrupted {
                         disconnect_timeout: Duration::as_millis(&duration),
                     });
@@ -1629,14 +1664,16 @@ impl<T: Config> UdpProtocol<T> {
 
                 // if we pass the disconnect_timeout threshold, send an event to disconnect
                 if !self.disconnect_event_sent
-                    && self.last_recv_time + self.disconnect_timeout < now
+                    && now.saturating_duration_since(self.last_recv_time) > self.disconnect_timeout
                 {
                     self.event_queue.push_back(Event::Disconnected);
                     self.disconnect_event_sent = true;
                 }
             },
             ProtocolState::Disconnected => {
-                if self.shutdown_timeout < now {
+                if now.saturating_duration_since(self.shutdown_started_at)
+                    > self.protocol_config.shutdown_delay
+                {
                     self.state = ProtocolState::Shutdown;
                 }
             },
@@ -2147,7 +2184,7 @@ impl<T: Config> UdpProtocol<T> {
         if self.handshake_failed.is_some() {
             return;
         }
-        self.sync_requests_sent += 1;
+        self.sync_requests_sent = self.sync_requests_sent.saturating_add(1);
 
         // Check for excessive retries and emit warning (once)
         if !self.sync_retry_warning_sent
@@ -2164,7 +2201,10 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // Check for excessive sync duration and emit warning (once)
-        let elapsed_ms = (self.now() - self.stats_start_time).as_millis();
+        let elapsed_ms = self
+            .now()
+            .saturating_duration_since(self.stats_start_time)
+            .as_millis();
         if !self.sync_duration_warning_sent
             && elapsed_ms > self.protocol_config.sync_duration_warning_ms
         {
@@ -2541,13 +2581,27 @@ impl<T: Config> UdpProtocol<T> {
             self.remote_conn_id = header.conn_id;
         }
         // the sync reply is good, so we send a sync request again until we have finished the required roundtrips. Then, we can conclude the syncing process.
-        self.sync_remaining_roundtrips -= 1;
-        let elapsed_ms = (self.now() - self.stats_start_time).as_millis();
+        let Some(remaining_roundtrips) = self.sync_remaining_roundtrips.checked_sub(1) else {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::Synchronization,
+                "Accepted a sync reply with no remaining synchronization roundtrips"
+            );
+            return;
+        };
+        self.sync_remaining_roundtrips = remaining_roundtrips;
+        let elapsed_ms = self
+            .now()
+            .saturating_duration_since(self.stats_start_time)
+            .as_millis();
         if self.sync_remaining_roundtrips > 0 {
             // register an event
             let evt = Event::Synchronizing {
                 total: self.sync_config.num_sync_packets,
-                count: self.sync_config.num_sync_packets - self.sync_remaining_roundtrips,
+                count: self
+                    .sync_config
+                    .num_sync_packets
+                    .saturating_sub(self.sync_remaining_roundtrips),
                 total_requests_sent: self.sync_requests_sent,
                 elapsed_ms,
             };
@@ -2959,27 +3013,28 @@ impl<T: Config> UdpProtocol<T> {
     /// Bumps the monotonic per-request sequence number and queues a
     /// [`FloorRequest`] stamped with it.
     fn send_floor_request(&mut self) {
-        self.floor_request_seq = self.floor_request_seq.wrapping_add(1);
+        self.floor_request_seq = next_floor_round_seq(self.floor_request_seq);
         self.queue_message(MessageBody::FloorRequest(FloorRequest {
             round_seq: self.floor_request_seq,
         }));
-        self.debug_assert_floor_round_invariants();
+        self.check_floor_round_invariants();
     }
 
     /// On receiving a [`FloorRequest`] (we are a relay for the requester): record
     /// the request's `round_seq` for the session to answer (it computes
     /// `pessimistic_floors` and replies via [`Self::send_floor_reply`]).
     ///
-    /// Highest-seq-wins — a newer request supersedes an undrained older one,
-    /// regardless of arrival order. Under packet reorder an OLDER `round_seq`
-    /// must NOT clobber a higher undrained pending one (which would answer the
-    /// stale round and skip the newer one), so the incoming seq is stored only
-    /// when it is strictly greater than the currently-pending one (or none is
-    /// pending yet).
+    /// Newest-serial-wins — a newer request supersedes an undrained older one,
+    /// regardless of arrival order or `u32` wrap. Under packet reorder an older
+    /// `round_seq` must not clobber a newer undrained one.
     fn on_floor_request(&mut self, body: &FloorRequest) {
+        if body.round_seq == 0 {
+            trace!("Dropping FloorRequest with reserved round_seq 0");
+            return;
+        }
         if self
             .pending_floor_request
-            .is_none_or(|pending| body.round_seq > pending)
+            .is_none_or(|pending| floor_round_seq_is_newer(body.round_seq, pending))
         {
             self.pending_floor_request = Some(body.round_seq);
         }
@@ -3014,8 +3069,9 @@ impl<T: Config> UdpProtocol<T> {
     ///    seq is a reordered stale (or duplicate) reply — dropping it is what
     ///    makes [`Self::round_floor`] reorder-immune (a plain `Input`-gossip
     ///    floor cache could not survive a reordered stale-HIGH packet).
-    /// 2. **Solicitation.** Its `round_seq` must NOT exceed the latest request
-    ///    this endpoint actually issued ([`Self::floor_request_seq`]). A reply
+    /// 2. **Solicitation.** Its `round_seq` must not be serial-newer than the
+    ///    latest request this endpoint actually issued
+    ///    ([`Self::floor_request_seq`]). A reply
     ///    echoing a never-issued seq is forged or corrupt; accepting it would
     ///    advance `floor_reply_seq` past every legitimate future reply (a
     ///    permanent round stall) and spuriously flip
@@ -3040,7 +3096,7 @@ impl<T: Config> UdpProtocol<T> {
     /// `num_players` are ignored; a reported `Frame::NULL` slot makes the session
     /// fold fall back to `last_frame`.
     fn on_floor_reply(&mut self, body: &FloorReply) {
-        if body.round_seq <= self.floor_reply_seq {
+        if !floor_round_seq_is_newer(body.round_seq, self.floor_reply_seq) {
             trace!(
                 "Dropping stale/duplicate FloorReply round_seq {} (latest accepted {})",
                 body.round_seq,
@@ -3048,7 +3104,15 @@ impl<T: Config> UdpProtocol<T> {
             );
             return;
         }
-        if body.round_seq > self.floor_request_seq {
+        let unsolicited = if self.floor_reply_seq == 0 {
+            // Before the first accepted reply there is no wrapping comparison
+            // baseline. Requests start at one, so numeric order is the exact
+            // issued range; this rejects a forged high serial at bootstrap.
+            body.round_seq > self.floor_request_seq
+        } else {
+            floor_round_seq_is_newer(body.round_seq, self.floor_request_seq)
+        };
+        if unsolicited {
             trace!(
                 "Dropping unsolicited FloorReply round_seq {} (latest request {})",
                 body.round_seq,
@@ -3070,7 +3134,7 @@ impl<T: Config> UdpProtocol<T> {
             }
         }
         self.floor_reply_seq = body.round_seq;
-        self.debug_assert_floor_round_invariants();
+        self.check_floor_round_invariants();
     }
 
     /// This endpoint's cached per-slot pessimistic floor from its latest accepted
@@ -3084,12 +3148,11 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     /// `true` when this endpoint has accepted a [`FloorReply`] that POSTDATES the
-    /// most recent prune (`floor_reply_seq > floor_prune_seq`) — i.e. a fresh
-    /// post-prune round has completed and [`Self::round_floor`] may be trusted.
-    /// A never-replied relay (`floor_reply_seq == 0`, `floor_prune_seq == 0`) is
-    /// never fresh, so its slot holds.
+    /// most recent prune in wrapping serial order — i.e. a fresh post-prune
+    /// round has completed and [`Self::round_floor`] may be trusted. A
+    /// never-replied relay is never fresh, so its slot holds.
     pub(crate) fn floor_round_is_fresh(&self) -> bool {
-        self.floor_reply_seq > self.floor_prune_seq
+        floor_round_seq_is_newer(self.floor_reply_seq, self.floor_prune_seq)
     }
 
     /// Hidden diagnostics for deterministic hostile-gossip integration tests.
@@ -3107,50 +3170,55 @@ impl<T: Config> UdpProtocol<T> {
     /// session calls this on EVERY endpoint whenever ANY remote is pruned.
     pub(crate) fn reset_floor_freshness(&mut self) {
         self.floor_prune_seq = self.floor_request_seq;
-        self.debug_assert_floor_round_invariants();
+        self.check_floor_round_invariants();
     }
 
-    /// Debug-only floor-round state invariants, asserted at the end of every
-    /// method that mutates floor-round state. Follows the same
-    /// `debug_assert!`-gated invariant-check convention as
-    /// [`SyncLayer`](crate::__internal::SyncLayer) (which wraps a fallible
-    /// `check_invariants`; these relations are simple enough to assert inline).
+    /// Diagnostic floor-round state invariants, checked at the end of every
+    /// method that mutates floor-round state. Violations are reported instead
+    /// of panicking so debug and paranoid deployments preserve availability.
     /// The relations:
     ///
-    /// 1. `floor_reply_seq <= floor_request_seq` — a reply is only accepted for a
-    ///    request actually issued, so the latest accepted reply seq can never
-    ///    exceed the latest request seq.
-    /// 2. `floor_prune_seq <= floor_request_seq` — a prune snapshots the current
-    ///    request seq ([`Self::reset_floor_freshness`]), so the threshold can
-    ///    never exceed the latest request seq.
+    /// 1. `floor_reply_seq` is not serial-newer than `floor_request_seq` — a
+    ///    reply is accepted only for a request actually issued.
+    /// 2. `floor_prune_seq` is not serial-newer than `floor_request_seq` — a
+    ///    prune snapshots the current request serial.
     /// 3. `round_floor.len() == peer_connect_status.len()` — both are seeded to
     ///    `num_players` at construction and neither is ever resized, so the
     ///    per-slot floor cache must stay parallel to the connect-status cache.
     ///
-    /// The body compiles out entirely in release builds (the `debug_assert!`s
-    /// vanish), so the unconditional callers leave an empty call that optimizes
-    /// away — no dead-code or unused-method warning in any build mode. The
-    /// release-with-debug-assertions CI gate still exercises it.
-    fn debug_assert_floor_round_invariants(&self) {
-        debug_assert!(
-            self.floor_reply_seq <= self.floor_request_seq,
-            "floor invariant: reply seq {} must not exceed request seq {}",
-            self.floor_reply_seq,
-            self.floor_request_seq
-        );
-        debug_assert!(
-            self.floor_prune_seq <= self.floor_request_seq,
-            "floor invariant: prune seq {} must not exceed request seq {}",
-            self.floor_prune_seq,
-            self.floor_request_seq
-        );
-        debug_assert_eq!(
-            self.round_floor.len(),
-            self.peer_connect_status.len(),
-            "floor invariant: round_floor length {} must match peer_connect_status length {}",
-            self.round_floor.len(),
-            self.peer_connect_status.len()
-        );
+    /// The checks compile to a no-op in ordinary release builds and remain
+    /// active when debug assertions or the `paranoid` feature are enabled.
+    fn check_floor_round_invariants(&self) {
+        if !cfg!(any(debug_assertions, feature = "paranoid")) {
+            return;
+        }
+        if floor_round_seq_is_newer(self.floor_reply_seq, self.floor_request_seq) {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::Invariant,
+                "floor reply seq {} exceeds request seq {}",
+                self.floor_reply_seq,
+                self.floor_request_seq
+            );
+        }
+        if floor_round_seq_is_newer(self.floor_prune_seq, self.floor_request_seq) {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::Invariant,
+                "floor prune seq {} exceeds request seq {}",
+                self.floor_prune_seq,
+                self.floor_request_seq
+            );
+        }
+        if self.round_floor.len() != self.peer_connect_status.len() {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::Invariant,
+                "round_floor length {} differs from peer_connect_status length {}",
+                self.round_floor.len(),
+                self.peer_connect_status.len()
+            );
+        }
     }
 
     /// Upon receiving a `ChecksumReport`, add it to the checksum history
@@ -3169,7 +3237,9 @@ impl<T: Config> UdpProtocol<T> {
         let max_history = self.protocol_config.max_checksum_history;
         if self.pending_checksums.len() >= max_history {
             // Calculate frames to keep, using saturating arithmetic to prevent underflow
-            let frames_to_subtract = (max_history as i32 - 1).saturating_mul(interval as i32);
+            let max_history = i32::try_from(max_history).unwrap_or(i32::MAX);
+            let interval = i32::try_from(interval).unwrap_or(i32::MAX);
+            let frames_to_subtract = max_history.saturating_sub(1).saturating_mul(interval);
             let oldest_frame_to_keep = safe_frame_sub!(
                 body.frame,
                 frames_to_subtract,
@@ -3747,6 +3817,58 @@ mod tests {
         let mut current = clock.lock().unwrap();
         *current += duration;
         *current
+    }
+
+    #[test]
+    fn regressing_injected_clock_saturates_elapsed_time_without_panicking() {
+        let (config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.state = ProtocolState::Running;
+        let earlier = protocol
+            .stats_start_time
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock has one second of backwards range");
+        *clock.lock().unwrap() = earlier;
+
+        assert_eq!(
+            protocol.network_stats(),
+            Err(FortressError::NotSynchronized)
+        );
+        let events = protocol
+            .poll(&[ConnectionStatus::default(); 2])
+            .collect::<Vec<_>>();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn maximum_timing_intervals_do_not_overflow_deadline_arithmetic() {
+        let (mut config, _clock) = mutable_clock_config();
+        config.quality_report_interval = Duration::MAX;
+        config.shutdown_delay = Duration::MAX;
+        let sync_config = SyncConfig {
+            sync_retry_interval: Duration::MAX,
+            sync_timeout: Some(Duration::MAX),
+            running_retry_interval: Duration::MAX,
+            keepalive_interval: Duration::MAX,
+            ..SyncConfig::default()
+        };
+        let mut protocol =
+            create_protocol_with_config(vec![PlayerHandle::new(0)], 2, 1, 8, sync_config, config);
+        protocol.state = ProtocolState::Running;
+
+        let events = protocol
+            .poll(&[ConnectionStatus::default(); 2])
+            .collect::<Vec<_>>();
+        assert!(events.is_empty());
+        protocol.disconnect();
+        assert_eq!(protocol.state, ProtocolState::Disconnected);
     }
 
     fn complete_test_sync(protocol: &mut UdpProtocol<TestConfig>) {
@@ -5292,6 +5414,21 @@ mod tests {
         assert_eq!(protocol.round_floor(slot2), Frame::new(4));
     }
 
+    #[test]
+    fn floor_round_serial_half_range_is_not_ordered() {
+        let baseline = 1_u32;
+        let candidate = baseline.wrapping_add(FLOOR_ROUND_SERIAL_HALF_RANGE);
+
+        assert!(
+            !floor_round_seq_is_newer(candidate, baseline),
+            "an exact half-range distance is ambiguous, not newer"
+        );
+        assert!(
+            !floor_round_seq_is_newer(baseline, candidate),
+            "the reverse exact half-range distance is equally ambiguous"
+        );
+    }
+
     /// FLOOR-ROUND reorder rejection: a `FloorReply` whose `round_seq` is older
     /// than (or equal to) the latest accepted is DROPPED — it neither overwrites
     /// `round_floor` nor regresses the reply seq. This is what makes the reply
@@ -5363,6 +5500,15 @@ mod tests {
             !protocol.floor_round_is_fresh(),
             "an unsolicited reply must NOT advance the reply seq / flip freshness"
         );
+
+        // A high pre-wrap serial is also unissued. Serial comparison alone
+        // would call it older than request 1, so the bootstrap gate must reject
+        // it explicitly while floor_reply_seq is still the zero sentinel.
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: u32::MAX,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(99)],
+        });
+        assert_eq!(protocol.round_floor(slot2), Frame::NULL);
 
         // A legitimate reply to the request we DID issue (seq 1) still lands,
         // proving the unsolicited reply did not poison `floor_reply_seq`.
@@ -5466,6 +5612,11 @@ mod tests {
         let mut protocol = running_protocol_three_slots();
         assert!(!protocol.has_pending_floor_request());
 
+        protocol.on_floor_request(&FloorRequest { round_seq: 0 });
+        assert!(
+            !protocol.has_pending_floor_request(),
+            "reserved serial zero must not enter the relay request queue"
+        );
         protocol.on_floor_request(&FloorRequest { round_seq: 7 });
         assert!(protocol.has_pending_floor_request());
         assert_eq!(protocol.take_pending_floor_request(), Some(7));
@@ -5537,6 +5688,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn floor_round_serial_wrap_accepts_post_wrap_reply_and_rejects_stale_pre_wrap_reply() {
+        let mut protocol = running_protocol_three_slots();
+        let slot2 = PlayerHandle::new(2);
+        protocol.floor_request_seq = u32::MAX - 1;
+        protocol.floor_reply_seq = u32::MAX - 1;
+        protocol.floor_prune_seq = u32::MAX - 1;
+
+        protocol.send_floor_request();
+        assert_eq!(protocol.floor_request_seq, u32::MAX);
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: u32::MAX,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(8)],
+        });
+        protocol.reset_floor_freshness();
+
+        protocol.send_floor_request();
+        assert_eq!(protocol.floor_request_seq, 1, "zero is a reserved serial");
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: 1,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(4)],
+        });
+        assert!(protocol.floor_round_is_fresh());
+        assert_eq!(protocol.round_floor(slot2), Frame::new(4));
+
+        protocol.on_floor_reply(&FloorReply {
+            round_seq: u32::MAX,
+            floors: vec![Frame::new(0), Frame::new(0), Frame::new(99)],
+        });
+        assert_eq!(
+            protocol.round_floor(slot2),
+            Frame::new(4),
+            "a reordered pre-wrap reply must not overwrite post-wrap state"
+        );
+    }
+
+    #[test]
+    fn pending_floor_request_uses_serial_order_across_wrap() {
+        let mut protocol = running_protocol_three_slots();
+        protocol.on_floor_request(&FloorRequest {
+            round_seq: u32::MAX,
+        });
+        protocol.on_floor_request(&FloorRequest { round_seq: 1 });
+        protocol.on_floor_request(&FloorRequest {
+            round_seq: u32::MAX,
+        });
+        assert_eq!(protocol.take_pending_floor_request(), Some(1));
+    }
+
     /// FLOOR-ROUND test-helper consistency: `set_round_floor_for_tests` must
     /// leave the request seq consistent with the marked-fresh reply seq (it
     /// bumps `floor_request_seq` to at least `floor_reply_seq`), so the endpoint
@@ -5557,10 +5757,10 @@ mod tests {
             protocol.floor_round_is_fresh(),
             "the helper marks the round post-prune fresh"
         );
-        // The headline post-condition: request seq is not left below reply seq.
+        // The headline post-condition: reply is not newer than request.
         assert!(
-            protocol.floor_reply_seq <= protocol.floor_request_seq,
-            "helper must not leave reply seq {} above request seq {} (poisoned endpoint)",
+            !floor_round_seq_is_newer(protocol.floor_reply_seq, protocol.floor_request_seq),
+            "helper must not leave reply seq {} newer than request seq {} (poisoned endpoint)",
             protocol.floor_reply_seq,
             protocol.floor_request_seq
         );
@@ -5570,8 +5770,8 @@ mod tests {
         protocol.send_floor_request();
         let new_seq = protocol.floor_request_seq;
         assert!(
-            new_seq > protocol.floor_reply_seq,
-            "a freshly-issued request seq must exceed the prior reply seq"
+            floor_round_seq_is_newer(new_seq, protocol.floor_reply_seq),
+            "a freshly-issued request seq must be newer than the prior reply seq"
         );
         protocol.on_floor_reply(&FloorReply {
             round_seq: new_seq,
@@ -5589,9 +5789,9 @@ mod tests {
     }
 
     /// FLOOR-ROUND seq invariant holds across a mixed send/reply/prune sequence:
-    /// `floor_reply_seq <= floor_request_seq` and `floor_prune_seq <=
-    /// floor_request_seq` must hold after every step. Exercises the invariant
-    /// the `debug_assert_floor_round_invariants` guard protects against a real
+    /// reply and prune serials must not be newer than the request serial after
+    /// every step. Exercises the invariant
+    /// the `check_floor_round_invariants` guard protects against a real
     /// operation mix rather than a single mutation. Unlike the two tests above
     /// this is a forward-looking regression guard (it passes against the
     /// pre-fix code too); its job is to catch any FUTURE change that lets the
@@ -5603,14 +5803,14 @@ mod tests {
         #[track_caller]
         fn assert_seq_invariant(protocol: &UdpProtocol<TestConfig>, step: &str) {
             assert!(
-                protocol.floor_reply_seq <= protocol.floor_request_seq,
-                "{step}: reply seq {} must not exceed request seq {}",
+                !floor_round_seq_is_newer(protocol.floor_reply_seq, protocol.floor_request_seq),
+                "{step}: reply seq {} must not be newer than request seq {}",
                 protocol.floor_reply_seq,
                 protocol.floor_request_seq
             );
             assert!(
-                protocol.floor_prune_seq <= protocol.floor_request_seq,
-                "{step}: prune seq {} must not exceed request seq {}",
+                !floor_round_seq_is_newer(protocol.floor_prune_seq, protocol.floor_request_seq),
+                "{step}: prune seq {} must not be newer than request seq {}",
                 protocol.floor_prune_seq,
                 protocol.floor_request_seq
             );
@@ -5648,6 +5848,31 @@ mod tests {
             Frame::new(7),
             "the only accepted reply's floor is cached"
         );
+    }
+
+    #[cfg(any(debug_assertions, feature = "paranoid"))]
+    #[test]
+    fn floor_round_invariant_checker_reports_invalid_serial_state() {
+        use crate::telemetry::{
+            push_violation_observer, CollectingObserver, ViolationKind, ViolationObserver,
+            ViolationSeverity,
+        };
+
+        let mut protocol = running_protocol_three_slots();
+        protocol.floor_request_seq = 1;
+        protocol.floor_reply_seq = 2;
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        protocol.check_floor_round_invariants();
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, ViolationSeverity::Critical);
+        assert_eq!(violations[0].kind, ViolationKind::Invariant);
+        assert!(violations[0]
+            .message
+            .contains("floor reply seq 2 exceeds request seq 1"));
     }
 
     /// FLOOR-ROUND prune detection: `detect_prune_transition` returns `true`
@@ -6386,14 +6611,101 @@ mod tests {
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
         protocol.state = ProtocolState::Disconnected;
 
-        // Set shutdown timeout to the past
-        protocol.shutdown_timeout = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        // Set shutdown start far enough in the past to exceed the default delay.
+        protocol.shutdown_started_at = Instant::now().checked_sub(Duration::from_secs(6)).unwrap();
 
         let connect_status = vec![ConnectionStatus::default(); 2];
         let _events: Vec<_> = protocol.poll(&connect_status).collect();
 
         // Should have transitioned to Shutdown
         assert_eq!(protocol.state, ProtocolState::Shutdown);
+    }
+
+    #[test]
+    fn disconnected_shutdown_waits_until_strictly_after_delay() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            protocol_config,
+        );
+        protocol.state = ProtocolState::Disconnected;
+        protocol.shutdown_started_at = *clock.lock().unwrap();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_secs(5));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            protocol.state,
+            ProtocolState::Disconnected,
+            "shutdown must not complete exactly at the configured delay"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            protocol.state,
+            ProtocolState::Shutdown,
+            "shutdown must complete once the configured delay has elapsed"
+        );
+    }
+
+    #[test]
+    fn running_disconnect_events_wait_until_strictly_after_thresholds() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            protocol_config,
+        );
+        protocol.state = ProtocolState::Running;
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_secs(3));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::NetworkInterrupted { .. })),
+            "the interruption warning must not fire exactly at its threshold"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::NetworkInterrupted { .. }))
+                .count(),
+            1,
+            "the interruption warning must fire once its threshold has elapsed"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1_999));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Disconnected)),
+            "disconnect must not fire exactly at its timeout threshold"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Disconnected))
+                .count(),
+            1,
+            "disconnect must fire once its timeout has elapsed"
+        );
     }
 
     #[test]
@@ -6512,6 +6824,81 @@ mod tests {
             .send_queue
             .iter()
             .any(|message| matches!(message.body, MessageBody::KeepAlive))
+    }
+
+    fn queue_has_floor_request(protocol: &UdpProtocol<TestConfig>) -> bool {
+        protocol
+            .send_queue
+            .iter()
+            .any(|message| matches!(message.body, MessageBody::FloorRequest(_)))
+    }
+
+    #[test]
+    fn poll_keepalive_waits_until_strictly_after_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            !queue_has_keep_alive(&protocol),
+            "KeepAlive must not fire exactly at the interval boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queue_has_keep_alive(&protocol),
+            "KeepAlive must fire once the interval has elapsed"
+        );
+    }
+
+    #[test]
+    fn poll_floor_request_waits_until_strictly_after_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        protocol.set_floor_request_needed(true);
+
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            !queue_has_floor_request(&protocol),
+            "FloorRequest must not fire exactly at the interval boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queue_has_floor_request(&protocol),
+            "FloorRequest must fire once the interval has elapsed"
+        );
+    }
+
+    #[test]
+    fn poll_nudge_waits_until_strictly_after_nudge_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+        protocol.set_connect_status_nudge(true);
+
+        // Make input idle for 201ms while the independent nudge timer is at
+        // exactly 200ms. This isolates the second elapsed-time gate.
+        advance_test_clock(&clock, Duration::from_millis(1));
+        protocol.last_nudge_time = *clock.lock().unwrap();
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "a nudge must not fire exactly at its cadence boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            queued_inputs(&protocol).len(),
+            1,
+            "a nudge must fire once both independent intervals have elapsed"
+        );
     }
 
     /// (i) Flag set + keepalive interval elapsed + idle (fully-acked) queue:
@@ -6679,7 +7066,7 @@ mod tests {
         );
 
         protocol.state = ProtocolState::Disconnected;
-        protocol.shutdown_timeout = *current.lock().unwrap() + Duration::from_secs(60);
+        protocol.shutdown_started_at = *current.lock().unwrap();
         protocol.send_queue.clear();
         advance_test_clock(&current, Duration::from_millis(201));
         let _ = protocol.poll(&connect_status).count();
@@ -6719,9 +7106,19 @@ mod tests {
             "the idle tick still keeps the link alive"
         );
 
-        // Another 101ms (201ms since the last real Input): now input-idle —
-        // the nudge fires.
-        advance_test_clock(&clock, Duration::from_millis(101));
+        // At exactly 200ms since the last real Input, the strict elapsed-time
+        // gate has not passed yet. This equality boundary keeps all protocol
+        // timers on the same "more than the interval" convention.
+        advance_test_clock(&clock, Duration::from_millis(100));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "no nudge may fire exactly at the input-idle interval"
+        );
+
+        // One more millisecond (201ms since the last real Input): now
+        // input-idle — the nudge fires.
+        advance_test_clock(&clock, Duration::from_millis(1));
         let _ = protocol.poll(&connect_status).count();
         assert_eq!(
             queued_inputs(&protocol).len(),
@@ -11329,12 +11726,12 @@ mod kani_proofs {
         }
     }
 
-    /// Proof: sync_remaining_roundtrips decrement is safe when counter > 0.
+    /// Proof: sync_remaining_roundtrips checked decrement is safe when the
+    /// counter is positive and rejects an extra reply at zero.
     ///
-    /// Verifies INV-PROTO-3: sync_remaining_roundtrips decrement at mod.rs:749.
-    /// Production code: `self.sync_remaining_roundtrips -= 1;`
-    /// This is only called after validating the sync reply, which only happens
-    /// in Synchronizing state where remaining > 0.
+    /// Verifies INV-PROTO-3. Production uses `checked_sub(1)` and reports a
+    /// synchronization violation instead of underflowing if the state-machine
+    /// invariant is ever broken.
     ///
     /// The key invariant: on_sync_reply() (mod.rs:740-769) only decrements when:
     /// 1. State is Synchronizing (line 741)
@@ -11391,8 +11788,8 @@ mod kani_proofs {
     /// - sync_remaining is non-negative (u32 guarantee + no underflow)
     ///
     /// Production code reference:
-    /// - mod.rs:390 sets: `self.sync_remaining_roundtrips = self.sync_config.num_sync_packets`
-    /// - mod.rs:749 decrements: `self.sync_remaining_roundtrips -= 1` (only when > 0 implicitly)
+    /// - synchronization start copies `SyncConfig::num_sync_packets`
+    /// - accepted replies update through `checked_sub(1)`
     ///
     /// - Tier: 2 (Medium, 30s-2min)
     /// - Verifies: Sync counter bounds (INV-PROTO-2, INV-PROTO-3)

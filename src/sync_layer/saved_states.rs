@@ -79,6 +79,15 @@ impl<T> SavedStates<T> {
                 reason: InvalidFrameReason::MustBeNonNegative,
             });
         }
+        if self.states.is_empty() {
+            return Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "states",
+                    index: 0,
+                    length: 0,
+                }),
+            });
+        }
         let pos = frame.as_i32() as usize % self.states.len();
         self.states
             .get(pos)
@@ -183,6 +192,23 @@ mod tests {
         let saved_states: SavedStates<u32> = SavedStates::new(3);
         let result = saved_states.get_cell(Frame::NULL);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_cell_empty_internal_buffer_returns_structured_error() {
+        let mut saved_states: SavedStates<u32> = SavedStates::new(0);
+        saved_states.states.clear();
+
+        assert!(matches!(
+            saved_states.get_cell(Frame::new(0)),
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::IndexOutOfBounds(IndexOutOfBounds {
+                    name: "states",
+                    index: 0,
+                    length: 0,
+                })
+            })
+        ));
     }
 
     #[test]

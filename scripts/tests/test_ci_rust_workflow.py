@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
 CI_NETWORK_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-network.yml"
 CI_COVERAGE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-coverage.yml"
+CI_SAFETY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-safety.yml"
 CARGO_LOCK = REPO_ROOT / "Cargo.lock"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 WASM_BROWSER_SMOKE_SOURCE = REPO_ROOT / "tests" / "wasm-browser-smoke" / "src" / "lib.rs"
@@ -260,6 +261,23 @@ def test_public_api_census_uses_pinned_nightly_and_checked_snapshot() -> None:
     }
     for event in ("push", "pull_request"):
         assert expected_paths <= _workflow_paths(workflow, event)
+
+
+def test_no_panics_gate_rejects_debug_assertions_and_scan_failures() -> None:
+    """Debug-only assertions and failed source scans must both block CI."""
+    workflow = _load_workflow(CI_SAFETY_WORKFLOW)
+    steps = workflow["jobs"]["no-panics"]["steps"]
+    check = next(
+        step
+        for step in steps
+        if step.get("name") == "Check for panic-prone patterns (library only)"
+    )
+    run = check["run"]
+
+    assert "debug_assert(_eq|_ne)?[[:space:]]*![[:space:]]*\\(" in run
+    assert "grep_status=$?" in run
+    assert 'if [ "$grep_status" -ne 1 ]' in run
+    assert 'exit "$grep_status"' in run
 
 
 @pytest.mark.parametrize("workflow_path", CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS)
