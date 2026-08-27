@@ -168,12 +168,20 @@ repos:
       # ══════════════════════════════════════════════════════════════════════
       # Documentation checks
       # ══════════════════════════════════════════════════════════════════════
+      - id: check-plan-hygiene
+        name: keep PLAN.md limited to active work
+        entry: python scripts/hooks/check-plan-hygiene.py
+        language: python
+        pass_filenames: false
+        always_run: true
+        files: '^(PLAN\.md|scripts/hooks/check-plan-hygiene\.py|scripts/tests/test_plan_hygiene\.py|\.agents/skills/(fortress-development|dev-pipeline|dst)/SKILL\.md|\.agents/skills/dst/references/fleet-search-roadmap\.md)$'
+
       - id: markdownlint
         name: markdownlint (autofix)
         entry: python scripts/hooks/markdownlint.py
         language: python
         types: [markdown]
-        exclude: '^(target/|fuzz/target/|loom-tests/target/|progress/|PLAN\.md)'
+        exclude: '^(target/|fuzz/target/|loom-tests/target/|progress/)'
 
       - id: vale
         name: vale prose linting (advisory)

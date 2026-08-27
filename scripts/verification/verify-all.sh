@@ -129,7 +129,7 @@ run_z3() {
     echo -e "${BLUE}└────────────────────────────────────────────────────────────────┘${NC}"
 
     echo -e "${YELLOW}Z3 verification not yet implemented.${NC}"
-    echo "See Phase 2.5 in PLAN.md for planned Z3 verification targets."
+    echo "See .agents/skills/verification/SKILL.md for Z3 guidance."
     Z3_RESULT="SKIP"
     echo ""
 }

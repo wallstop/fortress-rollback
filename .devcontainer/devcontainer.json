@@ -30,17 +30,25 @@
 			"type": "volume"
 		}
 	],
-	// Post-create setup: only workspace-specific tasks (tools are pre-installed in image)
-	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Ensure TLA+ tools are in the workspace\n    if [ -f .devcontainer/setup-tla-tools.sh ]; then\n        bash .devcontainer/setup-tla-tools.sh\n    fi\n    \n    # Sync Vale styles (prose linter)\n    if command -v vale >/dev/null 2>&1 && [ -f .vale.ini ]; then\n        echo \"Syncing Vale packages...\"\n        vale sync || echo \"Vale sync failed, run vale sync manually\"\n    fi\n    \n    # Build project to warm dependency cache\n    echo \"Warming dependency cache...\"\n    if ! cargo build; then\n        echo \"WARNING: Initial cargo build failed. Run cargo build manually to see errors.\"\n    fi\n    \n    # Validate Codex CLI install/auth state (non-blocking)\n    if [ -f .devcontainer/codex-bootstrap.sh ]; then\n        bash .devcontainer/codex-bootstrap.sh post-create\n    fi\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/ci/check-tools.sh to verify all tools are installed.\"\n'",
+	// Post-create setup: refresh latest CLIs, bound artifacts, and initialize caches.
+	"postCreateCommand": "bash -c '\n    set -e\n    echo \"=== Setting up Fortress Rollback Development Environment ===\"\n    \n    # Refresh AI CLIs and bound derived Cargo artifacts (non-blocking)\n    if [ -f .devcontainer/devcontainer-bootstrap.sh ]; then\n        bash .devcontainer/devcontainer-bootstrap.sh post-create\n    fi\n    \n    # Ensure TLA+ tools are in the workspace\n    if [ -f .devcontainer/setup-tla-tools.sh ]; then\n        bash .devcontainer/setup-tla-tools.sh\n    fi\n    \n    # Sync Vale styles (prose linter)\n    if command -v vale >/dev/null 2>&1 && [ -f .vale.ini ]; then\n        echo \"Syncing Vale packages...\"\n        vale sync || echo \"Vale sync failed, run vale sync manually\"\n    fi\n    \n    # Fetch dependencies without generating a large target directory\n    echo \"Warming Cargo dependency cache...\"\n    if ! cargo fetch --locked; then\n        echo \"WARNING: Cargo dependency fetch failed. Cargo will retry on first build.\"\n    fi\n    \n    # Validate Codex CLI install/auth state (non-blocking)\n    if [ -f .devcontainer/codex-bootstrap.sh ]; then\n        bash .devcontainer/codex-bootstrap.sh post-create\n    fi\n    \n    echo \"=== Development environment ready! ===\"\n    echo \"Run ./scripts/ci/check-tools.sh to verify all tools are installed.\"\n'",
 	// postStartCommand requires devcontainers implementations that support lifecycle start hooks.
-	"postStartCommand": "bash -c 'if [ -f .devcontainer/codex-bootstrap.sh ]; then bash .devcontainer/codex-bootstrap.sh post-start; fi'",
+	"postStartCommand": "bash -c 'if [ -f .devcontainer/devcontainer-bootstrap.sh ]; then bash .devcontainer/devcontainer-bootstrap.sh post-start; fi; if [ -f .devcontainer/codex-bootstrap.sh ]; then bash .devcontainer/codex-bootstrap.sh post-start; fi'",
 	// Environment variables for tools
 	"containerEnv": {
 		"TLA_TOOLS_JAR": "${containerWorkspaceFolder}/.tla-tools/tla2tools.jar",
 		"RUST_BACKTRACE": "1",
 		"CARGO_INCREMENTAL": "0",
+		"CARGO_PROFILE_DEV_DEBUG": "1",
+		"CARGO_PROFILE_TEST_DEBUG": "1",
+		"CARGO_PROFILE_BENCH_DEBUG": "1",
 		"MIRIFLAGS": "-Zmiri-symbolic-alignment-check -Zmiri-strict-provenance",
-		"CODEX_HOME": "/home/vscode/.codex"
+		"CODEX_HOME": "/home/vscode/.codex",
+		"NPM_CONFIG_PREFIX": "/home/vscode/.local",
+		"NPM_CONFIG_CACHE": "/home/vscode/.cache/npm"
+	},
+	"remoteEnv": {
+		"PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
 	},
 	// Run as vscode user
 	"remoteUser": "vscode",

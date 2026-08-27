@@ -349,12 +349,9 @@ For observers who don't contribute inputs:
 ```rust
 let session = SessionBuilder::<MyConfig>::new()
     .with_num_players(2)?
-    .start_spectator_session(host_addr, socket)
-    .ok_or(FortressError::InvalidRequest {
-        info: "spectator session initialization failed".into(),
-    })?;
-// Note: start_spectator_session returns Option<SpectatorSession<T>>.
-// Returns None if protocol initialization fails (e.g., serialization issues).
+    .try_start_spectator_session(host_addr, socket)?;
+// The try_ constructor preserves structured configuration, serialization,
+// protocol, and allocation failures. The legacy constructor returns Option.
 ```
 
 **Features:**

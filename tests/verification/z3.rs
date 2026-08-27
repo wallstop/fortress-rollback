@@ -1260,7 +1260,7 @@ fn z3_proof_confirmed_bound_below_same_instant_subset_overrides() {
                 None => attains_here,
             });
         }
-        solver.assert(&attained.expect("at least one term"));
+        solver.assert(attained.expect("at least one term"));
 
         // Counterexample search: the bound exceeds a same-instant override.
         solver.assert(bound.gt(&override_f));

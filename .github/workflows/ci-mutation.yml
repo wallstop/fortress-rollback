@@ -93,7 +93,7 @@ jobs:
           version: 27.1.0
 
       - name: Run authoritative baseline
-        run: cargo nextest run --locked --all-targets --features tokio,json --no-capture
+        run: cargo nextest run --locked --all-targets --features tokio,json,hot-join --no-capture
 
       - name: Plan exact mutation corpus
         id: plan

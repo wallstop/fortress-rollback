@@ -143,8 +143,7 @@ pub trait Rng {
     /// # Empty Range Behavior
     /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range(&mut self, range: std::ops::Range<u32>) -> u32 {
-        let span = range.end.wrapping_sub(range.start);
-        if span == 0 {
+        if range.is_empty() {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::Configuration,
@@ -154,13 +153,14 @@ pub trait Rng {
             );
             return range.start;
         }
+        let span = range.end - range.start;
 
         // Use rejection sampling to avoid bias
         let threshold = span.wrapping_neg() % span;
         loop {
             let random_value = self.next_u32();
             if random_value >= threshold {
-                return range.start.wrapping_add(random_value % span);
+                return range.start + random_value % span;
             }
         }
     }
@@ -170,8 +170,7 @@ pub trait Rng {
     /// # Empty Range Behavior
     /// If `range.is_empty()`, reports a violation via telemetry and returns `range.start`.
     fn gen_range_usize(&mut self, range: std::ops::Range<usize>) -> usize {
-        let span = range.end.wrapping_sub(range.start);
-        if span == 0 {
+        if range.is_empty() {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::Configuration,
@@ -181,6 +180,7 @@ pub trait Rng {
             );
             return range.start;
         }
+        let span = range.end - range.start;
 
         if span <= u32::MAX as usize {
             // Use 32-bit arithmetic for smaller ranges
@@ -188,9 +188,7 @@ pub trait Rng {
             loop {
                 let random_value = self.next_u32();
                 if random_value >= threshold {
-                    return range
-                        .start
-                        .wrapping_add((random_value % span as u32) as usize);
+                    return range.start + (random_value % span as u32) as usize;
                 }
             }
         } else {
@@ -200,7 +198,7 @@ pub trait Rng {
             loop {
                 let random_value = self.next_u64();
                 if random_value >= threshold {
-                    return range.start.wrapping_add((random_value % span64) as usize);
+                    return range.start + (random_value % span64) as usize;
                 }
             }
         }
@@ -246,11 +244,21 @@ pub trait Rng {
     /// Generates a random boolean with the given probability of being `true`.
     ///
     /// `probability` should be in the range `[0.0, 1.0]`.
-    /// Values outside this range are clamped.
+    /// Values outside this range are clamped; `NaN` behaves as `0.0`. Every
+    /// call consumes exactly one `u32` sample, including endpoint values.
     fn gen_bool(&mut self, probability: f64) -> bool {
-        let p = probability.clamp(0.0, 1.0);
-        let threshold = (p * f64::from(u32::MAX)) as u32;
-        self.next_u32() < threshold
+        let random_value = self.next_u32();
+        let bounded_probability = if probability.is_nan() {
+            0.0
+        } else {
+            probability.clamp(0.0, 1.0)
+        };
+
+        // A u32 has 2^32 equiprobable values. Scaling by the full sample-space
+        // size makes 0.5 split it exactly and keeps both endpoint contracts total.
+        let sample_space = f64::from(u32::MAX) + 1.0;
+        let threshold = (bounded_probability * sample_space) as u64;
+        u64::from(random_value) < threshold
     }
 
     /// Fills the given slice with random bytes.
@@ -385,12 +393,14 @@ thread_local! {
 /// let value: u32 = random();
 /// let coin_flip: bool = random();
 /// ```
+///
+/// Custom [`RandomValue`] implementations may call `random()` recursively. The
+/// thread-local generator is borrowed only while producing each primitive
+/// sample, so user code is never invoked while its storage is borrowed.
 #[must_use]
 pub fn random<T: RandomValue>() -> T {
-    THREAD_RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        T::random(&mut *rng)
-    })
+    let mut rng = thread_rng();
+    T::random(&mut rng)
 }
 
 /// Returns a reference to the thread-local RNG.
@@ -487,6 +497,32 @@ fn timing_entropy_seed() -> u64 {
 mod tests {
     use super::*;
 
+    struct ScriptedRng<const N: usize> {
+        samples: [u32; N],
+        consumed: usize,
+    }
+
+    impl<const N: usize> ScriptedRng<N> {
+        const fn new(samples: [u32; N]) -> Self {
+            Self {
+                samples,
+                consumed: 0,
+            }
+        }
+    }
+
+    impl<const N: usize> Rng for ScriptedRng<N> {
+        fn next_u32(&mut self) -> u32 {
+            let sample = self.samples[self.consumed];
+            self.consumed += 1;
+            sample
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32())
+        }
+    }
+
     #[test]
     fn test_pcg32_deterministic() {
         let mut rng1 = Pcg32::seed_from_u64(12345);
@@ -545,6 +581,14 @@ mod tests {
     }
 
     #[test]
+    fn gen_range_uses_the_exact_span() {
+        let mut rng = ScriptedRng::new([9]);
+
+        assert_eq!(rng.gen_range(10..20), 19);
+        assert_eq!(rng.consumed, 1);
+    }
+
+    #[test]
     fn test_gen_bool() {
         let mut rng = Pcg32::seed_from_u64(42);
 
@@ -564,6 +608,83 @@ mod tests {
         // Should be roughly 5000, allow variance
         assert!(true_count > 4500, "Too few trues: {true_count}");
         assert!(true_count < 5500, "Too many trues: {true_count}");
+    }
+
+    #[test]
+    fn test_gen_bool_one_is_true_for_maximum_sample() {
+        struct MaximumRng;
+
+        impl Rng for MaximumRng {
+            fn next_u32(&mut self) -> u32 {
+                u32::MAX
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        assert!(MaximumRng.gen_bool(1.0));
+        assert!(MaximumRng.gen_bool(f64::INFINITY));
+        assert!(!MaximumRng.gen_bool(0.0));
+        assert!(!MaximumRng.gen_bool(f64::NEG_INFINITY));
+        assert!(!MaximumRng.gen_bool(f64::NAN));
+    }
+
+    #[test]
+    fn gen_bool_every_probability_consumes_exactly_one_sample() {
+        struct CountingRng {
+            calls: usize,
+        }
+
+        impl Rng for CountingRng {
+            fn next_u32(&mut self) -> u32 {
+                self.calls += 1;
+                u32::MAX
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        for probability in [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            0.5,
+            1.0,
+            f64::INFINITY,
+        ] {
+            let mut rng = CountingRng { calls: 0 };
+            let _ = rng.gen_bool(probability);
+            assert_eq!(rng.calls, 1, "probability={probability:?}");
+        }
+    }
+
+    #[test]
+    fn gen_bool_endpoints_preserve_the_seeded_stream_position() {
+        for probability in [f64::NAN, 0.0, 1.0, f64::INFINITY] {
+            let mut actual = Pcg32::seed_from_u64(42);
+            let mut expected = Pcg32::seed_from_u64(42);
+
+            let _ = actual.gen_bool(probability);
+            let _ = expected.next_u32();
+
+            assert_eq!(actual.next_u32(), expected.next_u32());
+        }
+    }
+
+    #[test]
+    fn gen_bool_half_probability_has_an_exact_midpoint() {
+        let mut below_midpoint = ScriptedRng::new([(1_u32 << 31) - 1]);
+        let mut at_midpoint = ScriptedRng::new([1_u32 << 31]);
+
+        assert!(below_midpoint.gen_bool(0.5));
+        assert!(!at_midpoint.gen_bool(0.5));
+        assert_eq!(below_midpoint.consumed, 1);
+        assert_eq!(at_midpoint.consumed, 1);
     }
 
     #[test]
@@ -618,6 +739,22 @@ mod tests {
     }
 
     #[test]
+    fn test_random_value_can_call_random_recursively() {
+        struct RecursiveRandom;
+
+        impl RandomValue for RecursiveRandom {
+            fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
+                let _outer = rng.next_u32();
+                let nested: u32 = random();
+                let _ = nested;
+                Self
+            }
+        }
+
+        let _: RecursiveRandom = random();
+    }
+
+    #[test]
     fn test_seedable_from_entropy() {
         // Just verify it doesn't panic
         let _rng = Pcg32::from_entropy();
@@ -652,6 +789,28 @@ mod tests {
             assert!(val >= 10);
             assert!(val < 20);
         }
+    }
+
+    #[test]
+    fn gen_range_usize_rejects_below_threshold_then_maps_exactly() {
+        // For a span of six, 2^32 mod 6 is four. The first sample is rejected;
+        // the sample equal to the threshold is accepted and maps to offset four.
+        let mut rng = ScriptedRng::new([3, 4]);
+
+        assert_eq!(rng.gen_range_usize(10..16), 14);
+        assert_eq!(rng.consumed, 2);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn gen_range_usize_large_span_rejects_then_maps_exactly() {
+        // For a span of 2^32 + 1, 2^64 mod span is one. The first u64 sample
+        // is rejected; the sample equal to the threshold is accepted.
+        let end = (u32::MAX as usize) + 12;
+        let mut rng = ScriptedRng::new([0, 0, 0, 1]);
+
+        assert_eq!(rng.gen_range_usize(10..end), 11);
+        assert_eq!(rng.consumed, 4);
     }
 
     #[test]
@@ -739,6 +898,17 @@ mod tests {
         assert_eq!(result, u32::MAX, "Empty range at MAX should return MAX");
     }
 
+    /// Reversed exclusive ranges are empty and use the same deterministic
+    /// fallback as equal-bound ranges.
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_gen_range_reversed_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        assert_eq!(rng.gen_range(100..50), 100);
+        assert_eq!(rng.gen_range(u32::MAX..0), u32::MAX);
+    }
+
     /// Tests that gen_range_usize with an empty range returns start
     /// instead of panicking. A violation is reported via telemetry.
     #[test]
@@ -752,6 +922,17 @@ mod tests {
         // Test with different start values
         let result = rng.gen_range_usize(0..0);
         assert_eq!(result, 0, "Empty range at 0 should return 0");
+    }
+
+    /// Reversed exclusive ranges are empty and use the same deterministic
+    /// fallback as equal-bound ranges.
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_gen_range_usize_reversed_returns_start() {
+        let mut rng = Pcg32::seed_from_u64(42);
+
+        assert_eq!(rng.gen_range_usize(100..50), 100);
+        assert_eq!(rng.gen_range_usize(usize::MAX..0), usize::MAX);
     }
 
     /// Tests that gen_range_i64_inclusive with an invalid range (start > end)

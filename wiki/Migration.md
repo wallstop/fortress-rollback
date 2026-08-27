@@ -8,6 +8,70 @@
 
 Fortress Rollback is the correctness-first, verified fork of the original `ggrs` crate. This guide explains how to migrate existing projects.
 
+## Upgrading from 0.13
+
+Spectator startup now has `Result`-returning APIs that preserve the exact
+failure cause. Existing `start_spectator_session` and
+`start_spectator_session_multi` calls still compile and return `Option`, but new
+code should use the `try_` forms:
+
+```rust
+// Before: every startup failure became None.
+let spectator = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)?
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::NotSynchronized)?;
+
+// After: configuration, serialization, protocol, and allocation errors remain distinct.
+let spectator = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)?
+    .try_start_spectator_session(host_addr, socket)?;
+```
+
+Failover spectator host addresses must now be nonempty and unique. Duplicate
+addresses used to construct later endpoints that could never receive packets
+because routing stopped at the first address match. Startup now rejects the list
+before endpoint construction:
+
+```rust
+let spectator = match SessionBuilder::<GameConfig>::new()
+    .try_start_spectator_session_multi(&hosts, socket)
+{
+    Err(FortressError::InvalidRequestStructured {
+        kind:
+            InvalidRequestKind::DuplicateSpectatorHost {
+                first_index,
+                duplicate_index,
+            },
+    }) => {
+        eprintln!(
+            "host {duplicate_index} duplicates the address at {first_index}"
+        );
+    },
+    Err(error) => return Err(error),
+    Ok(spectator) => spectator,
+};
+```
+
+`InvalidRequestKind` remains exhaustive. Add match arms for
+`NoSpectatorHosts` and `DuplicateSpectatorHost { .. }` when upgrading exhaustive
+matches. Remove repeated addresses instead of relying on the former first-match
+routing behavior.
+
+The public-surface census also removed two unused aliases from the explicitly
+unstable `__internal` namespace. Replace them with the supported module paths:
+
+```rust
+// Before
+use fortress_rollback::__internal::{rle_decode, rle_encode};
+
+// After
+use fortress_rollback::rle::{decode, encode};
+```
+
+The functions and their wire-compatible bytes are unchanged; only the duplicate
+callable paths were removed.
+
 ## Upgrading from 0.11
 
 The Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries are removed.
@@ -40,6 +104,8 @@ requests and state in the application crate.
 - **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
 - **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
 - **Current wire protocol:** canonical hot-join membership generations require protocol v2; v1/v2 peers intentionally reject one another, so upgrade every participant together.
+- **Spectator startup after 0.13:** prefer the `try_start_spectator_session*` methods, and supply a nonempty list of unique failover hosts.
+- **Public-surface cleanup after 0.13:** replace `__internal::{rle_encode,rle_decode}` with `rle::{encode,decode}`.
 - **New in 0.10:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [0.10 section](#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes
@@ -51,7 +117,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.13"  # current version
+fortress-rollback = "0.14"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
@@ -243,14 +309,18 @@ The `sync-send` feature flag remains compatible. Fortress Rollback adds several 
 | `tokio`              | Async Tokio UDP socket adapter         | ✅               |
 | `json`               | JSON serialization for telemetry types | ✅               |
 | `paranoid`           | Runtime invariant checking             | ✅               |
-| `loom`               | Concurrency testing                    | ✅               |
+| `loom`               | No-op compatibility name; actual tests use `cfg(loom)` | ✅               |
 | `z3-verification`    | Formal verification tests              | ✅               |
+| `trace-validation`   | Bounded internal protocol trace recording for verification | ✅               |
 | `graphical-examples` | Deprecated no-op compatibility flag    | ✅ (enables nothing) |
 | `hot-join`           | Peers can join/rejoin a running session via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`) | ✅               |
 | `z3-verification-bundled` | `z3-verification` with a bundled Z3 build (no system Z3 needed) | ✅               |
 
-> **Note:** The `json` feature enables `to_json()` and `to_json_pretty()` methods on telemetry types.
-> Without this feature, the `serde_json` dependency is not included, reducing the default dependency count.
+> **Note:** The `json` feature enables Result-returning `try_to_json()` and
+> `try_to_json_pretty()` methods on telemetry and metrics types. The legacy `to_json()` and
+> `to_json_pretty()` methods remain `Option<String>` compatibility wrappers that erase the
+> `JsonSerializationError`; migrate to the `try_` forms when failure details matter. Without this
+> feature, the `serde_json` dependency is not included, reducing the default dependency count.
 
 For detailed feature documentation, see the [User Guide](User-Guide#feature-flags).
 

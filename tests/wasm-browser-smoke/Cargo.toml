@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 fortress-rollback = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = "=0.3.77"

@@ -9,6 +9,7 @@
 **/*.rs.bk
 
 .claude/**
+.nanocoder/**
 .idea/**
 
 site/

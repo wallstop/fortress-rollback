@@ -21,8 +21,8 @@ use crate::common::{
 };
 use fortress_rollback::{
     telemetry::CollectingObserver, FortressError, FortressEvent, FortressRequest, Frame,
-    InputQueueConfig, InputVec, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
-    SessionBuilder, SessionState, SpectatorConfig, SyncConfig,
+    InputQueueConfig, InputVec, InvalidRequestKind, PlayerHandle, PlayerType, ProtocolConfig,
+    RequestVec, SessionBuilder, SessionState, SpectatorConfig, SyncConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1014,7 +1014,7 @@ fn test_spectator_timeout_does_not_halt_host() -> Result<(), FortressError> {
 
 /// Drives a spectator that follows TWO independent P2P hosts (failover redundancy).
 ///
-/// Verifies that `start_spectator_session_multi` works end-to-end: both hosts
+/// Verifies that `try_start_spectator_session_multi` works end-to-end: both hosts
 /// feed identical confirmed inputs and the spectator advances correctly while
 /// reporting `num_hosts() == 2`.
 #[test]
@@ -1042,8 +1042,7 @@ fn test_multi_host_spectator_advances() -> Result<(), FortressError> {
     let mut spec = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)?
         .with_protocol_config(protocol_config(&clock))
-        .start_spectator_session_multi(&[addr1, addr2], socket3)
-        .expect("multi-host spectator should start");
+        .try_start_spectator_session_multi(&[addr1, addr2], socket3)?;
 
     assert_eq!(spec.num_hosts(), 2);
 
@@ -1141,8 +1140,7 @@ fn test_multi_host_spectator_failover_on_timeout() -> Result<(), FortressError> 
         .with_protocol_config(protocol_config(&clock))
         .with_disconnect_timeout(short_timeout)
         .with_disconnect_notify_delay(Duration::from_millis(50))
-        .start_spectator_session_multi(&[addr1, addr2], socket3)
-        .expect("multi-host spectator should start");
+        .try_start_spectator_session_multi(&[addr1, addr2], socket3)?;
 
     // Synchronize everything.
     let mut synced = false;
@@ -1224,6 +1222,36 @@ fn test_multi_host_spectator_empty_returns_none() {
         .unwrap()
         .start_spectator_session_multi(&[], socket);
     assert!(session.is_none());
+}
+
+#[test]
+fn test_multi_host_spectator_try_start_reports_host_list_errors() {
+    let (empty_socket, _empty_addr) = create_unconnected_socket(20051);
+    let empty_result = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)
+        .unwrap()
+        .try_start_spectator_session_multi(&[], empty_socket);
+    assert!(matches!(
+        empty_result,
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::NoSpectatorHosts
+        })
+    ));
+
+    let (duplicate_socket, host_addr) = create_unconnected_socket(20052);
+    let duplicate_result = SessionBuilder::<StubConfig>::new()
+        .with_num_players(2)
+        .unwrap()
+        .try_start_spectator_session_multi(&[host_addr, host_addr], duplicate_socket);
+    assert!(matches!(
+        duplicate_result,
+        Err(FortressError::InvalidRequestStructured {
+            kind: InvalidRequestKind::DuplicateSpectatorHost {
+                first_index: 0,
+                duplicate_index: 1,
+            }
+        })
+    ));
 }
 
 // ============================================================================
@@ -2068,8 +2096,7 @@ fn test_multi_host_inputs_confirmed_and_monotonic() -> Result<(), FortressError>
     let mut spec = SessionBuilder::<StubConfig>::new()
         .with_num_players(2)?
         .with_protocol_config(protocol_config(&clock))
-        .start_spectator_session_multi(&[addr1, addr2], socket3)
-        .expect("multi-host spectator should start");
+        .try_start_spectator_session_multi(&[addr1, addr2], socket3)?;
 
     assert_eq!(spec.num_hosts(), 2);
 

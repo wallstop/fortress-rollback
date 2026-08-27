@@ -10,36 +10,34 @@
 //! an async Tokio application by:
 //!
 //! 1. Wrapping a [`tokio::net::UdpSocket`] in a non-blocking adapter
-//! 2. Using the async helper methods for efficient I/O waiting
-//! 3. Using the synchronous session APIs between async socket polls
+//! 2. Moving the adapter into a synchronous Fortress Rollback session
+//! 3. Polling that session from a Tokio task and yielding or sleeping between ticks
 //!
 //! # Async vs Sync Methods
 //!
-//! This adapter provides both synchronous ([`NonBlockingSocket`] trait) and async methods:
+//! Before a session owns the adapter, it provides both synchronous
+//! ([`NonBlockingSocket`] trait) and async methods:
 //!
 //! | Sync Method | Async Method | When to Use |
 //! |-------------|--------------|-------------|
-//! | `send_to()` | [`send_to_async()`](TokioUdpSocket::send_to_async) | Async is preferred for reliability |
-//! | `receive_all_messages()` | [`recv_all()`](TokioUdpSocket::recv_all) | Async is preferred for efficiency |
+//! | `send_to()` | [`send_to_async()`](TokioUdpSocket::send_to_async) | Standalone adapter use |
+//! | `receive_all_messages()` | [`recv_all()`](TokioUdpSocket::recv_all) | Standalone adapter use |
 //! | - | [`wait_readable()`](TokioUdpSocket::wait_readable) | Wait for socket readability |
 //! | - | [`wait_writable()`](TokioUdpSocket::wait_writable) | Wait for socket writability |
 //!
-//! **Important**: The synchronous `send_to()` and `receive_all_messages()` methods from the
-//! [`NonBlockingSocket`] trait may fail if the socket isn't ready:
+//! **Important**: [`SessionBuilder`](crate::SessionBuilder) takes ownership of the adapter.
+//! After that move, application code cannot call its async helpers; the session uses the
+//! non-blocking trait methods internally. Those methods may encounter a socket that is not ready:
 //! - `send_to()` will report a violation and drop the packet if the socket would block
 //! - `receive_all_messages()` will return an empty vector if no data is available
 //!
-//! For reliable operation in async contexts, use the async methods or call
-//! `wait_readable()`/`wait_writable()` before the sync methods.
+//! The async helpers are useful only while application code still owns the standalone adapter.
 //!
 //! # Usage Pattern
 //!
-//! The typical pattern for async game loops is:
-//!
-//! 1. Use [`recv_all()`](TokioUdpSocket::recv_all) to efficiently wait for and receive messages
-//! 2. Process any received messages with the session
-//! 3. Advance the game frame and handle requests
-//! 4. Send messages using [`send_to_async()`](TokioUdpSocket::send_to_async) or the trait's `send_to()`
+//! The typical async game loop polls the session, advances the frame and handles requests,
+//! then yields or sleeps until the next tick. Use the async socket helpers only in a custom
+//! integration that keeps ownership of the adapter instead of moving it into a session.
 //!
 //! # Example
 //!
@@ -91,7 +89,7 @@
 //!
 //! - The adapter uses the same buffer sizes as [`UdpNonBlockingSocket`] for consistency
 //! - Message serialization uses pre-allocated buffers to minimize allocations
-//! - Use [`recv_all()`](TokioUdpSocket::recv_all) for efficient async waiting
+//! - Standalone adapter integrations can use [`recv_all()`](TokioUdpSocket::recv_all) for async waiting
 //! - The sync `receive_all_messages()` uses `try_recv_from` which may need prior readability polling
 //!
 //! # Feature Flag
@@ -100,7 +98,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! fortress-rollback = { version = "0.13", features = ["tokio"] }
+//! fortress-rollback = { version = "0.14", features = ["tokio"] }
 //! ```
 //!
 //! [`UdpNonBlockingSocket`]: crate::UdpNonBlockingSocket

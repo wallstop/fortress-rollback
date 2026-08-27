@@ -94,8 +94,9 @@ jobs:
           cargo deny --manifest-path "$MANIFEST" --locked --config "$LICENSE_CONFIG" check licenses
 
   # Unsafe code audit via cargo-geiger
-  # Only runs when dependencies change (Cargo.toml/Cargo.lock) or on schedule/manual trigger
-  # Skips entirely on PR/push when only .rs files change (dependencies unchanged)
+  # Runs on every PR because the pull_request payload does not include changed
+  # paths. Pushes remain limited to dependency changes; schedules/manual runs
+  # provide recurring coverage.
   unsafe-audit:
     name: Unsafe Code Audit
     runs-on: ubuntu-latest
@@ -103,6 +104,7 @@ jobs:
     if: |
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
       contains(toJSON(github.event.commits.*.modified), 'Cargo.toml') ||
       contains(toJSON(github.event.commits.*.modified), 'Cargo.lock') ||
       contains(toJSON(github.event.commits.*.added), 'Cargo.toml') ||
@@ -148,38 +150,95 @@ jobs:
           restore-keys: |
             geiger-${{ runner.os }}-cargo-
 
-      - name: Check cached geiger report
-        id: geiger-cache
-        uses: actions/cache@v6
-        continue-on-error: true
-        with:
-          path: geiger-report.txt
-          key: geiger-report-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Audit unsafe code in dependencies
-        if: steps.geiger-cache.outputs.cache-hit != 'true'
-        run: cargo geiger --all-features --lib 2>&1 | tee geiger-report.txt || true
+        run: |
+          set -u
+          set -o pipefail
+          # Keep the ordinary Z3 dependency visible, but do not compile bundled Z3 from
+          # source: cold native builds repeatedly exhausted this job's 20-minute budget.
+          rm -f geiger-report.complete
+          set +e
+          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt
+          pipeline_status=("${PIPESTATUS[@]}")
+          geiger_status="${pipeline_status[0]}"
+          tee_status="${pipeline_status[1]}"
+          set -e
+          if [ "${tee_status}" -ne 0 ]; then
+            echo "ERROR: cargo-geiger report writer failed with status ${tee_status}"
+            exit "${tee_status}"
+          fi
+          if [ "${geiger_status}" -eq 1 ]; then
+            geiger_error_count="$(
+              awk '/^error:/ { count++ } END { print count + 0 }' geiger-report.txt
+            )"
+            if [ "${geiger_error_count}" -ne 1 ] \
+              || ! awk '
+                NF { last = $0 }
+                END { exit(last ~ /^error: Found [1-9][0-9]* warnings$/ ? 0 : 1) }
+              ' geiger-report.txt; then
+              echo "ERROR: cargo-geiger producer failed: warning exit included incomplete or fatal output"
+              exit "${geiger_status}"
+            fi
+            echo "cargo-geiger completed with its expected warning exit"
+          elif [ "${geiger_status}" -ne 0 ]; then
+            echo "ERROR: cargo-geiger producer failed with status ${geiger_status}"
+            exit "${geiger_status}"
+          fi
+          if ! awk '
+            $7 == "fortress-rollback" &&
+            ($6 == ":)" || $6 == "?" || $6 == "!") &&
+            $1 ~ /^[0-9]+\/[0-9]+$/ && $2 ~ /^[0-9]+\/[0-9]+$/ &&
+            $3 ~ /^[0-9]+\/[0-9]+$/ && $4 ~ /^[0-9]+\/[0-9]+$/ &&
+            $5 ~ /^[0-9]+\/[0-9]+$/ { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' geiger-report.txt; then
+            echo "ERROR: cargo-geiger did not produce a complete fortress-rollback root row"
+            exit 1
+          fi
+          touch geiger-report.complete
         env:
+          CARGO_TERM_COLOR: never
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      - name: Display cached geiger report
-        if: steps.geiger-cache.outputs.cache-hit == 'true'
-        run: |
-          echo "Using cached geiger report (dependencies unchanged)"
-          cat geiger-report.txt
-
       - name: Verify no unsafe in library code
         run: |
-          # Check that our library has 0 unsafe usage
-          if grep -E "^[0-9]+/[0-9]+ .* fortress-rollback" geiger-report.txt | grep -v "0/0"; then
-            echo "ERROR: Unsafe code detected in fortress-rollback library!"
+          set -euo pipefail
+          test -f geiger-report.complete
+          root_row="$(
+            awk '
+              $7 == "fortress-rollback" &&
+              ($6 == ":)" || $6 == "?" || $6 == "!") &&
+              $1 ~ /^[0-9]+\/[0-9]+$/ && $2 ~ /^[0-9]+\/[0-9]+$/ &&
+              $3 ~ /^[0-9]+\/[0-9]+$/ && $4 ~ /^[0-9]+\/[0-9]+$/ &&
+              $5 ~ /^[0-9]+\/[0-9]+$/ { row = $0 }
+              END { print row }
+            ' geiger-report.txt
+          )"
+          if ! test -n "$root_row"; then
+            echo "ERROR: cargo-geiger report does not contain the fortress-rollback root row"
             exit 1
           fi
-          echo "✓ No unsafe code in fortress-rollback library"
+          unsafe_total="$(
+            printf '%s\n' "$root_row" | awk '
+              {
+                total = 0
+                for (field = 1; field <= 5; field++) {
+                  split($field, counts, "/")
+                  total += counts[1]
+                }
+                print total
+              }
+            '
+          )"
+          if [ "$unsafe_total" -ne 0 ]; then
+            echo "ERROR: Unsafe code detected in fortress-rollback library: $root_row"
+            exit 1
+          fi
+          echo "No unsafe code in fortress-rollback library: $root_row"
 
   # Unused dependencies check
   unused-deps:

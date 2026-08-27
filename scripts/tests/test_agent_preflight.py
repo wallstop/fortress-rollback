@@ -30,6 +30,9 @@ def _ids(checks: list[PlannedCheck]) -> list[str]:
 
 
 CHECK_TRIGGER_CASES: list[tuple[str, str]] = [
+    ("plan-hygiene", "PLAN.md"),
+    ("plan-hygiene", "scripts/hooks/check-plan-hygiene.py"),
+    ("plan-hygiene", ".agents/skills/fortress-development/SKILL.md"),
     ("sync-version-check", "README.md"),
     ("workspace-lock-check", "Cargo.toml"),
     ("workspace-lock-check", "fuzz/Cargo.lock"),
@@ -127,6 +130,16 @@ def test_plan_checks_runs_agent_skill_checks_for_skill_markdown() -> None:
     assert "sync-version-check" in check_ids
     assert "validate-agent-skills" in check_ids
     assert "agent-skills-quality" in check_ids
+
+
+def test_plan_checks_runs_plan_hygiene_for_plan_changes() -> None:
+    checks = plan_checks({"PLAN.md"})
+    plan_check = next(check for check in checks if check.check_id == "plan-hygiene")
+    assert plan_check.command == [
+        PYTHON_EXECUTABLE,
+        "scripts/hooks/check-plan-hygiene.py",
+    ]
+    assert plan_check.fix_hint is not None
 
 
 def test_plan_checks_runs_actionlint_for_workflow_files() -> None:

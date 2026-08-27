@@ -377,7 +377,7 @@ impl<T: Config> SpectatorSession<T> {
     ///
     /// For a single-host spectator this starts at `1` and may drop to `0` if
     /// the host disconnects. For a failover spectator created via
-    /// [`SessionBuilder::start_spectator_session_multi`], this starts at the
+    /// [`SessionBuilder::try_start_spectator_session_multi`], this starts at the
     /// number of supplied addresses and drops by one each time a host
     /// disconnects, letting the application observe redundancy in real time.
     ///
@@ -403,13 +403,12 @@ impl<T: Config> SpectatorSession<T> {
     /// let host_b: SocketAddr = "127.0.0.1:7001".parse()?;
     /// let session = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
-    ///     .start_spectator_session_multi(&[host_a, host_b], DummySocket)
-    ///     .ok_or(FortressError::NotSynchronized)?;
+    ///     .try_start_spectator_session_multi(&[host_a, host_b], DummySocket)?;
     /// assert_eq!(session.num_hosts(), 2);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
-    /// [`SessionBuilder::start_spectator_session_multi`]: crate::SessionBuilder::start_spectator_session_multi
+    /// [`SessionBuilder::try_start_spectator_session_multi`]: crate::SessionBuilder::try_start_spectator_session_multi
     #[must_use = "the host count should be inspected"]
     pub fn num_hosts(&self) -> usize {
         self.hosts.len()
@@ -445,8 +444,7 @@ impl<T: Config> SpectatorSession<T> {
     /// let session = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
     ///     .with_spectator_config(config)
-    ///     .start_spectator_session(host, DummySocket)
-    ///     .ok_or(FortressError::NotSynchronized)?;
+    ///     .try_start_spectator_session(host, DummySocket)?;
     /// assert!(session.is_rewind_enabled());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -487,8 +485,7 @@ impl<T: Config> SpectatorSession<T> {
     /// let session = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
     ///     .with_spectator_config(config)
-    ///     .start_spectator_session(host, DummySocket)
-    ///     .ok_or(FortressError::NotSynchronized)?;
+    ///     .try_start_spectator_session(host, DummySocket)?;
     /// assert_eq!(session.stream_delay(), 6);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -654,7 +651,7 @@ impl<T: Config> SpectatorSession<T> {
     /// Hosts are addressed by dense index below
     /// [`num_hosts()`](Self::num_hosts),
     /// in the builder-priority order passed to
-    /// [`start_spectator_session_multi`]. Unlike
+    /// [`try_start_spectator_session_multi`]. Unlike
     /// [`P2PSession::peer_metrics`], which takes an opaque
     /// [`PlayerHandle`], a spectator has no player handles for its upstream
     /// hosts, so it uses the same index space as `num_hosts()` — and returns an
@@ -678,7 +675,7 @@ impl<T: Config> SpectatorSession<T> {
     /// first host.
     ///
     /// [`P2PSession::peer_metrics`]: crate::P2PSession::peer_metrics
-    /// [`start_spectator_session_multi`]: crate::SessionBuilder::start_spectator_session_multi
+    /// [`try_start_spectator_session_multi`]: crate::SessionBuilder::try_start_spectator_session_multi
     #[must_use = "peer metrics should be inspected or logged"]
     pub fn peer_metrics(&self, host_index: usize) -> Option<PeerMetrics> {
         self.hosts.get(host_index).map(UdpProtocol::peer_metrics)
@@ -921,8 +918,7 @@ impl<T: Config> SpectatorSession<T> {
     /// let mut session = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
     ///     .with_spectator_config(config)
-    ///     .start_spectator_session(host, DummySocket)
-    ///     .ok_or(FortressError::NotSynchronized)?;
+    ///     .try_start_spectator_session(host, DummySocket)?;
     /// // Seeking to a frame that was never saved reports MissingState.
     /// assert!(session.seek_to_frame(Frame::new(0)).is_err());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -2794,7 +2790,7 @@ mod tests {
         assert!(session.peer_metrics(1).is_none());
     }
 
-    /// Regression for defect D9 (PLAN.md §2) on the **spectator** session: its
+    /// Regression for hardening defect D9 on the **spectator** session: its
     /// event-queue trim used to discard undrained events silently, just like
     /// the P2P session. The overflow now increments [`SessionMetrics`] (total +
     /// per-[`EventKind`](crate::metrics::EventKind)) and reports a single

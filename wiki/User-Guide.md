@@ -1269,8 +1269,8 @@ Best for: Live event streaming, replay viewers, tournament broadcasts.
 
 ```rust
 use fortress_rollback::{
-    FortressError, PlayerHandle, PlayerType, ProtocolConfig,
-    SessionBuilder, SpectatorConfig, SyncConfig,
+    PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SpectatorConfig,
+    SyncConfig,
 };
 use web_time::Duration;
 
@@ -1296,15 +1296,13 @@ let mut spectator_session = SessionBuilder::<GameConfig>::new()
         stream_delay: 6,       // Stay 100ms behind live at 60 FPS
         ..Default::default()
     })
-    .start_spectator_session(host_addr, spectator_socket)
-    .ok_or(FortressError::InvalidRequest {
-        info: "spectator session initialization failed".into(),
-    })?;
+    .try_start_spectator_session(host_addr, spectator_socket)?;
 ```
 
-Spectator startup returns `None` when the protocol configuration is invalid,
-the spectator configuration is invalid, or the host endpoint cannot be
-initialized. `SpectatorConfig::buffer_size` must be greater than zero, and
+The preferred `try_start_spectator_session` method preserves the structured
+configuration, serialization, protocol, or allocation error when startup fails.
+The older `start_spectator_session` method remains available when an `Option` is
+more convenient. `SpectatorConfig::buffer_size` must be greater than zero, and
 `stream_delay` must be smaller than `buffer_size`.
 
 For failover spectators created with `start_spectator_session_multi`, unresolved
@@ -1315,9 +1313,10 @@ resolves the next surviving host is promoted only for unresolved frames.
 Connection status comes from the selected host's whole-frame snapshot. Connected
 hosts that disagree on the same player/frame emit
 `FortressEvent::SpectatorDivergence` and make future `advance_frame` calls
-return `FortressError::SpectatorDivergence`. If duplicate host addresses are
-supplied, inbound packets are routed to the first matching host endpoint. When
-every host disconnects cleanly, the spectator may still advance through frames
+return `FortressError::SpectatorDivergence`. Failover host lists must be
+nonempty and contain unique addresses; `try_start_spectator_session_multi`
+reports the empty or duplicate indices before constructing endpoints. When every
+host disconnects cleanly, the spectator may still advance through frames
 that were already buffered; after those buffered frames are no longer viewable,
 `advance_frame` returns `PredictionThreshold`.
 
@@ -2032,9 +2031,11 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
 | `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
+| `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
-| `loom`                    | Enables Loom-compatible synchronization primitives    | Concurrency testing               | `loom` crate        |
+| `loom`                    | No-op compatibility name; use `cfg(loom)`             | Existing development manifests    | None                |
 | `graphical-examples`      | Deprecated no-op compatibility flag                   | Existing downstream feature lists | None                |
+| `trace-validation`        | Records bounded internal protocol events              | Development/trace verification    | None                |
 | `z3-verification`         | Enables Z3 formal verification tests                  | Development/CI verification       | `z3` crate (system) |
 | `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
 
@@ -2051,7 +2052,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send"] }
+fortress-rollback = { version = "0.14", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2086,7 +2087,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["tokio"] }
+fortress-rollback = { version = "0.14", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2115,15 +2116,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**Note:** When used with the `sync-send` feature, `TokioUdpSocket` automatically implements `Send + Sync`.
+`start_p2p_session` moves the adapter into the session. After that move, poll and advance the
+session from the Tokio task; application code cannot call the adapter's `recv_all`,
+`send_to_async`, or readiness helpers. Those async helpers support standalone adapter and custom
+transport integrations before session ownership. With `sync-send`, `TokioUdpSocket` implements
+`Send + Sync`.
+
+The repository's native runtime matrix exercises this ownership boundary on Linux, macOS, and
+Windows: two loopback adapters move into real sessions, synchronize, exchange confirmed inputs, and
+converge across four frames under bounded polling and a ten-second test timeout. This is an
+integration oracle for the adapter/session contract, not a requirement to sleep or await socket
+readiness in an application's game loop.
 
 #### `json`
 
-Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telemetry types like `SpecViolation` and `InvariantViolation`. This is useful for structured logging, monitoring systems, or exporting violation data.
+Enables fallible JSON serialization methods (`try_to_json()` and `try_to_json_pretty()`) on
+`SessionMetrics`, `PeerMetrics`, `HotJoinMetrics`, `SpecViolation`, and `InvariantViolation`. This
+is useful for structured logging, monitoring systems, or exporting telemetry without losing
+serializer or allocation failures.
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["json"] }
+fortress-rollback = { version = "0.14", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2139,13 +2153,17 @@ let violation = SpecViolation::new(
 );
 
 // With the `json` feature enabled:
-if let Some(json) = violation.to_json() {
-    println!("Violation: {}", json);
-    // Output: {"severity":"warning","kind":"frame_sync","message":"frame mismatch detected",...}
-}
+let json = violation.try_to_json()?;
+println!("Violation: {}", json);
+// Output: {"severity":"warning","kind":"frame_sync","message":"frame mismatch detected",...}
+
+# Ok::<(), fortress_rollback::JsonSerializationError>(())
 ```
 
-**Note:** Without the `json` feature, the telemetry types still implement `serde::Serialize` and can be serialized with any serde-compatible serializer (like bincode). The `json` feature specifically enables the convenience `to_json()` methods and adds the `serde_json` dependency.
+`to_json()` and `to_json_pretty()` remain available as compatibility wrappers. They return `None`
+for every `JsonSerializationError`; prefer the `try_` methods whenever the failure cause matters.
+Without the `json` feature, these types still implement `serde::Serialize` and can be serialized
+with any serde-compatible serializer (like bincode).
 
 #### `paranoid`
 
@@ -2153,7 +2171,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["paranoid"] }
+fortress-rollback = { version = "0.14", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2164,9 +2182,22 @@ fortress-rollback = { version = "0.13", features = ["paranoid"] }
 
 **Performance note:** Enabling `paranoid` may impact performance due to additional runtime checks. Use it temporarily for debugging rather than in shipped builds.
 
+#### `hot-join`
+
+Enables reserved-slot joins and rejoins in a running session. The player count and input wire
+width remain fixed; the host transfers a bounded state snapshot into a reserved or gracefully
+dropped slot. This feature adds `Serialize + DeserializeOwned` bounds to `Config::State`.
+
+```toml
+[dependencies]
+fortress-rollback = { version = "0.14", features = ["hot-join"] }
+```
+
 #### `loom`
 
-Enables [Loom](https://github.com/tokio-rs/loom)-compatible synchronization primitives for deterministic concurrency testing. When enabled, internal synchronization primitives switch from `parking_lot` to Loom's equivalents.
+The Cargo feature named `loom` is a no-op compatibility marker. The actual deterministic
+concurrency build uses the compiler configuration flag `cfg(loom)`, which switches internal
+synchronization primitives from `parking_lot` to Loom's equivalents.
 
 **Note:** This is a compile-time flag (`cfg(loom)`) and should not be enabled in Cargo.toml. Instead, it's used via `RUSTFLAGS`:
 
@@ -2181,6 +2212,11 @@ See `loom-tests/README.md` for details on running concurrency tests.
 ### Development/Contributor Feature Flags
 
 These feature flags are primarily for library development and CI, not typical user applications.
+
+#### `trace-validation`
+
+Enables bounded internal protocol-event recording for TLA+ trace validation. This unstable
+verification surface compiles out of normal builds and is not intended for application logic.
 
 #### `z3-verification`
 
@@ -2234,15 +2270,15 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send"] }
+fortress-rollback = { version = "0.14", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.14", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.14", features = ["sync-send", "paranoid"] }
 
 ```
 
@@ -2282,6 +2318,12 @@ Matchbox's optional `ggrs` feature implements the upstream GGRS `NonBlockingSock
 2. In the adapter's `send_to`, serialize Fortress `Message` values with `fortress_rollback::network::codec::encode` and pass the bytes through the split sender.
 3. In `receive_all_messages`, poll at most a fixed number of items from the split receiver and decode each with `codec::decode_message`, leaving excess packets queued for later. Do not use `WebRtcChannel::receive()` here because it drains the entire Matchbox queue into a new `Vec`.
 4. Implement Fortress Rollback's `NonBlockingSocket<matchbox_socket::PeerId>` for that local adapter and pass it to `SessionBuilder`.
+
+The browser runtime lane executes this raw-byte adapter shape under
+`wasm32-unknown-unknown`: two sessions synchronize and confirm frames, malformed packets fail the
+bounded decoder, and no receive call inspects more than eight raw packets. The runner has a
+five-minute CI budget and uploads its uncaptured log on failure. This browser-only evidence does not
+select `wasm-bindgen` dependencies for the distinct Emscripten target.
 
 #### Custom Transport (WebSockets, TCP, etc.)
 
@@ -2452,20 +2494,16 @@ let session = SessionBuilder::<GameConfig>::new()
 ### Spectator Side
 
 ```rust
-use fortress_rollback::{FortressError, SessionBuilder, SessionState, UdpNonBlockingSocket};
+use fortress_rollback::{SessionBuilder, SessionState, UdpNonBlockingSocket};
 
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
-// Note: start_spectator_session returns Option<SpectatorSession>
 let mut session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
-    .start_spectator_session(host_addr, socket)
-    .ok_or(FortressError::InvalidRequest {
-        info: "spectator session initialization failed".into(),
-    })?;
+    .try_start_spectator_session(host_addr, socket)?;
 
 // Spectator loop
 loop {
@@ -3549,7 +3587,9 @@ let config = SpectatorConfig {
 ```
 
 `buffer_size` must be greater than zero, and `stream_delay` must be less than
-`buffer_size`; invalid spectator configs make spectator startup return `None`.
+`buffer_size`; the preferred `try_start_spectator_session*` methods return the
+exact structured error for invalid spectator configuration. The compatibility
+`start_spectator_session*` methods map startup errors to `None`.
 `catchup_speed == 0` is allowed for compatibility. If catch-up mode is
 triggered with zero speed, no frame is attempted and `advance_frame` returns
 `Ok(<empty>)`.
@@ -3953,9 +3993,9 @@ let violation = SpecViolation::new(
 // Direct JSON serialization
 let json = serde_json::to_string(&violation)?;
 
-// Or use the convenience method (returns Option<String>)
-let json = violation.to_json();
-let json_pretty = violation.to_json_pretty();
+// Or use the fallible convenience methods (preserve JsonSerializationError)
+let json = violation.try_to_json()?;
+let json_pretty = violation.try_to_json_pretty()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

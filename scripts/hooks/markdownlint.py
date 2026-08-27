@@ -50,7 +50,6 @@ def main() -> int:
         "fuzz/target/",
         "loom-tests/target/",
         "progress/",
-        "PLAN.md",
     ]
 
     filtered_files = []

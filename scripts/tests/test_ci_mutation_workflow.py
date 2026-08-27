@@ -175,6 +175,15 @@ def test_baseline_and_summary_are_fail_closed() -> None:
     assert 'SHARD_RESULT" != "success"' in terminal
 
 
+def test_baseline_features_match_mutation_profile() -> None:
+    config = tomllib.loads(MUTANTS_CONFIG.read_text(encoding="utf-8"))
+    baseline = named_step(workflow_text(), "Run authoritative baseline")
+    feature_match = re.search(r"--features\s+([^\s]+)", baseline)
+
+    assert feature_match is not None
+    assert set(feature_match.group(1).split(",")) == set(config["features"])
+
+
 def test_untrusted_dispatch_values_are_passed_via_env_and_arrays() -> None:
     text = workflow_text()
 

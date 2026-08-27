@@ -1,0 +1,4 @@
+# schema=1
+path	owner	availability	usage-evidence	risk	disposition	replacement	rationale
+fortress_rollback::__internal::rle_decode	verification	no-default+all-features	no-workspace-callers	duplicate-callable-path	remove-reviewed	fortress_rollback::rle::decode	Unused verification alias duplicated an existing supported path.
+fortress_rollback::__internal::rle_encode	verification	no-default+all-features	no-workspace-callers	duplicate-callable-path	remove-reviewed	fortress_rollback::rle::encode	Unused verification alias duplicated an existing supported path.

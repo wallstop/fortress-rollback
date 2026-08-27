@@ -773,8 +773,8 @@ fn inband_detector_fires_on_checksum_lies_while_states_agree() {
     );
 }
 
-/// Oracle-integrity negative control at N=16 (PLAN.md Part V): the Part III
-/// H-16P "green at 16" verdict is only meaningful if the oracle still has
+/// Oracle-integrity negative control at N=16: the H-16P "green at 16"
+/// verdict is only meaningful if the oracle still has
 /// teeth at that scale — a corrupted peer in a 16-mesh must fail the run
 /// exactly as it does in the N=2 control. Guards against the oracle silently
 /// losing coverage as N grows (e.g., sampling or comparison short-circuits).
@@ -833,7 +833,7 @@ fn probe_smoke_fleet_sixteen_player_mesh_holds_invariants() {
     run_smoke_fleet(16);
 }
 
-/// H-TCP-lite transport-model probe (PLAN.md §13 H-TCP): a reliable,
+/// H-TCP-lite transport-model probe from the hardening audit: a reliable,
 /// in-order link profile (TCP / WebRTC-reliable model) with
 /// head-of-line-blocking stalls modeled by `LinkPolicy::retransmit_delay`.
 /// Zero jitter keeps `SimNet`'s per-link FIFO exact, so delivery is in-order —
@@ -1219,7 +1219,7 @@ fn peer_hitch_recovers_with_consistent_mesh() {
 /// into a *surviving* peer must still be caught while another peer is
 /// hitching. A stall that blinded the oracle would make the fleet miss desyncs
 /// exactly when a peer is under stress — the HD-1 "silent instrument" failure
-/// mode (PLAN.md Part V), here checked against the new lifecycle op.
+/// mode, here checked against the new lifecycle op.
 #[test]
 fn oracle_catches_seeded_divergence_under_peer_hitch() {
     let schedule = peer_hitch_schedule(4, Some(50));
@@ -3885,7 +3885,7 @@ fn clock_skew_long_run_schedule(steps: u32, ppm: i32) -> Schedule {
 /// extends the short +10% `clock_skew_is_tolerated_and_alters_execution`
 /// observation to a realistic magnitude over a long run.
 ///
-/// **What it does NOT do — H-SKEW (PLAN.md §13) is NOT executed here.** H-SKEW
+/// **What it does NOT do — H-SKEW is NOT executed here.** H-SKEW
 /// predicts a *rate* effect: a clock running 0.1% fast drives the frame loop
 /// 0.1% faster in wall-clock time, so the fast peer produces 216 more frames/hour
 /// than the network confirms and `local_frame_advantage` accumulates. This

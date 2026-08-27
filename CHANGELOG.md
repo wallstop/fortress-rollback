@@ -14,6 +14,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SessionBuilder::try_start_spectator_session` and
+  `SessionBuilder::try_start_spectator_session_multi` return the exact structured configuration,
+  serialization, protocol, or allocation error from spectator startup. The existing `Option` methods
+  remain as compatibility wrappers.
+- `SessionMetrics`, `PeerMetrics`, `HotJoinMetrics`, `SpecViolation`, and `InvariantViolation` now
+  provide `try_to_json` / `try_to_json_pretty` under the `json` feature. Their shared
+  `JsonSerializationError` preserves serializer, allocation, and UTF-8 sources; an exact counting
+  pass makes output allocation fallible. The existing `Option<String>` helpers remain compatibility
+  wrappers with explicitly documented error-erasing semantics; valid JSON bytes are unchanged.
+- The doc-hidden `network::compression` surface now exposes `try_encode` and `try_delta_encode`,
+  matching the existing public `rle::try_encode` path for callers that must distinguish valid empty
+  compression output from failure. The legacy RLE and delta-compression wrappers now document their
+  empty fallback and valid RLE/protocol bytes are unchanged.
+- Runtime CI now drives two real `P2PSession`s after each `TokioUdpSocket` moves into session
+  ownership, completing synchronization and four confirmed deterministic frames without sleep-based
+  assertions on Linux, macOS, and Windows. The browser `wasm32-unknown-unknown` lane now executes a
+  bounded raw-byte custom transport through synchronization and two confirmed frames, including
+  malformed-packet rejection and an eight-packet receive-poll cap. Both lanes have explicit time
+  budgets and retain uncaptured failure logs as CI artifacts; the Emscripten dependency lane remains
+  separate.
+
+### Changed
+
+- **Breaking:** failover spectator startup now rejects an empty host list with
+  `InvalidRequestKind::NoSpectatorHosts` and repeated addresses with
+  `InvalidRequestKind::DuplicateSpectatorHost { first_index, duplicate_index }` before endpoint
+  creation. This supersedes the 0.9 behavior that constructed unreachable duplicate endpoints.
+  Exhaustive `InvalidRequestKind` matches need arms for both variants.
+
+### Removed
+
+- **Breaking:** the unused `__internal::rle_encode` and `__internal::rle_decode` duplicate aliases
+  are removed at the 0.14 semver boundary. Use the existing supported `rle::encode` and
+  `rle::decode` paths. Encoded bytes and decode behavior are unchanged.
+
+### Fixed
+
+- **Pre-existing:** legacy `Frame` arithmetic operators now saturate at the `i32` bounds instead of panicking on overflow. Remainder returns `0` for its two undefined primitive-integer cases (a zero divisor and `i32::MIN % -1`), and the discouraged `From<usize>` conversion saturates at `i32::MAX` instead of wrapping into a negative frame. The existing checked and fallible APIs remain the preferred choices when callers need to detect invalid arithmetic.
+- **Pre-existing:** `Rng::gen_range` and `Rng::gen_range_usize` now treat every empty exclusive range, including reversed bounds, as invalid: they report the existing configuration violation and return the start bound. Previously reversed bounds wrapped the span and could return an arbitrary value outside the requested range. `Rng::gen_bool(1.0)` is now always true, including when the underlying sample is `u32::MAX`; probabilities use the full 2³²-value sample space, `NaN` deterministically behaves as zero probability, and every probability consumes exactly one sample so endpoint calls do not shift deterministic streams.
+- **Pre-existing:** custom `RandomValue` implementations may now call the thread-local `random()` function recursively. The thread-local generator is borrowed only around primitive sample generation, preventing the prior `RefCell already borrowed` panic while preserving the same shared random stream.
+
+## [0.14.0] - 2026-08-27
+
 ## [0.13.0] - 2026-08-25
 
 ### Changed
@@ -842,7 +887,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.13"
+fortress-rollback = "0.14"
 ```
 
 ### Import Path Change
@@ -902,7 +947,8 @@ fn handle_inputs(inputs: &[(MyInput, InputStatus)]) { ... }
 
 For detailed migration instructions, see [docs/migration.md](docs/migration.md).
 
-[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/wallstop/fortress-rollback/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/wallstop/fortress-rollback/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/wallstop/fortress-rollback/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/wallstop/fortress-rollback/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/wallstop/fortress-rollback/compare/v0.10.0...v0.11.0

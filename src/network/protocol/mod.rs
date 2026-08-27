@@ -803,8 +803,10 @@ impl<T: Config> UdpProtocol<T> {
     /// Note: This is an internal constructor called via SessionBuilder. The many parameters are
     /// acceptable here because users interact through the builder pattern, not this method directly.
     ///
-    /// # Returns
-    /// Returns `None` if input serialization fails (indicates a fundamental issue with Config::Input).
+    /// # Errors
+    ///
+    /// Returns a structured configuration, serialization, or allocation error
+    /// if the endpoint cannot be constructed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         mut handles: Vec<PlayerHandle>,
@@ -886,15 +888,10 @@ impl<T: Config> UdpProtocol<T> {
 
         // received input history - may fail if serialization is broken
         let mut recv_inputs = BTreeMap::new();
-        recv_inputs.insert(
-            Frame::NULL,
-            InputBytes::zeroed::<T>(recv_player_num)
-                .ok_or(SerializationErrorKind::EndpointCreationFailed)?,
-        );
+        recv_inputs.insert(Frame::NULL, InputBytes::zeroed::<T>(recv_player_num)?);
 
         // last acked input - may fail if serialization is broken
-        let last_acked_input = InputBytes::zeroed::<T>(local_players)
-            .ok_or(SerializationErrorKind::EndpointCreationFailed)?;
+        let last_acked_input = InputBytes::zeroed::<T>(local_players)?;
 
         let time_sync_layer = TimeSync::try_with_config(time_sync_config)?;
 
@@ -9482,7 +9479,6 @@ mod tests {
 // ============================================================================
 //
 // These tests verify invariants of the UDP protocol state machine using proptest.
-// See PLAN.md item 2.5 for context.
 //
 // # Invariants Tested
 //

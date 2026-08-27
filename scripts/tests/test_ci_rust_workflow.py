@@ -21,9 +21,11 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_RUST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-rust.yml"
+CI_NETWORK_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-network.yml"
 CI_COVERAGE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-coverage.yml"
 CARGO_LOCK = REPO_ROOT / "Cargo.lock"
 CARGO_CONFIG = REPO_ROOT / ".cargo" / "config.toml"
+WASM_BROWSER_SMOKE_SOURCE = REPO_ROOT / "tests" / "wasm-browser-smoke" / "src" / "lib.rs"
 NETWORK_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 NETWORK_DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 EMSCRIPTEN_DEPENDENCY_CHECK = "scripts/ci/check-emscripten-dependencies.sh"
@@ -228,6 +230,38 @@ def test_semver_failure_summary_distinguishes_infra_from_api_breaks() -> None:
     assert "found a breaking public-API change" not in summary
 
 
+def test_public_api_census_uses_pinned_nightly_and_checked_snapshot() -> None:
+    """Callable hidden paths must be rebuilt by the canonical nightly gate."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["public-api-census"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 10
+
+    steps = job["steps"]
+    nightly = next(
+        step for step in steps if step.get("name") == "Install pinned Rust nightly"
+    )
+    assert nightly["id"] == "nightly"
+    assert nightly["uses"] == "./.github/actions/install-pinned-nightly"
+
+    cache = next(step for step in steps if step.get("name") == "Setup Rust cache")
+    assert "steps.nightly.outputs.toolchain" in cache["with"]["cache-key"]
+    assert "target/public-api-census" in cache["with"]["cache-paths"].splitlines()
+
+    census = next(
+        step for step in steps if step.get("name") == "Verify checked public API snapshot"
+    )
+    assert census["run"] == "python3 scripts/api/public_api_census.py --check"
+
+    expected_paths = {
+        "scripts/api/public_api_census.py",
+        "scripts/tests/test_public_api_census.py",
+        "docs/api/public-api-*.tsv",
+    }
+    for event in ("push", "pull_request"):
+        assert expected_paths <= _workflow_paths(workflow, event)
+
+
 @pytest.mark.parametrize("workflow_path", CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS)
 @pytest.mark.parametrize("event", ("push", "pull_request"))
 def test_cargo_heavy_workflows_trigger_on_cargo_config_changes(
@@ -338,6 +372,29 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
     )
 
 
+def test_hot_join_clippy_covers_supported_feature_composition() -> None:
+    """User-facing additive features must compile together across all targets."""
+    workflow = _load_ci_rust_workflow()
+    steps = workflow["jobs"]["hot-join"]["steps"]
+    clippy_step = next(
+        step for step in steps if step.get("name") == "Run hot-join clippy"
+    )
+    commands = _shell_commands(clippy_step)
+
+    assert len(commands) == 1
+    assert "--workspace" in commands[0]
+    assert "--all-targets" in commands[0]
+    assert _feature_set(commands[0]) == frozenset(
+        {
+            "hot-join",
+            "tokio",
+            "json",
+            "sync-send",
+            "paranoid",
+            "trace-validation",
+        }
+    )
+
 def test_wasm_job_rejects_browser_dependencies_only_on_emscripten() -> None:
     """The JS bridge ban must not reject legitimate browser dependencies."""
     workflow = _load_ci_rust_workflow()
@@ -355,8 +412,8 @@ def test_wasm_job_rejects_browser_dependencies_only_on_emscripten() -> None:
         assert EMSCRIPTEN_DEPENDENCY_CHECK in _workflow_paths(workflow, event)
 
 
-def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
-    """The browser row must execute the clock path with matching bindgen tools."""
+def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
+    """The browser row must execute bounded session traffic with matching tools."""
     workflow = _load_ci_rust_workflow()
     steps = workflow["jobs"]["wasm-check"]["steps"]
 
@@ -375,13 +432,21 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
     test_step = next(
         step
         for step in steps
-        if step.get("name") == "Run browser WASM runtime smoke test"
+        if step.get("name") == "Run browser WASM session runtime test"
     )
     assert test_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
+    assert test_step["id"] == "browser_session_runtime"
+    assert test_step["timeout-minutes"] == 5
     assert (
         test_step["env"]["CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER"]
         == "wasm-bindgen-test-runner"
     )
+    assert test_step["env"]["WASM_BINDGEN_TEST_ONLY_WEB"] == "1"
+    browser_source = WASM_BROWSER_SMOKE_SOURCE.read_text(encoding="utf-8")
+    assert "wasm_bindgen_test_configure!(run_in_browser);" in browser_source
+    assert 'export CHROMEDRIVER="${CHROMEWEBDRIVER}/chromedriver"' in test_step["run"]
+    assert "google-chrome --version" in test_step["run"]
+    assert '"${CHROMEDRIVER}" --version' in test_step["run"]
 
     commands = _cargo_commands([test_step], "test")
     assert len(commands) == 1
@@ -393,6 +458,65 @@ def test_wasm_job_runs_browser_clock_smoke_under_node() -> None:
     assert command.count("--lib") == 1
     test_args = command[command.index("--") + 1 :]
     assert "--nocapture" in test_args
+    assert "set -euo pipefail" in test_step["run"]
+    assert "tee -a test-results/wasm-browser-runtime.log" in test_step["run"]
+
+    upload_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload browser runtime failure diagnostics"
+    )
+    assert upload_step["if"] == (
+        "failure() && steps.browser_session_runtime.outcome == 'failure' && "
+        "matrix.target == 'wasm32-unknown-unknown'"
+    )
+    assert upload_step["uses"] == "actions/upload-artifact@v7"
+    assert upload_step["with"]["path"] == "test-results/wasm-browser-runtime.log"
+    assert upload_step["with"]["retention-days"] == 7
+
+
+def test_network_job_runs_tokio_owned_sessions_on_every_native_os() -> None:
+    """Tokio session ownership must have a bounded, diagnostic runtime oracle."""
+    workflow = _load_workflow(CI_NETWORK_WORKFLOW)
+    job = workflow["jobs"]["network-tests"]
+    assert Counter(job["strategy"]["matrix"]["os"]) == Counter(
+        ("ubuntu-latest", "windows-latest", "macos-latest")
+    )
+
+    steps = job["steps"]
+    test_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Run Tokio-owned session runtime test"
+    )
+    assert test_step["id"] == "tokio_session_runtime"
+    assert test_step["timeout-minutes"] == 10
+    assert test_step["shell"] == "bash"
+    assert "set -euo pipefail" in test_step["run"]
+    assert 'tee "test-results/tokio-session-${{ runner.os }}.log"' in test_step["run"]
+
+    commands = _cargo_commands([test_step], "test")
+    assert len(commands) == 1
+    command = commands[0]
+    assert _option_values(command, "--features") == ["tokio"]
+    assert _option_values(command, "--test") == ["tokio_session"]
+    assert command.count("--locked") == 1
+    test_args = command[command.index("--") + 1 :]
+    assert "--nocapture" in test_args
+
+    upload_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload Tokio session failure diagnostics"
+    )
+    assert upload_step["if"] == (
+        "failure() && steps.tokio_session_runtime.outcome == 'failure'"
+    )
+    assert upload_step["uses"] == "actions/upload-artifact@v7"
+    assert upload_step["with"]["path"] == (
+        "test-results/tokio-session-${{ runner.os }}.log"
+    )
+    assert upload_step["with"]["retention-days"] == 7
 
 
 def test_wasm_job_checks_documented_custom_socket_example() -> None:

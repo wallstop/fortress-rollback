@@ -479,7 +479,7 @@ pub struct Oracle {
     /// rarer classes entirely: the N=16 oracle-integrity control found the
     /// per-peer `InbandDesyncDetected` stream filling all 64 global slots
     /// before the end-of-run state comparison ran, so `StateDivergence`
-    /// vanished from the report (PLAN.md Part V — the "silent cap"
+    /// vanished from the report (the hardening audit's "silent cap"
     /// anti-pattern inside the oracle itself). Every class is now
     /// guaranteed representation.
     per_class_cap: usize,

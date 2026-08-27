@@ -6,28 +6,31 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.0
-**Date:** December 6, 2025
-**Status:** Complete
+**Version:** 1.6
+**Date:** August 27, 2026
+**Status:** Maintained high-impact subset
 
-This document specifies preconditions, postconditions, and invariants for all public APIs. It complements formal-spec.md and serves as a reference for verification and documentation.
+This document specifies preconditions, postconditions, and invariants for selected high-impact public APIs. Rustdoc remains the authoritative reference for the complete public surface. This document complements formal-spec.md with behavioral contracts that benefit from a consolidated view.
 
 ---
 
 ## Table of Contents
 
 1. [Contract Notation](#contract-notation)
-2. [SessionBuilder](#sessionbuilder)
-3. [P2PSession](#p2psession)
-4. [SpectatorSession](#spectatorsession)
-5. [SyncTestSession](#synctestsession)
-6. [GameStateCell](#gamestatecell)
-7. [Request Handling](#request-handling)
-8. [Error Catalog](#error-catalog)
-9. [Event Catalog](#event-catalog)
-10. [Network Stream Framing](#network-stream-framing)
-11. [Cross-Cutting Invariants](#cross-cutting-invariants)
-12. [Revision History](#revision-history)
+2. [Public API Audit Ledger](#public-api-audit-ledger)
+3. [Frame](#frame)
+4. [SessionBuilder](#sessionbuilder)
+5. [P2PSession](#p2psession)
+6. [SpectatorSession](#spectatorsession)
+7. [SyncTestSession](#synctestsession)
+8. [GameStateCell](#gamestatecell)
+9. [Request Handling](#request-handling)
+10. [Error Catalog](#error-catalog)
+11. [Event Catalog](#event-catalog)
+12. [Network Stream Framing](#network-stream-framing)
+13. [Fallible JSON and Compression](#fallible-json-and-compression)
+14. [Cross-Cutting Invariants](#cross-cutting-invariants)
+15. [Revision History](#revision-history)
 
 ---
 
@@ -41,6 +44,48 @@ Each API is documented with:
 - **Errors**: Conditions that cause specific errors
 - **Panics**: Should always be "Never" for public APIs
 - **Invariants**: Properties preserved across the call
+
+---
+
+## Public API Audit Ledger
+
+This ledger records dispositioned rows from the active public API and integration audit. It grows
+with that audit; absence from this maintained high-impact subset is not an implicit approval.
+
+The exact one-to-one semver inventory lives in the
+[public API census](../api/public-api-census.md). Its generated snapshot includes callable hidden
+items and aliases that rendered rustdoc omits; this table remains the behavioral-contract subset.
+
+| Owner / surface | Features / platforms | Usage evidence | Risk hypothesis | Disposition / evidence |
+| --- | --- | --- | --- | --- |
+| `SessionBuilder::{try_,}start_spectator_session{,_multi}` | Core; native and WASM with a compatible socket | Spectator session tests, `sync-send`, `hot-join`, browser compile | `Option` erased startup errors; empty or duplicate failover hosts created ambiguous/unreachable sessions | Keep legacy `Option` wrappers; add exact Result APIs and pre-endpoint host validation. Issue #310 regressions cover exact errors, stable duplicate indices, and unchanged host order. |
+| `rle::{try_,}encode` | Core; all targets | Protocol compression, unit/property/fuzz tests | Allocation refusal collapsed to the same `[]` as valid empty input | Keep `try_encode` as the authoritative API; retain `encode` only as a documented violation-reporting compatibility fallback. Injected allocation refusal is distinct from `Ok([])`; golden RLE bytes are unchanged. |
+| `network::compression::{try_,}{delta_,}encode` | Doc-hidden core surface; all targets | Protocol send path and compression unit/property tests | Public empty-vector wrappers hid invalid widths or allocation refusal | Expose the existing structured Result paths; retain explicitly documented wrappers. Protocol send paths already use the fallible forms; wire bytes are unchanged. |
+| `{SessionMetrics,PeerMetrics,HotJoinMetrics,SpecViolation,InvariantViolation}::{try_,}to_json{,_pretty}` | `json`; all targets supported by `serde_json` | Metrics/telemetry tests and operator documentation | `Option<String>` erased serializer/allocation causes; direct `serde_json::to_string` could not make output reservation fallible | Add shared exact-count, fallible-reserve Result APIs with source-preserving `JsonSerializationError`; keep `Option` wrappers as explicit `.ok()` compatibility behavior. Failure injection and byte-identity regressions cover both formats. |
+| `TokioUdpSocket` after `P2PSession` ownership | `tokio`; native Linux, macOS, and Windows | Adapter units and compile matrix previously; real loopback session matrix now | Socket helpers worked before ownership, but no runtime oracle proved the synchronous session driver after the move | A bounded ten-second test moves two ephemeral adapters into sessions, synchronizes without sleeps as an oracle, confirms four frames, checks peer traffic, and asserts deterministic convergence. Issue #312 CI runs it on all three native operating systems and retains failure logs. |
+| Raw-byte browser `NonBlockingSocket` adapter | Browser `wasm32-unknown-unknown` only; excluded from Emscripten | Custom-socket example and browser compile previously; browser runner now | Compile-only coverage could miss clock/runtime, malformed decode, unbounded draining, or session-handshake failures | A browser-run bounded raw channel uses `codec::{encode,decode_message}`, rejects injected malformed packets, limits each receive call to eight attempts, synchronizes two sessions, and confirms two convergent frames. Target-specific dependencies remain browser-only. |
+| Complete callable public path census | No-default and complete production-API feature profiles | Pinned rustdoc JSON, source reachability graph, checked snapshot, parser fixtures, and cargo-semver-checks | Rendered rustdoc omitted callable hidden modules, associated items, and aliases; accidental path removal could evade review | Keep 2,709 current symbol rows (2,703 textual paths), including associated paths beneath aliases, under explicit owner, availability, usage, risk, and disposition rows. Retain compatibility and verification paths unless a reviewed migration records their replacement; issue #313 removes only two unused `__internal` RLE aliases at the 0.14 boundary. |
+
+---
+
+## Frame
+
+### Arithmetic operators and `From<usize>`
+
+**Pre:** None
+
+**Post:**
+
+- `Frame + i32`, `Frame + Frame`, `Frame += i32`, `Frame - i32`,
+  `Frame - Frame`, and `Frame -= i32` saturate at the `i32` numeric bounds.
+- `Frame % i32` returns the primitive remainder when defined and `0` for a zero
+  divisor or `i32::MIN % -1`.
+- `Frame::from(usize)` saturates at `Frame::new(i32::MAX)`; callers that need to
+  detect overflow use `Frame::from_usize` or `Frame::try_from_usize`.
+
+**Errors:** None. The operator traits and `From` conversion cannot return errors.
+
+**Panics:** Never
 
 ---
 
@@ -293,8 +338,8 @@ Each API is documented with:
 
 - Returns `Some(session)` with session created in `Synchronizing` state
 - Host endpoint begins synchronization
-- Returns `None` if protocol configuration validation, spectator configuration
-  validation, or protocol initialization fails (e.g., serialization issues)
+- Returns `None` if
+  `try_start_spectator_session(self, host_addr, socket)` would return `Err`
 
 **Spectator configuration validation:**
 
@@ -307,6 +352,58 @@ Each API is documented with:
 **Errors:** None (returns `Option`, not `Result`)
 
 **Panics:** Never
+
+---
+
+### `try_start_spectator_session(self, host_addr: T::Address, socket: impl NonBlockingSocket<T::Address> + 'static) -> FortressResult<SpectatorSession<T>>`
+
+```rust
+/// Create a spectator session and preserve the startup error.
+```
+
+**Pre:** None (no player registration required)
+
+**Post:**
+
+- Returns a session in `Synchronizing` state
+- The host endpoint begins synchronization
+- Construction sends no socket message before the session is returned
+
+**Errors:**
+
+- The exact structured protocol or spectator configuration error
+- `SerializationErrorStructured { .. }` when the input wire schema cannot be initialized
+- `InvalidRequestStructured { kind: AllocationFailed { .. } }` when endpoint or session storage cannot be reserved
+
+**Panics:** Never
+
+---
+
+### `try_start_spectator_session_multi(self, host_addrs: &[T::Address], socket: impl NonBlockingSocket<T::Address> + 'static) -> FortressResult<SpectatorSession<T>>`
+
+```rust
+/// Create a failover spectator session and preserve the startup error.
+```
+
+**Pre:** None
+
+**Post:**
+
+- Host-list validation completes before configuration validation or endpoint construction
+- Every accepted address is unique and retains its supplied failover priority
+- One synchronized endpoint is created per supplied address
+- Construction sends no socket message before the session is returned
+
+**Errors:**
+
+- `InvalidRequestStructured { kind: NoSpectatorHosts }` - the address list is empty
+- `InvalidRequestStructured { kind: DuplicateSpectatorHost { first_index, duplicate_index } }` - an address repeats; indices identify the earliest repeated occurrence in caller order
+- The same configuration, serialization, protocol, and allocation errors as `try_start_spectator_session`
+
+**Panics:** Never
+
+The compatibility `start_spectator_session_multi` method maps each error above
+to `None`.
 
 ---
 
@@ -700,7 +797,8 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
   `FortressEvent::SpectatorDivergence`, record a frame-sync violation, and
   latch a terminal `FortressError::SpectatorDivergence` for future
   `advance_frame` calls. Already advanced frames are not rewritten.
-- Duplicate host addresses route inbound packets to the first matching endpoint.
+- Failover host addresses are unique because
+  `try_start_spectator_session_multi` rejects duplicates before construction.
 
 **Errors:**
 
@@ -955,7 +1053,7 @@ fallible reservation, malformed/trailing message bytes, poisoned state, and inco
 
 **Panics:** Never
 
-**Invariant:** Stream framing is a transport envelope only. It does not change protocol-v1
+**Invariant:** Stream framing is a transport envelope only. It does not change protocol-v2
 datagram bytes, rollback determinism, or the `Message` body format.
 
 ### `NonBlockingSocket::send_to(message, address)`
@@ -967,14 +1065,46 @@ One session update may invoke this method multiple times. Asynchronous adapters 
 either admit a bounded burst or apply an explicit freshness-preserving batch/drop policy; they do
 not wait for a socket-wide outbound buffer to empty after each message.
 
+## Fallible JSON and Compression
+
+### `try_to_json` / `try_to_json_pretty`
+
+**Pre:** The `json` feature is enabled.
+
+**Post:** Returns the same compact or pretty UTF-8 bytes as `serde_json`. A counting pass without
+an output buffer determines the exact length; the output is reserved fallibly before the writing
+pass.
+
+**Errors:** `JsonSerializationError::Serialization` preserves the `serde_json::Error`;
+`Allocation` preserves `TryReserveError` and the requested byte count; `InvalidUtf8` preserves the
+conversion error if the serializer violates its UTF-8 contract.
+
+**Compatibility:** `to_json` / `to_json_pretty` return `.ok()` from the corresponding fallible
+method. Their `None` value intentionally erases the cause and is not recommended for incident data.
+
+**Panics:** Never
+
+### `rle::try_encode` and `network::compression::try_encode` / `try_delta_encode`
+
+**Post:** Successful bytes are identical to the legacy wrappers and the frozen protocol format.
+Valid empty input returns `Ok(vec![])`.
+
+**Errors:** Structured input-width/reference errors and output allocation refusal remain observable.
+
+**Compatibility:** `encode` / `delta_encode` report a violation and return `vec![]` on error. Since
+valid empty input has the same vector shape, callers that need to tell those states apart use the
+fallible API.
+
+**Panics:** Never
+
 ## Cross-Cutting Invariants
 
-These invariants are preserved across ALL public API calls:
+Relevant session and transport APIs preserve these invariants:
 
 1. **INV-3 (Input Immutability):** Confirmed inputs never change
-2. **INV-4 (Queue Bounds):** `0 ≤ queue.length ≤ 128`
-3. **INV-5 (Index Validity):** `head, tail ∈ [0, 128)`
-4. **INV-11 (No Panics):** All errors are `Result::Err`, never panic
+2. **INV-4 (Queue Bounds):** `0 ≤ queue.length ≤ configured queue capacity`
+3. **INV-5 (Index Validity):** Every occupied queue index stays within its configured capacity
+4. **INV-11 (No Panics):** Caller-controlled input follows documented error or fallback semantics
 
 ---
 
@@ -982,6 +1112,10 @@ These invariants are preserved across ALL public API calls:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.6     | 2026-08-27 | Linked the exact pinned rustdoc-JSON census, retained hidden/alias dispositions, and reviewed removal ledger from issue #313. |
+| 1.5     | 2026-08-27 | Added Tokio-owned session and browser raw-transport runtime dispositions from issue #312, including timeout, malformed-packet, bounded-polling, and native/browser/Emscripten target evidence. |
+| 1.4     | 2026-08-27 | Added the dispositioned public API audit ledger and fallible JSON/compression contracts, including compatibility fallback and byte-stability guarantees. |
+| 1.3     | 2026-08-26 | Scoped the ledger to its maintained high-impact subset; added total `Frame` arithmetic and conversion contracts; corrected configurable queue invariants and protocol-v2 framing terminology. |
 | 1.2     | 2026-07-12 | Added bounded TCP/byte-stream framing contracts for `codec::encode_framed` and `FrameDecoder`. |
 | 1.1     | 2026-05-07 | Added contracts for runtime input delay (`P2PSession::set_input_delay`, `P2PSession::input_delay`), configurable disconnect behavior (`SessionBuilder::with_disconnect_behavior`, `P2PSession::disconnect_behavior`), and explicit graceful peer removal (`P2PSession::remove_player`). Documented new `InvalidRequestKind`/`InternalErrorKind` variants and the new `FortressEvent::PeerDropped` and `FortressEvent::InputDelayRecommendation` events. Added Event Catalog. |
 | 1.0     | 2025-12-06 | Complete API contracts                                                                                                                                                                                                                                                                                                                                                                                                                                                       |

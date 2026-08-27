@@ -24,6 +24,10 @@
 )]
 
 use std::collections::BTreeMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
 use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
 use crate::common::{
@@ -86,9 +90,9 @@ fn is_state_snapshot_ack(msg: &Message) -> bool {
 struct CountingSocket {
     inner: crate::common::ChannelSocket,
     /// Count of `StateSnapshot` messages this socket has sent.
-    snapshots_sent: std::rc::Rc<std::cell::Cell<usize>>,
+    snapshots_sent: Arc<AtomicUsize>,
     /// Count of `StateSnapshotAck` messages this socket has sent.
-    acks_sent: std::rc::Rc<std::cell::Cell<usize>>,
+    acks_sent: Arc<AtomicUsize>,
     /// When `true`, every outgoing `StateSnapshot` is silently dropped (the
     /// counter still increments, recording the *attempt*). Lets a host-side test
     /// keep a serve from ever completing while still counting per-poll sends.
@@ -103,12 +107,12 @@ struct CountingSocket {
 impl NonBlockingSocket<std::net::SocketAddr> for CountingSocket {
     fn send_to(&mut self, msg: &Message, addr: &std::net::SocketAddr) {
         if is_state_snapshot(msg) {
-            self.snapshots_sent.set(self.snapshots_sent.get() + 1);
+            self.snapshots_sent.fetch_add(1, Ordering::Relaxed);
             if self.drop_outgoing_snapshots {
                 return;
             }
         } else if is_state_snapshot_ack(msg) {
-            self.acks_sent.set(self.acks_sent.get() + 1);
+            self.acks_sent.fetch_add(1, Ordering::Relaxed);
             if self.drop_outgoing_acks {
                 return;
             }
@@ -134,7 +138,7 @@ struct DropSnapshotSocket {
     drops_remaining: usize,
     /// Shared counter of snapshots actually dropped, so the test can confirm the
     /// drop fired (non-vacuity) and a retransmit was genuinely required.
-    dropped: std::rc::Rc<std::cell::Cell<usize>>,
+    dropped: Arc<AtomicUsize>,
 }
 
 impl NonBlockingSocket<std::net::SocketAddr> for DropSnapshotSocket {
@@ -148,7 +152,7 @@ impl NonBlockingSocket<std::net::SocketAddr> for DropSnapshotSocket {
             if self.drops_remaining > 0 && is_state_snapshot(&msg) {
                 // Deterministically drop this snapshot delivery (simulated loss).
                 self.drops_remaining -= 1;
-                self.dropped.set(self.dropped.get() + 1);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             out.push((from, msg));
@@ -168,9 +172,9 @@ impl NonBlockingSocket<std::net::SocketAddr> for DropSnapshotSocket {
 struct GatedDropSnapshotSocket {
     inner: crate::common::ChannelSocket,
     /// While `true`, all `StateSnapshot` deliveries are dropped.
-    dropping: std::rc::Rc<std::cell::Cell<bool>>,
+    dropping: Arc<AtomicBool>,
     /// Count of snapshots actually dropped (non-vacuity).
-    dropped: std::rc::Rc<std::cell::Cell<usize>>,
+    dropped: Arc<AtomicUsize>,
 }
 
 impl NonBlockingSocket<std::net::SocketAddr> for GatedDropSnapshotSocket {
@@ -181,8 +185,8 @@ impl NonBlockingSocket<std::net::SocketAddr> for GatedDropSnapshotSocket {
     fn receive_all_messages(&mut self) -> Vec<(std::net::SocketAddr, Message)> {
         let mut out = Vec::new();
         for (from, msg) in self.inner.receive_all_messages() {
-            if self.dropping.get() && is_state_snapshot(&msg) {
-                self.dropped.set(self.dropped.get() + 1);
+            if self.dropping.load(Ordering::Relaxed) && is_state_snapshot(&msg) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             out.push((from, msg));
@@ -957,11 +961,11 @@ fn hot_join_completes_when_first_snapshot_is_dropped() -> Result<(), FortressErr
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
     // Wrap the joiner's socket so the FIRST snapshot it would receive is dropped.
-    let dropped = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let joiner_socket = DropSnapshotSocket {
         inner: joiner_socket,
         drops_remaining: 1,
-        dropped: std::rc::Rc::clone(&dropped),
+        dropped: Arc::clone(&dropped),
     };
 
     let mut host = SessionBuilder::<StubConfig>::new()
@@ -1049,7 +1053,7 @@ fn hot_join_completes_when_first_snapshot_is_dropped() -> Result<(), FortressErr
     // only have completed via the host's reliable retransmit (this is the MAJOR-1
     // fix; without it the joiner would be wedged in HotJoining forever).
     assert_eq!(
-        dropped.get(),
+        dropped.load(Ordering::Relaxed),
         1,
         "exactly one snapshot must have been dropped (otherwise the test is vacuous)"
     );
@@ -1528,12 +1532,12 @@ fn hot_join_phase4_serve_timeout_keeps_slot_reserved() -> Result<(), FortressErr
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
     // Drop EVERY snapshot delivered to the joiner, forever.
-    let dropping = std::rc::Rc::new(std::cell::Cell::new(true));
-    let dropped = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let dropping = Arc::new(AtomicBool::new(true));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let joiner_socket = GatedDropSnapshotSocket {
         inner: joiner_socket,
-        dropping: std::rc::Rc::clone(&dropping),
-        dropped: std::rc::Rc::clone(&dropped),
+        dropping: Arc::clone(&dropping),
+        dropped: Arc::clone(&dropped),
     };
 
     let mut host = SessionBuilder::<StubConfig>::new()
@@ -1598,7 +1602,7 @@ fn hot_join_phase4_serve_timeout_keeps_slot_reserved() -> Result<(), FortressErr
         "host should have started serving at least once"
     );
     assert!(
-        dropped.get() > 0,
+        dropped.load(Ordering::Relaxed) > 0,
         "snapshots must have been dropped (non-vacuous)"
     );
     // The Phase-4 timeout MUST have fired: the only way the host re-serves (a
@@ -1707,12 +1711,12 @@ fn hot_join_phase4_abort_does_not_spam_send_queue() -> Result<(), FortressError>
     let clock = TestClock::new();
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
-    let dropping = std::rc::Rc::new(std::cell::Cell::new(true));
-    let dropped = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let dropping = Arc::new(AtomicBool::new(true));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let joiner_socket = GatedDropSnapshotSocket {
         inner: joiner_socket,
-        dropping: std::rc::Rc::clone(&dropping),
-        dropped: std::rc::Rc::clone(&dropped),
+        dropping: Arc::clone(&dropping),
+        dropped: Arc::clone(&dropped),
     };
 
     let mut host = SessionBuilder::<StubConfig>::new()
@@ -1761,7 +1765,10 @@ fn hot_join_phase4_abort_does_not_spam_send_queue() -> Result<(), FortressError>
         join_requested >= 150,
         "test must drive many timeout cycles (>=150 serves); got {join_requested}"
     );
-    assert!(dropped.get() > 0, "snapshots must have been dropped");
+    assert!(
+        dropped.load(Ordering::Relaxed) > 0,
+        "snapshots must have been dropped"
+    );
 
     // THE FIX-3a ASSERTION: the host->joiner pending_output must stay tiny. The
     // cleanup resets it to ~0 on every abort, so it never climbs toward the
@@ -1794,12 +1801,12 @@ fn hot_join_in_session_retry_after_phase4_timeout_completes() -> Result<(), Fort
     let clock = TestClock::new();
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
-    let dropping = std::rc::Rc::new(std::cell::Cell::new(true));
-    let dropped = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let dropping = Arc::new(AtomicBool::new(true));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let joiner_socket = GatedDropSnapshotSocket {
         inner: joiner_socket,
-        dropping: std::rc::Rc::clone(&dropping),
-        dropped: std::rc::Rc::clone(&dropped),
+        dropping: Arc::clone(&dropping),
+        dropped: Arc::clone(&dropped),
     };
 
     let mut host = SessionBuilder::<StubConfig>::new()
@@ -1867,7 +1874,7 @@ fn hot_join_in_session_retry_after_phase4_timeout_completes() -> Result<(), Fort
 
         // Once a timeout has happened, stop dropping so the retry can complete.
         if join_requested >= 2 {
-            dropping.set(false);
+            dropping.store(false, Ordering::Relaxed);
         }
         if snapshot_frame.is_some() {
             break;
@@ -1880,7 +1887,7 @@ fn hot_join_in_session_retry_after_phase4_timeout_completes() -> Result<(), Fort
         "a Phase-4 timeout must have fired before the retry (>=2 serves); got {join_requested}"
     );
     assert!(
-        dropped.get() > 0,
+        dropped.load(Ordering::Relaxed) > 0,
         "snapshots must have been dropped during the abandon window"
     );
     let snapshot_frame =
@@ -1997,14 +2004,14 @@ fn hot_join_host_sends_at_most_one_snapshot_per_poll() -> Result<(), FortressErr
     let clock = TestClock::new();
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
-    let snapshots_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let snapshots_sent = Arc::new(AtomicUsize::new(0));
     // Drop the host's outgoing snapshots so the joiner never acks: the serve
     // stays open for the whole run and we observe many consecutive serving polls,
     // each of which must send exactly one snapshot.
     let host_socket = CountingSocket {
         inner: host_socket,
-        snapshots_sent: std::rc::Rc::clone(&snapshots_sent),
-        acks_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
+        snapshots_sent: Arc::clone(&snapshots_sent),
+        acks_sent: Arc::new(AtomicUsize::new(0)),
         drop_outgoing_snapshots: true,
         drop_outgoing_acks: false,
     };
@@ -2035,9 +2042,9 @@ fn hot_join_host_sends_at_most_one_snapshot_per_poll() -> Result<(), FortressErr
 
     let mut serving_polls = 0_usize;
     for _ in 0..40 {
-        let before = snapshots_sent.get();
+        let before = snapshots_sent.load(Ordering::Relaxed);
         host.poll_remote_clients();
-        let delta = snapshots_sent.get() - before;
+        let delta = snapshots_sent.load(Ordering::Relaxed) - before;
         assert!(
             delta <= 1,
             "host must send at most one snapshot per poll; sent {delta} this poll"
@@ -2078,15 +2085,15 @@ fn hot_join_joiner_sends_at_most_one_ack_per_poll() -> Result<(), FortressError>
     let clock = TestClock::new();
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
-    let acks_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let acks_sent = Arc::new(AtomicUsize::new(0));
     // Drop the joiner's outgoing acks so the host never completes the join and
     // keeps re-sending the snapshot every poll. The joiner therefore receives a
     // duplicate snapshot on every poll while Running — the exact condition that
     // used to trigger a double ack.
     let joiner_socket = CountingSocket {
         inner: joiner_socket,
-        snapshots_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
-        acks_sent: std::rc::Rc::clone(&acks_sent),
+        snapshots_sent: Arc::new(AtomicUsize::new(0)),
+        acks_sent: Arc::clone(&acks_sent),
         drop_outgoing_snapshots: false,
         drop_outgoing_acks: true,
     };
@@ -2123,9 +2130,9 @@ fn hot_join_joiner_sends_at_most_one_ack_per_poll() -> Result<(), FortressError>
         if host.current_state() == SessionState::Running {
             let _ = advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), 1);
         }
-        let before = acks_sent.get();
+        let before = acks_sent.load(Ordering::Relaxed);
         joiner.poll_remote_clients();
-        let delta = acks_sent.get() - before;
+        let delta = acks_sent.load(Ordering::Relaxed) - before;
         assert!(
             delta <= 1,
             "joiner must send at most one ack per poll; sent {delta} this poll"
@@ -2190,15 +2197,15 @@ fn hot_join_custom_serve_timeout_aborts_at_exactly_configured_polls() -> Result<
     let clock = TestClock::new();
     let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
 
-    let snapshots_sent = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let snapshots_sent = Arc::new(AtomicUsize::new(0));
     // Drop the host's outgoing snapshots so the joiner never acks: every serve
     // runs to its timeout, then the still-HotJoining joiner's next JoinRequest
     // re-opens a fresh serve. We count snapshots between consecutive
     // JoinRequested events.
     let host_socket = CountingSocket {
         inner: host_socket,
-        snapshots_sent: std::rc::Rc::clone(&snapshots_sent),
-        acks_sent: std::rc::Rc::new(std::cell::Cell::new(0)),
+        snapshots_sent: Arc::clone(&snapshots_sent),
+        acks_sent: Arc::new(AtomicUsize::new(0)),
         drop_outgoing_snapshots: true,
         drop_outgoing_acks: false,
     };
@@ -2235,7 +2242,7 @@ fn hot_join_custom_serve_timeout_aborts_at_exactly_configured_polls() -> Result<
         host.poll_remote_clients();
         for e in drain_events(&mut host) {
             if matches!(e, FortressEvent::JoinRequested { .. }) {
-                let now = snapshots_sent.get();
+                let now = snapshots_sent.load(Ordering::Relaxed);
                 if let Some(prev) = last_at_join_req {
                     per_serve_snapshots.push(now - prev);
                 }

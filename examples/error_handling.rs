@@ -130,6 +130,28 @@ fn configuration_errors() -> ExampleResult {
         Ok(()) => return Err(contract_error("zero spectator buffer was accepted")),
     }
     println!();
+
+    // Example 5: Duplicate failover spectator hosts
+    println!("5. Duplicate failover spectator hosts:");
+    let socket = UdpNonBlockingSocket::bind_to_port(0)?;
+    let host = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 7000);
+    match SessionBuilder::<GameConfig>::new()
+        .try_start_spectator_session_multi(&[host, host], socket)
+    {
+        Err(FortressError::InvalidRequestStructured {
+            kind:
+                InvalidRequestKind::DuplicateSpectatorHost {
+                    first_index,
+                    duplicate_index,
+                },
+        }) => {
+            println!("   Error: Host {duplicate_index} duplicates host {first_index}");
+            println!("   Recovery: Supply each failover host address once");
+        },
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(contract_error("duplicate spectator hosts were accepted")),
+    }
+    println!();
     Ok(())
 }
 

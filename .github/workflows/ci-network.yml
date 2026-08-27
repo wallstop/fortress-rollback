@@ -129,6 +129,30 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
+      - name: Run Tokio-owned session runtime test
+        id: tokio_session_runtime
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          cargo test --locked --features tokio --test tokio_session -- --nocapture 2>&1 | tee "test-results/tokio-session-${{ runner.os }}.log"
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Upload Tokio session failure diagnostics
+        if: failure() && steps.tokio_session_runtime.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tokio-session-${{ runner.os }}-failure
+          path: test-results/tokio-session-${{ runner.os }}.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Run multi-process network tests (nextest)
         # No retry wrapper. Per-PR is now a deterministic, loss-free smoke tier
         # (the spawn_peer guard rejects loss-bearing scenarios), so a failure

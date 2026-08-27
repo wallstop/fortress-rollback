@@ -27,6 +27,11 @@
 
 use serde::Serialize;
 
+#[cfg(feature = "json")]
+use crate::json::{serialize_json, JsonStyle};
+#[cfg(feature = "json")]
+use crate::JsonSerializationError;
+
 /// The category of a [`FortressEvent`], independent of its payload.
 ///
 /// Mirrors the variants of [`FortressEvent`] one-to-one so events can be
@@ -555,25 +560,47 @@ impl SessionMetrics {
         self.checksum_history_high_water = self.checksum_history_high_water.max(len);
     }
 
+    /// Serializes this snapshot to compact JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Compact)
+    }
+
     /// Serializes this snapshot to a compact JSON string.
     ///
-    /// Returns `None` if serialization fails. This type is a small set of
-    /// integer counters, so failure is not expected in normal operation, but it
-    /// is not impossible (for example, an allocation failure inside
-    /// `serde_json`).
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json`](Self::try_to_json). Use the fallible method when the
+    /// failure cause matters.
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
-        serde_json::to_string(self).ok()
+        self.try_to_json().ok()
+    }
+
+    /// Serializes this snapshot to pretty-printed JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json_pretty(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Pretty)
     }
 
     /// Serializes this snapshot to a pretty-printed JSON string.
     ///
-    /// Like [`to_json`](Self::to_json), but indented for readability.
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json_pretty`](Self::try_to_json_pretty).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
-        serde_json::to_string_pretty(self).ok()
+        self.try_to_json_pretty().ok()
     }
 }
 
@@ -615,21 +642,42 @@ pub struct HotJoinMetrics {
 
 #[cfg(all(feature = "hot-join", feature = "json"))]
 impl HotJoinMetrics {
+    /// Serializes this snapshot to compact JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    pub fn try_to_json(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Compact)
+    }
+
     /// Serializes this snapshot to a compact JSON string.
     ///
-    /// Returns `None` if serialization fails — not expected for a few integers,
-    /// but possible (for example, an allocation failure inside `serde_json`).
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json`](Self::try_to_json).
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
-        serde_json::to_string(self).ok()
+        self.try_to_json().ok()
+    }
+
+    /// Serializes this snapshot to pretty-printed JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    pub fn try_to_json_pretty(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Pretty)
     }
 
     /// Serializes this snapshot to a pretty-printed JSON string.
     ///
-    /// Like [`to_json`](Self::to_json), but indented for readability.
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json_pretty`](Self::try_to_json_pretty).
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
-        serde_json::to_string_pretty(self).ok()
+        self.try_to_json_pretty().ok()
     }
 }
 
@@ -987,24 +1035,46 @@ pub struct PeerMetrics {
 }
 
 impl PeerMetrics {
+    /// Serializes this snapshot to compact JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Compact)
+    }
+
     /// Serializes this snapshot to a compact JSON string.
     ///
-    /// Returns `None` if serialization fails — not expected for this small set of
-    /// integer counters, but not impossible (for example, an allocation failure
-    /// inside `serde_json`).
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json`](Self::try_to_json).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
-        serde_json::to_string(self).ok()
+        self.try_to_json().ok()
+    }
+
+    /// Serializes this snapshot to pretty-printed JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json_pretty(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Pretty)
     }
 
     /// Serializes this snapshot to a pretty-printed JSON string.
     ///
-    /// Like [`to_json`](Self::to_json), but indented for readability.
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json_pretty`](Self::try_to_json_pretty).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
-        serde_json::to_string_pretty(self).ok()
+        self.try_to_json_pretty().ok()
     }
 }
 
@@ -1321,7 +1391,8 @@ mod tests {
         let mut m = SessionMetrics::new();
         m.record_rollback(1);
         m.record_rollback(17);
-        let json = m.to_json().expect("json serialization succeeds");
+        let json = m.try_to_json().expect("json serialization succeeds");
+        assert_eq!(m.to_json().as_deref(), Some(json.as_str()));
         assert!(json.contains(r#""1":1"#), "{json}");
         assert!(json.contains(r#""17_plus":1"#), "{json}");
         assert!(json.contains(r#""frames_advanced":18"#), "{json}");
@@ -1333,12 +1404,26 @@ mod tests {
         let mut metrics = SessionMetrics::new();
         metrics.record_event_discard(EventKind::Disconnected);
         metrics.record_unknown_source_packet();
-        let json = metrics.to_json().expect("json serialization succeeds");
+        let json = metrics.try_to_json().expect("json serialization succeeds");
+        assert_eq!(metrics.to_json().as_deref(), Some(json.as_str()));
         assert!(json.contains(r#""events_discarded_total":1"#), "{json}");
         assert!(json.contains(r#""unknown_source_packets":1"#), "{json}");
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""disconnected":1"#), "{json}");
         assert!(json.contains(r#""synchronized":0"#), "{json}");
+
+        let expected_pretty =
+            serde_json::to_string_pretty(&metrics).expect("reference serialization succeeds");
+        assert_eq!(
+            metrics
+                .try_to_json_pretty()
+                .expect("pretty json serialization succeeds"),
+            expected_pretty
+        );
+        assert_eq!(
+            metrics.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
     }
 
     #[test]
@@ -1415,7 +1500,8 @@ mod tests {
             ..Default::default()
         };
         m.messages_sent_by_kind.record(MessageKind::Input);
-        let json = m.to_json().expect("json serialization succeeds");
+        let json = m.try_to_json().expect("json serialization succeeds");
+        assert_eq!(m.to_json().as_deref(), Some(json.as_str()));
         assert!(json.contains(r#""packets_sent":1"#), "{json}");
         assert!(
             json.contains(r#""portability_risk_messages_sent":3"#),
@@ -1429,5 +1515,49 @@ mod tests {
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""input":1"#), "{json}");
         assert!(json.contains(r#""keep_alive":0"#), "{json}");
+
+        let expected_pretty =
+            serde_json::to_string_pretty(&m).expect("reference serialization succeeds");
+        assert_eq!(
+            m.try_to_json_pretty()
+                .expect("pretty json serialization succeeds"),
+            expected_pretty
+        );
+        assert_eq!(
+            m.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
+    }
+
+    #[cfg(all(feature = "hot-join", feature = "json"))]
+    #[test]
+    fn hot_join_metrics_fallible_and_compatibility_json_match() {
+        let metrics = HotJoinMetrics {
+            completed: true,
+            polls_to_running: 3,
+            millis_to_running: 12,
+        };
+        let expected_compact =
+            serde_json::to_string(&metrics).expect("reference serialization succeeds");
+        let expected_pretty =
+            serde_json::to_string_pretty(&metrics).expect("reference serialization succeeds");
+        assert_eq!(
+            metrics.try_to_json().expect("hot-join metrics serialize"),
+            expected_compact
+        );
+        assert_eq!(
+            metrics.to_json().as_deref(),
+            Some(expected_compact.as_str())
+        );
+        assert_eq!(
+            metrics
+                .try_to_json_pretty()
+                .expect("hot-join metrics serialize prettily"),
+            expected_pretty
+        );
+        assert_eq!(
+            metrics.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
     }
 }

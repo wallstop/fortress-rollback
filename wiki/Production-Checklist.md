@@ -115,6 +115,10 @@ The [threat model](Threat-Model) records the complete single-dishonest-peer capa
   or transport. Keep those dependencies behind the full browser target predicate.
 - Godot Web `wasm32-unknown-emscripten` must not inherit browser JavaScript bridge crates. Use an
   application/Godot `NonBlockingSocket` adapter and the Emscripten monotonic clock.
+- Keep a browser-run session oracle for raw custom transports: exercise handshake, confirmed frame
+  exchange, malformed packet rejection, and the adapter's receive-poll cap. Keep its
+  `wasm-bindgen` test dependencies behind the full browser target predicate so the Emscripten graph
+  stays separate.
 - Browsers can throttle or suspend background tabs. Treat a suspension as a network interruption and
   test resume, timeout, and graceful-drop behavior explicitly.
 

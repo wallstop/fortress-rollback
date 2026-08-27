@@ -38,8 +38,13 @@ This devcontainer provides a complete environment for developing, testing, and f
 - **yamllint** - YAML file linting
 - **markdownlint** - Markdown file linting
 - **markdown-link-check** - Verify markdown links
-- **Codex CLI** - OpenAI coding agent CLI (`@openai/codex`)
 - **pre-commit** - Pre-commit hook framework
+
+### AI Coding CLIs
+
+- **Nanocoder** - Local-first coding agent (`@nanocollective/nanocoder`)
+- **OpenCode** - Open source coding agent (`opencode-ai`)
+- **Codex CLI** - OpenAI coding agent (`@openai/codex`)
 
 ### Profiling
 
@@ -60,13 +65,33 @@ After the container starts, verify all tools:
 ./scripts/ci/check-tools.sh
 ```
 
-## Codex CLI Setup
+## AI CLI and npm Setup
 
-The devcontainer installs OpenAI Codex CLI during image build via npm:
+The image build installs Nanocoder, OpenCode, and Codex CLI from each npm
+package's `latest` tag. The create hook resolves the tags again, so a cached
+image does not freeze their versions. Each package refresh is failure-tolerant:
+an unavailable registry does not prevent the container from opening, and the
+image-bundled version remains available. Routine start hooks skip registry
+access so reopening an existing container stays fast and offline-safe.
 
 ```bash
+nanocoder --version
+opencode --version
 codex --version
 ```
+
+Global npm installs use the `vscode` user's `~/.local` prefix and
+`~/.cache/npm` cache. You can install and update packages without `sudo`:
+
+```bash
+npm install --global <package>
+npm update --global
+npm config get prefix
+```
+
+The prefix command should print `/home/vscode/.local`.
+
+### Codex authentication
 
 Authentication options:
 
@@ -78,7 +103,36 @@ Authentication options:
 Notes:
 
 - Codex auth cache is persisted at `~/.codex` using a dedicated devcontainer volume.
-- The lifecycle hook `.devcontainer/codex-bootstrap.sh` runs on create/start to print readiness guidance.
+- `.devcontainer/devcontainer-bootstrap.sh` refreshes all three AI CLIs on
+  create and bounds Cargo artifacts on create/start. `.devcontainer/codex-bootstrap.sh`
+  then prints Codex readiness guidance.
+
+## Cargo Artifact Size Policy
+
+The container keeps Rust builds smaller by disabling incremental compilation
+and using line-table-only debug information for dev, test, and benchmark
+profiles. The create hook runs `cargo fetch --locked` instead of compiling the
+workspace, which warms the dependency cache without populating `target/`.
+
+On create and start, the maintenance hook measures `target/`. When it exceeds 8
+GiB, the hook runs `cargo clean --target-dir <target>` at most once every seven
+days. The cleanup only removes derived Cargo artifacts; source files and Cargo's
+download cache remain untouched. Registry failures and cleanup failures never
+block container startup.
+
+For safety, automatic cleanup operates only on the exact `target/` directory
+under the resolved workspace. A `CARGO_TARGET_DIR` elsewhere is never cleaned
+automatically, even when it contains Cargo's standard cache marker.
+
+You can tune or disable the policy through container environment variables:
+
+| Variable                               | Default | Purpose                                       |
+|----------------------------------------|---------|-----------------------------------------------|
+| `FORTRESS_TARGET_MAX_BYTES`            | 8 GiB   | Cleanup threshold in bytes                    |
+| `FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS`   | `7`     | Minimum days between successful cleanups      |
+| `FORTRESS_NPM_REFRESH_TIMEOUT_SECONDS` | `120`   | Time limit for each npm package refresh       |
+| `DEVCONTAINER_SKIP_TARGET_CLEANUP`     | `0`     | Set to `1` to disable automatic Cargo cleanup |
+| `DEVCONTAINER_SKIP_TOOL_REFRESH`       | `0`     | Set to `1` to keep image-bundled CLI versions |
 
 ## Build Performance
 
@@ -178,7 +232,13 @@ cargo install cargo-shear cargo-spellcheck cargo-geiger cargo-careful
 
 # CI/CD linting tools
 pip3 install --break-system-packages yamllint pre-commit
-npm install -g markdownlint-cli markdown-link-check @openai/codex@latest
+# AI tools use the devcontainer's user-owned npm prefix (no sudo)
+npm install --global \
+  markdownlint-cli@latest \
+  markdown-link-check@latest \
+  @nanocollective/nanocoder@latest \
+  opencode-ai@latest \
+  @openai/codex@latest
 
 # actionlint (GitHub Actions linter)
 # Download the script first, then run with bash (avoids shell issues)
