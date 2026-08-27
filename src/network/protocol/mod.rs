@@ -6904,9 +6904,19 @@ mod tests {
             "the idle tick still keeps the link alive"
         );
 
-        // Another 101ms (201ms since the last real Input): now input-idle —
-        // the nudge fires.
-        advance_test_clock(&clock, Duration::from_millis(101));
+        // At exactly 200ms since the last real Input, the strict elapsed-time
+        // gate has not passed yet. This equality boundary keeps all protocol
+        // timers on the same "more than the interval" convention.
+        advance_test_clock(&clock, Duration::from_millis(100));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "no nudge may fire exactly at the input-idle interval"
+        );
+
+        // One more millisecond (201ms since the last real Input): now
+        // input-idle — the nudge fires.
+        advance_test_clock(&clock, Duration::from_millis(1));
         let _ = protocol.poll(&connect_status).count();
         assert_eq!(
             queued_inputs(&protocol).len(),
