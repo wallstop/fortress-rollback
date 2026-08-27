@@ -4,7 +4,7 @@
 
 Complete issue #297's requested final correctness census after PR #314 merged. Re-scan the public
 runtime boundaries for panic, undefined behavior, timer overflow, and rollback ordering faults;
-then advance the result to one reviewed, exact-head green pull request.
+then advance the result to reviewed, exact-head green PR #315.
 
 ## Discovery
 
