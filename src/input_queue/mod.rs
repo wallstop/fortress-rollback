@@ -460,7 +460,17 @@ impl<T: Config> InputQueue<T> {
                 frame: next_frame,
                 input: last_input.input,
             };
-            if !self.add_input_by_frame(filler, next_frame, reclaim_before) {
+            let inserted = self.add_input_by_frame(filler, next_frame, reclaim_before);
+            if !inserted || self.last_added_frame != next_frame {
+                if inserted {
+                    report_violation!(
+                        ViolationSeverity::Critical,
+                        ViolationKind::InputQueue,
+                        "add_input_by_frame retained frame {} but last_added_frame is {}",
+                        next_frame,
+                        self.last_added_frame
+                    );
+                }
                 self.head = snapshot_head;
                 self.tail = snapshot_tail;
                 self.length = snapshot_length;
@@ -478,16 +488,6 @@ impl<T: Config> InputQueue<T> {
                     kind: InternalErrorKind::InputQueueGapFillFailed { frame: next_frame },
                 });
             }
-            // `add_input_by_frame` is the only mutator that updates
-            // `last_added_frame`; this is a debug-only sanity check that the
-            // invariant holds. In release builds it is compiled out — a real
-            // mismatch would have been reported by `add_input_by_frame` via
-            // `report_violation!` and surfaced through the `false` return
-            // above.
-            debug_assert_eq!(
-                self.last_added_frame, next_frame,
-                "add_input_by_frame must advance last_added_frame to next_frame"
-            );
         }
 
         self.frame_delay = delay;
@@ -785,11 +785,26 @@ impl<T: Config> InputQueue<T> {
     /// [`Self::validate_freeze_at_cut`] without introducing a second fallible
     /// phase.
     pub(crate) fn freeze_at_prevalidated_cut(&mut self, cut: Frame) {
-        debug_assert_eq!(self.validate_freeze_at_cut(cut), Ok(()));
-        if let Ok(input) = self.retained_confirmed_input(cut) {
-            self.last_confirmed_input = Some(input.input);
-            self.frozen = true;
-        }
+        let Ok(()) = self.validate_freeze_at_cut(cut) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "freeze_at_prevalidated_cut called with invalid cut {}",
+                cut
+            );
+            return;
+        };
+        let Ok(input) = self.retained_confirmed_input(cut) else {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InputQueue,
+                "prevalidated freeze cut {} was no longer retained",
+                cut
+            );
+            return;
+        };
+        self.last_confirmed_input = Some(input.input);
+        self.frozen = true;
     }
 
     /// Discards confirmed frames **before** the given `frame` from the queue.

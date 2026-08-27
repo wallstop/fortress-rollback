@@ -126,6 +126,12 @@ impl<T, const CAP: usize> InlineVec<T, CAP> {
         self.len
     }
 
+    /// Returns whether the vector has no live elements. Mirrors
+    /// [`Vec::is_empty`].
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Returns a reference to the first element, or `None`. Mirrors
     /// [`Vec::first`] / `[T]::first`.
     pub(crate) fn first(&self) -> Option<&T> {

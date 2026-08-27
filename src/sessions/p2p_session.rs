@@ -2184,7 +2184,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     fn coordinated_drop_apply_commit(&mut self, commit: DropCommit) -> Result<(), DropAbortReason> {
-        let (target_addr, targets, participants, local_participant) = {
+        let (target_addr, targets, local_participant) = {
             let active = self
                 .coordinated_drop
                 .active
@@ -2193,6 +2193,7 @@ impl<T: Config> P2PSession<T> {
             if active.operation != commit.operation
                 || active.cut != Some(commit.cut)
                 || active.cut_digest != Some(commit.cut_digest)
+                || active.participants.is_empty()
                 || active.ready.len() != active.participants.len()
                 || active.phase != CoordinatedDropPhase::Ready
             {
@@ -2201,7 +2202,6 @@ impl<T: Config> P2PSession<T> {
             (
                 active.target_addr.clone(),
                 active.targets.clone(),
-                active.participants.clone(),
                 active.local_participant,
             )
         };
@@ -2295,10 +2295,6 @@ impl<T: Config> P2PSession<T> {
             active.committed_acks.insert(local_participant);
         }
 
-        // The exact participant vector is consumed above as the commit
-        // certificate; retain this assertion as a compile-visible guard against
-        // accidentally weakening the all-ready comparison during refactors.
-        debug_assert!(!participants.is_empty());
         Ok(())
     }
 
@@ -2727,7 +2723,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         // initial session state - if there are no endpoints, we don't need a synchronization phase
-        let state = if players.remotes.len() + players.spectators.len() == 0 {
+        let state = if players.remotes.is_empty() && players.spectators.is_empty() {
             SessionState::Running
         } else {
             SessionState::Synchronizing
@@ -12111,7 +12107,7 @@ impl<T: Config> P2PSession<T> {
                         ViolationKind::NetworkProtocol,
                         "Received input from invalid player handle {} (max={})",
                         player,
-                        self.num_players - 1
+                        self.num_players.saturating_sub(1)
                     );
                     return;
                 }

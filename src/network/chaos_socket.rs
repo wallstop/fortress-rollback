@@ -401,7 +401,8 @@ impl ChaosConfigBuilder {
 struct InFlightPacket<A> {
     addr: A,
     msg: Message,
-    deliver_at: Instant,
+    queued_at: Instant,
+    delay: Duration,
 }
 
 /// A socket wrapper that injects configurable network chaos.
@@ -606,12 +607,11 @@ where
         }
     }
 
-    /// Calculates the delivery time for a packet with latency and jitter.
-    fn calculate_delivery_time(&mut self) -> Instant {
-        let now = self.now();
+    /// Calculates a packet's latency without constructing an absolute deadline.
+    fn calculate_delivery_delay(&mut self) -> Duration {
         let base_latency = self.config.latency;
         let jitter = if self.config.jitter > Duration::ZERO {
-            let jitter_range = self.config.jitter.as_nanos() as i64;
+            let jitter_range = i64::try_from(self.config.jitter.as_nanos()).unwrap_or(i64::MAX);
             let jitter_offset = self
                 .rng
                 .gen_range_i64_inclusive(-jitter_range..=jitter_range);
@@ -621,13 +621,13 @@ where
                 // Negative jitter reduces latency but not below zero
                 let reduction = Duration::from_nanos((-jitter_offset) as u64);
                 // saturating_sub ensures we never get a negative duration
-                return now + base_latency.saturating_sub(reduction);
+                return base_latency.saturating_sub(reduction);
             }
         } else {
             Duration::ZERO
         };
 
-        now + base_latency + jitter
+        base_latency.saturating_add(jitter)
     }
 
     /// Determines if a packet should be dropped based on the given rate.
@@ -652,17 +652,17 @@ where
         // If we're in a burst, continue dropping
         if self.burst_loss_remaining > 0 {
             self.burst_loss_remaining -= 1;
-            self.stats.packets_dropped_burst += 1;
+            self.stats.packets_dropped_burst = self.stats.packets_dropped_burst.saturating_add(1);
             return true;
         }
 
         // Check if we should start a new burst
         if self.config.burst_loss_length > 0 && self.should_drop(self.config.burst_loss_probability)
         {
-            self.stats.burst_loss_events += 1;
+            self.stats.burst_loss_events = self.stats.burst_loss_events.saturating_add(1);
             // Drop this packet and set up remaining burst
             self.burst_loss_remaining = self.config.burst_loss_length.saturating_sub(1);
-            self.stats.packets_dropped_burst += 1;
+            self.stats.packets_dropped_burst = self.stats.packets_dropped_burst.saturating_add(1);
             return true;
         }
 
@@ -683,7 +683,7 @@ where
         }
 
         while let Some(packet) = self.in_flight.front() {
-            if packet.deliver_at <= now {
+            if now.saturating_duration_since(packet.queued_at) >= packet.delay {
                 if ready.len() >= MAX_RECEIVE_MESSAGES_PER_POLL {
                     report_violation!(
                         ViolationSeverity::Warning,
@@ -772,7 +772,8 @@ where
                         let swap_index = self.rng.gen_range_usize(0..self.reorder_buffer.len());
                         if i != swap_index {
                             self.reorder_buffer.swap(i, swap_index);
-                            self.stats.packets_reordered += 1;
+                            self.stats.packets_reordered =
+                                self.stats.packets_reordered.saturating_add(1);
                         }
                     }
                 }
@@ -817,7 +818,8 @@ where
 
             // Apply receive-side packet loss before queueing.
             if self.should_drop(self.config.receive_loss_rate) {
-                self.stats.packets_dropped_receive += 1;
+                self.stats.packets_dropped_receive =
+                    self.stats.packets_dropped_receive.saturating_add(1);
                 continue;
             }
 
@@ -828,7 +830,8 @@ where
                     "ChaosSocket in-flight queue reached cap of {} packet(s)",
                     MAX_RECEIVE_MESSAGES_PER_POLL
                 );
-                self.stats.packets_dropped_receive += 1;
+                self.stats.packets_dropped_receive =
+                    self.stats.packets_dropped_receive.saturating_add(1);
                 continue;
             }
 
@@ -839,15 +842,18 @@ where
                     ViolationKind::NetworkProtocol,
                     "Failed to reserve ChaosSocket in-flight packet slot"
                 );
-                self.stats.packets_dropped_receive += 1;
+                self.stats.packets_dropped_receive =
+                    self.stats.packets_dropped_receive.saturating_add(1);
                 return;
             }
 
-            let deliver_at = self.calculate_delivery_time();
+            let queued_at = self.now();
+            let delay = self.calculate_delivery_delay();
             self.in_flight.push_back(InFlightPacket {
                 addr,
                 msg,
-                deliver_at,
+                queued_at,
+                delay,
             });
             accepted_this_poll += 1;
         }
@@ -859,14 +865,20 @@ where
 
         // Sort by delivery time to maintain order (unless reordering is enabled).
         if self.config.reorder_rate <= 0.0 {
-            self.in_flight
-                .make_contiguous()
-                .sort_by_key(|p| p.deliver_at);
+            let now = self.now();
+            self.in_flight.make_contiguous().sort_by_key(|packet| {
+                packet
+                    .delay
+                    .saturating_sub(now.saturating_duration_since(packet.queued_at))
+            });
         }
 
         // Deliver packets that have completed their latency delay.
         let mut ready = self.deliver_ready_packets();
-        self.stats.packets_received += u64::try_from(ready.len()).unwrap_or(u64::MAX);
+        self.stats.packets_received = self
+            .stats
+            .packets_received
+            .saturating_add(u64::try_from(ready.len()).unwrap_or(u64::MAX));
 
         // Apply reordering to ready packets.
         self.apply_reordering(&mut ready);
@@ -883,7 +895,7 @@ where
     S: NonBlockingSocket<A> + Send + Sync,
 {
     fn send_to(&mut self, msg: &Message, addr: &A) {
-        self.stats.packets_sent += 1;
+        self.stats.packets_sent = self.stats.packets_sent.saturating_add(1);
 
         // Check for burst loss first (takes priority)
         if self.should_drop_burst() {
@@ -892,7 +904,7 @@ where
 
         // Check for packet loss on send
         if self.should_drop(self.config.send_loss_rate) {
-            self.stats.packets_dropped_send += 1;
+            self.stats.packets_dropped_send = self.stats.packets_dropped_send.saturating_add(1);
             return;
         }
 
@@ -901,7 +913,7 @@ where
 
         // Check for duplication - send additional copy
         if self.should_duplicate() {
-            self.stats.packets_duplicated += 1;
+            self.stats.packets_duplicated = self.stats.packets_duplicated.saturating_add(1);
             self.inner.send_to(msg, addr);
         }
     }
@@ -919,7 +931,7 @@ where
     S: NonBlockingSocket<A>,
 {
     fn send_to(&mut self, msg: &Message, addr: &A) {
-        self.stats.packets_sent += 1;
+        self.stats.packets_sent = self.stats.packets_sent.saturating_add(1);
 
         // Check for burst loss first (takes priority)
         if self.should_drop_burst() {
@@ -928,7 +940,7 @@ where
 
         // Check for packet loss on send
         if self.should_drop(self.config.send_loss_rate) {
-            self.stats.packets_dropped_send += 1;
+            self.stats.packets_dropped_send = self.stats.packets_dropped_send.saturating_add(1);
             return;
         }
 
@@ -937,7 +949,7 @@ where
 
         // Check for duplication - send additional copy
         if self.should_duplicate() {
-            self.stats.packets_duplicated += 1;
+            self.stats.packets_duplicated = self.stats.packets_duplicated.saturating_add(1);
             self.inner.send_to(msg, addr);
         }
     }
@@ -2007,6 +2019,21 @@ mod tests {
         let _ = socket.receive_all_messages();
 
         // Packet should be in flight, not delivered
+        assert_eq!(socket.packets_in_flight(), 1);
+    }
+
+    #[test]
+    fn maximum_latency_and_jitter_remain_in_flight_without_deadline_overflow() {
+        let mut inner = TestSocket::default();
+        inner.to_receive.push((test_addr(), test_message()));
+        let config = ChaosConfig::builder()
+            .latency(Duration::MAX)
+            .jitter(Duration::MAX)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(inner, config);
+
+        assert!(socket.receive_all_messages().is_empty());
         assert_eq!(socket.packets_in_flight(), 1);
     }
 

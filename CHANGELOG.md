@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed-packet rejection and an eight-packet receive-poll cap. Both lanes have explicit time
   budgets and retain uncaptured failure logs as CI artifacts; the Emscripten dependency lane remains
   separate.
+- `SyncConfig::validate` reports nonfunctional synchronization counts and sub-millisecond timing
+  intervals before a transport is allocated. Network session constructors apply the same validation
+  automatically.
 
 ### Changed
 
@@ -53,6 +56,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** synchronization and disconnect timers now compare monotonic elapsed durations
+  rather than constructing absolute `Instant` deadlines. Extremely large valid intervals no longer
+  panic through `Instant` overflow, a regressing injected test clock saturates elapsed time at zero,
+  and all retry counters and remaining-roundtrip updates saturate or fail closed. Network startup
+  now rejects zero sync roundtrips, sub-millisecond sync/retry/keepalive intervals, and a disconnect
+  notification delay greater than its timeout, preventing underflow and nonfunctional sessions.
+- **Pre-existing:** `ChaosSocket` now stores enqueue time plus elapsed delay instead of an absolute
+  delivery deadline. `Duration::MAX` latency/jitter remains safely in flight, regressing injected
+  clocks cannot release packets early, large jitter no longer narrows through a wrapping cast, and
+  all chaos statistics saturate instead of overflowing.
+- **Pre-existing:** debug and `paranoid` builds no longer turn internal input-queue, sync-layer,
+  graceful-drop, metrics, or floor-round diagnostics into process-aborting assertions. Invariant
+  failures report through structured telemetry or fail closed, and safety CI now rejects
+  `debug_assert!` variants anywhere under `src/`.
+- **Pre-existing:** the reordered floor-gossip request/reply channel now compares wrapping round
+  numbers as reserved-zero serials. After `u32::MAX`, post-wrap replies remain newer than pre-wrap
+  state, reordered pre-wrap packets stay stale, and a subsequent relay prune can complete instead
+  of holding confirmation forever.
 - **Pre-existing:** legacy `Frame` arithmetic operators now saturate at the `i32` bounds instead of panicking on overflow. Remainder returns `0` for its two undefined primitive-integer cases (a zero divisor and `i32::MIN % -1`), and the discouraged `From<usize>` conversion saturates at `i32::MAX` instead of wrapping into a negative frame. The existing checked and fallible APIs remain the preferred choices when callers need to detect invalid arithmetic.
 - **Pre-existing:** `Rng::gen_range` and `Rng::gen_range_usize` now treat every empty exclusive range, including reversed bounds, as invalid: they report the existing configuration violation and return the start bound. Previously reversed bounds wrapped the span and could return an arbitrary value outside the requested range. `Rng::gen_bool(1.0)` is now always true, including when the underlying sample is `u32::MAX`; probabilities use the full 2³²-value sample space, `NaN` deterministically behaves as zero probability, and every probability consumes exactly one sample so endpoint calls do not shift deterministic streams.
 - **Pre-existing:** custom `RandomValue` implementations may now call the thread-local `random()` function recursively. The thread-local generator is borrowed only around primitive sample generation, preventing the prior `RefCell already borrowed` panic while preserving the same shared random stream.

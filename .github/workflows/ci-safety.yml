@@ -481,6 +481,20 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Clippy's panic lints do not reject debug_assert! and its variants.
+          # Ban them throughout src/ so debug/paranoid deployments cannot gain
+          # abort paths that ordinary release builds compile away.
+          if grep -R -n -E 'debug_assert(_eq|_ne)?[[:space:]]*![[:space:]]*\(' src --include='*.rs'; then
+            echo "::error::debug_assert macros are forbidden in src/; report the invariant without panicking"
+            exit 1
+          else
+            grep_status=$?
+            if [ "$grep_status" -ne 1 ]; then
+              echo "::error::debug_assert source scan failed with status $grep_status"
+              exit "$grep_status"
+            fi
+          fi
+
           # Run clippy with strict panic-prevention lints on LIBRARY code only
           # Test code is allowed to use unwrap/expect for cleaner assertions
           # These lints catch code that could panic at runtime:

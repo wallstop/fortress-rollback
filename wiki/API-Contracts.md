@@ -267,6 +267,28 @@ items and aliases that rendered rustdoc omits; this table remains the behavioral
 
 **Panics:** Never
 
+**Notes:** Network session startup returns a structured configuration error if
+the timeout is shorter than the disconnect notification delay.
+
+---
+
+### `with_disconnect_notify_delay(self, notify_delay: Duration) -> Self`
+
+```rust
+/// Set the delay before reporting an interrupted connection.
+```
+
+**Pre:** None
+
+**Post:** `self.disconnect_notify_start = notify_delay`
+
+**Errors:** None
+
+**Panics:** Never
+
+**Notes:** Network session startup returns a structured configuration error if
+the notification delay is greater than the disconnect timeout.
+
 ---
 
 ### `with_disconnect_behavior(self, behavior: DisconnectBehavior) -> Self`

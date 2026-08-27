@@ -410,13 +410,6 @@ impl<T: Config> SyncLayer<T> {
     /// This method is exposed via `__internal` for testing. It is not part of the stable public API.
     pub fn save_current_state(&mut self) -> FortressRequest<T> {
         self.last_saved_frame = self.current_frame;
-        // Debug assertion to catch invariant violations during development.
-        // Every current_frame mutation path validates its target first, so this
-        // should never fail.
-        debug_assert!(
-            self.current_frame.as_i32() >= 0,
-            "Internal invariant violation: current_frame must be non-negative"
-        );
         // Use match to handle the theoretical error case gracefully instead of panicking.
         // In the impossible case of an invalid frame, create a default cell.
         let cell = match self.saved_states.get_cell(self.current_frame) {
@@ -946,14 +939,9 @@ impl<T: Config> SyncLayer<T> {
             queue.reset_to_frame(frame);
         }
 
-        // The freshness precheck above keeps both frame-ordering invariants: the
-        // new last_confirmed_frame is frame - 1 (or NULL), and the unchanged
-        // last_saved_frame is NULL until snapshot injection. This debug
-        // assert surfaces a regression in development; production is unaffected.
-        debug_assert!(
-            self.check_invariants().is_ok(),
-            "seek_to_frame must preserve SyncLayer invariants"
-        );
+        // The freshness precheck above keeps both frame-ordering invariants. In
+        // diagnostic builds, report any regression without aborting the process.
+        crate::debug_check_invariants!(self, "seek_to_frame must preserve SyncLayer invariants");
 
         Ok(())
     }
@@ -1091,8 +1079,8 @@ impl<T: Config> SyncLayer<T> {
             });
         }
         self.last_saved_frame = frame;
-        debug_assert!(
-            self.check_invariants().is_ok(),
+        crate::debug_check_invariants!(
+            self,
             "inject_snapshot_state must preserve SyncLayer invariants"
         );
         Ok(FortressRequest::LoadGameState { cell, frame })
@@ -1313,7 +1301,8 @@ impl<T: Config> SyncLayer<T> {
             });
         }
 
-        if frame_to_load.as_i32() < self.current_frame.as_i32() - self.max_prediction as i32 {
+        let prediction = i32::try_from(self.max_prediction).unwrap_or(i32::MAX);
+        if frame_to_load.as_i32() < self.current_frame.as_i32().saturating_sub(prediction) {
             return Err(FortressError::InvalidFrameStructured {
                 frame: frame_to_load,
                 reason: InvalidFrameReason::OutsidePredictionWindow {
@@ -1794,7 +1783,7 @@ impl<T: Config> InvariantChecker for SyncLayer<T> {
         }
 
         // Invariant 7: saved states count is max_prediction + 1
-        let expected_states = self.max_prediction + 1;
+        let expected_states = self.max_prediction.saturating_add(1);
         if self.saved_states.states.len() != expected_states {
             return Err(
                 InvariantViolation::new("SyncLayer", "saved_states count is incorrect")

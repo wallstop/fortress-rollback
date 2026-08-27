@@ -42,6 +42,26 @@ fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn duration_millis_to_u64_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn validate_disconnect_timing(
+    disconnect_timeout: Duration,
+    disconnect_notify_delay: Duration,
+) -> Result<(), FortressError> {
+    if disconnect_notify_delay > disconnect_timeout {
+        return Err(InvalidRequestKind::DurationConfigOutOfRange {
+            field: "disconnect_notify_delay",
+            min_ms: 0,
+            max_ms: duration_millis_to_u64_saturating(disconnect_timeout),
+            actual_ms: duration_millis_to_u64_saturating(disconnect_notify_delay),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// A clock function that returns the current [`Instant`].
 ///
 /// This type alias is used for clock injection in [`ProtocolConfig`], enabling
@@ -173,6 +193,68 @@ impl SyncConfig {
     /// Creates a new `SyncConfig` with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Validates synchronization roundtrip and interval settings.
+    ///
+    /// Session constructors call this method automatically. Calling it directly
+    /// is useful when validating configuration before allocating a transport.
+    ///
+    /// Durations larger than the platform's [`Instant`] range are valid. The
+    /// protocol compares elapsed durations instead of constructing absolute
+    /// deadlines, so such values behave as intervals that have not elapsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::ConfigValueOutOfRange`] when
+    /// [`num_sync_packets`](Self::num_sync_packets) is zero.
+    ///
+    /// Returns [`InvalidRequestKind::DurationConfigOutOfRange`] when a retry,
+    /// keepalive, or configured synchronization-timeout duration is shorter
+    /// than one millisecond.
+    pub fn validate(&self) -> Result<(), FortressError> {
+        if self.num_sync_packets == 0 {
+            return Err(InvalidRequestKind::ConfigValueOutOfRange {
+                field: "num_sync_packets",
+                min: 1,
+                max: u64::from(u32::MAX),
+                actual: 0,
+            }
+            .into());
+        }
+
+        for (field, duration) in [
+            ("sync_retry_interval", self.sync_retry_interval),
+            ("running_retry_interval", self.running_retry_interval),
+            ("keepalive_interval", self.keepalive_interval),
+        ] {
+            if duration < Duration::from_millis(1) {
+                return Err(InvalidRequestKind::DurationConfigOutOfRange {
+                    field,
+                    min_ms: 1,
+                    max_ms: u64::MAX,
+                    actual_ms: duration_millis_to_u64_saturating(duration),
+                }
+                .into());
+            }
+        }
+
+        if self
+            .sync_timeout
+            .is_some_and(|duration| duration < Duration::from_millis(1))
+        {
+            return Err(InvalidRequestKind::DurationConfigOutOfRange {
+                field: "sync_timeout",
+                min_ms: 1,
+                max_ms: u64::MAX,
+                actual_ms: self
+                    .sync_timeout
+                    .map_or(0, duration_millis_to_u64_saturating),
+            }
+            .into());
+        }
+
+        Ok(())
     }
 
     /// Configuration preset for high-latency networks (100-200ms RTT).
@@ -1689,6 +1771,41 @@ mod tests {
         let new_config = SyncConfig::new();
         let default_config = SyncConfig::default();
         assert_eq!(new_config, default_config);
+    }
+
+    #[test]
+    fn sync_config_presets_and_maximum_intervals_validate() {
+        for config in [
+            SyncConfig::default(),
+            SyncConfig::lan(),
+            SyncConfig::high_latency(),
+            SyncConfig::lossy(),
+            SyncConfig::mobile(),
+            SyncConfig::competitive(),
+            SyncConfig::extreme(),
+            SyncConfig::stress_test(),
+            SyncConfig {
+                sync_retry_interval: Duration::MAX,
+                sync_timeout: Some(Duration::MAX),
+                running_retry_interval: Duration::MAX,
+                keepalive_interval: Duration::MAX,
+                ..SyncConfig::default()
+            },
+        ] {
+            assert_eq!(config.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn disconnect_timing_accepts_equal_or_disabled_notification_windows() {
+        assert_eq!(
+            validate_disconnect_timing(Duration::from_secs(2), Duration::from_secs(2)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_disconnect_timing(Duration::ZERO, Duration::ZERO),
+            Ok(())
+        );
     }
 
     #[test]
