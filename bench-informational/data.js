@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787673903431,
+  "lastUpdate": 1787846742570,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -11867,6 +11867,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1229,
             "range": "± 8",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f610fbdcefd2b008bcc099ce6f22157ce65445a2",
+          "message": "fix: harden API boundaries and security CI (#314)\n\n## Summary\n\n- add Result-returning spectator constructors that preserve exact\nstartup errors, reject empty/duplicate failover hosts before endpoint\ncreation, and keep legacy Option wrappers source-compatible\n- add Result-returning RLE/compression and JSON telemetry APIs with\nsource-preserving serializer/allocation errors, explicit compatibility\nfallbacks, and byte-identity regressions\n- exercise session-owned Tokio UDP on Linux, macOS, and Windows plus a\nbounded raw-byte transport in a real headless browser, with\nmalformed-packet rejection and failure artifacts\n- advance the development boundary to 0.14.0 so the repository semver\ngate recognizes the deliberate pre-1.0 public error-enum expansion\n- add a pinned rustdoc-JSON census of 2,709 public symbols across 2,703\ntextual paths, including hidden and alias-associated paths, with a\nmachine-checked removal ledger and exact-head CI snapshot gate\n- make legacy `Frame` arithmetic/conversion and deterministic RNG\nboundary inputs total, preserve one-sample probability stream\nconsumption, and add boundary regressions\n- bound the custom transport example, keep all `NonBlockingSocket` paths\nprompt and silent, and expose saturating drop diagnostics\n- restore the recurring Unsafe Code Audit without bundled-Z3 timeout\nrisk; run it on every PR, recompute reports, parse the real cargo-geiger\nroot row, and fail closed on producer, report-writer, partial-output, or\ncache-completeness failures\n- harden devcontainer tool refresh and Cargo target maintenance with\nexact workspace scope, marker/symlink checks, bounded numeric inputs,\nage-check fail-safe behavior, and PR image builds without publishing\n- synchronize API/integration documentation, feature ownership, wiki\ncontracts, active-plan hygiene, and the deterministic fleet-search\nroadmap\n\n## Security CI root cause\n\nThe two latest scheduled Unsafe Code Audit runs raced their 20-minute\njob timeout after cargo-geiger activated the bundled Z3 source build.\nThe replacement feature census excludes only `z3-verification-bundled`,\nretaining ordinary Z3 verification coverage. The report is no longer\nreused across source changes, and executable workflow tests cover\nwarning exits, fatal/partial output, real safety-symbol columns, and\n`tee` failure.\n\n## Verification\n\n- exact-head composite Nextest: 3,213 passed, 72 skipped\n- strict workspace/all-target Clippy with `tokio,json`: passed\n- complete repository Python suite: 2,152 passed\n- local diff-scope mutation corpus: 41 total, 26 caught, 15 unviable,\nzero missed/timeouts; threshold follow-up: 14 total, 12 caught, two\nunviable, zero missed/timeouts\n- full agent preflight: passed (workflow lint, plan/changelog policy,\nversion/lock consistency, links, docs claims, shell/tooling policies)\n- `cargo doc --no-deps --all-features`, `actionlint`, shell\nsyntax/portability, Markdown/wiki checks, and `git diff --check`: passed\n- four Cargo workspace dependency dry-runs: zero selected updates\n- three independent final adversarial reviews at `f375ccf`: zero\nremaining findings\n- hosted validation at `f375ccf`: all 17 workflows passed, including\nUnsafe Code Audit, platform/Miri/verification matrices, and the\nauthoritative 41-mutant gate\n- exact-head `5468610` spectator audit: full Nextest 2,927/2,927 (71\nskipped); `sync-send` spectator 225/225; `hot-join` spectator 229/229;\n210 rustdoc cases; strict all-feature Clippy; browser no-default checks;\n286 preflight Python tests; warning-denied rustdoc/examples/docs/wiki\ngates\n- focused spectator validation/input-buffer mutation slice: two caught,\nfive unviable, zero missed/timeouts; three independent adversarial\naudits found and closed the duplicate-validation\ncomplexity/error-identity risks before commit\n- supported nightly 0.13.0-to-0.14.0 semver comparison: passed; the\nversion bump resolves the prior exact-head hosted rejection of the\ndeliberate exhaustive `InvalidRequestKind` additions\n- exact-head `10906da` #311 local validation: 2,928 tests passed (71\nskipped), 225 rustdoc cases, strict all-feature Clippy, 286 preflight\nPython tests and every repository preflight gate, warning-denied\nrustdoc, immutable serialization plus v2/v1/legacy wire goldens, and a\nlocked crates.io publish dry run\n- focused JSON mutation slice: four caught, ten unviable, zero\nmissed/timeouts; injected JSON/RLE allocation and serializer failures\nremain distinct from valid empty output\n- exact-head `9368453` #312 local validation: native Tokio ownership\nruntime passed; browser fixture compiled and passed strict WASM Clippy\nin forced browser mode; full Nextest 2,928/2,928 (71 skipped), strict\nworkspace Clippy, 286 preflight Python tests, actionlint, workflow\npolicy tests, and the Emscripten dependency boundary passed\n- implementation commit `3461d68` #313 local validation: deterministic\n2,709-symbol/2,703-path census matched in no-default and complete\nproduction-feature profiles; 2,928/2,928 Nextest (71 skipped), strict\ncomposite Clippy, 352 preflight policy/docs tests, 170 focused\nparser/workflow/wiki tests, warning-denied rustdoc, actionlint, locked\npublish dry run, and the supported 0.13.0-to-0.14.0 semver comparison\npassed\n- #313 adversarial review found and closed shared field/method path\naccounting and 1,299 missing associated paths beneath aliases; the final\nledger records 125 root aliases and 1,425 alias-related symbols, while\ntwo unused `__internal` RLE aliases move to the machine-validated\nremoval ledger\n- exact-head `d92fb07` complete Python suite: 2,163/2,163 passed; hosted\ndocs failure was a brittle literal production-script count and is\nreplaced by semantic census inclusion in the strict Python 3.10 typing\ninventory\n\n## Follow-up scope\n\nThis closes the ordered audit children #310 through #313. The parent\n#297 acceptance evidence is reconciled at this exact head and will close\nwith this PR.\n\nCloses #310.\nCloses #311.\nCloses #312.\nCloses #313.\nCloses #297.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Pre-1.0 breaking public API and error-enum expansion affect downstream\nmatches and spectator failover behavior; security CI and new runtime\ngates change what must pass on every PR.\n> \n> **Overview**\n> This PR closes the post-audit public API work by **bumping the crate\nto 0.14.0** and documenting deliberate breaking changes: exhaustive\n`InvalidRequestKind` variants for empty/duplicate spectator failover\nhosts, removal of unused `__internal` RLE aliases, and expanded fallible\nsurfaces while keeping legacy `Option` wrappers.\n> \n> **Session and serialization APIs** gain `Result`-returning spectator\nstartup (`try_start_spectator_session` / `_multi`), fallible JSON on\nmetrics/telemetry types (`try_to_json` with exact-size reservation), and\nmatching `try_encode` paths for compression/RLE. Failover spectators now\nfail before endpoint creation on invalid host lists.\n> \n> **CI and governance** add a pinned **public API census** job\n(`public_api_census.py` + checked TSV snapshots), **Tokio-owned** and\n**headless-browser** session runtime tests with failure artifacts, and a\nrestored **Unsafe Code Audit** on every PR (no bundled-Z3 geiger run,\nfail-closed report parsing). Mutation baseline and `mutants.toml` now\ninclude `hot-join`. Devcontainer work adds user-owned npm AI CLIs,\n`devcontainer-bootstrap.sh` for bounded `target/` cleanup, and PR-only\ndevcontainer image builds without GHCR push.\n> \n> Agent skills gain **plan hygiene** (pre-commit cap on `PLAN.md`) and a\n**fleet-search roadmap** reference; design-decision logs record the\nabove boundaries.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfbfaae0650026bff8cbbb887b4f1170441231c10. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-27T08:56:56-07:00",
+          "tree_id": "7b4754f22a03673158bb12f469e5f6e1c02e0aa9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f610fbdcefd2b008bcc099ce6f22157ce65445a2"
+        },
+        "date": 1787846742484,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 68,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 257,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 33,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 45,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 110,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 413,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 81,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 101,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 132,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 137,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 180,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 269,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 256,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 345,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 516,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 117,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 137,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 173,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 211,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 258,
+            "range": "± 39",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 355,
+            "range": "± 37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 433,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 524,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 696,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 440,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 634,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 791,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 940,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 72,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 94,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 467,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 785,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 1192,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 23,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 72,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 239,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 898,
+            "range": "± 7",
             "unit": "ns/iter"
           }
         ]
