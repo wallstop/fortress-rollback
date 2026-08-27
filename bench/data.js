@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787673899706,
+  "lastUpdate": 1787846740287,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "93542c2364e3a6d66550bd462769241fa1209293",
-          "message": "Advance M3 simulation census coverage (#213)\n\n## Summary\n\n- Add a ReliableFifo simulation noise profile plus\n`LinkPolicy::retransmit_delay` so M3 can model reliable ordered\ntransports with head-of-line retransmission stalls instead of packet\nloss.\n- Rework the TCP-model fleet probes to use retransmit-delay windows and\nassert the premise with `retransmit_delayed > 0` and `dropped_by_policy\n== 0`.\n- Add the first `tests/simulation/census.rs` row for RTT far beyond\n`max_prediction`, asserting stall telemetry while the existing\nsimulation oracle proves liveness and state agreement.\n\n## Validation\n\n- `cargo nextest run --no-capture -E\n'test(retransmit_delay_delivers_would_drop_and_holds_later_sends) or\ntest(reliable_fifo_profile_is_lossless_ordered_and_storyline_free) or\ntest(link_policy_without_retransmit_delay_uses_zero_default) or\ntest(tcp_model_reliable_fifo_two_player_mesh_holds_invariants) or\ntest(tcp_model_reliable_fifo_four_player_mesh_holds_invariants) or\ntest(high_rtt_beyond_prediction_window_throttles_without_divergence)'`\n- `cargo fmt`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo nextest run --test simulation --no-capture`\n- `cargo nextest run --no-capture` (2441 passed, 58 skipped)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to test/simulation infrastructure (`SimNet`,\nschedules, fleet/census tests); production rollback protocol code is\nuntouched.\n> \n> **Overview**\n> Extends the simulation test stack so M3 can exercise **reliable\nordered transports** (TCP/WebRTC-style) instead of only UDP-like loss.\n> \n> **`SimNet`** gains `LinkPolicy::retransmit_delay`: when nonzero,\nburst/drop rolls **delay** would-be drops and block later sends on that\nlink until the retransmit deadline (head-of-line blocking), with a\n`retransmit_delayed` stat and `#[serde(default)]` so older schedule JSON\nstill deserializes as zero (UDP semantics).\n> \n> **Schedule harness** bumps schema to **9**, adds\n`BackgroundNoise::ReliableFifo` (lossless 30ms links, no random\nstorylines), and wires `retransmit_delay` through generated policies.\n> \n> **Fleet** TCP-model probes swap capture-and-hold `Hold` windows for\n**`SetLink`** policies with `drop_rate: 1.0` + 400ms retransmit delay,\nand assert `retransmit_delayed > 0` and `dropped_by_policy == 0`.\n> \n> **New `tests/simulation/census.rs`** row: two peers with ~240ms RTT\nand `max_prediction = 2` must pass the oracle, show **stall_count > 0**,\nand reproduce trace hash (prediction-window throttling without\ndivergence).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n995beb63b3f3878cad424e1f87dfc2bcccfdc02f. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-08T11:40:38-07:00",
-          "tree_id": "759ba1ecdfc0ec64b2f7eb13f4d4b7dbcd69bde6",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/93542c2364e3a6d66550bd462769241fa1209293"
-        },
-        "date": 1783536318405,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 162,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 459,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 707,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1035,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128115,
-            "range": "± 548",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 43637,
-            "range": "± 248",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 66",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 83",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3827,6 +3701,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3137,
             "range": "± 237",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f610fbdcefd2b008bcc099ce6f22157ce65445a2",
+          "message": "fix: harden API boundaries and security CI (#314)\n\n## Summary\n\n- add Result-returning spectator constructors that preserve exact\nstartup errors, reject empty/duplicate failover hosts before endpoint\ncreation, and keep legacy Option wrappers source-compatible\n- add Result-returning RLE/compression and JSON telemetry APIs with\nsource-preserving serializer/allocation errors, explicit compatibility\nfallbacks, and byte-identity regressions\n- exercise session-owned Tokio UDP on Linux, macOS, and Windows plus a\nbounded raw-byte transport in a real headless browser, with\nmalformed-packet rejection and failure artifacts\n- advance the development boundary to 0.14.0 so the repository semver\ngate recognizes the deliberate pre-1.0 public error-enum expansion\n- add a pinned rustdoc-JSON census of 2,709 public symbols across 2,703\ntextual paths, including hidden and alias-associated paths, with a\nmachine-checked removal ledger and exact-head CI snapshot gate\n- make legacy `Frame` arithmetic/conversion and deterministic RNG\nboundary inputs total, preserve one-sample probability stream\nconsumption, and add boundary regressions\n- bound the custom transport example, keep all `NonBlockingSocket` paths\nprompt and silent, and expose saturating drop diagnostics\n- restore the recurring Unsafe Code Audit without bundled-Z3 timeout\nrisk; run it on every PR, recompute reports, parse the real cargo-geiger\nroot row, and fail closed on producer, report-writer, partial-output, or\ncache-completeness failures\n- harden devcontainer tool refresh and Cargo target maintenance with\nexact workspace scope, marker/symlink checks, bounded numeric inputs,\nage-check fail-safe behavior, and PR image builds without publishing\n- synchronize API/integration documentation, feature ownership, wiki\ncontracts, active-plan hygiene, and the deterministic fleet-search\nroadmap\n\n## Security CI root cause\n\nThe two latest scheduled Unsafe Code Audit runs raced their 20-minute\njob timeout after cargo-geiger activated the bundled Z3 source build.\nThe replacement feature census excludes only `z3-verification-bundled`,\nretaining ordinary Z3 verification coverage. The report is no longer\nreused across source changes, and executable workflow tests cover\nwarning exits, fatal/partial output, real safety-symbol columns, and\n`tee` failure.\n\n## Verification\n\n- exact-head composite Nextest: 3,213 passed, 72 skipped\n- strict workspace/all-target Clippy with `tokio,json`: passed\n- complete repository Python suite: 2,152 passed\n- local diff-scope mutation corpus: 41 total, 26 caught, 15 unviable,\nzero missed/timeouts; threshold follow-up: 14 total, 12 caught, two\nunviable, zero missed/timeouts\n- full agent preflight: passed (workflow lint, plan/changelog policy,\nversion/lock consistency, links, docs claims, shell/tooling policies)\n- `cargo doc --no-deps --all-features`, `actionlint`, shell\nsyntax/portability, Markdown/wiki checks, and `git diff --check`: passed\n- four Cargo workspace dependency dry-runs: zero selected updates\n- three independent final adversarial reviews at `f375ccf`: zero\nremaining findings\n- hosted validation at `f375ccf`: all 17 workflows passed, including\nUnsafe Code Audit, platform/Miri/verification matrices, and the\nauthoritative 41-mutant gate\n- exact-head `5468610` spectator audit: full Nextest 2,927/2,927 (71\nskipped); `sync-send` spectator 225/225; `hot-join` spectator 229/229;\n210 rustdoc cases; strict all-feature Clippy; browser no-default checks;\n286 preflight Python tests; warning-denied rustdoc/examples/docs/wiki\ngates\n- focused spectator validation/input-buffer mutation slice: two caught,\nfive unviable, zero missed/timeouts; three independent adversarial\naudits found and closed the duplicate-validation\ncomplexity/error-identity risks before commit\n- supported nightly 0.13.0-to-0.14.0 semver comparison: passed; the\nversion bump resolves the prior exact-head hosted rejection of the\ndeliberate exhaustive `InvalidRequestKind` additions\n- exact-head `10906da` #311 local validation: 2,928 tests passed (71\nskipped), 225 rustdoc cases, strict all-feature Clippy, 286 preflight\nPython tests and every repository preflight gate, warning-denied\nrustdoc, immutable serialization plus v2/v1/legacy wire goldens, and a\nlocked crates.io publish dry run\n- focused JSON mutation slice: four caught, ten unviable, zero\nmissed/timeouts; injected JSON/RLE allocation and serializer failures\nremain distinct from valid empty output\n- exact-head `9368453` #312 local validation: native Tokio ownership\nruntime passed; browser fixture compiled and passed strict WASM Clippy\nin forced browser mode; full Nextest 2,928/2,928 (71 skipped), strict\nworkspace Clippy, 286 preflight Python tests, actionlint, workflow\npolicy tests, and the Emscripten dependency boundary passed\n- implementation commit `3461d68` #313 local validation: deterministic\n2,709-symbol/2,703-path census matched in no-default and complete\nproduction-feature profiles; 2,928/2,928 Nextest (71 skipped), strict\ncomposite Clippy, 352 preflight policy/docs tests, 170 focused\nparser/workflow/wiki tests, warning-denied rustdoc, actionlint, locked\npublish dry run, and the supported 0.13.0-to-0.14.0 semver comparison\npassed\n- #313 adversarial review found and closed shared field/method path\naccounting and 1,299 missing associated paths beneath aliases; the final\nledger records 125 root aliases and 1,425 alias-related symbols, while\ntwo unused `__internal` RLE aliases move to the machine-validated\nremoval ledger\n- exact-head `d92fb07` complete Python suite: 2,163/2,163 passed; hosted\ndocs failure was a brittle literal production-script count and is\nreplaced by semantic census inclusion in the strict Python 3.10 typing\ninventory\n\n## Follow-up scope\n\nThis closes the ordered audit children #310 through #313. The parent\n#297 acceptance evidence is reconciled at this exact head and will close\nwith this PR.\n\nCloses #310.\nCloses #311.\nCloses #312.\nCloses #313.\nCloses #297.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Pre-1.0 breaking public API and error-enum expansion affect downstream\nmatches and spectator failover behavior; security CI and new runtime\ngates change what must pass on every PR.\n> \n> **Overview**\n> This PR closes the post-audit public API work by **bumping the crate\nto 0.14.0** and documenting deliberate breaking changes: exhaustive\n`InvalidRequestKind` variants for empty/duplicate spectator failover\nhosts, removal of unused `__internal` RLE aliases, and expanded fallible\nsurfaces while keeping legacy `Option` wrappers.\n> \n> **Session and serialization APIs** gain `Result`-returning spectator\nstartup (`try_start_spectator_session` / `_multi`), fallible JSON on\nmetrics/telemetry types (`try_to_json` with exact-size reservation), and\nmatching `try_encode` paths for compression/RLE. Failover spectators now\nfail before endpoint creation on invalid host lists.\n> \n> **CI and governance** add a pinned **public API census** job\n(`public_api_census.py` + checked TSV snapshots), **Tokio-owned** and\n**headless-browser** session runtime tests with failure artifacts, and a\nrestored **Unsafe Code Audit** on every PR (no bundled-Z3 geiger run,\nfail-closed report parsing). Mutation baseline and `mutants.toml` now\ninclude `hot-join`. Devcontainer work adds user-owned npm AI CLIs,\n`devcontainer-bootstrap.sh` for bounded `target/` cleanup, and PR-only\ndevcontainer image builds without GHCR push.\n> \n> Agent skills gain **plan hygiene** (pre-commit cap on `PLAN.md`) and a\n**fleet-search roadmap** reference; design-decision logs record the\nabove boundaries.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfbfaae0650026bff8cbbb887b4f1170441231c10. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-27T08:56:56-07:00",
+          "tree_id": "7b4754f22a03673158bb12f469e5f6e1c02e0aa9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/f610fbdcefd2b008bcc099ce6f22157ce65445a2"
+        },
+        "date": 1787846739267,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 35985,
+            "range": "± 1523",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 32288,
+            "range": "± 306",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 655,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 842,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6580,
+            "range": "± 126",
             "unit": "ns/iter"
           }
         ]
