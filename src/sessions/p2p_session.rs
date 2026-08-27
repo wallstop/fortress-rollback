@@ -2190,10 +2190,12 @@ impl<T: Config> P2PSession<T> {
                 .active
                 .as_ref()
                 .ok_or(DropAbortReason::ParticipantLost)?;
+            if active.participants.is_empty() {
+                return Err(DropAbortReason::ConflictingHistory);
+            }
             if active.operation != commit.operation
                 || active.cut != Some(commit.cut)
                 || active.cut_digest != Some(commit.cut_digest)
-                || active.participants.is_empty()
                 || active.ready.len() != active.participants.len()
                 || active.phase != CoordinatedDropPhase::Ready
             {
@@ -12988,6 +12990,51 @@ mod tests {
                 .is_some_and(|status| status.disconnected),
             "the committed operation must freeze the remote slot"
         );
+    }
+
+    #[test]
+    fn coordinated_drop_commit_rejects_empty_participant_certificate() {
+        let mut session = create_two_player_session();
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: 0,
+        };
+        let cut = Frame::new(0);
+        let cut_digest = 0_u64;
+        let now = session.coordinated_drop_now();
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(8080),
+            targets: Vec::new(),
+            participants: Vec::new(),
+            local_participant: 0,
+            held_at: cut,
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready: std::collections::BTreeSet::new(),
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(cut),
+            cut_digest: Some(cut_digest),
+            pending_commit: None,
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+
+        let result = session.coordinated_drop_apply_commit(DropCommit {
+            operation,
+            cut,
+            cut_digest,
+        });
+
+        assert_eq!(result, Err(DropAbortReason::ConflictingHistory));
     }
 
     #[cfg(feature = "hot-join")]

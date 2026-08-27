@@ -5414,6 +5414,21 @@ mod tests {
         assert_eq!(protocol.round_floor(slot2), Frame::new(4));
     }
 
+    #[test]
+    fn floor_round_serial_half_range_is_not_ordered() {
+        let baseline = 1_u32;
+        let candidate = baseline.wrapping_add(FLOOR_ROUND_SERIAL_HALF_RANGE);
+
+        assert!(
+            !floor_round_seq_is_newer(candidate, baseline),
+            "an exact half-range distance is ambiguous, not newer"
+        );
+        assert!(
+            !floor_round_seq_is_newer(baseline, candidate),
+            "the reverse exact half-range distance is equally ambiguous"
+        );
+    }
+
     /// FLOOR-ROUND reorder rejection: a `FloorReply` whose `round_seq` is older
     /// than (or equal to) the latest accepted is DROPPED — it neither overwrites
     /// `round_floor` nor regresses the reply seq. This is what makes the reply
@@ -6697,6 +6712,81 @@ mod tests {
             .send_queue
             .iter()
             .any(|message| matches!(message.body, MessageBody::KeepAlive))
+    }
+
+    fn queue_has_floor_request(protocol: &UdpProtocol<TestConfig>) -> bool {
+        protocol
+            .send_queue
+            .iter()
+            .any(|message| matches!(message.body, MessageBody::FloorRequest(_)))
+    }
+
+    #[test]
+    fn poll_keepalive_waits_until_strictly_after_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            !queue_has_keep_alive(&protocol),
+            "KeepAlive must not fire exactly at the interval boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queue_has_keep_alive(&protocol),
+            "KeepAlive must fire once the interval has elapsed"
+        );
+    }
+
+    #[test]
+    fn poll_floor_request_waits_until_strictly_after_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        protocol.set_floor_request_needed(true);
+
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            !queue_has_floor_request(&protocol),
+            "FloorRequest must not fire exactly at the interval boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queue_has_floor_request(&protocol),
+            "FloorRequest must fire once the interval has elapsed"
+        );
+    }
+
+    #[test]
+    fn poll_nudge_waits_until_strictly_after_nudge_interval() {
+        let (mut protocol, clock) = running_nudge_protocol();
+        protocol.last_acked_input.frame = Frame::new(3);
+        protocol.set_connect_status_nudge(true);
+
+        // Make input idle for 201ms while the independent nudge timer is at
+        // exactly 200ms. This isolates the second elapsed-time gate.
+        advance_test_clock(&clock, Duration::from_millis(1));
+        protocol.last_nudge_time = *clock.lock().unwrap();
+        advance_test_clock(&clock, Duration::from_millis(200));
+        let connect_status = vec![ConnectionStatus::default(); 2];
+        let _ = protocol.poll(&connect_status).count();
+        assert!(
+            queued_inputs(&protocol).is_empty(),
+            "a nudge must not fire exactly at its cadence boundary"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            queued_inputs(&protocol).len(),
+            1,
+            "a nudge must fire once both independent intervals have elapsed"
+        );
     }
 
     /// (i) Flag set + keepalive interval elapsed + idle (fully-acked) queue:

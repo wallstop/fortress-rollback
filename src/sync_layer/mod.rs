@@ -2464,6 +2464,21 @@ mod sync_layer_tests {
         );
     }
 
+    #[test]
+    fn check_invariants_rejects_an_invalid_sync_layer() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Same-module corruption deliberately constructs a state that the
+        // public constructors cannot produce. This pins the checker itself,
+        // rather than merely proving that valid constructors return `Ok`.
+        sync_layer.num_players = 0;
+
+        assert!(
+            sync_layer.check_invariants().is_err(),
+            "an empty player set must violate SyncLayer invariants"
+        );
+    }
+
     /// Test rollback at the edge of prediction window maintains invariants.
     #[test]
     fn test_rollback_at_prediction_window_edge() {
