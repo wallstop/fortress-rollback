@@ -76,7 +76,14 @@ exclude_globs = [
 # guaranteed false "missed" results after a complete test-suite run per
 # mutant. Keep formal proof bodies in the Kani fleet and mutation-test the
 # production code they constrain.
-exclude_re = ["kani.*proof"]
+exclude_re = [
+    "kani.*proof",
+
+    # The sync-send and non-sync-send trait impls are mutually exclusive, so a
+    # single mutation run necessarily leaves one wrapper uncompiled. Both
+    # wrappers delegate directly to the mutation-tested inherent methods.
+    "<impl NonBlockingSocket<A> for ChaosSocket<A, S>>::(send_to|receive_all_messages)",
+]
 
 # ============================================================================
 # Timeout Configuration

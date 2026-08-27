@@ -610,21 +610,21 @@ where
     /// Calculates a packet's latency without constructing an absolute deadline.
     fn calculate_delivery_delay(&mut self) -> Duration {
         let base_latency = self.config.latency;
-        let jitter = if self.config.jitter > Duration::ZERO {
-            let jitter_range = i64::try_from(self.config.jitter.as_nanos()).unwrap_or(i64::MAX);
-            let jitter_offset = self
-                .rng
-                .gen_range_i64_inclusive(-jitter_range..=jitter_range);
-            if jitter_offset >= 0 {
-                Duration::from_nanos(jitter_offset as u64)
-            } else {
-                // Negative jitter reduces latency but not below zero
-                let reduction = Duration::from_nanos((-jitter_offset) as u64);
-                // saturating_sub ensures we never get a negative duration
-                return base_latency.saturating_sub(reduction);
-            }
+        if self.config.jitter == Duration::ZERO {
+            return base_latency;
+        }
+
+        let jitter_range = i64::try_from(self.config.jitter.as_nanos()).unwrap_or(i64::MAX);
+        let jitter_offset = self
+            .rng
+            .gen_range_i64_inclusive(-jitter_range..=jitter_range);
+        let jitter = if jitter_offset >= 0 {
+            Duration::from_nanos(jitter_offset as u64)
         } else {
-            Duration::ZERO
+            // Negative jitter reduces latency but not below zero
+            let reduction = Duration::from_nanos((-jitter_offset) as u64);
+            // saturating_sub ensures we never get a negative duration
+            return base_latency.saturating_sub(reduction);
         };
 
         base_latency.saturating_add(jitter)
@@ -885,16 +885,8 @@ where
 
         ready
     }
-}
 
-// Implementation for sync-send feature
-#[cfg(feature = "sync-send")]
-impl<A, S> NonBlockingSocket<A> for ChaosSocket<A, S>
-where
-    A: Clone + PartialEq + Eq + Hash + Send + Sync,
-    S: NonBlockingSocket<A> + Send + Sync,
-{
-    fn send_to(&mut self, msg: &Message, addr: &A) {
+    fn send_to_impl(&mut self, msg: &Message, addr: &A) {
         self.stats.packets_sent = self.stats.packets_sent.saturating_add(1);
 
         // Check for burst loss first (takes priority)
@@ -916,6 +908,18 @@ where
             self.stats.packets_duplicated = self.stats.packets_duplicated.saturating_add(1);
             self.inner.send_to(msg, addr);
         }
+    }
+}
+
+// Implementation for sync-send feature
+#[cfg(feature = "sync-send")]
+impl<A, S> NonBlockingSocket<A> for ChaosSocket<A, S>
+where
+    A: Clone + PartialEq + Eq + Hash + Send + Sync,
+    S: NonBlockingSocket<A> + Send + Sync,
+{
+    fn send_to(&mut self, msg: &Message, addr: &A) {
+        self.send_to_impl(msg, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
@@ -931,27 +935,7 @@ where
     S: NonBlockingSocket<A>,
 {
     fn send_to(&mut self, msg: &Message, addr: &A) {
-        self.stats.packets_sent = self.stats.packets_sent.saturating_add(1);
-
-        // Check for burst loss first (takes priority)
-        if self.should_drop_burst() {
-            return;
-        }
-
-        // Check for packet loss on send
-        if self.should_drop(self.config.send_loss_rate) {
-            self.stats.packets_dropped_send = self.stats.packets_dropped_send.saturating_add(1);
-            return;
-        }
-
-        // Send immediately to inner socket
-        self.inner.send_to(msg, addr);
-
-        // Check for duplication - send additional copy
-        if self.should_duplicate() {
-            self.stats.packets_duplicated = self.stats.packets_duplicated.saturating_add(1);
-            self.inner.send_to(msg, addr);
-        }
+        self.send_to_impl(msg, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
@@ -1785,6 +1769,35 @@ mod tests {
     // These tests verify latency behavior with various configurations using a
     // data-driven approach to catch edge cases.
 
+    #[test]
+    fn nonzero_jitter_changes_seeded_delivery_delays_within_bounds() {
+        let base = Duration::from_millis(100);
+        let jitter = Duration::from_millis(50);
+        let config = ChaosConfig::builder()
+            .latency(base)
+            .jitter(jitter)
+            .seed(42)
+            .build();
+        let mut socket = ChaosSocket::new(TestSocket::default(), config);
+
+        let delays: Vec<_> = (0..16).map(|_| socket.calculate_delivery_delay()).collect();
+        assert!(
+            delays.iter().any(|&delay| delay != base),
+            "enabled jitter must vary at least one delay in the fixed seeded sample"
+        );
+        assert!(
+            delays.iter().any(|&delay| delay < base),
+            "symmetric jitter must reduce at least one delay in the fixed seeded sample"
+        );
+        assert!(
+            delays.iter().any(|&delay| delay > base),
+            "symmetric jitter must increase at least one delay in the fixed seeded sample"
+        );
+        assert!(delays
+            .iter()
+            .all(|&delay| (base - jitter..=base + jitter).contains(&delay)));
+    }
+
     /// Test case for data-driven latency testing
     struct LatencyTestCase {
         name: &'static str,
@@ -1965,6 +1978,37 @@ mod tests {
                 i, expected_magic, msg.header.conn_id
             );
         }
+    }
+
+    #[test]
+    fn zero_reorder_rate_delivers_ready_packet_before_blocked_packet() {
+        use crate::network::messages::{MessageBody, MessageHeader};
+
+        let mut socket = ChaosSocket::new(TestSocket::default(), ChaosConfig::passthrough());
+        let queued_at = socket.now();
+        socket.in_flight.push_back(InFlightPacket {
+            addr: test_addr(),
+            msg: Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::KeepAlive,
+            },
+            queued_at,
+            delay: Duration::from_secs(1),
+        });
+        socket.in_flight.push_back(InFlightPacket {
+            addr: test_addr(),
+            msg: Message {
+                header: MessageHeader::new(2),
+                body: MessageBody::KeepAlive,
+            },
+            queued_at,
+            delay: Duration::ZERO,
+        });
+
+        let received = socket.receive_all_messages();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].1.header.conn_id, 2);
+        assert_eq!(socket.packets_in_flight(), 1);
     }
 
     /// Test edge case: zero latency should deliver immediately
