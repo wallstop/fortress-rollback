@@ -5850,6 +5850,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(debug_assertions, feature = "paranoid"))]
     #[test]
     fn floor_round_invariant_checker_reports_invalid_serial_state() {
         use crate::telemetry::{
