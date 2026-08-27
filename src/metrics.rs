@@ -1411,6 +1411,19 @@ mod tests {
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""disconnected":1"#), "{json}");
         assert!(json.contains(r#""synchronized":0"#), "{json}");
+
+        let expected_pretty =
+            serde_json::to_string_pretty(&metrics).expect("reference serialization succeeds");
+        assert_eq!(
+            metrics
+                .try_to_json_pretty()
+                .expect("pretty json serialization succeeds"),
+            expected_pretty
+        );
+        assert_eq!(
+            metrics.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
     }
 
     #[test]
@@ -1502,6 +1515,18 @@ mod tests {
         // The per-kind breakdown is a self-describing, snake_case-keyed map.
         assert!(json.contains(r#""input":1"#), "{json}");
         assert!(json.contains(r#""keep_alive":0"#), "{json}");
+
+        let expected_pretty =
+            serde_json::to_string_pretty(&m).expect("reference serialization succeeds");
+        assert_eq!(
+            m.try_to_json_pretty()
+                .expect("pretty json serialization succeeds"),
+            expected_pretty
+        );
+        assert_eq!(
+            m.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
     }
 
     #[cfg(all(feature = "hot-join", feature = "json"))]
@@ -1512,11 +1537,27 @@ mod tests {
             polls_to_running: 3,
             millis_to_running: 12,
         };
-        let compact = metrics.try_to_json().expect("hot-join metrics serialize");
-        let pretty = metrics
-            .try_to_json_pretty()
-            .expect("hot-join metrics serialize prettily");
-        assert_eq!(metrics.to_json().as_deref(), Some(compact.as_str()));
-        assert_eq!(metrics.to_json_pretty().as_deref(), Some(pretty.as_str()));
+        let expected_compact =
+            serde_json::to_string(&metrics).expect("reference serialization succeeds");
+        let expected_pretty =
+            serde_json::to_string_pretty(&metrics).expect("reference serialization succeeds");
+        assert_eq!(
+            metrics.try_to_json().expect("hot-join metrics serialize"),
+            expected_compact
+        );
+        assert_eq!(
+            metrics.to_json().as_deref(),
+            Some(expected_compact.as_str())
+        );
+        assert_eq!(
+            metrics
+                .try_to_json_pretty()
+                .expect("hot-join metrics serialize prettily"),
+            expected_pretty
+        );
+        assert_eq!(
+            metrics.to_json_pretty().as_deref(),
+            Some(expected_pretty.as_str())
+        );
     }
 }

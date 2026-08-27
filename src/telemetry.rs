@@ -3176,6 +3176,19 @@ mod tests {
             assert!(json.contains(r#""type_name":"TestType""#));
             assert!(json.contains(r#""invariant":"value out of range""#));
             assert!(json.contains(r#""details":"value=-5, expected>=0""#));
+
+            let expected_pretty =
+                serde_json::to_string_pretty(&violation).expect("reference serialization succeeds");
+            assert_eq!(
+                violation
+                    .try_to_json_pretty()
+                    .expect("pretty json serialization succeeds"),
+                expected_pretty
+            );
+            assert_eq!(
+                violation.to_json_pretty().as_deref(),
+                Some(expected_pretty.as_str())
+            );
         }
 
         #[test]

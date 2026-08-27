@@ -35,9 +35,9 @@ gitignore = true
 all_features = false
 no_default_features = false
 
-# Test core features only (excludes slow Z3 verification)
-# The tokio feature is included to test async socket adapters
-features = ["tokio", "json"]
+# Test core features plus hot-join while excluding slow Z3 verification.
+# HotJoinMetrics is mutation-tested only when its feature-gated API is compiled.
+features = ["tokio", "json", "hot-join"]
 
 # ============================================================================
 # File Exclusion Patterns
