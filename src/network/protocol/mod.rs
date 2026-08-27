@@ -5850,6 +5850,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn floor_round_invariant_checker_reports_invalid_serial_state() {
+        use crate::telemetry::{
+            push_violation_observer, CollectingObserver, ViolationKind, ViolationObserver,
+            ViolationSeverity,
+        };
+
+        let mut protocol = running_protocol_three_slots();
+        protocol.floor_request_seq = 1;
+        protocol.floor_reply_seq = 2;
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        protocol.check_floor_round_invariants();
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, ViolationSeverity::Critical);
+        assert_eq!(violations[0].kind, ViolationKind::Invariant);
+        assert!(violations[0]
+            .message
+            .contains("floor reply seq 2 exceeds request seq 1"));
+    }
+
     /// FLOOR-ROUND prune detection: `detect_prune_transition` returns `true`
     /// exactly on the running→pruned edge (and only once per edge), the signal
     /// the session counts to bump its prune generation.
@@ -6594,6 +6618,93 @@ mod tests {
 
         // Should have transitioned to Shutdown
         assert_eq!(protocol.state, ProtocolState::Shutdown);
+    }
+
+    #[test]
+    fn disconnected_shutdown_waits_until_strictly_after_delay() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            protocol_config,
+        );
+        protocol.state = ProtocolState::Disconnected;
+        protocol.shutdown_started_at = *clock.lock().unwrap();
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_secs(5));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            protocol.state,
+            ProtocolState::Disconnected,
+            "shutdown must not complete exactly at the configured delay"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let _ = protocol.poll(&connect_status).count();
+        assert_eq!(
+            protocol.state,
+            ProtocolState::Shutdown,
+            "shutdown must complete once the configured delay has elapsed"
+        );
+    }
+
+    #[test]
+    fn running_disconnect_events_wait_until_strictly_after_thresholds() {
+        let (protocol_config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            protocol_config,
+        );
+        protocol.state = ProtocolState::Running;
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        advance_test_clock(&clock, Duration::from_secs(3));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::NetworkInterrupted { .. })),
+            "the interruption warning must not fire exactly at its threshold"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::NetworkInterrupted { .. }))
+                .count(),
+            1,
+            "the interruption warning must fire once its threshold has elapsed"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1_999));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Disconnected)),
+            "disconnect must not fire exactly at its timeout threshold"
+        );
+
+        advance_test_clock(&clock, Duration::from_millis(1));
+        let events = protocol.poll(&connect_status).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Disconnected))
+                .count(),
+            1,
+            "disconnect must fire once its timeout has elapsed"
+        );
     }
 
     #[test]
