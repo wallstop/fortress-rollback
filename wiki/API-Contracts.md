@@ -6,8 +6,8 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.3
-**Date:** August 26, 2026
+**Version:** 1.4
+**Date:** August 27, 2026
 **Status:** Maintained high-impact subset
 
 This document specifies preconditions, postconditions, and invariants for selected high-impact public APIs. Rustdoc remains the authoritative reference for the complete public surface. This document complements formal-spec.md with behavioral contracts that benefit from a consolidated view.
@@ -17,18 +17,20 @@ This document specifies preconditions, postconditions, and invariants for select
 ## Table of Contents
 
 1. [Contract Notation](#contract-notation)
-2. [Frame](#frame)
-3. [SessionBuilder](#sessionbuilder)
-4. [P2PSession](#p2psession)
-5. [SpectatorSession](#spectatorsession)
-6. [SyncTestSession](#synctestsession)
-7. [GameStateCell](#gamestatecell)
-8. [Request Handling](#request-handling)
-9. [Error Catalog](#error-catalog)
-10. [Event Catalog](#event-catalog)
-11. [Network Stream Framing](#network-stream-framing)
-12. [Cross-Cutting Invariants](#cross-cutting-invariants)
-13. [Revision History](#revision-history)
+2. [Public API Audit Ledger](#public-api-audit-ledger)
+3. [Frame](#frame)
+4. [SessionBuilder](#sessionbuilder)
+5. [P2PSession](#p2psession)
+6. [SpectatorSession](#spectatorsession)
+7. [SyncTestSession](#synctestsession)
+8. [GameStateCell](#gamestatecell)
+9. [Request Handling](#request-handling)
+10. [Error Catalog](#error-catalog)
+11. [Event Catalog](#event-catalog)
+12. [Network Stream Framing](#network-stream-framing)
+13. [Fallible JSON and Compression](#fallible-json-and-compression)
+14. [Cross-Cutting Invariants](#cross-cutting-invariants)
+15. [Revision History](#revision-history)
 
 ---
 
@@ -42,6 +44,20 @@ Each API is documented with:
 - **Errors**: Conditions that cause specific errors
 - **Panics**: Should always be "Never" for public APIs
 - **Invariants**: Properties preserved across the call
+
+---
+
+## Public API Audit Ledger
+
+This ledger records dispositioned rows from the active public API and integration audit. It grows
+with that audit; absence from this maintained high-impact subset is not an implicit approval.
+
+| Owner / surface | Features / platforms | Usage evidence | Risk hypothesis | Disposition / evidence |
+| --- | --- | --- | --- | --- |
+| `SessionBuilder::{try_,}start_spectator_session{,_multi}` | Core; native and WASM with a compatible socket | Spectator session tests, `sync-send`, `hot-join`, browser compile | `Option` erased startup errors; empty or duplicate failover hosts created ambiguous/unreachable sessions | Keep legacy `Option` wrappers; add exact Result APIs and pre-endpoint host validation. Issue #310 regressions cover exact errors, stable duplicate indices, and unchanged host order. |
+| `rle::{try_,}encode` | Core; all targets | Protocol compression, unit/property/fuzz tests | Allocation refusal collapsed to the same `[]` as valid empty input | Keep `try_encode` as the authoritative API; retain `encode` only as a documented violation-reporting compatibility fallback. Injected allocation refusal is distinct from `Ok([])`; golden RLE bytes are unchanged. |
+| `network::compression::{try_,}{delta_,}encode` | Doc-hidden core surface; all targets | Protocol send path and compression unit/property tests | Public empty-vector wrappers hid invalid widths or allocation refusal | Expose the existing structured Result paths; retain explicitly documented wrappers. Protocol send paths already use the fallible forms; wire bytes are unchanged. |
+| `{SessionMetrics,PeerMetrics,HotJoinMetrics,SpecViolation,InvariantViolation}::{try_,}to_json{,_pretty}` | `json`; all targets supported by `serde_json` | Metrics/telemetry tests and operator documentation | `Option<String>` erased serializer/allocation causes; direct `serde_json::to_string` could not make output reservation fallible | Add shared exact-count, fallible-reserve Result APIs with source-preserving `JsonSerializationError`; keep `Option` wrappers as explicit `.ok()` compatibility behavior. Failure injection and byte-identity regressions cover both formats. |
 
 ---
 
@@ -1042,6 +1058,38 @@ One session update may invoke this method multiple times. Asynchronous adapters 
 either admit a bounded burst or apply an explicit freshness-preserving batch/drop policy; they do
 not wait for a socket-wide outbound buffer to empty after each message.
 
+## Fallible JSON and Compression
+
+### `try_to_json` / `try_to_json_pretty`
+
+**Pre:** The `json` feature is enabled.
+
+**Post:** Returns the same compact or pretty UTF-8 bytes as `serde_json`. A counting pass without
+an output buffer determines the exact length; the output is reserved fallibly before the writing
+pass.
+
+**Errors:** `JsonSerializationError::Serialization` preserves the `serde_json::Error`;
+`Allocation` preserves `TryReserveError` and the requested byte count; `InvalidUtf8` preserves the
+conversion error if the serializer violates its UTF-8 contract.
+
+**Compatibility:** `to_json` / `to_json_pretty` return `.ok()` from the corresponding fallible
+method. Their `None` value intentionally erases the cause and is not recommended for incident data.
+
+**Panics:** Never
+
+### `rle::try_encode` and `network::compression::try_encode` / `try_delta_encode`
+
+**Post:** Successful bytes are identical to the legacy wrappers and the frozen protocol format.
+Valid empty input returns `Ok(vec![])`.
+
+**Errors:** Structured input-width/reference errors and output allocation refusal remain observable.
+
+**Compatibility:** `encode` / `delta_encode` report a violation and return `vec![]` on error. Since
+valid empty input has the same vector shape, callers that need to tell those states apart use the
+fallible API.
+
+**Panics:** Never
+
 ## Cross-Cutting Invariants
 
 Relevant session and transport APIs preserve these invariants:
@@ -1057,6 +1105,7 @@ Relevant session and transport APIs preserve these invariants:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.4     | 2026-08-27 | Added the dispositioned public API audit ledger and fallible JSON/compression contracts, including compatibility fallback and byte-stability guarantees. |
 | 1.3     | 2026-08-26 | Scoped the ledger to its maintained high-impact subset; added total `Frame` arithmetic and conversion contracts; corrected configurable queue invariants and protocol-v2 framing terminology. |
 | 1.2     | 2026-07-12 | Added bounded TCP/byte-stream framing contracts for `codec::encode_framed` and `FrameDecoder`. |
 | 1.1     | 2026-05-07 | Added contracts for runtime input delay (`P2PSession::set_input_delay`, `P2PSession::input_delay`), configurable disconnect behavior (`SessionBuilder::with_disconnect_behavior`, `P2PSession::disconnect_behavior`), and explicit graceful peer removal (`P2PSession::remove_player`). Documented new `InvalidRequestKind`/`InternalErrorKind` variants and the new `FortressEvent::PeerDropped` and `FortressEvent::InputDelayRecommendation` events. Added Event Catalog. |

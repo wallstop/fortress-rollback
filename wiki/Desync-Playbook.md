@@ -22,8 +22,9 @@ match as authoritative until investigators find the cause.
    packet records when available. They may expose equivocation that a single merged replay cannot.
 
 With the `json` feature, `SessionMetrics`, `PeerMetrics`, and `SpecViolation` provide
-`to_json()` and `to_json_pretty()` helpers. Never include credentials or player secrets in an
-incident bundle.
+`try_to_json()` and `try_to_json_pretty()` helpers that preserve serialization and allocation
+errors. Treat an export error as an explicit partial-bundle condition; do not replace it with empty
+output. Never include credentials or player secrets in an incident bundle.
 
 ## Triage
 

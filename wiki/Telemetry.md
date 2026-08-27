@@ -259,8 +259,16 @@ Each violation carries structured context:
 | `new(severity, kind, message, location)` | Create a new violation |
 | `with_frame(frame)` | Attach a frame reference |
 | `with_context(key, value)` | Add a key-value context entry |
-| `to_json()` | `Option<String>` -- JSON string (requires `json` feature) |
-| `to_json_pretty()` | `Option<String>` -- pretty JSON string (requires `json` feature) |
+| `try_to_json()` | `Result<String, JsonSerializationError>` -- compact JSON with exact errors (requires `json` feature) |
+| `try_to_json_pretty()` | `Result<String, JsonSerializationError>` -- pretty JSON with exact errors (requires `json` feature) |
+| `to_json()` | Compatibility `Option<String>` that maps every JSON error to `None` |
+| `to_json_pretty()` | Pretty compatibility wrapper with the same error-erasing fallback |
+
+The fallible helpers first count the exact encoded length without building an output buffer,
+reserve that buffer with `try_reserve_exact`, and then serialize without further growth.
+`JsonSerializationError` retains the original serializer or allocation error through
+`std::error::Error::source`. Compact and pretty output remain byte-for-byte identical to the
+corresponding `serde_json` helpers.
 
 ### `CollectingObserver`
 

@@ -102,7 +102,7 @@ ggrs = "0.11"
 
 # After
 [dependencies]
-fortress-rollback = "0.13"  # current version
+fortress-rollback = "0.14"  # current version
 ```
 
 If you were using a git/path dependency, point it to the new repository:
@@ -301,8 +301,11 @@ The `sync-send` feature flag remains compatible. Fortress Rollback adds several 
 | `hot-join`           | Peers can join/rejoin a running session via a state snapshot (requires `Config::State: Serialize + DeserializeOwned`) | ✅               |
 | `z3-verification-bundled` | `z3-verification` with a bundled Z3 build (no system Z3 needed) | ✅               |
 
-> **Note:** The `json` feature enables `to_json()` and `to_json_pretty()` methods on telemetry types.
-> Without this feature, the `serde_json` dependency is not included, reducing the default dependency count.
+> **Note:** The `json` feature enables Result-returning `try_to_json()` and
+> `try_to_json_pretty()` methods on telemetry and metrics types. The legacy `to_json()` and
+> `to_json_pretty()` methods remain `Option<String>` compatibility wrappers that erase the
+> `JsonSerializationError`; migrate to the `try_` forms when failure details matter. Without this
+> feature, the `serde_json` dependency is not included, reducing the default dependency count.
 
 For detailed feature documentation, see the [User Guide](User-Guide#feature-flags).
 

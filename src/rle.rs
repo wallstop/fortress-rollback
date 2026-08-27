@@ -151,9 +151,12 @@ mod varint {
 ///
 /// * `buf` - The input bytes to encode
 ///
-/// # Returns
+/// # Compatibility fallback
 ///
-/// The RLE-encoded bytes.
+/// This wrapper returns an empty vector and reports a violation if
+/// [`try_encode`] cannot reserve the output. Empty input also encodes
+/// successfully to an empty vector, so use [`try_encode`] when valid empty
+/// output must be distinguishable from allocation failure.
 ///
 /// # Example
 ///
@@ -192,10 +195,22 @@ pub fn try_encode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
 
 /// Encode a bitfield starting at a specific offset.
 fn try_encode_with_offset(buf: &[u8], offset: usize) -> RleResult<Vec<u8>> {
+    try_encode_with_offset_and_reserve(buf, offset, |output, encoded_len| {
+        output.try_reserve_exact(encoded_len)
+    })
+}
+
+fn try_encode_with_offset_and_reserve<R>(
+    buf: &[u8],
+    offset: usize,
+    reserve: R,
+) -> RleResult<Vec<u8>>
+where
+    R: FnOnce(&mut Vec<u8>, usize) -> Result<(), std::collections::TryReserveError>,
+{
     let encoded_len = encode_len_with_offset(buf, offset);
     let mut enc = Vec::new();
-    enc.try_reserve_exact(encoded_len)
-        .map_err(|_err| allocation_failed("rle.encode", encoded_len))?;
+    reserve(&mut enc, encoded_len).map_err(|_err| allocation_failed("rle.encode", encoded_len))?;
 
     let slice = match buf.get(offset..) {
         Some(s) => s,
@@ -538,6 +553,7 @@ fn decode_len_with_offset(
 )]
 mod tests {
     use super::*;
+    use crate::InvalidRequestKind;
 
     // ================
     // Test-only types
@@ -638,6 +654,26 @@ mod tests {
         let encoded = encode(&data);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn try_encode_distinguishes_valid_empty_output_from_allocation_failure() {
+        let empty = try_encode([]).expect("empty input is valid");
+        assert!(empty.is_empty());
+
+        let error = try_encode_with_offset_and_reserve(&[1_u8], 0, |_, _| {
+            Vec::<u8>::new().try_reserve(usize::MAX)
+        })
+        .expect_err("injected allocation refusal must be observable");
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::AllocationFailed {
+                    context: "rle.encode",
+                    requested_elements: 2,
+                },
+            }
+        ));
     }
 
     #[test]

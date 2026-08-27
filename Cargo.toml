@@ -5,7 +5,7 @@ members = [".", "tests/network-peer", "tests/wasm-browser-smoke"]
 
 [package]
 name = "fortress-rollback"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["wallstop <wallstop@wallstopstudios.com>"]
 edition = "2021"
 rust-version = "1.86"  # Minimum Supported Rust Version (MSRV) - required by criterion 0.8.1
@@ -291,8 +291,8 @@ z3-verification-bundled = ["z3-verification", "z3?/bundled"]
 # Enable tokio async runtime integration for async socket adapters
 # Provides TokioUdpSocket for use with async networking code
 tokio = ["dep:tokio"]
-# Enable JSON serialization for telemetry types (adds serde_json dependency)
-# Provides to_json() and to_json_pretty() methods on SpecViolation and InvariantViolation
+# Enable fallible JSON serialization for telemetry and metrics (adds serde_json dependency).
+# Provides try_to_json()/try_to_json_pretty() plus compatibility Option wrappers.
 json = ["dep:serde_json"]
 
 [dependencies]

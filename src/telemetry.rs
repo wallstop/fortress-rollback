@@ -23,6 +23,11 @@
 
 use crate::network::network_stats::NetworkStats;
 use crate::sync::Mutex;
+#[cfg(feature = "json")]
+use crate::{
+    json::{serialize_json, JsonStyle},
+    JsonSerializationError,
+};
 use crate::{Frame, PlayerHandle};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -281,11 +286,12 @@ impl SpecViolation {
         self
     }
 
-    /// Serializes this violation to a JSON string.
+    /// Serializes this violation to compact JSON while preserving errors.
     ///
-    /// This is a convenience method for programmatic access to violation data.
-    /// Returns `None` if serialization fails (which should not happen for
-    /// well-formed violations).
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
     ///
     /// # Example
     ///
@@ -302,24 +308,46 @@ impl SpecViolation {
     ///
     /// # #[cfg(feature = "json")]
     /// # {
-    /// if let Some(json) = violation.to_json() {
-    ///     assert!(json.contains(r#""frame":42"#));
-    /// }
+    /// let json = violation.try_to_json()?;
+    /// assert!(json.contains(r#""frame":42"#));
     /// # }
+    /// # Ok::<(), fortress_rollback::JsonSerializationError>(())
     /// ```
+    #[cfg(feature = "json")]
+    pub fn try_to_json(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Compact)
+    }
+
+    /// Serializes this violation to a compact JSON string.
+    ///
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json`](Self::try_to_json). Use the fallible method when the
+    /// failure cause matters.
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
-        serde_json::to_string(self).ok()
+        self.try_to_json().ok()
+    }
+
+    /// Serializes this violation to pretty-printed JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json_pretty(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Pretty)
     }
 
     /// Serializes this violation to a pretty-printed JSON string.
     ///
-    /// Like [`to_json`](Self::to_json), but with indentation for readability.
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json_pretty`](Self::try_to_json_pretty).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
-        serde_json::to_string_pretty(self).ok()
+        self.try_to_json_pretty().ok()
     }
 }
 
@@ -1416,21 +1444,46 @@ impl InvariantViolation {
         self
     }
 
-    /// Serializes this violation to a JSON string.
+    /// Serializes this violation to compact JSON while preserving errors.
     ///
-    /// Returns `None` if serialization fails (which should not happen for
-    /// well-formed violations).
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Compact)
+    }
+
+    /// Serializes this violation to a compact JSON string.
+    ///
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json`](Self::try_to_json).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json(&self) -> Option<String> {
-        serde_json::to_string(self).ok()
+        self.try_to_json().ok()
+    }
+
+    /// Serializes this violation to pretty-printed JSON while preserving errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonSerializationError`] if serialization fails or the exact
+    /// output buffer cannot be reserved.
+    #[cfg(feature = "json")]
+    pub fn try_to_json_pretty(&self) -> Result<String, JsonSerializationError> {
+        serialize_json(self, JsonStyle::Pretty)
     }
 
     /// Serializes this violation to a pretty-printed JSON string.
+    ///
+    /// This compatibility wrapper returns `None` for any error from
+    /// [`try_to_json_pretty`](Self::try_to_json_pretty).
     #[cfg(feature = "json")]
     #[must_use]
     pub fn to_json_pretty(&self) -> Option<String> {
-        serde_json::to_string_pretty(self).ok()
+        self.try_to_json_pretty().ok()
     }
 }
 
@@ -3032,7 +3085,8 @@ mod tests {
                 "test.rs:42",
             );
 
-            let json = violation.to_json().unwrap();
+            let json = violation.try_to_json().unwrap();
+            assert_eq!(violation.to_json().as_deref(), Some(json.as_str()));
             assert!(json.contains(r#""severity":"warning""#));
             assert!(json.contains(r#""kind":"frame_sync""#));
             assert!(json.contains(r#""message":"test message""#));
@@ -3051,7 +3105,8 @@ mod tests {
             )
             .with_frame(Frame::new(42));
 
-            let json = violation.to_json().unwrap();
+            let json = violation.try_to_json().unwrap();
+            assert_eq!(violation.to_json().as_deref(), Some(json.as_str()));
             assert!(json.contains(r#""frame":42"#));
             // Verify it's a number, not a string
             assert!(!json.contains(r#""frame":"42""#));
@@ -3101,7 +3156,11 @@ mod tests {
                 "test.rs:1",
             );
 
-            let json_pretty = violation.to_json_pretty().unwrap();
+            let json_pretty = violation.try_to_json_pretty().unwrap();
+            assert_eq!(
+                violation.to_json_pretty().as_deref(),
+                Some(json_pretty.as_str())
+            );
             // Pretty JSON should have newlines
             assert!(json_pretty.contains('\n'));
             assert!(json_pretty.contains("  ")); // indentation
@@ -3112,7 +3171,8 @@ mod tests {
             let violation = InvariantViolation::new("TestType", "value out of range")
                 .with_details("value=-5, expected>=0");
 
-            let json = violation.to_json().unwrap();
+            let json = violation.try_to_json().unwrap();
+            assert_eq!(violation.to_json().as_deref(), Some(json.as_str()));
             assert!(json.contains(r#""type_name":"TestType""#));
             assert!(json.contains(r#""invariant":"value out of range""#));
             assert!(json.contains(r#""details":"value=-5, expected>=0""#));

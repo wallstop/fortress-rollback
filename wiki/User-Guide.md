@@ -2052,7 +2052,7 @@ When enabled, the `Config` and `NonBlockingSocket` traits require their associat
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send"] }
+fortress-rollback = { version = "0.14", features = ["sync-send"] }
 ```
 
 **Without `sync-send`:**
@@ -2087,7 +2087,7 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["tokio"] }
+fortress-rollback = { version = "0.14", features = ["tokio"] }
 ```
 
 **Example usage:**
@@ -2124,11 +2124,14 @@ transport integrations before session ownership. With `sync-send`, `TokioUdpSock
 
 #### `json`
 
-Enables JSON serialization methods (`to_json()` and `to_json_pretty()`) on telemetry types like `SpecViolation` and `InvariantViolation`. This is useful for structured logging, monitoring systems, or exporting violation data.
+Enables fallible JSON serialization methods (`try_to_json()` and `try_to_json_pretty()`) on
+`SessionMetrics`, `PeerMetrics`, `HotJoinMetrics`, `SpecViolation`, and `InvariantViolation`. This
+is useful for structured logging, monitoring systems, or exporting telemetry without losing
+serializer or allocation failures.
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["json"] }
+fortress-rollback = { version = "0.14", features = ["json"] }
 ```
 
 **Example usage:**
@@ -2144,13 +2147,17 @@ let violation = SpecViolation::new(
 );
 
 // With the `json` feature enabled:
-if let Some(json) = violation.to_json() {
-    println!("Violation: {}", json);
-    // Output: {"severity":"warning","kind":"frame_sync","message":"frame mismatch detected",...}
-}
+let json = violation.try_to_json()?;
+println!("Violation: {}", json);
+// Output: {"severity":"warning","kind":"frame_sync","message":"frame mismatch detected",...}
+
+# Ok::<(), fortress_rollback::JsonSerializationError>(())
 ```
 
-**Note:** Without the `json` feature, the telemetry types still implement `serde::Serialize` and can be serialized with any serde-compatible serializer (like bincode). The `json` feature specifically enables the convenience `to_json()` methods and adds the `serde_json` dependency.
+`to_json()` and `to_json_pretty()` remain available as compatibility wrappers. They return `None`
+for every `JsonSerializationError`; prefer the `try_` methods whenever the failure cause matters.
+Without the `json` feature, these types still implement `serde::Serialize` and can be serialized
+with any serde-compatible serializer (like bincode).
 
 #### `paranoid`
 
@@ -2158,7 +2165,7 @@ Enables runtime invariant checking in release builds. Normally, invariant checks
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["paranoid"] }
+fortress-rollback = { version = "0.14", features = ["paranoid"] }
 ```
 
 **Use cases:**
@@ -2177,7 +2184,7 @@ dropped slot. This feature adds `Serialize + DeserializeOwned` bounds to `Config
 
 ```toml
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["hot-join"] }
+fortress-rollback = { version = "0.14", features = ["hot-join"] }
 ```
 
 #### `loom`
@@ -2257,15 +2264,15 @@ Most features are independent and can be combined freely. Here's a matrix showin
 ```toml
 # Standard multi-threaded game
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send"] }
+fortress-rollback = { version = "0.14", features = ["sync-send"] }
 
 # Async server with Tokio
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send", "tokio"] }
+fortress-rollback = { version = "0.14", features = ["sync-send", "tokio"] }
 
 # Debugging production issues
 [dependencies]
-fortress-rollback = { version = "0.13", features = ["sync-send", "paranoid"] }
+fortress-rollback = { version = "0.14", features = ["sync-send", "paranoid"] }
 
 ```
 
@@ -3974,9 +3981,9 @@ let violation = SpecViolation::new(
 // Direct JSON serialization
 let json = serde_json::to_string(&violation)?;
 
-// Or use the convenience method (returns Option<String>)
-let json = violation.to_json();
-let json_pretty = violation.to_json_pretty();
+// Or use the fallible convenience methods (preserve JsonSerializationError)
+let json = violation.try_to_json()?;
+let json_pretty = violation.try_to_json_pretty()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

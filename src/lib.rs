@@ -50,6 +50,12 @@
 )]
 use std::{fmt::Debug, hash::Hash};
 
+#[cfg(feature = "json")]
+mod json;
+
+#[cfg(feature = "json")]
+pub use json::JsonSerializationError;
+
 pub use error::{
     DeltaDecodeReason, FortressError, IndexOutOfBounds, InternalErrorKind, InvalidFrameReason,
     InvalidRequestKind, RleDecodeReason, SerializationErrorKind, SocketErrorKind,
@@ -152,7 +158,7 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// ```toml
 /// [dependencies]
-/// fortress-rollback = { version = "0.13", features = ["tokio"] }
+/// fortress-rollback = { version = "0.14", features = ["tokio"] }
 /// ```
 ///
 /// # Example

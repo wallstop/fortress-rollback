@@ -83,6 +83,11 @@ impl From<CompressionError> for FortressError {
 }
 
 /// Encodes input bytes using XOR delta encoding followed by RLE compression.
+///
+/// This compatibility wrapper returns an empty vector and reports a violation
+/// when [`try_encode`] fails. Because an empty pending-input iterator also
+/// encodes successfully to an empty vector, callers that need to distinguish
+/// valid empty output from failure must use [`try_encode`].
 pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<u8>>) -> Vec<u8> {
     match try_encode(reference, pending_input) {
         Ok(encoded) => encoded,
@@ -98,8 +103,13 @@ pub fn encode<'a>(reference: &[u8], pending_input: impl Iterator<Item = &'a Vec<
     }
 }
 
-/// Encodes input bytes using fallible delta-buffer allocation.
-pub(crate) fn try_encode<'a>(
+/// Encodes input bytes using fallible delta-buffer and RLE allocation.
+///
+/// # Errors
+///
+/// Returns a structured [`FortressError`] when the reference/input widths are
+/// invalid or an output allocation is refused.
+pub fn try_encode<'a>(
     reference: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Result<Vec<u8>, FortressError> {
@@ -110,6 +120,11 @@ pub(crate) fn try_encode<'a>(
 }
 
 /// Performs XOR delta encoding against a reference.
+///
+/// This compatibility wrapper returns an empty vector and reports a violation
+/// when [`try_delta_encode`] fails. Because an empty pending-input iterator also
+/// encodes successfully to an empty vector, callers that need to distinguish
+/// valid empty output from failure must use [`try_delta_encode`].
 pub fn delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
@@ -129,7 +144,12 @@ pub fn delta_encode<'a>(
 }
 
 /// Performs XOR delta encoding against a reference with fallible allocation.
-pub(crate) fn try_delta_encode<'a>(
+///
+/// # Errors
+///
+/// Returns a structured [`FortressError`] when the reference is empty, an input
+/// width differs from the reference, or output allocation is refused.
+pub fn try_delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Result<Vec<u8>, FortressError> {
