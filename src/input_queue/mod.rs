@@ -2733,6 +2733,33 @@ mod input_queue_tests {
         );
     }
 
+    /// At the terminal frame, saturating frame addition can produce a candidate
+    /// equal to `last_added_frame`. A rejected insert must still fail the whole
+    /// delay update even though that equality makes the postcondition appear to
+    /// hold.
+    #[test]
+    fn frame_delay_increase_at_maximum_frame_reports_rejected_insert() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid queue length");
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 7 })),
+            Frame::new(0)
+        );
+        queue.last_added_frame = Frame::new(i32::MAX);
+        let before = queue.clone();
+
+        let error = queue
+            .set_frame_delay(1)
+            .expect_err("a rejected saturated filler must fail the delay update");
+        assert!(matches!(
+            error,
+            FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::InputQueueGapFillFailed { frame }
+            } if frame == Frame::new(i32::MAX)
+        ));
+        assert_queue_unchanged(&queue, &before);
+    }
+
     /// A full recovery batch may need every ring slot for frames at or after
     /// the rollback point. Older confirmed history must be reclaimed without
     /// evicting that rollback point or corrupting the full-ring head/tail

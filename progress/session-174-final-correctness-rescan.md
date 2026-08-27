@@ -46,10 +46,15 @@ initial source scan could miss whitespace variants and accept a failed scanner p
 workflow and its executable contract test now cover both paths. The final frozen diff produced no
 additional concrete correctness findings.
 
+After PR publication, a local diff-scoped mutation slice found that changing the input gap-fill
+failure guard from OR to AND survived the existing full-queue test. A terminal-frame regression now
+isolates the rejected-insert branch when saturating addition leaves `last_added_frame` equal to the
+candidate. The formerly missed mutant is caught.
+
 ## Local Evidence
 
 - Strict production Clippy passed with panic, unwrap, expect, unreachable, todo, unimplemented,
-  arithmetic, and indexing lints denied under the composite production feature set.
+  and indexing lints denied under the Safety workflow feature set.
 - Baseline Nextest passed 2,938/2,938 with 71 skipped; hot-join Nextest passed 3,196/3,196 with 72
   skipped; rustdoc passed 169 cases with 54 ignored.
 - Focused regressions passed for configuration/timing, floor wrap, chaos `Duration::MAX`, empty
@@ -58,6 +63,8 @@ additional concrete correctness findings.
   seeds 0 through 2. Kani proved the synchronization counter and bounds harnesses.
 - The complete agent preflight, 38 Safety workflow tests, actionlint, API snapshot regeneration,
   Markdown/link/wiki checks, `cargo audit`, `cargo deny check`, and `git diff --check` passed.
+- The configuration mutation slice reports 11 caught, three unviable, zero missed or timed out; the
+  formerly surviving input gap-fill guard mutant is caught in its focused rerun.
 
 ## Commits
 
