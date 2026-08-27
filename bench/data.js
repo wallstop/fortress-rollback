@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787846740287,
+  "lastUpdate": 1787868803924,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ee8cb20a410f3a7403fba2dd11bda7b2a8efbc8a",
-          "message": "Add frozen-queue network blip census row (#214)\n\n## Summary\n\nAdds the next M3 section 6.4 premise-asserted simulation census row for\na frozen dropped slot plus a sub-timeout survivor link blip.\n\n## What changed\n\n- Adds harness-level drained peer event counters, both aggregate and\nsplit by observing peer.\n- Adds payload-keyed peer event counters by observing peer so census\nrows can assert the exact endpoint named by drained events.\n- Adds `frozen_queue_survivors_resume_after_network_blip`, a hand-built\nschedule that:\n- gracefully removes peer 2 under `ContinueWithout`, freezing the\ndeparted slot;\n- blocks live survivor traffic between peers 0 and 1 for a sub-timeout\nwindow;\n- heals at the actual blip restoration step, so bounded recovery is\nanchored to the real link restoration;\n  - asserts blocked traffic was actually dropped by the fabric;\n- asserts both live survivors observed `PeerDropped` for removed peer 2;\n- asserts each survivor observed `NetworkInterrupted` and\n`NetworkResumed` for the other survivor's address;\n  - asserts bounded post-heal recovery ran and passed;\n  - asserts survivor confirmation progress and deterministic replay.\n- Extends the harness default-vs-explicit input regression to cover the\nnew event counter fields.\n\n## Validation\n\n- `cargo test --test simulation\nfrozen_queue_survivors_resume_after_network_blip -- --nocapture`\n- `cargo test --test simulation census -- --nocapture`\n- `cargo test --test simulation\ndefault_run_matches_explicit_stub_input_run -- --nocapture`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `git diff --check`\n- `npx markdownlint PLAN.md\nprogress/session-088-frozen-queue-network-blip-census.md --config\n.markdownlint.json --fix`\n- `cargo nextest run --no-capture` -> `2442 passed, 58 skipped`\n\n## Review follow-up\n\nCursor bugbot findings from the first revision are addressed in commit\n`7a7c5b6`: recovery is anchored at `blip_end`, event assertions are\npayload-specific, and `PeerDropped` propagation is asserted for survivor\n1. A second adversarial sub-agent review reported zero issues.\n\n## Notes\n\nPLAN.md and progress logs are updated locally per agent workflow, but\nthis repository ignores `PLAN.md` and `progress/**`. The H-RING\ncandidate row was also explored and produced a real red result; it\nshould be handled as a separate red-green investigation rather than\nincluded here.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests and harness reporting;\nproduction rollback/session code is untouched.\n> \n> **Overview**\n> Extends the simulation **harness** so census rows can assert on\n**drained peer events**, not only end-state oracles. **`RunReport`** now\ncarries aggregate peer event counts, per-observer counts, and\n**payload-keyed** counts (`PeerEventKey` / `PeerEventPayload`) built\nwhile draining each peer’s event queue; **`peer_addr`** is exposed to\ntests for address-specific keys.\n> \n> Adds the M3 §6.4 census\n**`frozen_queue_survivors_resume_after_network_blip`**: a 3-peer\nschedule that gracefully removes peer 2 under **`ContinueWithout`**,\nblocks survivor traffic between peers 0 and 1 for a sub-timeout window,\nheals when links unblock, then asserts blocked drops, bounded post-heal\nrecovery, **`NetworkInterrupted`/`NetworkResumed`** per remote address,\n**`PeerDropped`** for the removed slot, survivor confirmation progress,\nand deterministic **`trace_hash`** replay.\n> \n> The default-vs-explicit stub input harness regression now also\ncompares the new event counter fields.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfb198c31267102f08c07e10ca9d4258471c150dc. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-08T13:56:20-07:00",
-          "tree_id": "bee5c93938c953f2f877122cb8b4ddc7a2157495",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ee8cb20a410f3a7403fba2dd11bda7b2a8efbc8a"
-        },
-        "date": 1783544455467,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 163,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 460,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 716,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1047,
-            "range": "± 68",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128279,
-            "range": "± 2362",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44197,
-            "range": "± 455",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 84",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3755,6 +3629,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6580,
             "range": "± 126",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6cdbf0669ed60956527e791b5356dbff3b2b4382",
+          "message": "fix: harden timing and serial correctness (#315)\n\n## Summary\n\n- validate synchronization and disconnect timing at every construction\nboundary\n- replace overflow-prone absolute deadlines with saturating elapsed-time\ncomparisons\n- make floor round trips wrap-safe with reserved-zero serial ordering\nand bootstrap spoof protection\n- harden chaos delays, saved-state access, input rollback, and\nsynchronization invariants against panic\n- enforce the production zero-panic contract by banning `debug_assert!`\nunder `src/`\n- close mutation gaps in gap-fill rejection, symmetric jitter,\nready-packet ordering, protocol timer equality, floor serial ordering,\ninvariant detection, and empty drop certificates\n- stop tracking ignored local `progress/` logs\n- synchronize the changelog, API/formal contracts, user guide, public\nAPI census, and wiki mirrors\n\nCloses #297.\n\n## Red/green evidence\n\nRed regressions reproduced:\n\n- zero and sub-millisecond synchronization intervals\n- disconnect notification delay exceeding disconnect timeout\n- `Instant + Duration::MAX` protocol and chaos scheduling\n- floor-round wraparound and a forged maximum bootstrap reply\n- empty saved-state modulo\n- paranoid-build production `debug_assert!` panics\n- surviving mutations in saturated gap-fill rejection, nonzero jitter,\nzero-reorder ready sorting, protocol timer equality, floor serial\nhalf-range ordering, SyncLayer invariant detection, and an empty\ncoordinated-drop certificate\n\nGreen local evidence:\n\n- strict production Clippy with panic, unwrap, expect, unreachable,\ntodo, unimplemented, and indexing lints denied\n- final baseline Nextest: 2,941 passed, 71 skipped\n- final all-feature workspace Nextest: 3,392 passed, 72 skipped;\nall-feature Clippy passed with warnings denied\n- earlier full hot-join Nextest: 3,196 passed, 72 skipped\n- rustdoc: 169 passed, 54 ignored\n- pinned Miri seeds 0–2 for maximum timers, floor wrap, chaos delay, and\nempty saved states\n- Kani synchronization counter and bounds proofs\n- complete agent preflight; 38 Safety workflow tests; actionlint; API\ncensus; Markdown, link, and wiki checks\n- `cargo audit`, `cargo deny check`, and all four lockfile dry-run\nupdates\n- configuration mutation slice: 11 caught, 3 unviable, 0 missed/timeouts\n- iterated 27-mutant input/chaos/saved-state boundary corpus with no\nremaining scored survivor\n- exact hosted mutation follow-up: 5 caught, 1 structurally unviable, 0\nmissed/timeouts across invariant, serial, timer, and coordinated-drop\ntargets\n- subsequent hosted aggregate findings (interruption/shutdown equality\nand invariant-checker execution): all 4 caught in the exact focused\nlocal rerun\n- release-profile review finding fixed: diagnostic-only invariant test\nis gated to debug/paranoid; overflow-check and warnings-as-errors\nrelease reproductions pass\n- final hosted diff corpus contains 151 production mutants for\nauthoritative classification\n- zero tracked `progress/**` paths; ignored progress files remain\navailable locally\n\n## Mutation scope\n\nThe `sync-send` and non-`sync-send` `ChaosSocket` trait implementations\nare mutually exclusive. Their wrappers now delegate directly to shared,\nmutation-tested inherent methods, and the mutation configuration\nexcludes only those trivial wrappers so the uncompiled copy cannot\ncreate a guaranteed survivor.\n\n## Dependency and main-branch audit\n\nAll 17 workflows on base commit `f610fbd` completed successfully.\nDry-run updates selected zero compatible lockfile changes. bincode-next\n3.1.1 and serial_test 4.0.1 exceed the project's Rust 1.86 MSRV, so the\nlatest compatible releases remain selected.\n\n## Review notes\n\nThe main-thread adversarial loop found and fixed a bootstrap\nmaximum-round bypass plus two fail-open Safety CI scan paths.\nPost-publication mutation passes found and fixed the boundary and\ninvalid-state test gaps above plus one feature-gating blind spot. The\nfinal frozen diff had no remaining concrete findings.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Touches core UDP protocol timing, floor-gossip ordering across serial\nwrap, and session startup validation—areas that affect sync, disconnect\nbehavior, and relay confirmation if regressions slip through.\n> \n> **Overview**\n> This PR hardens **network timing, floor-gossip serials, and failure\nmodes** so debug/paranoid builds and extreme configs cannot panic or\nstall sessions.\n> \n> **Configuration** adds public **`SyncConfig::validate`** plus\n**`validate_disconnect_timing`**, wired into session builders and\n**`UdpProtocol::new`**. Invalid sync roundtrip counts, sub-millisecond\nintervals, and a notify delay greater than disconnect timeout now fail\nwith structured errors before endpoints are created.\n> \n> **Protocol timers** stop using absolute `Instant` deadlines\n(`shutdown_timeout`, keepalive, disconnect, sync retry). They compare\n**elapsed durations** with saturating math, use **strictly-after**\ninterval boundaries in poll logic, and guard sync roundtrip decrements\nwith **`checked_sub`**.\n> \n> **Floor-round relay** replaces plain numeric `round_seq` ordering with\n**half-range wrapping comparison**, **reserved serial 0**, and bootstrap\nprotection against forged high serials—so post-`u32::MAX` replies stay\nvalid and stale pre-wrap packets are dropped. Invariant checks\n**`report_violation`** instead of **`debug_assert!`**.\n> \n> **`ChaosSocket`** schedules delivery from **enqueue time + delay**\n(not `deliver_at`), saturates stats, shares **`send_to_impl`** between\nfeature-gated trait impls, and extends **cargo-mutants** excludes for\nthe thin wrapper methods.\n> \n> **Input queue, sync layer, metrics, saved states, and coordinated\ndrop** replace remaining production **`debug_assert!`** paths with\ntelemetry or fail-closed returns; gap-fill now fails when a saturated\ninsert looks successful at **`i32::MAX`**. **Safety CI** fails if any\n**`debug_assert`** variant appears under **`src/`**.\n> \n> Docs/changelog/API census/wiki mirror the new validation and serial\nsemantics; several **`progress/`** session logs are removed from the\ntree.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfa8b771d9a2993fef5f36e256bf2ae220fc9b7e8. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-27T15:04:38-07:00",
+          "tree_id": "e36487a931f33c26b75337560eb4554ce5264e4d",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/6cdbf0669ed60956527e791b5356dbff3b2b4382"
+        },
+        "date": 1787868801470,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 59231,
+            "range": "± 705",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 42558,
+            "range": "± 386",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1863,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 99",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2772,
+            "range": "± 223",
             "unit": "ns/iter"
           }
         ]
