@@ -6,7 +6,7 @@
 
 # Fortress Rollback API Contracts
 
-**Version:** 1.4
+**Version:** 1.5
 **Date:** August 27, 2026
 **Status:** Maintained high-impact subset
 
@@ -58,6 +58,8 @@ with that audit; absence from this maintained high-impact subset is not an impli
 | `rle::{try_,}encode` | Core; all targets | Protocol compression, unit/property/fuzz tests | Allocation refusal collapsed to the same `[]` as valid empty input | Keep `try_encode` as the authoritative API; retain `encode` only as a documented violation-reporting compatibility fallback. Injected allocation refusal is distinct from `Ok([])`; golden RLE bytes are unchanged. |
 | `network::compression::{try_,}{delta_,}encode` | Doc-hidden core surface; all targets | Protocol send path and compression unit/property tests | Public empty-vector wrappers hid invalid widths or allocation refusal | Expose the existing structured Result paths; retain explicitly documented wrappers. Protocol send paths already use the fallible forms; wire bytes are unchanged. |
 | `{SessionMetrics,PeerMetrics,HotJoinMetrics,SpecViolation,InvariantViolation}::{try_,}to_json{,_pretty}` | `json`; all targets supported by `serde_json` | Metrics/telemetry tests and operator documentation | `Option<String>` erased serializer/allocation causes; direct `serde_json::to_string` could not make output reservation fallible | Add shared exact-count, fallible-reserve Result APIs with source-preserving `JsonSerializationError`; keep `Option` wrappers as explicit `.ok()` compatibility behavior. Failure injection and byte-identity regressions cover both formats. |
+| `TokioUdpSocket` after `P2PSession` ownership | `tokio`; native Linux, macOS, and Windows | Adapter units and compile matrix previously; real loopback session matrix now | Socket helpers worked before ownership, but no runtime oracle proved the synchronous session driver after the move | A bounded ten-second test moves two ephemeral adapters into sessions, synchronizes without sleeps as an oracle, confirms four frames, checks peer traffic, and asserts deterministic convergence. Issue #312 CI runs it on all three native operating systems and retains failure logs. |
+| Raw-byte browser `NonBlockingSocket` adapter | Browser `wasm32-unknown-unknown` only; excluded from Emscripten | Custom-socket example and browser compile previously; browser runner now | Compile-only coverage could miss clock/runtime, malformed decode, unbounded draining, or session-handshake failures | A browser-run bounded raw channel uses `codec::{encode,decode_message}`, rejects injected malformed packets, limits each receive call to eight attempts, synchronizes two sessions, and confirms two convergent frames. Target-specific dependencies remain browser-only. |
 
 ---
 
@@ -1105,6 +1107,7 @@ Relevant session and transport APIs preserve these invariants:
 
 | Version | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.5     | 2026-08-27 | Added Tokio-owned session and browser raw-transport runtime dispositions from issue #312, including timeout, malformed-packet, bounded-polling, and native/browser/Emscripten target evidence. |
 | 1.4     | 2026-08-27 | Added the dispositioned public API audit ledger and fallible JSON/compression contracts, including compatibility fallback and byte-stability guarantees. |
 | 1.3     | 2026-08-26 | Scoped the ledger to its maintained high-impact subset; added total `Frame` arithmetic and conversion contracts; corrected configurable queue invariants and protocol-v2 framing terminology. |
 | 1.2     | 2026-07-12 | Added bounded TCP/byte-stream framing contracts for `codec::encode_framed` and `FrameDecoder`. |

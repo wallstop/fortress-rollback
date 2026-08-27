@@ -601,11 +601,29 @@ jobs:
       - name: Run clippy for WASM target
         run: cargo clippy --target ${{ matrix.target }} --no-default-features -- -D warnings
 
-      - name: Run browser WASM runtime smoke test
+      - name: Run browser WASM session runtime test
+        id: browser_session_runtime
         if: matrix.target == 'wasm32-unknown-unknown'
+        timeout-minutes: 5
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-        run: cargo test -p wasm-browser-smoke --target ${{ matrix.target }} --lib -- --nocapture
+          WASM_BINDGEN_TEST_ONLY_WEB: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          export CHROMEDRIVER="${CHROMEWEBDRIVER}/chromedriver"
+          google-chrome --version 2>&1 | tee test-results/wasm-browser-runtime.log
+          "${CHROMEDRIVER}" --version 2>&1 | tee -a test-results/wasm-browser-runtime.log
+          cargo test -p wasm-browser-smoke --target ${{ matrix.target }} --lib -- --nocapture 2>&1 | tee -a test-results/wasm-browser-runtime.log
+
+      - name: Upload browser runtime failure diagnostics
+        if: failure() && steps.browser_session_runtime.outcome == 'failure' && matrix.target == 'wasm32-unknown-unknown'
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-browser-runtime-failure
+          path: test-results/wasm-browser-runtime.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Reject browser-only dependencies on Emscripten
         if: matrix.target == 'wasm32-unknown-emscripten'

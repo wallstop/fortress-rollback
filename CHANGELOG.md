@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the existing public `rle::try_encode` path for callers that must distinguish valid empty
   compression output from failure. The legacy RLE and delta-compression wrappers now document their
   empty fallback and valid RLE/protocol bytes are unchanged.
+- Runtime CI now drives two real `P2PSession`s after each `TokioUdpSocket` moves into session
+  ownership, completing synchronization and four confirmed deterministic frames without sleep-based
+  assertions on Linux, macOS, and Windows. The browser `wasm32-unknown-unknown` lane now executes a
+  bounded raw-byte custom transport through synchronization and two confirmed frames, including
+  malformed-packet rejection and an eight-packet receive-poll cap. Both lanes have explicit time
+  budgets and retain uncaptured failure logs as CI artifacts; the Emscripten dependency lane remains
+  separate.
 
 ### Changed
 

@@ -2122,6 +2122,12 @@ session from the Tokio task; application code cannot call the adapter's `recv_al
 transport integrations before session ownership. With `sync-send`, `TokioUdpSocket` implements
 `Send + Sync`.
 
+The repository's native runtime matrix exercises this ownership boundary on Linux, macOS, and
+Windows: two loopback adapters move into real sessions, synchronize, exchange confirmed inputs, and
+converge across four frames under bounded polling and a ten-second test timeout. This is an
+integration oracle for the adapter/session contract, not a requirement to sleep or await socket
+readiness in an application's game loop.
+
 #### `json`
 
 Enables fallible JSON serialization methods (`try_to_json()` and `try_to_json_pretty()`) on
@@ -2312,6 +2318,12 @@ Matchbox's optional `ggrs` feature implements the upstream GGRS `NonBlockingSock
 2. In the adapter's `send_to`, serialize Fortress `Message` values with `fortress_rollback::network::codec::encode` and pass the bytes through the split sender.
 3. In `receive_all_messages`, poll at most a fixed number of items from the split receiver and decode each with `codec::decode_message`, leaving excess packets queued for later. Do not use `WebRtcChannel::receive()` here because it drains the entire Matchbox queue into a new `Vec`.
 4. Implement Fortress Rollback's `NonBlockingSocket<matchbox_socket::PeerId>` for that local adapter and pass it to `SessionBuilder`.
+
+The browser runtime lane executes this raw-byte adapter shape under
+`wasm32-unknown-unknown`: two sessions synchronize and confirm frames, malformed packets fail the
+bounded decoder, and no receive call inspects more than eight raw packets. The runner has a
+five-minute CI budget and uploads its uncaptured log on failure. This browser-only evidence does not
+select `wasm-bindgen` dependencies for the distinct Emscripten target.
 
 #### Custom Transport (WebSockets, TCP, etc.)
 

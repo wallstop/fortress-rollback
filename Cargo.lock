@@ -1238,6 +1238,7 @@ name = "wasm-browser-smoke"
 version = "0.0.0"
 dependencies = [
  "fortress-rollback",
+ "serde",
  "wasm-bindgen-test",
 ]
 
