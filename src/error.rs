@@ -628,6 +628,15 @@ pub enum InvalidRequestKind {
     /// Returned when a method that requires exactly one remote player is called,
     /// but no remote players have been registered.
     NoRemotePlayers,
+    /// No spectator hosts were supplied for a failover spectator session.
+    NoSpectatorHosts,
+    /// A failover spectator host address appears more than once.
+    DuplicateSpectatorHost {
+        /// Index of the first occurrence in the supplied host list.
+        first_index: usize,
+        /// Index of the later duplicate occurrence.
+        duplicate_index: usize,
+    },
     /// Multiple remote players registered when exactly one is required.
     ///
     /// Returned when a method that requires exactly one remote player is called,
@@ -901,6 +910,19 @@ impl Display for InvalidRequestKind {
                 )
             },
             Self::NoRemotePlayers => write!(f, "no remote players registered in the session"),
+            Self::NoSpectatorHosts => {
+                write!(f, "no spectator hosts supplied for the failover session")
+            },
+            Self::DuplicateSpectatorHost {
+                first_index,
+                duplicate_index,
+            } => {
+                write!(
+                    f,
+                    "duplicate spectator host at index {} (first supplied at index {})",
+                    duplicate_index, first_index
+                )
+            },
             Self::MultipleRemotePlayers { count } => {
                 write!(
                     f,
@@ -2234,6 +2256,25 @@ mod tests {
         let display = format!("{}", kind);
         assert!(display.contains("buffer size"));
         assert!(display.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_no_spectator_hosts() {
+        let display = InvalidRequestKind::NoSpectatorHosts.to_string();
+
+        assert!(display.contains("no spectator hosts"));
+    }
+
+    #[test]
+    fn test_invalid_request_kind_duplicate_spectator_host() {
+        let display = InvalidRequestKind::DuplicateSpectatorHost {
+            first_index: 2,
+            duplicate_index: 5,
+        }
+        .to_string();
+
+        assert!(display.contains("index 5"));
+        assert!(display.contains("index 2"));
     }
 
     #[test]

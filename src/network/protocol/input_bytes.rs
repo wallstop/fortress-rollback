@@ -135,43 +135,43 @@ impl InputBytes {
 
     /// Creates a zeroed InputBytes for the given number of players.
     ///
-    /// # Returns
-    /// Returns `None` if serialization of the default Input type fails, which indicates
-    /// a fundamental issue with the Config::Input type's serialization implementation.
-    pub fn zeroed<T: Config>(num_players: usize) -> Option<Self> {
+    /// # Errors
+    ///
+    /// Returns a structured serialization or allocation error when the buffer
+    /// cannot be constructed.
+    pub fn zeroed<T: Config>(num_players: usize) -> Result<Self, FortressError> {
         // Measure once to get the size of the default input without allocating
         // an intermediate serialized buffer.
-        match codec::encoded_len(&T::Input::default()) {
-            Ok(input_size) => {
-                // saturating_mul matches the sibling `from_inputs` and avoids an
-                // overflow panic under release `overflow-checks`.
-                let size = input_size.saturating_mul(num_players);
-                let mut bytes = Vec::new();
-                if bytes.try_reserve_exact(size).is_err() {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "Failed to reserve {} bytes for zeroed input buffer",
-                        size
-                    );
-                    return None;
-                }
-                bytes.extend(std::iter::repeat_n(0, size));
-                Some(Self {
-                    frame: Frame::NULL,
-                    bytes,
-                })
-            },
-            Err(e) => {
-                report_violation!(
-                    ViolationSeverity::Critical,
-                    ViolationKind::InternalError,
-                    "Failed to serialize default input type: {}",
-                    e
-                );
-                None
-            },
+        let input_size = codec::encoded_len(&T::Input::default()).map_err(|error| {
+            report_violation!(
+                ViolationSeverity::Critical,
+                ViolationKind::InternalError,
+                "Failed to serialize default input type: {}",
+                error
+            );
+            SerializationErrorKind::EndpointCreationFailed
+        })?;
+        if input_size == 0 {
+            return Err(SerializationErrorKind::InputSerializedSizeZero.into());
         }
+
+        let size = input_size.checked_mul(num_players).ok_or({
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::InputSerializedFrameTooLarge {
+                    frame_len: usize::MAX,
+                    max: crate::rle::DEFAULT_MAX_DECODED_LEN,
+                },
+            }
+        })?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_error| crate::error::allocation_failed("input_bytes.zeroed", size))?;
+        bytes.extend(std::iter::repeat_n(0, size));
+        Ok(Self {
+            frame: Frame::NULL,
+            bytes,
+        })
     }
 
     /// Creates an InputBytes from the given inputs, rejecting per-player values
@@ -465,6 +465,14 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    struct OneByteInputConfig;
+
+    impl Config for OneByteInputConfig {
+        type Input = u8;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     enum BalancedVariableInput {
         Short,
@@ -543,6 +551,23 @@ mod tests {
         let input_bytes = InputBytes::zeroed::<TestConfig>(0).unwrap();
         assert_eq!(input_bytes.frame, Frame::NULL);
         assert!(input_bytes.bytes.is_empty());
+    }
+
+    #[test]
+    fn zeroed_reports_allocation_failure_without_relabeling_it_as_serialization() {
+        let Err(error) = InputBytes::zeroed::<OneByteInputConfig>(usize::MAX) else {
+            panic!("oversized zeroed input buffer unexpectedly succeeded");
+        };
+
+        assert!(matches!(
+            error,
+            FortressError::InvalidRequestStructured {
+                kind: crate::InvalidRequestKind::AllocationFailed {
+                    context: "input_bytes.zeroed",
+                    requested_elements: u64::MAX,
+                }
+            }
+        ));
     }
 
     // ==========================================

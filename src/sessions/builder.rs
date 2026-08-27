@@ -4,15 +4,15 @@ use std::sync::Arc;
 use web_time::Duration;
 
 use crate::{
-    error::InvalidRequestKind,
+    error::{allocation_failed, InvalidRequestKind},
     network::protocol::UdpProtocol,
     replay::Replay,
     sessions::player_registry::PlayerRegistry,
     sessions::replay_session::ReplaySession,
     telemetry::{SessionTelemetry, ViolationObserver},
     time_sync::TimeSyncConfig,
-    Config, DesyncDetection, FortressError, NonBlockingSocket, P2PSession, PlayerHandle,
-    PlayerType, SpectatorSession, SyncTestSession,
+    Config, DesyncDetection, FortressError, FortressResult, NonBlockingSocket, P2PSession,
+    PlayerHandle, PlayerType, SpectatorSession, SyncTestSession,
 };
 
 // Re-export config types for backwards compatibility with code that imports from builder
@@ -1953,23 +1953,47 @@ impl<T: Config> SessionBuilder<T> {
     /// [`start_spectator_session_multi`](Self::start_spectator_session_multi).
     ///
     /// # Returns
-    /// Returns `None` if the protocol or spectator configuration is invalid,
-    /// protocol initialization fails (e.g., due to serialization issues with
-    /// the Input type), or the configured event queue cannot be reserved.
+    ///
+    /// Returns `None` if startup fails. Use
+    /// [`try_start_spectator_session`](Self::try_start_spectator_session) to
+    /// inspect the structured error.
     pub fn start_spectator_session(
         self,
         host_addr: T::Address,
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
-        self.validate_spectator_config().ok()?;
+        self.try_start_spectator_session(host_addr, socket).ok()
+    }
+
+    /// Consumes the builder to create a new [`SpectatorSession`], preserving
+    /// startup failures as structured errors.
+    ///
+    /// This is the preferred form of
+    /// [`start_spectator_session`](Self::start_spectator_session) for new code.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exact protocol, spectator-configuration, serialization, or
+    /// allocation error that prevented construction.
+    pub fn try_start_spectator_session(
+        self,
+        host_addr: T::Address,
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+    ) -> FortressResult<SpectatorSession<T>> {
+        self.validate_spectator_config()?;
+
+        let mut hosts = Vec::new();
+        hosts
+            .try_reserve_exact(1)
+            .map_err(|_error| allocation_failed("spectator.hosts", 1))?;
 
         // create the single host endpoint and synchronize it
-        let host = self.build_spectator_host(host_addr)?;
+        hosts.push(self.build_spectator_host(host_addr)?);
 
         SpectatorSession::new(
             self.num_players,
             Box::new(socket),
-            vec![host],
+            hosts,
             self.spectator_config.buffer_size,
             self.spectator_config.max_frames_behind,
             self.spectator_config.catchup_speed,
@@ -1978,7 +2002,6 @@ impl<T: Config> SessionBuilder<T> {
             self.violation_observer,
             self.event_queue_size,
         )
-        .ok()
     }
 
     /// Consumes the builder to create a redundant (failover) [`SpectatorSession`].
@@ -1987,9 +2010,7 @@ impl<T: Config> SessionBuilder<T> {
     /// to **multiple** game peers ("hosts") at once. Unresolved frames use the
     /// highest-priority currently connected host by the order in `host_addrs` as
     /// the canonical source. Lower-priority host snapshots remain provisional
-    /// while a higher-priority host is connected. If duplicate host addresses are
-    /// provided, inbound packets are routed to the first matching host endpoint;
-    /// later duplicates do not receive that packet.
+    /// while a higher-priority host is connected. Host addresses must be unique.
     ///
     /// Connected redundant hosts that disagree for the same player/frame report a
     /// frame-sync violation, emit [`FortressEvent::SpectatorDivergence`], and
@@ -2011,16 +2032,15 @@ impl<T: Config> SessionBuilder<T> {
     ///
     /// # Returns
     ///
-    /// Returns `None` if `host_addrs` is empty, if the protocol or spectator
-    /// configuration is invalid, protocol initialization fails for any address
-    /// (e.g. due to serialization issues with the Input type), or the configured
-    /// event queue cannot be reserved.
+    /// Returns `None` if startup fails. Use
+    /// [`try_start_spectator_session_multi`](Self::try_start_spectator_session_multi)
+    /// to inspect the structured error.
     ///
     /// # Example
     ///
     /// ```
     /// # use fortress_rollback::prelude::*;
-    /// # use fortress_rollback::Message;
+    /// # use fortress_rollback::{InvalidRequestKind, Message};
     /// # use std::net::SocketAddr;
     /// # #[derive(Debug)]
     /// # struct TestConfig;
@@ -2038,15 +2058,21 @@ impl<T: Config> SessionBuilder<T> {
     /// let host_b: SocketAddr = "127.0.0.1:7001".parse()?;
     /// let session = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
-    ///     .start_spectator_session_multi(&[host_a, host_b], DummySocket)
-    ///     .ok_or(FortressError::NotSynchronized)?;
+    ///     .try_start_spectator_session_multi(&[host_a, host_b], DummySocket)?;
     /// assert_eq!(session.num_hosts(), 2);
     ///
-    /// // An empty address list yields no session.
-    /// let none = SessionBuilder::<TestConfig>::new()
+    /// // An empty address list returns a structured error.
+    /// let error = SessionBuilder::<TestConfig>::new()
     ///     .with_num_players(2)?
-    ///     .start_spectator_session_multi(&[], DummySocket);
-    /// assert!(none.is_none());
+    ///     .try_start_spectator_session_multi(&[], DummySocket)
+    ///     .err()
+    ///     .ok_or(FortressError::NotSynchronized)?;
+    /// assert!(matches!(
+    ///     error,
+    ///     FortressError::InvalidRequestStructured {
+    ///         kind: InvalidRequestKind::NoSpectatorHosts
+    ///     }
+    /// ));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
@@ -2059,16 +2085,36 @@ impl<T: Config> SessionBuilder<T> {
         host_addrs: &[T::Address],
         socket: impl NonBlockingSocket<T::Address> + 'static,
     ) -> Option<SpectatorSession<T>> {
-        // A failover spectator needs at least one host.
-        if host_addrs.is_empty() {
-            return None;
-        }
+        self.try_start_spectator_session_multi(host_addrs, socket)
+            .ok()
+    }
 
-        self.validate_spectator_config().ok()?;
+    /// Consumes the builder to create a redundant [`SpectatorSession`],
+    /// preserving startup failures as structured errors.
+    ///
+    /// Host-list validation runs before configuration validation or endpoint
+    /// construction. Address order remains the failover priority order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequestKind::NoSpectatorHosts`] for an empty host list,
+    /// [`InvalidRequestKind::DuplicateSpectatorHost`] for a repeated address,
+    /// or the exact configuration, protocol, serialization, or allocation error
+    /// that prevented construction.
+    pub fn try_start_spectator_session_multi(
+        self,
+        host_addrs: &[T::Address],
+        socket: impl NonBlockingSocket<T::Address> + 'static,
+    ) -> FortressResult<SpectatorSession<T>> {
+        Self::validate_spectator_hosts(host_addrs)?;
+
+        self.validate_spectator_config()?;
 
         // Build and synchronize one host endpoint per address.
         let mut hosts = Vec::new();
-        hosts.try_reserve_exact(host_addrs.len()).ok()?;
+        hosts
+            .try_reserve_exact(host_addrs.len())
+            .map_err(|_error| allocation_failed("spectator.hosts", host_addrs.len()))?;
         for host_addr in host_addrs {
             hosts.push(self.build_spectator_host(host_addr.clone())?);
         }
@@ -2085,18 +2131,58 @@ impl<T: Config> SessionBuilder<T> {
             self.violation_observer,
             self.event_queue_size,
         )
-        .ok()
+    }
+
+    fn validate_spectator_hosts(host_addrs: &[T::Address]) -> FortressResult<()> {
+        if host_addrs.is_empty() {
+            return Err(InvalidRequestKind::NoSpectatorHosts.into());
+        }
+
+        let mut indexed_hosts = Vec::new();
+        indexed_hosts
+            .try_reserve_exact(host_addrs.len())
+            .map_err(|_error| {
+                allocation_failed("spectator.host_address_validation", host_addrs.len())
+            })?;
+        indexed_hosts.extend(host_addrs.iter().enumerate());
+        indexed_hosts.sort_unstable_by(|(left_index, left_addr), (right_index, right_addr)| {
+            left_addr
+                .cmp(right_addr)
+                .then_with(|| left_index.cmp(right_index))
+        });
+
+        let earliest_duplicate = indexed_hosts
+            .windows(2)
+            .filter_map(|adjacent_hosts| {
+                let [(first_index, first_addr), (duplicate_index, duplicate_addr)] = adjacent_hosts
+                else {
+                    return None;
+                };
+                (first_addr == duplicate_addr).then_some((*first_index, *duplicate_index))
+            })
+            .min_by_key(|(_first_index, duplicate_index)| *duplicate_index);
+
+        if let Some((first_index, duplicate_index)) = earliest_duplicate {
+            return Err(InvalidRequestKind::DuplicateSpectatorHost {
+                first_index,
+                duplicate_index,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 
     /// Builds and synchronizes a single spectator host endpoint for `host_addr`.
     ///
-    /// Returns `None` if protocol creation or synchronization fails. Shared by
-    /// [`start_spectator_session`](Self::start_spectator_session) and
-    /// [`start_spectator_session_multi`](Self::start_spectator_session_multi) to avoid
-    /// duplicating the single-host construction logic.
-    fn build_spectator_host(&self, host_addr: T::Address) -> Option<UdpProtocol<T>> {
+    /// Shared by the single-host and failover spectator constructors.
+    fn build_spectator_host(&self, host_addr: T::Address) -> FortressResult<UdpProtocol<T>> {
         let mut handles = Vec::new();
-        handles.try_reserve_exact(self.num_players).ok()?;
+        handles
+            .try_reserve_exact(self.num_players)
+            .map_err(|_error| {
+                allocation_failed("spectator.host_player_handles", self.num_players)
+            })?;
         for handle in (0..self.num_players).map(PlayerHandle::new) {
             handles.push(handle);
         }
@@ -2114,10 +2200,9 @@ impl<T: Config> SessionBuilder<T> {
             self.sync_config,
             self.protocol_config.clone(),
             self.time_sync_config,
-        )
-        .ok()?;
-        host.synchronize().ok()?;
-        Some(host)
+        )?;
+        host.synchronize()?;
+        Ok(host)
     }
 
     /// Consumes the builder to construct a new [`SyncTestSession`]. During a [`SyncTestSession`], Fortress Rollback will simulate a rollback every frame
@@ -2314,6 +2399,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -2325,6 +2411,14 @@ mod tests {
 
     impl Config for TestConfig {
         type Input = TestInput;
+        type State = Vec<u8>;
+        type Address = SocketAddr;
+    }
+
+    struct ZeroWidthInputConfig;
+
+    impl Config for ZeroWidthInputConfig {
+        type Input = ();
         type State = Vec<u8>;
         type Address = SocketAddr;
     }
@@ -2787,6 +2881,136 @@ mod tests {
         assert!(multi_spectator.is_none());
     }
 
+    #[test]
+    fn try_start_spectator_session_preserves_configuration_error() {
+        let result = SessionBuilder::<TestConfig>::new()
+            .with_desync_detection_mode(DesyncDetection::On { interval: 0 })
+            .try_start_spectator_session(test_addr(7_505), DummySocket);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn try_start_spectator_session_multi_preserves_configuration_error() {
+        let result = SessionBuilder::<TestConfig>::new()
+            .with_desync_detection_mode(DesyncDetection::On { interval: 0 })
+            .try_start_spectator_session_multi(&[test_addr(7_506)], DummySocket);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::ConfigValueOutOfRange {
+                    field: "desync_detection.interval",
+                    min: 1,
+                    actual: 0,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn try_start_spectator_session_preserves_zero_width_input_error() {
+        let result = SessionBuilder::<ZeroWidthInputConfig>::new()
+            .try_start_spectator_session(test_addr(7_507), DummySocket);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured {
+                kind: crate::SerializationErrorKind::InputSerializedSizeZero
+            })
+        ));
+    }
+
+    #[test]
+    fn try_start_spectator_session_multi_rejects_empty_hosts_before_configuration() {
+        let result = SessionBuilder::<TestConfig>::new()
+            .with_spectator_config(SpectatorConfig {
+                buffer_size: 0,
+                ..SpectatorConfig::default()
+            })
+            .try_start_spectator_session_multi(&[], DummySocket);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NoSpectatorHosts
+            })
+        ));
+    }
+
+    #[test]
+    fn try_start_spectator_session_multi_rejects_duplicate_hosts_before_endpoint_creation() {
+        let cases = [
+            (vec![test_addr(7_510), test_addr(7_510)], (0usize, 1usize)),
+            (
+                vec![test_addr(7_511), test_addr(7_512), test_addr(7_511)],
+                (0, 2),
+            ),
+            (
+                vec![test_addr(7_513), test_addr(7_514), test_addr(7_514)],
+                (1, 2),
+            ),
+            (
+                vec![
+                    test_addr(7_520),
+                    test_addr(7_519),
+                    test_addr(7_520),
+                    test_addr(7_519),
+                ],
+                (0, 2),
+            ),
+        ];
+
+        for (host_addrs, (expected_first, expected_duplicate)) in cases {
+            let clock_calls = Arc::new(AtomicUsize::new(0));
+            let clock_calls_for_config = Arc::clone(&clock_calls);
+            let result = SessionBuilder::<TestConfig>::new()
+                .with_protocol_config(ProtocolConfig {
+                    clock: Some(Arc::new(move || {
+                        clock_calls_for_config.fetch_add(1, Ordering::SeqCst);
+                        web_time::Instant::now()
+                    })),
+                    ..ProtocolConfig::default()
+                })
+                .try_start_spectator_session_multi(&host_addrs, DummySocket);
+
+            assert!(matches!(
+                result,
+                Err(FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::DuplicateSpectatorHost {
+                        first_index,
+                        duplicate_index,
+                    }
+                }) if first_index == expected_first && duplicate_index == expected_duplicate
+            ));
+            assert_eq!(
+                clock_calls.load(Ordering::SeqCst),
+                0,
+                "duplicate validation must precede endpoint construction"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_multi_spectator_start_maps_duplicate_error_to_none() {
+        let addr = test_addr(7_515);
+        let session = SessionBuilder::<TestConfig>::new()
+            .start_spectator_session_multi(&[addr, addr], DummySocket);
+
+        assert!(session.is_none());
+    }
+
     #[cfg(feature = "hot-join")]
     #[test]
     fn hot_join_session_start_rejects_zero_desync_interval_without_remote_endpoints() {
@@ -2865,6 +3089,24 @@ mod tests {
     }
 
     #[test]
+    fn try_start_spectator_session_reports_buffer_reservation_failure() {
+        let result = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_spectator_config(SpectatorConfig {
+                buffer_size: usize::MAX,
+                stream_delay: 0,
+                ..SpectatorConfig::default()
+            })
+            .try_start_spectator_session(test_addr(7_516), DummySocket);
+
+        let Err(error) = result else {
+            panic!("oversized spectator buffer unexpectedly succeeded");
+        };
+        assert_allocation_failed(error, "spectator.inputs");
+    }
+
+    #[test]
     fn start_spectator_session_returns_none_when_event_queue_reservation_fails() {
         let session = SessionBuilder::<TestConfig>::new()
             .with_num_players(2)
@@ -2874,6 +3116,21 @@ mod tests {
             .start_spectator_session(test_addr(7_501), DummySocket);
 
         assert!(session.is_none());
+    }
+
+    #[test]
+    fn try_start_spectator_session_reports_event_queue_reservation_failure() {
+        let result = SessionBuilder::<TestConfig>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_event_queue_size(usize::MAX)
+            .unwrap()
+            .try_start_spectator_session(test_addr(7_517), DummySocket);
+
+        let Err(error) = result else {
+            panic!("oversized spectator event queue unexpectedly succeeded");
+        };
+        assert_allocation_failed(error, "spectator.event_queue");
     }
 
     #[test]

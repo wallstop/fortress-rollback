@@ -315,8 +315,8 @@ Each API is documented with:
 
 - Returns `Some(session)` with session created in `Synchronizing` state
 - Host endpoint begins synchronization
-- Returns `None` if protocol configuration validation, spectator configuration
-  validation, or protocol initialization fails (e.g., serialization issues)
+- Returns `None` if
+  `try_start_spectator_session(self, host_addr, socket)` would return `Err`
 
 **Spectator configuration validation:**
 
@@ -329,6 +329,58 @@ Each API is documented with:
 **Errors:** None (returns `Option`, not `Result`)
 
 **Panics:** Never
+
+---
+
+### `try_start_spectator_session(self, host_addr: T::Address, socket: impl NonBlockingSocket<T::Address> + 'static) -> FortressResult<SpectatorSession<T>>`
+
+```rust
+/// Create a spectator session and preserve the startup error.
+```
+
+**Pre:** None (no player registration required)
+
+**Post:**
+
+- Returns a session in `Synchronizing` state
+- The host endpoint begins synchronization
+- Construction sends no socket message before the session is returned
+
+**Errors:**
+
+- The exact structured protocol or spectator configuration error
+- `SerializationErrorStructured { .. }` when the input wire schema cannot be initialized
+- `InvalidRequestStructured { kind: AllocationFailed { .. } }` when endpoint or session storage cannot be reserved
+
+**Panics:** Never
+
+---
+
+### `try_start_spectator_session_multi(self, host_addrs: &[T::Address], socket: impl NonBlockingSocket<T::Address> + 'static) -> FortressResult<SpectatorSession<T>>`
+
+```rust
+/// Create a failover spectator session and preserve the startup error.
+```
+
+**Pre:** None
+
+**Post:**
+
+- Host-list validation completes before configuration validation or endpoint construction
+- Every accepted address is unique and retains its supplied failover priority
+- One synchronized endpoint is created per supplied address
+- Construction sends no socket message before the session is returned
+
+**Errors:**
+
+- `InvalidRequestStructured { kind: NoSpectatorHosts }` - the address list is empty
+- `InvalidRequestStructured { kind: DuplicateSpectatorHost { first_index, duplicate_index } }` - an address repeats; indices identify the earliest repeated occurrence in caller order
+- The same configuration, serialization, protocol, and allocation errors as `try_start_spectator_session`
+
+**Panics:** Never
+
+The compatibility `start_spectator_session_multi` method maps each error above
+to `None`.
 
 ---
 
@@ -722,7 +774,8 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
   `FortressEvent::SpectatorDivergence`, record a frame-sync violation, and
   latch a terminal `FortressError::SpectatorDivergence` for future
   `advance_frame` calls. Already advanced frames are not rewritten.
-- Duplicate host addresses route inbound packets to the first matching endpoint.
+- Failover host addresses are unique because
+  `try_start_spectator_session_multi` rejects duplicates before construction.
 
 **Errors:**
 

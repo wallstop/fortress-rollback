@@ -8,6 +8,56 @@
 
 Fortress Rollback is the correctness-first, verified fork of the original `ggrs` crate. This guide explains how to migrate existing projects.
 
+## Upgrading from 0.13
+
+Spectator startup now has `Result`-returning APIs that preserve the exact
+failure cause. Existing `start_spectator_session` and
+`start_spectator_session_multi` calls still compile and return `Option`, but new
+code should use the `try_` forms:
+
+```rust
+// Before: every startup failure became None.
+let spectator = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)?
+    .start_spectator_session(host_addr, socket)
+    .ok_or(FortressError::NotSynchronized)?;
+
+// After: configuration, serialization, protocol, and allocation errors remain distinct.
+let spectator = SessionBuilder::<GameConfig>::new()
+    .with_num_players(2)?
+    .try_start_spectator_session(host_addr, socket)?;
+```
+
+Failover spectator host addresses must now be nonempty and unique. Duplicate
+addresses used to construct later endpoints that could never receive packets
+because routing stopped at the first address match. Startup now rejects the list
+before endpoint construction:
+
+```rust
+let spectator = match SessionBuilder::<GameConfig>::new()
+    .try_start_spectator_session_multi(&hosts, socket)
+{
+    Err(FortressError::InvalidRequestStructured {
+        kind:
+            InvalidRequestKind::DuplicateSpectatorHost {
+                first_index,
+                duplicate_index,
+            },
+    }) => {
+        eprintln!(
+            "host {duplicate_index} duplicates the address at {first_index}"
+        );
+    },
+    Err(error) => return Err(error),
+    Ok(spectator) => spectator,
+};
+```
+
+`InvalidRequestKind` remains exhaustive. Add match arms for
+`NoSpectatorHosts` and `DuplicateSpectatorHost { .. }` when upgrading exhaustive
+matches. Remove repeated addresses instead of relying on the former first-match
+routing behavior.
+
 ## Upgrading from 0.11
 
 The Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries are removed.
@@ -40,6 +90,7 @@ requests and state in the application crate.
 - **0.10 synchronization default:** `SyncConfig::default()` now emits a `SyncTimeout` event after 20 seconds; set `sync_timeout: None` explicitly to retain the previous unlimited-wait behavior.
 - **0.10 wire protocol:** all peers in a session must upgrade together; protocol v1 intentionally rejects unversioned 0.9 packets.
 - **Current wire protocol:** canonical hot-join membership generations require protocol v2; v1/v2 peers intentionally reject one another, so upgrade every participant together.
+- **Spectator startup after 0.13:** prefer the `try_start_spectator_session*` methods, and supply a nonempty list of unique failover hosts.
 - **New in 0.10:** runtime input-delay adjustment (`set_input_delay`/`input_delay`), opt-in graceful peer drop (`DisconnectBehavior::ContinueWithout`, `with_disconnect_behavior`), explicit graceful removal (`remove_player`), and fail-closed redundant spectator divergence; exhaustive matches on `FortressEvent`, `FortressError`, `InvalidRequestKind`, `InternalErrorKind`, `SerializationErrorKind`, `RleDecodeReason`, and `DeltaDecodeReason` need new arms — see [0.10 section](#010-runtime-input-delay-disconnect-behavior-graceful-peer-removal-and-spectator-divergence).
 
 ## Dependency Changes

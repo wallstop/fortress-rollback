@@ -1269,8 +1269,8 @@ Best for: Live event streaming, replay viewers, tournament broadcasts.
 
 ```rust
 use fortress_rollback::{
-    FortressError, PlayerHandle, PlayerType, ProtocolConfig,
-    SessionBuilder, SpectatorConfig, SyncConfig,
+    PlayerHandle, PlayerType, ProtocolConfig, SessionBuilder, SpectatorConfig,
+    SyncConfig,
 };
 use web_time::Duration;
 
@@ -1296,15 +1296,13 @@ let mut spectator_session = SessionBuilder::<GameConfig>::new()
         stream_delay: 6,       // Stay 100ms behind live at 60 FPS
         ..Default::default()
     })
-    .start_spectator_session(host_addr, spectator_socket)
-    .ok_or(FortressError::InvalidRequest {
-        info: "spectator session initialization failed".into(),
-    })?;
+    .try_start_spectator_session(host_addr, spectator_socket)?;
 ```
 
-Spectator startup returns `None` when the protocol configuration is invalid,
-the spectator configuration is invalid, or the host endpoint cannot be
-initialized. `SpectatorConfig::buffer_size` must be greater than zero, and
+The preferred `try_start_spectator_session` method preserves the structured
+configuration, serialization, protocol, or allocation error when startup fails.
+The older `start_spectator_session` method remains available when an `Option` is
+more convenient. `SpectatorConfig::buffer_size` must be greater than zero, and
 `stream_delay` must be smaller than `buffer_size`.
 
 For failover spectators created with `start_spectator_session_multi`, unresolved
@@ -1315,9 +1313,10 @@ resolves the next surviving host is promoted only for unresolved frames.
 Connection status comes from the selected host's whole-frame snapshot. Connected
 hosts that disagree on the same player/frame emit
 `FortressEvent::SpectatorDivergence` and make future `advance_frame` calls
-return `FortressError::SpectatorDivergence`. If duplicate host addresses are
-supplied, inbound packets are routed to the first matching host endpoint. When
-every host disconnects cleanly, the spectator may still advance through frames
+return `FortressError::SpectatorDivergence`. Failover host lists must be
+nonempty and contain unique addresses; `try_start_spectator_session_multi`
+reports the empty or duplicate indices before constructing endpoints. When every
+host disconnects cleanly, the spectator may still advance through frames
 that were already buffered; after those buffered frames are no longer viewable,
 `advance_frame` returns `PredictionThreshold`.
 
@@ -2476,20 +2475,16 @@ let session = SessionBuilder::<GameConfig>::new()
 ### Spectator Side
 
 ```rust
-use fortress_rollback::{FortressError, SessionBuilder, SessionState, UdpNonBlockingSocket};
+use fortress_rollback::{SessionBuilder, SessionState, UdpNonBlockingSocket};
 
 let host_addr = "192.168.1.100:7000".parse()?;
 let socket = UdpNonBlockingSocket::bind_to_port(8000)?;
 
-// Note: start_spectator_session returns Option<SpectatorSession>
 let mut session = SessionBuilder::<GameConfig>::new()
     .with_num_players(2)?
     .with_max_frames_behind(10)?  // When to start catching up
     .with_catchup_speed(2)?       // How fast to catch up
-    .start_spectator_session(host_addr, socket)
-    .ok_or(FortressError::InvalidRequest {
-        info: "spectator session initialization failed".into(),
-    })?;
+    .try_start_spectator_session(host_addr, socket)?;
 
 // Spectator loop
 loop {
@@ -3573,7 +3568,9 @@ let config = SpectatorConfig {
 ```
 
 `buffer_size` must be greater than zero, and `stream_delay` must be less than
-`buffer_size`; invalid spectator configs make spectator startup return `None`.
+`buffer_size`; the preferred `try_start_spectator_session*` methods return the
+exact structured error for invalid spectator configuration. The compatibility
+`start_spectator_session*` methods map startup errors to `None`.
 `catchup_speed == 0` is allowed for compatibility. If catch-up mode is
 triggered with zero speed, no frame is attempted and `advance_frame` returns
 `Ok(<empty>)`.
