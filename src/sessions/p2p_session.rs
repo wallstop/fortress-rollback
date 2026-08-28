@@ -201,7 +201,9 @@ enum RemoteDisconnectNotification {
 
 // Stable v1 sometimes-state registry order. Keep these masks aligned with
 // `diagnostic_sometimes_state_vector` and issue #316.
-const SOMETIMES_ROLLBACK_AT_PREDICTION_LIMIT: u8 = 1 << 0;
+// Spell the zero-index bit literally: shifting either direction by zero is
+// equivalent, which creates an untestable operator mutant.
+const SOMETIMES_ROLLBACK_AT_PREDICTION_LIMIT: u8 = 0b0000_0001;
 const SOMETIMES_LOWER_FLOOR_CONSUMED: u8 = 1 << 1;
 const SOMETIMES_CONNECT_STATUS_NUDGE_SENT: u8 = 1 << 2;
 const SOMETIMES_SPARSE_EARLIER_CHECKPOINT_SELECTED: u8 = 1 << 3;
