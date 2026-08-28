@@ -72,6 +72,20 @@ use fortress_rollback::rle::{decode, encode};
 The functions and their wire-compatible bytes are unchanged; only the duplicate
 callable paths were removed.
 
+The development-only `z3-verification` feature now uses the `z3` 0.21 bindings,
+which require Z3 4.13.3 or newer and target Z3 5.x enum definitions. Contributors
+who run the formal-verification suite should install Z3 5.1.0 or use the existing
+`z3-verification-bundled` feature. The bundled feature name is unchanged, but it
+now selects upstream's supported `vendored` build path:
+
+```shell
+# Before: older system Z3 installations could link against z3 0.20.
+cargo test --features z3-verification -- --nocapture
+
+# After: use a matching vendored solver when Z3 5.1.0 is unavailable.
+cargo test --features z3-verification-bundled -- --nocapture
+```
+
 ## Upgrading from 0.11
 
 The Macroquad-based `ex_game_p2p`, `ex_game_spectator`, and `ex_game_synctest` binaries are removed.

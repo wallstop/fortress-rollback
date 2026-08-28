@@ -283,11 +283,11 @@ paranoid = []
 # No-op compatibility marker. Actual Loom builds use RUSTFLAGS="--cfg loom";
 # retaining this name avoids breaking existing development feature lists.
 loom = []
-# Enable Z3 formal verification tests (requires system Z3: apt install libz3-dev)
+# Enable Z3 formal verification tests (requires Z3 >=4.13.3; Z3 5.x recommended)
 z3-verification = ["dep:z3"]
-# Enable Z3 with bundled build (slow - builds Z3 from source, ~30+ minutes)
+# Enable Z3 with a vendored build (slow - builds Z3 from source, ~30+ minutes)
 # Use this only if you don't have Z3 installed system-wide
-z3-verification-bundled = ["z3-verification", "z3?/bundled"]
+z3-verification-bundled = ["z3-verification", "z3?/vendored"]
 # Enable tokio async runtime integration for async socket adapters
 # Provides TokioUdpSocket for use with async networking code
 tokio = ["dep:tokio"]
@@ -309,8 +309,8 @@ tracing = "0.1"
 smallvec = { version = "1.13", features = ["serde"] }
 # SMT solver for formal verification
 # Only compiled when z3-verification feature is enabled
-# For bundled build (slow), use z3-verification-bundled feature instead
-z3 = { version = "0.20", optional = true }
+# For a vendored build (slow), use z3-verification-bundled instead
+z3 = { version = "0.21", optional = true }
 # Tokio async runtime for async socket adapters
 # Only compiled when tokio feature is enabled
 tokio = { version = "1.52", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }

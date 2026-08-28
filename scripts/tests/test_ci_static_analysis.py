@@ -21,6 +21,8 @@ WORKFLOW_DIRECTORY = REPO_ROOT / ".github" / "workflows"
 QUALITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-quality.yml"
 LINT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-lint.yml"
 CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-codeql.yml"
+VERIFICATION_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-verification.yml"
+DEVCONTAINER_DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 RUFF_CONFIG = REPO_ROOT / "ruff.toml"
 RUFF_ACTION = "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89"
@@ -260,6 +262,33 @@ def test_static_workflow_paths_cover_all_relevant_sources() -> None:
         assert {"Cargo.toml", "tests/**", "fuzz/**", "loom-tests/**"}.issubset(
             quality[event]["paths"]
         )
+
+
+def test_z3_verification_uses_pinned_compatible_solver() -> None:
+    workflow = _load_workflow(VERIFICATION_WORKFLOW)
+    assert workflow["env"]["Z3_VERSION"] == "5.1.0"
+
+    steps = _steps(workflow, "z3-verification")
+    install = _step_by_name(steps, "Install pinned Z3 library")
+    install_command = install["run"]
+    assert '"z3-solver==${Z3_VERSION}.0"' in install_command
+    assert "apt-get install -y libz3-dev" not in install_command
+    assert "Z3_LIBRARY_PATH_OVERRIDE" in install_command
+    assert "LD_LIBRARY_PATH" in install_command
+    assert "Z3_SYS_Z3_VERSION" in install_command
+    assert 'z3.get_version_string() == os.environ["Z3_VERSION"]' in install_command
+    assert install.get("continue-on-error") is not True
+
+    verification = _step_by_name(
+        steps, "Run Z3 verification tests (nextest)"
+    )
+    assert "cargo nextest run --locked" in verification["run"]
+    assert verification.get("continue-on-error") is not True
+
+    dockerfile = DEVCONTAINER_DOCKERFILE.read_text(encoding="utf-8")
+    assert "z3-solver==5.1.0.0" in dockerfile
+    assert "/etc/ld.so.conf.d/z3-solver.conf" in dockerfile
+    assert "ldconfig" in dockerfile
 
 
 def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:

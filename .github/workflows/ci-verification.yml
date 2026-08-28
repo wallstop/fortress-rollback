@@ -43,6 +43,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # z3 0.21's generated bindings target Z3 5.x. Keep the native solver and
+  # Rust bindings aligned instead of relying on each runner image's apt version.
+  Z3_VERSION: '5.1.0'
   # Single source of truth for Kani version used by both `cargo install` and
   # the actions/cache key. Bump here to upgrade Kani; the cache key invalidates
   # automatically. Without this pinning, `cargo install --locked kani-verifier`
@@ -135,11 +138,25 @@ jobs:
         with:
           cache-key: z3
 
-      - name: Install Z3 library
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+      - name: Install pinned Z3 library
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-cache-dir \
+            "z3-solver==${Z3_VERSION}.0"
+          python3 -c \
+            'import os, z3; assert z3.get_version_string() == os.environ["Z3_VERSION"]'
+          z3_package_dir="$(python3 -c \
+            'from pathlib import Path; import z3; print(Path(z3.__file__).parent)')"
+          z3_lib_dir="${z3_package_dir}/lib"
+          test -f "${z3_lib_dir}/libz3.so"
+          z3_runtime_path="${z3_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          {
+            printf 'Z3_LIBRARY_PATH_OVERRIDE=%s\n' "${z3_lib_dir}"
+            printf 'LD_LIBRARY_PATH=%s\n' "${z3_runtime_path}"
+            printf 'Z3_SYS_Z3_VERSION=%s\n' "${Z3_VERSION}"
+          } >> "${GITHUB_ENV}"
 
       - name: Run Z3 verification tests (nextest)
-        run: cargo nextest run --profile ci --test verification --features z3-verification -E 'test(z3)'
+        run: cargo nextest run --locked --profile ci --test verification --features z3-verification -E 'test(z3)'
         timeout-minutes: 10
 
   # Kani Formal Verification (Tier 1 - Fast proofs)
