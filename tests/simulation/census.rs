@@ -9,6 +9,10 @@ use super::harness::{
     peer_addr, run, run_with_input, HostileGossipMode, HostileGossipOptions, PeerEventKey,
     PeerEventPayload, RunOptions, RunReport, TraceSessionState, WideStubInput,
 };
+use super::sometimes_state::{
+    publish_targeted_probe, CensusAccumulator, PlantedPositiveEvidence, H_BLOAT_PROBE,
+    H_POLLCAP_PROBE, SOMETIMES_STATE_IDS,
+};
 use crate::common::sim_net::{
     BandwidthPolicy, FragmentationPolicy, GilbertElliottPolicy, LinkPolicy,
 };
@@ -1201,6 +1205,7 @@ fn h_pollcap_targeted_release_defers_without_starvation() {
     low.expect_pass(&schedule);
     high.expect_pass(&schedule);
     assert_eq!(low.trace_hash, replay.trace_hash);
+    assert_eq!(low.sometimes_state_by_peer, replay.sometimes_state_by_peer);
     assert_eq!(low.verdict, replay.verdict);
     assert_eq!(low.net_stats, replay.net_stats);
     assert_eq!(low.receive_stats_by_peer, replay.receive_stats_by_peer);
@@ -1264,6 +1269,12 @@ fn h_pollcap_targeted_release_defers_without_starvation() {
     }
     assert_eq!(low.recovered_within_b, Some(true));
     assert_eq!(high.recovered_within_b, Some(true));
+    let mut census = CensusAccumulator::default();
+    census
+        .record_materialized_schedule([&low, &high, &replay], u64::from(schedule.config.steps))
+        .expect("H-POLLCAP schedule records once across option/replay executions");
+    publish_targeted_probe(H_POLLCAP_PROBE, &census)
+        .expect("H-POLLCAP targeted census publishes atomically");
 }
 
 /// H-BLOAT scale interaction: an N=16 mesh with incompressible 32-byte inputs
@@ -1575,6 +1586,23 @@ fn h_bloat_scale_fragmentation_interaction_is_bounded_and_recovers() {
         obey_drain_step,
         obey_report.wait_frames_obeyed,
     );
+    let mut census = CensusAccumulator::default();
+    for (schedule, reports) in [
+        (&unconstrained_ignore, vec![&unconstrained_ignore_report]),
+        (&unconstrained, vec![&unconstrained_report]),
+        (&fragment_ignore, vec![&fragment_ignore_report]),
+        (&fragment_obey, vec![&fragment_obey_report]),
+        (&bandwidth_ignore, vec![&bandwidth_ignore_report]),
+        (&bandwidth_obey, vec![&bandwidth_obey_report]),
+        (&ignore, vec![&ignore_report, &ignore_replay]),
+        (&obey, vec![&obey_report, &replay]),
+    ] {
+        census
+            .record_materialized_schedule(reports, u64::from(schedule.config.steps))
+            .expect("H-BLOAT materialized schedule records once across replay");
+    }
+    publish_targeted_probe(H_BLOAT_PROBE, &census)
+        .expect("H-BLOAT targeted census publishes atomically");
 }
 
 #[test]
@@ -2737,6 +2765,24 @@ fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
         Some(&TraceSessionState::Synchronizing),
         "the high observer must remain in the explicit fail-closed state"
     );
+    assert!(
+        report.sometimes_state_by_peer[OBSERVER][4],
+        "H-RING must propagate the observer's real InputQueue occupancy into registry position 4"
+    );
+    assert!(
+        report.sometimes_state[4],
+        "the RunReport aggregate must preserve the planted ring observation"
+    );
+
+    let planted = PlantedPositiveEvidence::from_materialized_schedule(
+        [&report],
+        u64::from(schedule.config.steps),
+    )
+    .expect("H-RING report records through the production census fold");
+    let ring_count = planted.state(4).expect("registry position 4 exists");
+    assert_eq!(ring_count.id, SOMETIMES_STATE_IDS[4]);
+    assert!(ring_count.schedules_hit >= 1);
+    assert!(ring_count.peer_sessions_hit >= 1);
 
     let replay = run(&schedule, &options);
     assert_eq!(report.trace_hash, replay.trace_hash);

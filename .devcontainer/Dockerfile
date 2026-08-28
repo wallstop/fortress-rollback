@@ -101,7 +101,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     chmod +x /usr/local/bin/actionlint
 
 # Install Vale (prose linter) - architecture aware
-RUN VALE_VERSION="3.9.3" && \
+RUN VALE_VERSION="3.19.0" && \
     ARCH="$(uname -m)" && \
     if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then VALE_ARCH="arm64"; else VALE_ARCH="64-bit"; fi && \
         curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_${VALE_ARCH}.tar.gz" \

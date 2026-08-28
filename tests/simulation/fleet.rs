@@ -15,6 +15,10 @@ use super::harness::{
     phase_control_progress_interval, phase_control_sample_capacity, run, RunOptions, RunReport,
     TraceSessionState,
 };
+use super::sometimes_state::{
+    publish_targeted_probe, write_organic_shard, CensusAccumulator, NegativeControlEvidence,
+    OrganicShardReport, H_OSC_PROBE, H_SKEW_PROBE, SOMETIMES_STATE_COUNT, SOMETIMES_STATE_IDS,
+};
 use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
 use std::{
@@ -173,6 +177,7 @@ fn run_nightly_shard(shard: u64) {
         .expect("nightly simulation tests require FORTRESS_SIM_SEED_BASE")
         .parse::<u64>()
         .expect("FORTRESS_SIM_SEED_BASE must be an unsigned integer");
+    let mut census = CensusAccumulator::default();
 
     for offset in 0..NIGHTLY_SEEDS_PER_SHARD {
         let seed = nightly_seed(run_id, shard, offset);
@@ -181,6 +186,9 @@ fn run_nightly_shard(shard: u64) {
         let schedule = nightly_schedule(seed, n_players, noise);
         let report = run(&schedule, &nightly_run_options(&schedule));
         report.expect_pass(&schedule);
+        census
+            .record_materialized_schedule([&report], u64::from(schedule.config.steps))
+            .expect("organic sometimes-state schedule records");
         if noise == BackgroundNoise::ReliableFifo {
             assert!(
                 report.net_stats.retransmit_delayed > 0,
@@ -189,6 +197,9 @@ fn run_nightly_shard(shard: u64) {
             );
         }
     }
+    let shard_index = u32::try_from(shard).expect("nightly shard index fits u32");
+    write_organic_shard(&OrganicShardReport::new(run_id, shard_index, &census))
+        .expect("organic sometimes-state shard publishes atomically");
 }
 
 macro_rules! nightly_shard_test {
@@ -209,6 +220,71 @@ nightly_shard_test!(nightly_seed_shard_4_holds_invariants, 4);
 nightly_shard_test!(nightly_seed_shard_5_holds_invariants, 5);
 nightly_shard_test!(nightly_seed_shard_6_holds_invariants, 6);
 nightly_shard_test!(nightly_seed_shard_7_holds_invariants, 7);
+
+#[test]
+fn fixed_lan_negative_control_has_exactly_five_missing_states() {
+    let mut config = SimConfig::smoke(2);
+    config.steps = 1_000;
+    config.noise = BackgroundNoise::Clean;
+    config.scenario_mix = ScenarioMix::NetworkOnly;
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: 1,
+        link_seed: 1 ^ 0x1111_2222_3333_4444,
+        config,
+        initial_links: vec![(0, 1, LinkPolicy::clean()), (1, 0, LinkPolicy::clean())],
+        events: Vec::new(),
+        heal_at: 1_000,
+    };
+    let first = run(&schedule, &RunOptions::default());
+    let replay = run(&schedule, &RunOptions::default());
+    assert_eq!(schedule.seed, 1, "control seed must stay fixed");
+    assert_eq!(schedule.config.n_players, 2, "control must stay at N=2");
+    assert_eq!(schedule.config.steps, 1_000, "control step budget changed");
+    assert_eq!(schedule.config.noise, BackgroundNoise::Clean);
+    assert_eq!(schedule.config.scenario_mix, ScenarioMix::NetworkOnly);
+    assert_eq!(schedule.heal_at, schedule.config.steps);
+    assert_eq!(schedule.link_seed, 1 ^ 0x1111_2222_3333_4444);
+    assert!(schedule.events.is_empty(), "control must inject no events");
+    assert_eq!(schedule.initial_links.len(), 2);
+    assert_eq!(
+        schedule
+            .initial_links
+            .iter()
+            .map(|(from, to, _)| (*from, *to))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (1, 0)]
+    );
+    for (from, to, policy) in &schedule.initial_links {
+        assert_ne!(from, to);
+        assert!(policy.drop_rate.abs() <= f64::EPSILON);
+        assert!(policy.dup_rate.abs() <= f64::EPSILON);
+        assert_eq!(policy.base_delay, Duration::ZERO);
+        assert_eq!(policy.jitter, Duration::ZERO);
+        assert!(policy.burst_rate.abs() <= f64::EPSILON);
+        assert_eq!(policy.burst_len, 0);
+        assert_eq!(policy.retransmit_delay, Duration::ZERO);
+        assert!(policy.gilbert_elliott.is_none());
+        assert!(policy.fragmentation.is_none());
+        assert!(policy.bandwidth.is_none());
+    }
+    first.expect_pass(&schedule);
+    replay.expect_pass(&schedule);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(
+        first.sometimes_state_by_peer,
+        replay.sometimes_state_by_peer
+    );
+    assert_eq!(first.sometimes_state_by_peer.len(), 2);
+    assert!(first
+        .sometimes_state_by_peer
+        .iter()
+        .all(|vector| *vector == [false; SOMETIMES_STATE_COUNT]));
+    assert_eq!(first.sometimes_state, replay.sometimes_state);
+    assert_eq!(first.sometimes_state, [false; SOMETIMES_STATE_COUNT]);
+    let negative = NegativeControlEvidence::from_vector(first.sometimes_state);
+    assert_eq!(negative.missing_ids(), SOMETIMES_STATE_IDS);
+}
 
 /// Permanent D14 regression: the minimized lossy one-caller removal schedule
 /// previously rewrote target slot 4 at frame 327 after late gossip lowered its
@@ -704,6 +780,11 @@ fn same_schedule_produces_identical_trace() {
     );
     assert_eq!(first.final_confirmed, second.final_confirmed);
     assert_eq!(first.net_stats, second.net_stats);
+    assert_eq!(first.sometimes_state, second.sometimes_state);
+    assert_eq!(
+        first.sometimes_state_by_peer,
+        second.sometimes_state_by_peer
+    );
 }
 
 /// Negative control (real divergence): corrupting one peer's simulated state
@@ -806,12 +887,18 @@ fn oracle_catches_seeded_divergence_in_sixteen_player_mesh() {
 #[test]
 fn same_schedule_produces_identical_trace_at_sixteen_players() {
     let schedule = generate(7, SimConfig::smoke(16));
+    assert_eq!(schedule.config.n_players, 16, "test must remain at N=16");
     let first = run(&schedule, &RunOptions::default());
     let second = run(&schedule, &RunOptions::default());
     assert_eq!(
         first.trace_hash, second.trace_hash,
         "N=16 must reproduce bit-identically (final_confirmed {:?} vs {:?})",
         first.final_confirmed, second.final_confirmed
+    );
+    assert_eq!(first.sometimes_state, second.sometimes_state);
+    assert_eq!(
+        first.sometimes_state_by_peer,
+        second.sometimes_state_by_peer
     );
 }
 
@@ -3005,6 +3092,7 @@ fn h_osc_aggregation_pressure_is_measured_and_decays() {
     let mut trigger_duty = Vec::new();
     let mut phase_trigger_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
     let mut phase_endpoint_duty: [Vec<(u64, u64)>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut census = CensusAccumulator::default();
     for n in [2usize, 8, 16] {
         let mut n_aggregate_triggers = 0_u64;
         let mut n_aggregate_evaluations = 0_u64;
@@ -3013,6 +3101,9 @@ fn h_osc_aggregation_pressure_is_measured_and_decays() {
             let report = h_osc_run(&schedule);
             let replay = h_osc_run(&schedule);
             report.expect_pass(&schedule);
+            census
+                .record_materialized_schedule([&report, &replay], u64::from(schedule.config.steps))
+                .expect("H-OSC census schedule records once across replay");
             assert_eq!(report.trace_hash, replay.trace_hash, "n={n}, salt={salt}");
             assert_eq!(
                 report.progress_samples, replay.progress_samples,
@@ -3157,6 +3248,8 @@ fn h_osc_aggregation_pressure_is_measured_and_decays() {
             );
         }
     }
+    publish_targeted_probe(H_OSC_PROBE, &census)
+        .expect("H-OSC targeted census publishes atomically");
 }
 
 #[test]
@@ -4268,6 +4361,15 @@ fn h_skew_hour_equivalent_measures_lag_correction_and_cost() {
         skewed_resimulation_by_phase[2] >= exact_resimulation_by_phase[2].saturating_mul(3),
         "the pre-correction phase must carry the measured rollback amplification"
     );
+    let mut census = CensusAccumulator::default();
+    census
+        .record_materialized_schedule([&exact_report], u64::from(exact.config.steps))
+        .expect("H-SKEW exact schedule records");
+    census
+        .record_materialized_schedule([&skewed_report, &replay], u64::from(skewed.config.steps))
+        .expect("H-SKEW skewed schedule records once across replay");
+    publish_targeted_probe(H_SKEW_PROBE, &census)
+        .expect("H-SKEW targeted census publishes atomically");
 }
 
 /// H-SKEW cost-amplification diagnostic: repeat a ten-minute-equivalent matched

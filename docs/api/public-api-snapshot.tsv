@@ -1,9 +1,9 @@
 # schema=1
-# rustdoc-toolchain=nightly-2026-07-08
+# rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2713
-# textual-paths=2707
+# symbols=2716
+# textual-paths=2710
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -522,6 +522,7 @@ fortress_rollback::P2PSession::diagnostic_hostile_gossip	function	no-default+all
 fortress_rollback::P2PSession::diagnostic_player_connected	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_player_receipt_frame	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_player_retained_input_range	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
+fortress_rollback::P2PSession::diagnostic_sometimes_state_vector	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::disconnect_behavior	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::disconnect_player	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::events	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
@@ -1935,6 +1936,7 @@ fortress_rollback::prelude::P2PSession::diagnostic_hostile_gossip	function	no-de
 fortress_rollback::prelude::P2PSession::diagnostic_player_connected	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_connected	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_player_receipt_frame	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_receipt_frame	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_player_retained_input_range	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_retained_input_range	src/sessions/p2p_session.rs
+fortress_rollback::prelude::P2PSession::diagnostic_sometimes_state_vector	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_sometimes_state_vector	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::disconnect_behavior	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::disconnect_behavior	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::disconnect_player	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::disconnect_player	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::events	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::events	src/sessions/p2p_session.rs
@@ -2430,6 +2432,7 @@ fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_hostile_gossip	
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_player_connected	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_connected	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_player_receipt_frame	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_receipt_frame	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_player_retained_input_range	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_player_retained_input_range	src/sessions/p2p_session.rs
+fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_sometimes_state_vector	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_sometimes_state_vector	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::disconnect_behavior	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::disconnect_behavior	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::disconnect_player	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::disconnect_player	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::events	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::events	src/sessions/p2p_session.rs

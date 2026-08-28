@@ -6,6 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 try:
@@ -107,6 +108,42 @@ def _run_unsafe_audit_verifier(
     )
 
 
+def _run_deny_policy(
+    tmp_path: Path, *, global_config: bool
+) -> subprocess.CompletedProcess[str]:
+    cargo_stub = tmp_path / "cargo"
+    cargo_stub.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "${CARGO_CALLS:?}"\n'
+        'if [ "$1" = "deny" ] && [ "$2" = "--config" ] '
+        '&& [ "$4" = "check" ] && [ "$5" = "--help" ]; then\n'
+        '  exit "${CONFIG_PROBE_STATUS:?}"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    cargo_stub.chmod(0o755)
+    calls = tmp_path / "cargo-calls.txt"
+    deny_step = next(
+        step
+        for step in _workflow()["jobs"]["supply-chain-security"]["steps"]
+        if step.get("name") == "Deny policy (${{ matrix.workspace }})"
+    )
+    return subprocess.run(
+        ["bash", "-c", deny_step["run"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "CARGO_CALLS": str(calls),
+            "CONFIG_PROBE_STATUS": "0" if global_config else "2",
+            "LICENSE_CONFIG": str(tmp_path / "deny.toml"),
+            "MANIFEST": "Cargo.toml",
+        },
+    )
+
+
 def _workspace_matrix(job: dict) -> dict[str, tuple[str, str]]:
     entries = job["strategy"]["matrix"]["include"]
     return {
@@ -143,10 +180,32 @@ def test_security_commands_are_explicit_and_fail_closed() -> None:
     assert 'cargo audit --file "$LOCKFILE"' in run_blocks
     assert 'cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources' in run_blocks
     assert (
+        'cargo deny --config "$LICENSE_CONFIG" check --help >/dev/null 2>&1'
+        in run_blocks
+    )
+    assert (
         'cargo deny --manifest-path "$MANIFEST" --locked '
         '--config "$LICENSE_CONFIG" check licenses'
     ) in run_blocks
+    assert (
+        'cargo deny --manifest-path "$MANIFEST" --locked '
+        'check --config "$LICENSE_CONFIG" licenses'
+    ) in run_blocks
     assert all(not step.get("continue-on-error", False) for step in steps)
+
+
+@pytest.mark.parametrize("global_config", [False, True])
+def test_deny_policy_selects_the_supported_config_position(
+    tmp_path: Path, global_config: bool
+) -> None:
+    result = _run_deny_policy(tmp_path, global_config=global_config)
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "cargo-calls.txt").read_text(encoding="utf-8")
+    config = tmp_path / "deny.toml"
+    if global_config:
+        assert f'deny --manifest-path Cargo.toml --locked --config {config} check licenses' in calls
+    else:
+        assert f'deny --manifest-path Cargo.toml --locked check --config {config} licenses' in calls
 
 
 def test_freshness_reports_are_required_but_version_lag_is_advisory() -> None:

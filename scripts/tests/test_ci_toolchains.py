@@ -243,7 +243,7 @@ def test_floating_nightly_detector_rejects_env_at_every_scope(
 
 
 def test_floating_nightly_detector_accepts_dated_forms() -> None:
-    dated = "nightly-2026-07-08"
+    dated = "nightly-2026-08-26"
     job = {
         "env": {"RUSTUP_TOOLCHAIN": dated},
         "steps": [
@@ -275,11 +275,12 @@ def test_generic_nightly_pin_is_dated_and_has_one_source_of_truth() -> None:
 
 def test_miri_pin_is_dated_and_has_one_source_of_truth() -> None:
     pin = MIRI_PIN.read_text(encoding="utf-8").strip()
-    workflow_text = (WORKFLOWS / "ci-rust.yml").read_text(encoding="utf-8")
+    workflow = _load_yaml(WORKFLOWS / "ci-rust.yml")
+    miri_job_text = yaml.safe_dump(workflow["jobs"]["miri"])
 
     assert re.fullmatch(r"nightly-\d{4}-\d{2}-\d{2}", pin)
-    assert pin not in workflow_text
-    assert "pin-file: miri-toolchain" in workflow_text
+    assert pin not in miri_job_text
+    assert "pin-file: miri-toolchain" in miri_job_text
 
 
 def test_release_toolchain_pin_is_exact_u64_semver_and_single_source() -> None:
@@ -474,10 +475,10 @@ def test_pinned_nightly_installer_retries_and_reports_diagnostics() -> None:
 @pytest.mark.parametrize(
     ("pin_contents", "components", "targets", "expected_error"),
     (
-        ("nightly\nnightly-2026-07-08\n", "", "", "exactly one line"),
+        ("nightly\nnightly-2026-08-26\n", "", "", "exactly one line"),
         ("nightly\n", "", "", "exactly nightly-YYYY-MM-DD"),
-        ("nightly-2026-07-08\n", "rust src", "", "Invalid rustup component"),
-        ("nightly-2026-07-08\n", "", "wasm32;uname", "Invalid rustup target"),
+        ("nightly-2026-08-26\n", "rust src", "", "Invalid rustup component"),
+        ("nightly-2026-08-26\n", "", "wasm32;uname", "Invalid rustup target"),
     ),
 )
 def test_pinned_nightly_installer_rejects_invalid_input_before_rustup(

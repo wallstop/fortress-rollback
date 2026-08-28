@@ -1,3 +1,6 @@
+// GodotClass's `init` expansion uses explicit field names on current nightly.
+#![allow(clippy::redundant_field_names)]
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;

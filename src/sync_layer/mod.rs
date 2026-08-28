@@ -1148,6 +1148,14 @@ impl<T: Config> SyncLayer<T> {
             .map(InputQueue::retained_input_range)
     }
 
+    /// Returns whether any player queue has ever retained exactly one slot less
+    /// than its fixed capacity.
+    pub(crate) fn input_ring_within_one_slot_of_capacity_seen(&self) -> bool {
+        self.input_queues
+            .iter()
+            .any(InputQueue::within_one_slot_of_capacity_seen)
+    }
+
     /// Validates retained overlaps and installs only a sequential missing
     /// suffix for `handle`, bounded by that queue's fixed capacity.
     #[allow(dead_code)] // D14 session orchestration consumes this substrate next.
@@ -1863,6 +1871,26 @@ mod sync_layer_tests {
             Frame::new(0),
             "frozen queue must retain its original high-water"
         );
+    }
+
+    #[test]
+    fn input_ring_observation_ors_across_player_queues() {
+        let mut sync_layer = SyncLayer::<TestConfig>::with_queue_length(2, 2, 4);
+        let player = PlayerHandle::new(1);
+
+        for frame in 0..2 {
+            assert!(sync_layer.add_remote_input(
+                player,
+                PlayerInput::new(Frame::new(frame), TestInput { inp: frame as u8 })
+            ));
+        }
+        assert!(!sync_layer.input_ring_within_one_slot_of_capacity_seen());
+
+        assert!(sync_layer.add_remote_input(
+            player,
+            PlayerInput::new(Frame::new(2), TestInput { inp: 2 })
+        ));
+        assert!(sync_layer.input_ring_within_one_slot_of_capacity_seen());
     }
 
     #[test]

@@ -419,6 +419,10 @@ where
     /// every cycle and would otherwise starve the bare-keepalive branch (and
     /// any nudge hooked on it) indefinitely.
     last_nudge_time: Instant,
+    /// Monotonic observation bit set only after a connect-status nudge has been
+    /// successfully built and queued. Ordinary and retransmitted inputs do not
+    /// touch it.
+    connect_status_nudge_sent_seen: bool,
     /// Last time a REAL `Input` message (fresh send or pending retransmission,
     /// not a nudge) was queued. The nudge is an input-idle SUBSTITUTE: while
     /// genuine input traffic flows it must stay completely silent so enabling
@@ -982,6 +986,7 @@ impl<T: Config> UdpProtocol<T> {
             // connect-status nudge
             connect_status_nudge: false,
             last_nudge_time: now,
+            connect_status_nudge_sent_seen: false,
             last_input_send_time: now,
 
             // time sync
@@ -1257,6 +1262,13 @@ impl<T: Config> UdpProtocol<T> {
     pub(crate) fn force_running_for_tests(&mut self) {
         self.state = ProtocolState::Running;
         self.remote_conn_id = 1;
+    }
+
+    /// Seeds the acknowledged-frame premise required to build a connect-status
+    /// nudge without directly setting the observation bit.
+    #[cfg(test)]
+    pub(crate) fn seed_last_acked_input_frame_for_tests(&mut self, frame: Frame) {
+        self.last_acked_input.frame = frame;
     }
 
     /// Test-only: a compact snapshot of the synchronization-relevant endpoint
@@ -2084,6 +2096,12 @@ impl<T: Config> UdpProtocol<T> {
         self.connect_status_nudge
     }
 
+    /// Returns whether this endpoint has ever successfully queued a
+    /// connect-status nudge.
+    pub(crate) fn connect_status_nudge_sent_seen(&self) -> bool {
+        self.connect_status_nudge_sent_seen
+    }
+
     /// Sends a **connect-status nudge**: a status-bearing duplicate `Input`
     /// message re-built from the retained delta reference
     /// [`last_acked_input`](Self::last_acked_input), carrying the session's
@@ -2177,6 +2195,7 @@ impl<T: Config> UdpProtocol<T> {
         };
         connect_status.clone_into(&mut body.peer_connect_status);
         self.queue_message(MessageBody::Input(body));
+        self.connect_status_nudge_sent_seen = true;
         true
     }
 
@@ -6891,6 +6910,10 @@ mod tests {
             queued_inputs(&protocol).is_empty(),
             "a nudge must not fire exactly at its cadence boundary"
         );
+        assert!(
+            !protocol.connect_status_nudge_sent_seen(),
+            "the exact timing boundary is an adjacent negative"
+        );
 
         advance_test_clock(&clock, Duration::from_millis(1));
         let _ = protocol.poll(&connect_status).count();
@@ -6911,6 +6934,7 @@ mod tests {
         let (mut protocol, clock) = running_nudge_protocol();
         protocol.last_acked_input.frame = Frame::new(3);
         protocol.set_connect_status_nudge(true);
+        assert!(!protocol.connect_status_nudge_sent_seen());
 
         let status_first = vec![
             ConnectionStatus {
@@ -6926,6 +6950,7 @@ mod tests {
         ];
         advance_test_clock(&clock, Duration::from_millis(201));
         let _ = protocol.poll(&status_first).count();
+        assert!(protocol.connect_status_nudge_sent_seen());
 
         {
             let inputs = queued_inputs(&protocol);
@@ -6981,6 +7006,10 @@ mod tests {
             status_second,
             "each nudge carries the connect status current at its own poll"
         );
+        assert!(
+            protocol.connect_status_nudge_sent_seen(),
+            "the observation remains monotonic after later polls"
+        );
     }
 
     /// (ii) Flag clear: the idle tick sends the plain KeepAlive exactly as
@@ -7001,6 +7030,10 @@ mod tests {
         assert!(
             queued_inputs(&protocol).is_empty(),
             "without the flag no duplicate Input may be sent"
+        );
+        assert!(
+            !protocol.connect_status_nudge_sent_seen(),
+            "ordinary keepalives must not count as nudges"
         );
     }
 
@@ -7028,6 +7061,10 @@ mod tests {
         assert!(
             queued_inputs(&protocol).is_empty(),
             "no self-referencing nudge can be built before the first ack"
+        );
+        assert!(
+            !protocol.connect_status_nudge_sent_seen(),
+            "an enabled nudge with a NULL ack reference must not count"
         );
     }
 
@@ -7101,6 +7138,7 @@ mod tests {
             queued_inputs(&protocol).is_empty(),
             "no nudge may fire while real input traffic is fresh"
         );
+        assert!(!protocol.connect_status_nudge_sent_seen());
         assert!(
             queue_has_keep_alive(&protocol),
             "the idle tick still keeps the link alive"
@@ -7115,6 +7153,7 @@ mod tests {
             queued_inputs(&protocol).is_empty(),
             "no nudge may fire exactly at the input-idle interval"
         );
+        assert!(!protocol.connect_status_nudge_sent_seen());
 
         // One more millisecond (201ms since the last real Input): now
         // input-idle — the nudge fires.
@@ -7172,6 +7211,10 @@ mod tests {
         assert_eq!(
             retransmission.peer_connect_status, connect_status,
             "gossip rides the retransmission"
+        );
+        assert!(
+            !protocol.connect_status_nudge_sent_seen(),
+            "ordinary/retransmitted Input packets must not count as nudges"
         );
     }
 

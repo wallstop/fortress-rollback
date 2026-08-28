@@ -19,6 +19,7 @@ pub mod oracle;
 pub mod schedule;
 pub mod shrink;
 
+use super::sometimes_state::{aggregate_peer_vectors, SometimesStateVector, SOMETIMES_STATE_COUNT};
 use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBinding};
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
@@ -952,6 +953,8 @@ struct TraceFinalSummary {
     first_running_step: Vec<Option<u32>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     first_synchronized_step: Vec<Vec<Option<u32>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sometimes_state: Option<SometimesStateVector>,
     net: TraceNetStats,
 }
 
@@ -965,6 +968,11 @@ pub struct RunReport {
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
+    /// Per-P2P-session monotonic sometimes-state vectors, indexed by peer.
+    /// Empty for schedule schemas before 20.
+    pub sometimes_state_by_peer: Vec<SometimesStateVector>,
+    /// Fixed-order OR of [`Self::sometimes_state_by_peer`].
+    pub sometimes_state: SometimesStateVector,
     /// Each peer's final confirmed frame.
     pub final_confirmed: Vec<i32>,
     /// Final [`TRACE_TAIL_CAPACITY`] end-of-step snapshots.
@@ -3526,6 +3534,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     let hostile_gossip = options
         .hostile_gossip
         .map(|_| hostile_counters.evidence(hostile_gossip_probe));
+    let sometimes_state_by_peer = if schedule.schema_version >= 20 {
+        peers
+            .iter()
+            .map(|peer| peer.session.diagnostic_sometimes_state_vector())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let sometimes_state = aggregate_peer_vectors(&sometimes_state_by_peer);
     let final_trace_summary = TraceFinalSummary {
         failure_classes: verdict.failures.iter().map(OracleFailure::class).collect(),
         final_confirmed: final_confirmed.clone(),
@@ -3591,6 +3608,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         receive_stats_by_peer: receive_stats_by_peer.clone(),
         first_running_step: reported_first_running_step.clone(),
         first_synchronized_step: reported_first_synchronized_step.clone(),
+        sometimes_state: (schedule.schema_version >= 20).then_some(sometimes_state),
         net: TraceNetStats::from(net.stats()),
     };
     fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
@@ -3599,6 +3617,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         replay_input_width_bytes: I::WIDTH_BYTES,
         verdict,
         trace_hash,
+        sometimes_state_by_peer,
+        sometimes_state,
         final_confirmed,
         trace_tail: trace_tail.into(),
         probe_confirmed,
@@ -3918,6 +3938,60 @@ mod tests {
         second_expected.write(&(second_bytes.len() as u64).to_le_bytes());
         second_expected.write(second_bytes);
         assert_eq!(actual, second_expected.finish());
+    }
+
+    fn final_summary_hash(schema_version: u32, sometimes_state: SometimesStateVector) -> u64 {
+        let summary = TraceFinalSummary {
+            failure_classes: Vec::new(),
+            final_confirmed: vec![7, 7],
+            probe_confirmed: Vec::new(),
+            probe_peer_wire_by_link: Vec::new(),
+            fragmentation_drops_by_link: Vec::new(),
+            link_stats_by_link: Vec::new(),
+            pending_output_probe: None,
+            receipt_range_probe: None,
+            hostile_gossip: None,
+            confirmed_at_heal: vec![3, 3],
+            confirmed_after_recovery: vec![7, 7],
+            recovered_within_b: Some(true),
+            spectator_applied_frames: 0,
+            spectator_max_frame: None,
+            spectator_final_hosts: None,
+            progress_samples: Vec::new(),
+            frame_opportunities: Vec::new(),
+            wait_frames_obeyed: Vec::new(),
+            wait_recommendation_max: Vec::new(),
+            wait_recommendation_frames: Vec::new(),
+            wait_recommendations_accepted: Vec::new(),
+            wait_frames_accepted: Vec::new(),
+            cpu_feedback: Vec::new(),
+            receive_stats_by_peer: Vec::new(),
+            first_running_step: Vec::new(),
+            first_synchronized_step: Vec::new(),
+            sometimes_state: (schema_version >= 20).then_some(sometimes_state),
+            net: TraceNetStats::default(),
+        };
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        fold_trace(&mut hash, &summary, &mut Vec::new());
+        hash
+    }
+
+    #[test]
+    fn schema_v20_final_trace_identity_includes_sometimes_state_vector() {
+        let all_false = [false; SOMETIMES_STATE_COUNT];
+        let mut one_bit_changed = all_false;
+        one_bit_changed[2] = true;
+
+        assert_ne!(
+            final_summary_hash(20, all_false),
+            final_summary_hash(20, one_bit_changed),
+            "schema 20 must fold every sometimes-state bit into final trace identity"
+        );
+        assert_eq!(
+            final_summary_hash(19, all_false),
+            final_summary_hash(19, one_bit_changed),
+            "legacy schemas must preserve the pre-census final-summary identity"
+        );
     }
 
     #[test]

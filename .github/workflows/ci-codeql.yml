@@ -88,7 +88,7 @@ jobs:
                     "actions/cache-poisoning/poisonable-step|feef20c4e42596ef:1",
                     "actions/cache-poisoning/poisonable-step|8d4fae92413ae178:1",
                     "actions/cache-poisoning/poisonable-step|911ca217a17b7b20:1",
-                    "actions/untrusted-checkout/medium|bd8dc38829013265:1"
+                    "actions/untrusted-checkout/medium|3a1085a4c6a85ca1:1"
                   ]
                 | index($identity) != null);
 

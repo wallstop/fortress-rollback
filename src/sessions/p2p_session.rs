@@ -40,7 +40,7 @@ use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fmt;
 use std::hash::Hasher;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -197,6 +197,26 @@ enum GracefulDropFailurePolicy {
 enum RemoteDisconnectNotification {
     Silent,
     UserRequested,
+}
+
+// Stable v1 sometimes-state registry order. Keep these masks aligned with
+// `diagnostic_sometimes_state_vector` and issue #316.
+// Spell the zero-index bit literally: shifting either direction by zero is
+// equivalent, which creates an untestable operator mutant.
+const SOMETIMES_ROLLBACK_AT_PREDICTION_LIMIT: u8 = 0b0000_0001;
+const SOMETIMES_LOWER_FLOOR_CONSUMED: u8 = 1 << 1;
+const SOMETIMES_CONNECT_STATUS_NUDGE_SENT: u8 = 1 << 2;
+const SOMETIMES_SPARSE_EARLIER_CHECKPOINT_SELECTED: u8 = 1 << 3;
+const SOMETIMES_INPUT_RING_WITHIN_ONE_SLOT: u8 = 1 << 4;
+
+const fn completed_rollback_at_prediction_limit(depth: usize, max_prediction: usize) -> bool {
+    max_prediction != 0 && depth == max_prediction
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct RemoteSlotConfirmedBoundObservation {
+    bound: Option<Frame>,
+    lower_floor_consumed: bool,
 }
 
 #[allow(dead_code)] // consumed incrementally by the D14 session state machine below
@@ -367,6 +387,11 @@ where
     /// cut. Atomic interior mutability preserves the session's existing
     /// `Send`/`Sync` auto-traits while the public accessor remains `&self`.
     exposed_confirmed_high_water: AtomicI32,
+    /// Monotonic, observation-only bits for the stable v1 sometimes-state
+    /// registry. Relaxed atomic OR preserves the session's auto-traits and is
+    /// deterministic because bit order and the final value are schedule-order
+    /// independent.
+    sometimes_state_seen: AtomicU8,
     /// Operation-identified, non-retracting graceful-drop barrier (D14).
     coordinated_drop: CoordinatedDropState<T::Address>,
 
@@ -2845,6 +2870,7 @@ impl<T: Config> P2PSession<T> {
             disconnect_behavior,
             halt_confirmed_ceiling: None,
             exposed_confirmed_high_water: AtomicI32::new(Frame::NULL.as_i32()),
+            sometimes_state_seen: AtomicU8::new(0),
             coordinated_drop: CoordinatedDropState::default(),
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
@@ -3328,12 +3354,17 @@ impl<T: Config> P2PSession<T> {
 
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
         let mut events = VecDeque::new();
+        let mut connect_status_nudge_sent = false;
         for endpoint in self.player_reg.remotes.values_mut() {
             let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
                 events.push_back((event, handles.clone(), addr.clone()))
             }
+            connect_status_nudge_sent |= endpoint.connect_status_nudge_sent_seen();
+        }
+        if connect_status_nudge_sent {
+            self.record_sometimes_state(SOMETIMES_CONNECT_STATUS_NUDGE_SENT);
         }
         for endpoint in self.player_reg.spectators.values_mut() {
             let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
@@ -8124,10 +8155,13 @@ impl<T: Config> P2PSession<T> {
         #[cfg(not(feature = "hot-join"))]
         let effective_reported_frame = reported;
         let (request_seq, reply_seq, prune_seq) = endpoint.floor_round_diagnostic();
-        let target_confirmed_bound = self
-            .local_connect_status
-            .get(target.as_usize())
-            .and_then(|local| self.remote_slot_confirmed_bound(target, local));
+        let target_confirmed_bound =
+            self.local_connect_status
+                .get(target.as_usize())
+                .and_then(|local| {
+                    self.remote_slot_confirmed_bound_observation(target, local)
+                        .bound
+                });
         Some(HostileGossipDiagnostic {
             endpoint_running: endpoint.is_running(),
             status_disconnected: status.disconnected,
@@ -8160,6 +8194,34 @@ impl<T: Config> P2PSession<T> {
             .ok()
             .flatten()
             .map(|range| (range.first, range.last))
+    }
+
+    /// Doc-hidden diagnostic compatibility surface: returns the monotonic v1
+    /// sometimes-state vector in this exact order:
+    /// rollback at prediction limit, lower floor consumed, connect-status nudge
+    /// sent, sparse earlier checkpoint selected, input ring within one slot of
+    /// capacity.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_sometimes_state_vector(&self) -> [bool; 5] {
+        if self
+            .sync_layer
+            .input_ring_within_one_slot_of_capacity_seen()
+        {
+            self.record_sometimes_state(SOMETIMES_INPUT_RING_WITHIN_ONE_SLOT);
+        }
+        let bits = self.sometimes_state_seen.load(Ordering::Relaxed);
+        [
+            bits & SOMETIMES_ROLLBACK_AT_PREDICTION_LIMIT != 0,
+            bits & SOMETIMES_LOWER_FLOOR_CONSUMED != 0,
+            bits & SOMETIMES_CONNECT_STATUS_NUDGE_SENT != 0,
+            bits & SOMETIMES_SPARSE_EARLIER_CHECKPOINT_SELECTED != 0,
+            bits & SOMETIMES_INPUT_RING_WITHIN_ONE_SLOT != 0,
+        ]
+    }
+
+    fn record_sometimes_state(&self, mask: u8) {
+        self.sometimes_state_seen.fetch_or(mask, Ordering::Relaxed);
     }
 
     /// Returns the maximum prediction window of a session.
@@ -10177,6 +10239,7 @@ impl<T: Config> P2PSession<T> {
                 if earlier.is_null() {
                     last_saved
                 } else {
+                    self.record_sometimes_state(SOMETIMES_SPARSE_EARLIER_CHECKPOINT_SELECTED);
                     earlier
                 }
             } else {
@@ -10323,6 +10386,9 @@ impl<T: Config> P2PSession<T> {
         // frames the application actually stepped.
         if let Ok(depth) = usize::try_from(count) {
             self.metrics.record_rollback(depth);
+            if completed_rollback_at_prediction_limit(depth, self.max_prediction) {
+                self.record_sometimes_state(SOMETIMES_ROLLBACK_AT_PREDICTION_LIMIT);
+            }
         }
         // after all this, we should have arrived at the same frame where we started
         let final_frame = self.sync_layer.current_frame();
@@ -10843,6 +10909,21 @@ impl<T: Config> P2PSession<T> {
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
     ) -> Option<Frame> {
+        let observation = self.remote_slot_confirmed_bound_observation(handle, local_status);
+        if observation.lower_floor_consumed {
+            self.record_sometimes_state(SOMETIMES_LOWER_FLOOR_CONSUMED);
+        }
+        observation.bound
+    }
+
+    /// Computes the production fold and its exact lower-floor predicate without
+    /// mutating the observation census. Hidden diagnostics use this pure path so
+    /// reading diagnostic state can never manufacture coverage.
+    fn remote_slot_confirmed_bound_observation(
+        &self,
+        handle: PlayerHandle,
+        local_status: &ConnectionStatus,
+    ) -> RemoteSlotConfirmedBoundObservation {
         // N-peer pending-reactivation shield, bound leg (companion to the
         // fold shield in `update_player_disconnects`): while this survivor
         // holds the REOPENED attempt `(handle, F)`, the attempt owns the
@@ -10944,6 +11025,7 @@ impl<T: Config> P2PSession<T> {
         let consume_round_floor = self.pessimistic_floor_relay_topology();
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
+        let mut lower_floor_consumed = false;
         for endpoint in self.player_reg.remotes.values() {
             if !endpoint.is_running() {
                 continue;
@@ -11001,12 +11083,16 @@ impl<T: Config> P2PSession<T> {
             // queue-min freeze (equal to the true floor for a disconnected slot),
             // reorder-safe, so confirmation can never outrun the freeze via a
             // disconnected relay.
+            let round_floor = endpoint.round_floor(handle);
             let reported = if consume_round_floor
                 && !status.disconnected
                 && endpoint.floor_round_is_fresh()
-                && endpoint.round_floor(handle) != Frame::NULL
+                && round_floor != Frame::NULL
             {
-                std::cmp::min(status.last_frame, endpoint.round_floor(handle))
+                if round_floor < status.last_frame {
+                    lower_floor_consumed = true;
+                }
+                std::cmp::min(status.last_frame, round_floor)
             } else {
                 status.last_frame
             };
@@ -11026,7 +11112,7 @@ impl<T: Config> P2PSession<T> {
                 None => folded_frame,
             });
         }
-        match (local_status.disconnected, any_reports_connected, gossip_min) {
+        let bound = match (local_status.disconnected, any_reports_connected, gossip_min) {
             // Connected slot, no contributing endpoints: the local receipt
             // alone (pre-barrier behavior).
             (false, _, None) => Some(local_status.last_frame),
@@ -11046,6 +11132,10 @@ impl<T: Config> P2PSession<T> {
             // slot connected; also covers the empty-fold `N == 2` post-drop
             // case): exclude the slot — the frozen value carries it.
             (true, false, _) => None,
+        };
+        RemoteSlotConfirmedBoundObservation {
+            bound,
+            lower_floor_consumed,
         }
     }
 
@@ -12556,6 +12646,105 @@ mod tests {
         );
 
         assert!(matches!(result, Err(DropAbortReason::ConflictingHistory)));
+    }
+
+    #[test]
+    fn completed_rollback_prediction_limit_predicate_is_exact() {
+        assert!(!completed_rollback_at_prediction_limit(0, 0));
+        assert!(!completed_rollback_at_prediction_limit(3, 4));
+        assert!(completed_rollback_at_prediction_limit(4, 4));
+        assert!(!completed_rollback_at_prediction_limit(5, 4));
+    }
+
+    #[test]
+    fn incomplete_resimulation_does_not_record_completed_rollback() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(MAX_PREDICTION)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        if let FortressRequest::SaveGameState { cell, frame } =
+            session.sync_layer.save_current_state()
+        {
+            cell.save(frame, Some(0), Some(0));
+        }
+        for f in 0..4i32 {
+            let frame = Frame::new(f);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, f as u8)),
+                frame
+            );
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(4), SaveMode::EveryFrame);
+
+        let mut requests = RequestVec::<TestConfig>::new();
+        let result = session.adjust_gamestate(Frame::new(0), Frame::new(4), &mut requests);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::SynchronizedInputsFailed { frame }
+            }) if frame == Frame::new(0)
+        ));
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[0],
+            "loading a checkpoint is insufficient; every resimulated frame must complete"
+        );
+        assert_eq!(session.metrics.rollback_count, 0);
+    }
+
+    #[test]
+    fn input_ring_occupancy_reaches_exact_session_vector_position() {
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("one player")
+            .with_max_prediction_window(1)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 4 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for input in [0_u8, 1] {
+            let frame = Frame::new(i32::from(input));
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, input)),
+                frame
+            );
+            session.sync_layer.advance_frame();
+        }
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false; 5],
+            "two occupied slots leave two free slots in a four-slot ring"
+        );
+
+        let frame = Frame::new(2);
+        assert_eq!(
+            session
+                .sync_layer
+                .add_local_input(local, PlayerInput::new(frame, 2)),
+            frame
+        );
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false, false, false, false, true],
+            "actual InputQueue occupancy must reach exact registry position 4"
+        );
     }
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -15626,6 +15815,11 @@ mod tests {
         }
         assert_eq!(session.sync_layer.current_frame(), Frame::new(8));
         assert_eq!(session.sync_layer.last_saved_frame(), Frame::new(6));
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false; 5],
+            "setup alone must not manufacture detector coverage"
+        );
 
         // Disconnect handle 1 at agreed freeze frame F = 4, lowering the rollback
         // target BELOW `last_saved_frame`. The frozen queue lets `synchronized_inputs`
@@ -15661,6 +15855,11 @@ mod tests {
         session
             .adjust_gamestate(first_incorrect, confirmed_frame, &mut requests)
             .expect("adjust_gamestate");
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [true, false, false, true, false],
+            "the completed depth-four rollback and non-null earlier sparse checkpoint hit exact registry positions"
+        );
 
         // After the deep rollback, re-simulation returned to current_frame = 8, but
         // the sparse save (gated on current_frame == min_confirmed == 8) never fired
@@ -15703,6 +15902,51 @@ mod tests {
         assert!(
             session.sync_layer.last_saved_frame() <= session.sync_layer.current_frame(),
             "INV-8: last_saved_frame must not exceed current_frame"
+        );
+    }
+
+    #[test]
+    fn sparse_rollback_at_last_saved_checkpoint_records_limit_without_earlier() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_save_mode(SaveMode::Sparse)
+            .with_max_prediction_window(MAX_PREDICTION)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for f in 0..8i32 {
+            let frame = Frame::new(f);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, f as u8)),
+                frame
+            );
+            if f == 4 {
+                if let FortressRequest::SaveGameState { cell, frame: saved } =
+                    session.sync_layer.save_current_state()
+                {
+                    cell.save(saved, Some(4), Some(4));
+                }
+            }
+            session.sync_layer.advance_frame();
+        }
+        assert_eq!(session.sync_layer.last_saved_frame(), Frame::new(4));
+
+        let mut requests = RequestVec::<TestConfig>::new();
+        session
+            .adjust_gamestate(Frame::new(4), Frame::new(8), &mut requests)
+            .expect("rollback from the current last-saved checkpoint");
+
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [true, false, false, false, false],
+            "the completed depth-four rollback occupies position 0 while last_saved == first_incorrect excludes the earlier-checkpoint position"
         );
     }
 
@@ -18199,11 +18443,75 @@ mod tests {
         }
 
         let status = session.local_connect_status[d.as_usize()];
+        assert!(
+            session
+                .diagnostic_hostile_gossip(PlayerHandle::new(2), d)
+                .is_some(),
+            "the diagnostic reads the same relay fold"
+        );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a diagnostic read must not manufacture lower-floor coverage"
+        );
         assert_eq!(
             session.remote_slot_confirmed_bound(d, &status),
             Some(Frame::new(4)),
             "with B pruned and C+D running, the relay C's fresh round floor (4) must bound \
              confirmation — folding its own last_frame (10) would discard the contested window"
+        );
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false, true, false, false, false],
+            "the consumed lower floor must occupy exact registry position 1"
+        );
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false, true, false, false, false],
+            "the production observation is monotonic and does not set adjacent positions"
+        );
+    }
+
+    #[test]
+    fn remote_slot_confirmed_bound_equal_floor_is_adjacent_negative() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("running endpoint");
+            endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(10))
+        );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a fresh non-null floor equal to status is not strictly lower"
         );
     }
 
@@ -18251,6 +18559,10 @@ mod tests {
             Some(Frame::new(10)),
             "with every remote running (no prune), the one-hop fold is complete and the \
              relay's round floor (4) must be ignored (no steady-state pacing cost)"
+        );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a low floor outside the relay topology must not count"
         );
     }
 
@@ -18350,6 +18662,29 @@ mod tests {
             "a fresh round reply of NULL (relay folds no lower source) must fall back to \
              last_frame (8) even with the gate engaged — never a spurious NULL-driven dip"
         );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a NULL floor is not consumable"
+        );
+
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            endpoint.set_round_floor_for_tests(d, Frame::new(4));
+            endpoint.reset_floor_freshness();
+        }
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(8)),
+            "a cached low floor from a stale generation is ignored"
+        );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a stale floor must not count"
+        );
     }
 
     /// MID-GAME-DROP REORDER facet, DISCONNECTED-relay sub-shape (S53). A relay
@@ -18430,6 +18765,10 @@ mod tests {
              slot) and is merged reorder-safely, so confirmation can never outrun \
              it. Folding the stale floor (10) discards the contested (4, 10] window \
              before the freeze reclaims it — the mid-game-drop reorder desync"
+        );
+        assert!(
+            !session.diagnostic_sometimes_state_vector()[1],
+            "a disconnected relay uses its authoritative status freeze, not its floor"
         );
     }
 
@@ -18934,11 +19273,47 @@ mod tests {
     /// `tests/sessions/peer_drop.rs`).
     #[test]
     fn poll_remote_clients_sets_connect_status_nudge_until_mesh_agreement() {
-        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let addr_b = test_addr(9401);
+        let addr_c = test_addr(9402);
+        let addr_d = test_addr(9403);
+        let current = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let clock_handle = Arc::clone(&current);
+        let protocol_config = ProtocolConfig {
+            quality_report_interval: std::time::Duration::from_secs(3_600),
+            clock: Some(Arc::new(move || {
+                *clock_handle.lock().expect("test clock lock")
+            })),
+            ..ProtocolConfig::default()
+        };
+        let mut session = SessionBuilder::<TestConfig>::new()
+            .with_protocol_config(protocol_config)
+            .with_num_players(4)
+            .expect("4 players is valid")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local A is valid")
+            .add_player(PlayerType::Remote(addr_b), PlayerHandle::new(1))
+            .expect("remote B is valid")
+            .add_player(PlayerType::Remote(addr_c), PlayerHandle::new(2))
+            .expect("remote C is valid")
+            .add_player(PlayerType::Remote(addr_d), PlayerHandle::new(3))
+            .expect("remote D is valid")
+            .start_p2p_session(DummySocket)
+            .expect("session should build");
+        for addr in [addr_b, addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("remote endpoint must exist at build time");
+            endpoint.force_running_for_tests();
+            endpoint.seed_last_acked_input_frame_for_tests(Frame::new(3));
+        }
+        session.state = SessionState::Running;
         let c = PlayerHandle::new(2);
 
         // No disconnect anywhere: polling must keep the nudge disarmed.
         session.poll_remote_clients();
+        assert_eq!(session.diagnostic_sometimes_state_vector(), [false; 5]);
         for addr in [addr_b, addr_d] {
             assert!(
                 !session
@@ -18980,18 +19355,25 @@ mod tests {
                     },
                 );
         }
+        *current.lock().expect("test clock lock") += std::time::Duration::from_millis(201);
         session.poll_remote_clients();
         for addr in [addr_b, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get(&addr)
+                .expect("survivor endpoint");
+            assert!(endpoint.connect_status_nudge_for_tests());
             assert!(
-                session
-                    .player_reg
-                    .remotes
-                    .get(&addr)
-                    .expect("survivor endpoint")
-                    .connect_status_nudge_for_tests(),
-                "the nudge must be armed while the drop awaits mesh agreement"
+                endpoint.connect_status_nudge_sent_seen(),
+                "the armed nudge must traverse successful protocol queueing"
             );
         }
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false, false, true, false, false],
+            "a successfully queued protocol nudge must reach exact registry position 2"
+        );
 
         // Both survivors now gossip the slot disconnected: mesh-agreed — the
         // next poll must disarm the nudge.
@@ -19011,6 +19393,11 @@ mod tests {
                 );
         }
         session.poll_remote_clients();
+        assert_eq!(
+            session.diagnostic_sometimes_state_vector(),
+            [false, false, true, false, false],
+            "the production observation remains monotonic after mesh agreement"
+        );
         for addr in [addr_b, addr_d] {
             assert!(
                 !session

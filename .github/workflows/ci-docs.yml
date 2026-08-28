@@ -107,7 +107,7 @@ jobs:
       - name: Install Vale CLI
         run: |
           # Pin to specific version for reproducibility
-          VALE_VERSION="3.9.0"
+          VALE_VERSION="3.19.0"
           curl -sfL "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz" \
             | sudo tar xz -C /usr/local/bin vale
           vale --version

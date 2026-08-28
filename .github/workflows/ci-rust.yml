@@ -605,7 +605,7 @@ jobs:
 
       - name: Install wasm-bindgen CLI for browser runtime tests
         if: matrix.target == 'wasm32-unknown-unknown'
-        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: wasm-bindgen-cli@0.2.127
 
@@ -684,15 +684,15 @@ jobs:
       - name: Install Godot Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot
         with:
-          toolchain: nightly-2026-07-08
+          toolchain: nightly-2026-08-26
           components: clippy,rust-src,rustfmt
           targets: wasm32-unknown-emscripten
 
       - name: Check Godot fixture formatting
-        run: cargo +nightly-2026-07-08 fmt --manifest-path tests/godot-emscripten/Cargo.toml -- --check
+        run: cargo +nightly-2026-08-26 fmt --manifest-path tests/godot-emscripten/Cargo.toml -- --check
 
       - name: Lint Godot fixture
-        run: cargo +nightly-2026-07-08 clippy --manifest-path tests/godot-emscripten/Cargo.toml --locked --all-targets --all-features -- -D warnings
+        run: cargo +nightly-2026-08-26 clippy --manifest-path tests/godot-emscripten/Cargo.toml --locked --all-targets --all-features -- -D warnings
 
       - name: Install Emscripten SDK
         uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16

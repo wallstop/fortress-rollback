@@ -442,7 +442,7 @@ def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
     assert install_step["uses"] == (
-        "taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532"
+        "taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d"
     )
     locked_bindgen = _locked_package_version("wasm-bindgen")
     assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"
@@ -591,7 +591,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
         rust_step["uses"]
         == "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
     )
-    assert rust_step["with"]["toolchain"] == "nightly-2026-07-08"
+    assert rust_step["with"]["toolchain"] == "nightly-2026-08-26"
     assert set(str(rust_step["with"]["components"]).split(",")) == {
         "clippy",
         "rust-src",
@@ -683,7 +683,7 @@ def test_godot_browser_job_lints_runs_and_preserves_failures() -> None:
     )
     fmt_command = _shell_commands(fmt_step)
     assert len(fmt_command) == 1
-    assert fmt_command[0][:3] == ["cargo", "+nightly-2026-07-08", "fmt"]
+    assert fmt_command[0][:3] == ["cargo", "+nightly-2026-08-26", "fmt"]
     assert _option_values(fmt_command[0], "--manifest-path") == [
         f"{GODOT_FIXTURE}/Cargo.toml"
     ]
@@ -694,7 +694,7 @@ def test_godot_browser_job_lints_runs_and_preserves_failures() -> None:
     )
     clippy_command = _shell_commands(clippy_step)
     assert len(clippy_command) == 1
-    assert clippy_command[0][:3] == ["cargo", "+nightly-2026-07-08", "clippy"]
+    assert clippy_command[0][:3] == ["cargo", "+nightly-2026-08-26", "clippy"]
     assert _option_values(clippy_command[0], "--manifest-path") == [
         f"{GODOT_FIXTURE}/Cargo.toml"
     ]

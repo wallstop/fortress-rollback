@@ -72,7 +72,7 @@ runs:
     # Best-effort: a Cache-service outage must never fail the calling job, so
     # cache restore/save errors are tolerated (the build just runs uncached).
     - name: Cache cargo registry and build
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       continue-on-error: true
       with:
         path: ${{ inputs.cache-paths }}
