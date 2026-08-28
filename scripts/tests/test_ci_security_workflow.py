@@ -112,12 +112,12 @@ def _run_deny_policy(
     tmp_path: Path, *, global_config: bool
 ) -> subprocess.CompletedProcess[str]:
     cargo_stub = tmp_path / "cargo"
-    help_line = "      --config <CONFIG>\n" if global_config else ""
     cargo_stub.write_text(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "${CARGO_CALLS:?}"\n'
-        'if [ "$*" = "deny --help" ]; then\n'
-        f"  printf '%s' '{help_line}'\n"
+        'if [ "$1" = "deny" ] && [ "$2" = "--config" ] '
+        '&& [ "$4" = "check" ] && [ "$5" = "--help" ]; then\n'
+        '  exit "${CONFIG_PROBE_STATUS:?}"\n'
         "fi\n",
         encoding="utf-8",
     )
@@ -137,6 +137,7 @@ def _run_deny_policy(
         env={
             "PATH": f"{tmp_path}:/usr/bin:/bin",
             "CARGO_CALLS": str(calls),
+            "CONFIG_PROBE_STATUS": "0" if global_config else "2",
             "LICENSE_CONFIG": str(tmp_path / "deny.toml"),
             "MANIFEST": "Cargo.toml",
         },
@@ -178,7 +179,10 @@ def test_security_commands_are_explicit_and_fail_closed() -> None:
 
     assert 'cargo audit --file "$LOCKFILE"' in run_blocks
     assert 'cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources' in run_blocks
-    assert '*"--config <CONFIG>"*' in run_blocks
+    assert (
+        'cargo deny --config "$LICENSE_CONFIG" check --help >/dev/null 2>&1'
+        in run_blocks
+    )
     assert (
         'cargo deny --manifest-path "$MANIFEST" --locked '
         '--config "$LICENSE_CONFIG" check licenses'
