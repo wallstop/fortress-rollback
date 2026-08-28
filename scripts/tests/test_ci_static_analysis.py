@@ -307,7 +307,7 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     assert "feef20c4e42596ef:1" in run
     assert "8d4fae92413ae178:1" in run
     assert "911ca217a17b7b20:1" in run
-    assert "bd8dc38829013265:1" in run
+    assert "3a1085a4c6a85ca1:1" in run
     assert "unique | length" in run
     assert enforcement.get("continue-on-error") is not True
 
@@ -335,7 +335,7 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
                 r'"locations":[{"physicalLocation":{"artifactLocation":{'
                 r'"uri":".github/workflows/ci-release-state.yml"}}}],'
                 r'"partialFingerprints":{'
-                r'"primaryLocationLineHash":"bd8dc38829013265:1"}}]}]}',
+                r'"primaryLocationLineHash":"3a1085a4c6a85ca1:1"}}]}]}',
             ),
             True,
         ),
