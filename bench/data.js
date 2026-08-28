@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787899206988,
+  "lastUpdate": 1787950041929,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "dfa4aa371d4c8a3232c1842cbc2d05c44c705c9c",
-          "message": "Support Godot GDExtensions on wasm32-unknown-emscripten (#217)\n\n## Summary\n\n- keep browser-only JavaScript bridge dependencies out of the\n`wasm32-unknown-emscripten` graph while preserving browser\n`wasm32-unknown-unknown` support\n- move `ChaosSocket` to the same cross-platform monotonic clock as the\nprotocol and add exact browser/Emscripten compile, graph, and runtime\ngates\n- exercise Fortress inside real threaded and non-threaded Godot 4.6.3\nWeb GDExtension exports in Chromium\n- correct Matchbox, target-gating, clock, changelog, and migration\nguidance\n\n## Root cause\n\nFortress's quality-report timestamp previously called `js_sys::Date` for\nevery `wasm32` target. Godot loads Rust GDExtensions as Emscripten side\nmodules, where wasm-bindgen imports are unavailable. A second\nbrowser-only clock path remained in `ChaosSocket`, and the existing WASM\nCI covered only `wasm32-unknown-unknown`.\n\n## Validation\n\n- strict workspace Clippy\n- 2,473 nextest tests passed\n- browser and Emscripten five-feature compile matrices plus target\nClippy\n- Emscripten normal dependency graph contains no `wasm-bindgen*`,\n`js-sys`, or `web-sys`\n- browser ChaosSocket runtime smoke passed under\n`wasm-bindgen-test-runner 0.2.106`\n- Godot 4.6.3 + Emscripten 4.0.11 threaded/non-threaded exports passed\n2/2 Chromium tests\n- actionlint, workflow tests, cargo-deny, rustdoc, docs/wiki/link\nchecks, pre-commit, and agent preflight\n\nAddresses #216\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Breaking clock callback type on browser WASM and new timing paths\naffect networking telemetry; CI mitigates compile/graph/runtime risk but\nproduction Godot/browser combos still need careful integration testing.\n> \n> **Overview**\n> Enables **Godot Web GDExtensions** on `wasm32-unknown-emscripten` by\nrouting protocol quality-report RTT and all `ChaosSocket` timing through\n**`web_time::Instant`** (honoring `ProtocolConfig::clock`) instead of\nwall-clock/`js_sys`, and **breaking** `ChaosSocket::with_clock()` to\nreturn `web_time::Instant` on browser WASM.\n> \n> Adds **`scripts/ci/check-emscripten-dependencies.sh`** and expands\n**`wasm-check`** to a matrix (`wasm32-unknown-unknown` + Emscripten):\nfeature-matrix `cargo check`/`clippy`, Emscripten-only JS-bridge\nrejection, and a **`wasm-browser-smoke`** `wasm-bindgen-test` for\ndefault Chaos clock behavior. New **`godot-emscripten`** CI builds\nthreaded/non-threaded Godot 4.6.3 exports and runs Playwright probes\nagainst real protocol RTT smoke.\n> \n> Docs/README/migration now distinguish **browser vs Emscripten**\ntargets, Matchbox **0.14** adapter guidance, and monotonic-clock\nsemantics; workspace/docker wiring includes the new smoke crate.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n40a6cc376050e076288ce1d4fc9e9ca61cec3c93. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-10T10:18:39-07:00",
-          "tree_id": "0fd8525db1385e93632b105fa4fb04df4c3e1694",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/dfa4aa371d4c8a3232c1842cbc2d05c44c705c9c"
-        },
-        "date": 1783704235970,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 161,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 430,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 682,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1005,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 125160,
-            "range": "± 2809",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45761,
-            "range": "± 274",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 101",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3611,6 +3485,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3220,
             "range": "± 232",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e894056c153ba1b78bdb2e1ae3cd1b4db40f1bbb",
+          "message": "chore(deps): update Z3 verification stack (#319)\n\n## Summary\n\n- update the optional `z3` dependency to 0.21.0 and migrate the bundled\ncompatibility feature to upstream's `vendored` path\n- pin Z3 5.1.0 for hosted verification and the devcontainer, including\nexplicit build/runtime library selection\n- add static regression coverage and document the solver compatibility\nfloor, recommended version, and migration path\n\n## Dependency audit\n\n- all four Cargo workspaces select zero further compatible updates\n- npm reports no outdated packages\n- `bincode-next` 3.1.1 remains blocked by its Rust 1.90 requirement\n- `serial_test` 4.0.1 remains blocked by its Rust 1.93.1 requirement\n\n## Validation\n\n- `cargo fmt --check`\n- strict workspace/all-target Clippy with `tokio,json`\n- feature-specific Nextest: 3,008 passed, 72 skipped\n- `cargo c`\n- `cargo t`: 2,975 passed, 72 skipped\n- native Z3 5.1.0 verification: 65 passed, including 54 Z3 proofs\n- vendored Z3 verification target compiles with `--locked`\n- doc tests: 160 passed, 50 ignored\n- rustdoc with warnings denied\n- focused CI/devcontainer tests: 101 passed\n- agent preflight: 286 + 66 checks passed\n- Actionlint, wiki consistency, Markdown lint, link check, spell check,\nCargo audit, and Cargo deny\n\n## Risk\n\nThis only changes development-time formal verification and tooling.\nProduction Rust, runtime public APIs, network/replay formats,\ndeterministic state, and allocation-sensitive paths are unchanged.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes affect optional formal-verification features, CI, and\ndevcontainer tooling only—not production runtime APIs, networking, or\nreplay formats.\n> \n> **Overview**\n> Upgrades the optional **`z3`** crate to **0.21** and documents a\n**breaking** change for the dev-only **`z3-verification`** feature:\nnative Z3 must be **≥4.13.3**, with **5.1.0** recommended so Rust\nbindings match Z3 5.x enums. **`z3-verification-bundled`** now enables\nupstream’s **`vendored`** build instead of **`bundled`**.\n> \n> **CI and devcontainer** stop using distro **`libz3-dev`** and instead\ninstall pinned **`z3-solver==5.1.0.0`**, assert the runtime version,\nexport **`Z3_LIBRARY_PATH_OVERRIDE`**, **`LD_LIBRARY_PATH`**, and\n**`Z3_SYS_Z3_VERSION`**, and run Z3 Nextest with **`--locked`**. The\ndevcontainer registers the wheel’s **`lib`** via **`ld.so.conf.d`** and\n**`ldconfig`**.\n> \n> **Semver** job timeout increases from **20** to **40** minutes so a\ncold lockfile rebuild after the dependency bump can finish and save\ncache instead of cancelling. Static workflow tests lock in the Z3 pin\nand semver timeout.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\na3c86fc5afbae144d8542251cea2524472d02355. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-28T13:38:49-07:00",
+          "tree_id": "86f948e4d1dabc16d316266bfce304e0dab27112",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e894056c153ba1b78bdb2e1ae3cd1b4db40f1bbb"
+        },
+        "date": 1787950040765,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 59162,
+            "range": "± 351",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 41558,
+            "range": "± 436",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1860,
+            "range": "± 111",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 103",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2987,
+            "range": "± 224",
             "unit": "ns/iter"
           }
         ]
