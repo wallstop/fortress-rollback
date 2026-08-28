@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** Cargo lockfile refreshes no longer cancel the semver gate before its cold
+  dependency build can finish and populate the shared cache.
 - **Pre-existing:** synchronization and disconnect timers now compare monotonic elapsed durations
   rather than constructing absolute `Instant` deadlines. Extremely large valid intervals no longer
   panic through `Instant` overflow, a regressing injected test clock saturates elapsed time at zero,

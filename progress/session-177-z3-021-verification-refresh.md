@@ -63,3 +63,12 @@ the assertion now reads the single workflow environment pin. The final diff pass
 documentation inconsistencies: an overstated 5.x minimum in the manifest comment and a shell
 command labeled as TOML. Both are corrected. The change does not touch production Rust, network or
 replay formats, deterministic state, allocation-sensitive paths, or public runtime APIs.
+
+## Hosted CI Follow-up
+
+The first PR run completed 15 workflows successfully, including Z3 verification, the devcontainer
+image, mutation testing, CodeQL, and the cross-platform Rust matrix. The semver job alone exhausted
+its 20-minute backstop twice while rebuilding after the lockfile change; GitHub reported
+`cancelled`, not a semver finding, and the cancellation prevented the cache-save post-step. The
+semver backstop is now 40 minutes, with a regression test preserving enough time for a cold
+lockfile rebuild to finish and populate its cache.
