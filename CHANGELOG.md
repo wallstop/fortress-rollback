@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the development-only `z3-verification` feature now uses `z3` 0.21 and requires
+  Z3 4.13.3 or newer; Z3 5.1.0 is recommended so native enum definitions match the bindings. The
+  existing `z3-verification-bundled` feature now uses upstream's supported vendored build path for
+  contributors without a compatible system solver.
 - **Breaking:** failover spectator startup now rejects an empty host list with
   `InvalidRequestKind::NoSpectatorHosts` and repeated addresses with
   `InvalidRequestKind::DuplicateSpectatorHost { first_index, duplicate_index }` before endpoint
@@ -60,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** Cargo lockfile refreshes no longer cancel the semver gate before its cold
+  dependency build can finish and populate the shared cache.
 - **Pre-existing:** synchronization and disconnect timers now compare monotonic elapsed durations
   rather than constructing absolute `Instant` deadlines. Extremely large valid intervals no longer
   panic through `Instant` overflow, a regressing injected test clock saturates elapsed time at zero,

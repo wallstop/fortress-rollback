@@ -517,8 +517,8 @@ jobs:
     name: Semver Check
     runs-on: ubuntu-latest
     # Backstop only: a warm sccache + target cache brings this well under a
-    # minute. The first (cold) run after a Cargo.lock change can take longer.
-    timeout-minutes: 20
+    # minute. Allow a cold Cargo.lock rebuild to finish and save its cache.
+    timeout-minutes: 40
     if: github.event_name == 'pull_request'
 
     steps:

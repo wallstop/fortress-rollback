@@ -248,7 +248,7 @@ sudo mv /tmp/actionlint /usr/local/bin/
 rm /tmp/download-actionlint.bash
 
 # Z3
-pip3 install z3-solver
+pip3 install 'z3-solver==5.1.0.0'
 ```
 
 ## Troubleshooting

@@ -231,6 +231,14 @@ def test_semver_failure_summary_distinguishes_infra_from_api_breaks() -> None:
     assert "found a breaking public-API change" not in summary
 
 
+def test_semver_gate_allows_cold_lockfile_rebuild() -> None:
+    """Lockfile refreshes must have enough time to populate an empty cache."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["semver-checks"]
+
+    assert job["timeout-minutes"] == 40
+
+
 def test_public_api_census_uses_pinned_nightly_and_checked_snapshot() -> None:
     """Callable hidden paths must be rebuilt by the canonical nightly gate."""
     workflow = _load_ci_rust_workflow()

@@ -2220,20 +2220,23 @@ verification surface compiles out of normal builds and is not intended for appli
 
 #### `z3-verification`
 
-Enables Z3 formal verification tests. Requires the Z3 SMT solver library to be installed on your system.
+Enables Z3 formal verification tests. The Rust bindings require Z3 4.13.3 or
+newer and use enum definitions compatible with Z3 5.x. Use Z3 5.1.0 when
+installing a system solver so the native library and Rust bindings agree.
 
 **System installation (recommended):**
 
 ```bash
-# Debian/Ubuntu
-sudo apt install libz3-dev
-
-# macOS
-brew install z3
+# Confirm that the installed solver is compatible.
+z3 --version
 
 # Then run verification tests
-cargo test --features z3-verification
+cargo test --features z3-verification -- --nocapture
 ```
+
+Distribution packages older than Z3 4.13.3 are unsupported. If the available
+system package is older than 5.x, use `z3-verification-bundled` to build the
+matching solver from source.
 
 **What it tests:**
 
@@ -2244,14 +2247,17 @@ cargo test --features z3-verification
 
 #### `z3-verification-bundled`
 
-Like `z3-verification`, but builds Z3 from source. This is useful for CI environments where system Z3 is not available.
+Like `z3-verification`, but builds the matching Z3 source instead of linking a
+system library. Use this option when the installed solver is missing, older
+than 4.13.3, or from a different enum-compatibility range.
 
-```toml
+```shell
 # In CI or when Z3 is not installed
 cargo test --features z3-verification-bundled
 ```
 
-**Warning:** Building Z3 from source takes 30+ minutes. Use `z3-verification` with system Z3 when possible.
+**Warning:** Building Z3 from source takes 30+ minutes. Prefer
+`z3-verification` with Z3 5.1.0 when a compatible system library is available.
 
 ### Feature Flag Combinations
 

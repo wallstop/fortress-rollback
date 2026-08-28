@@ -90,8 +90,13 @@ RUN TLA_TOOLS_VERSION="$(tr -d '[:space:]' < /tmp/tla-tools-version)" && \
 # Note: devcontainer.json containerEnv overrides this to the workspace copy
 ENV TLA_TOOLS_JAR=/opt/tla/tla2tools.jar
 
-# Install Z3 and yamllint via pip
-RUN pip3 install --no-cache-dir --break-system-packages z3-solver yamllint
+# Install the Z3 version matched by the Rust bindings and make its shared
+# library the default for both development builds and verification binaries.
+RUN pip3 install --no-cache-dir --break-system-packages z3-solver==5.1.0.0 yamllint && \
+    Z3_PACKAGE_DIR="$(python3 -c \
+      'from pathlib import Path; import z3; print(Path(z3.__file__).parent)')" && \
+    printf '%s\n' "${Z3_PACKAGE_DIR}/lib" > /etc/ld.so.conf.d/z3-solver.conf && \
+    ldconfig
 
 # Install actionlint (GitHub Actions linter)
 RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 120 https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
