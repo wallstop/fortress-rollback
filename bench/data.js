@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787868803924,
+  "lastUpdate": 1787899206988,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "824ea063b30b15672430f61521721bf448354ac8",
-          "message": "Add sparse and multi-drop census rows (#215)\n\n## Summary\n\n- add a serializable simulation `SavePolicy` axis and wire it into P2P\nharness session builders\n- add harness observations for directed blocked drops and observed\n`LoadGameState` requests\n- add premise-asserted census rows for `SaveMode::Sparse` graceful-drop\nrollback and same-step multi-drop after asymmetric receipt loss\n\n## Validation\n\n- `cargo fmt --check`\n- `cargo test --test simulation\nsparse_save_mode_survives_graceful_drop_rollback -- --nocapture`\n- `cargo test --test simulation\nsame_step_multi_drop_after_asymmetric_block_converges -- --nocapture`\n- `cargo test --test simulation census -- --nocapture`\n- `cargo test --test simulation\nconfig_without_serde_default_fields_uses_defaults -- --nocapture`\n- `cargo test --test simulation\ndefault_run_matches_explicit_stub_input_run -- --nocapture`\n- `cargo test --test simulation census --features hot-join --\n--nocapture`\n- `npx markdownlint 'PLAN.md'\n'progress/session-089-m3-sparse-and-multidrop-census.md' --config\n.markdownlint.json --fix`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo nextest run --no-capture` (2444 passed, 58 skipped)\n- `cargo nextest run --features hot-join --no-capture` (2687 passed, 58\nskipped)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation test infrastructure and census\ncoverage; production rollback code is only consumed via existing\n`SaveMode` APIs.\n> \n> **Overview**\n> Adds a serializable **`SavePolicy`** on simulation schedules (default\n**`EveryFrame`**) and wires it into P2P session builders via\n**`with_save_mode`**, so corpus runs can exercise **`SaveMode::Sparse`**\nwithout a schema bump.\n> \n> **SimNet** now tracks **per-directed-link blocked-drop counts**; the\nharness maps those to peer indices on\n**`RunReport::blocked_drops_by_link`** and records **`LoadGameState`**\nrequests as **`load_game_state_observations`**. Hot-join schedules with\nthree or more peers must use **`EveryFrame`** saving.\n> \n> Two **M3 §6.4 census** tests pin graceful-drop rollback under sparse\nsaves and same-step multi-drop after asymmetric blocks, with premise\nchecks (loads, rollbacks, **`PeerDropped`**, blocked links) plus the\nexisting oracle and trace-hash reproducibility.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n11c26963c9a6c29a5c92462192e1fbb9a98b918d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-08T19:15:32-07:00",
-          "tree_id": "1d12d311924178359d5d0b24650da601c039946b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/824ea063b30b15672430f61521721bf448354ac8"
-        },
-        "date": 1783563606912,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 119,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 169,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 489,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 742,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1066,
-            "range": "± 34",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 128746,
-            "range": "± 618",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 43792,
-            "range": "± 963",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 104",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3683,6 +3557,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2772,
             "range": "± 223",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b621ffbd6f42147511ec36e6195f96f91f0f9c0e",
+          "message": "feat: publish deterministic sometimes-state census (#318)\n\n## Summary\n\n- add five fixed-order, monotonic production observations and include\ntheir final per-peer/aggregate vectors in deterministic simulation trace\nidentity\n- publish strictly validated, atomically written, domain-separated\norganic and targeted census artifacts from the unchanged nightly fleet\n- add real production-path positives, adjacent negatives, replay/zero\ncontrols, mutation-sensitive artifact tests, and the merge/upload\nworkflow\n- refresh all currently compatible Cargo/tool/action pins, including\nRust nightly 2026-08-26, Codex, Ruff, Vale, and CI actions\n\n## Acceptance evidence\n\n- final adversarial review: zero Critical/High/Medium/Low findings\n- full workspace Clippy with `tokio,json`: pass\n- workspace/all-target Nextest: 3,082 passed, 72 skipped\n- `cargo c`: pass; `cargo t`: 2,975 passed, 72 skipped\n- pinned two-seed Miri matrix: 3,306 passed, 10 ignored\n- workflow/static tests: 179 passed; Actionlint and all four audit/deny\nmatrices pass\n- public API census: 2,716 symbols match\n- exact nightly seed-316 run: 1,000 schedules / 5,000,000 steps; nine\nJSON artifacts totaling 9,154 bytes\n- warmed interleaved B/T ratios: 101.9491%, 101.1156%, 103.2193%; median\nratio 101.6623% (limits: 115% paired, 110% median)\n\nThe initial nightly intentionally reports organic zeroes without\nfailing. A future seven-window ratchet remains a separately approved\ndecision.\n\nCloses #316\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches P2P confirmation folding and rollback observation hooks on hot\npaths, but bits are observation-only; larger risk is CI/nightly census\nworkflow and toolchain bumps affecting reproducibility and security\ngates.\n> \n> **Overview**\n> Adds **issue #316** observation plumbing: five fixed-order, monotonic\n“sometimes-state” bits are recorded on the production P2P path (rollback\ndepth at prediction limit, relay lower-floor consumption, connect-status\nnudge queued, sparse earlier rollback checkpoint, input ring one slot\nbelow capacity) and exposed via doc-hidden\n`P2PSession::diagnostic_sometimes_state_vector` without changing wire,\nRNG, or replay semantics.\n> \n> The simulation harness **schema 20** folds per-peer and aggregated\nvectors into deterministic trace identity; nightly fleet runs write\neight organic shards plus targeted probe evidence under\n`FORTRESS_SIM_CENSUS_DIR`, then CI merges, validates, and uploads\npublished census artifacts (separate from failure dumps).\n> \n> **CI/tooling** moves the pinned Rust nightly to **2026-08-26**, bumps\nVale, Ruff, typos, `actions/cache` v6, `taiki-e/install-action`,\ncheckout patches, and adds a `cargo deny` license-check flag-order\ncompatibility branch with workflow contract tests.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6545a6ba6b549d4dd1a452119b787e71f7acb62c. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+          "timestamp": "2026-08-27T23:31:35-07:00",
+          "tree_id": "c52f430ce89e97ef04d27415ed4bd03159d39cad",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b621ffbd6f42147511ec36e6195f96f91f0f9c0e"
+        },
+        "date": 1787899204992,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 51391,
+            "range": "± 202",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 41613,
+            "range": "± 312",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3220,
+            "range": "± 232",
             "unit": "ns/iter"
           }
         ]
