@@ -35,7 +35,7 @@ THIRD_PARTY_ACTION_PINS = {
     "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89",
     "benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba",
     "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f",
-    "crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f",
+    "crate-ci/typos@a8168dc2984a9e2352f183ffe788f0f23a300389",
     "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
     "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",
@@ -46,13 +46,13 @@ THIRD_PARTY_ACTION_PINS = {
     "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
     "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
     "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
-    "taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532",
+    "taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d",
 }
 FORBIDDEN_MUTABLE_ACTION_REFS = {
     "Swatinem/rust-cache@v2",
     "benchmark-action/github-action-benchmark@v1",
     "codecov/codecov-action@v7",
-    "crate-ci/typos@v1.49.0",
+    "crate-ci/typos@v1.49.1",
     "docker/build-push-action@v7",
     "docker/login-action@v4.6.0",
     "docker/metadata-action@v6",
@@ -186,7 +186,7 @@ def test_quality_tools_are_immutable_and_version_pinned() -> None:
         _steps(workflow, "python-static-analysis"), "Check Python scripts"
     )
     assert ruff["uses"] == RUFF_ACTION
-    assert ruff["with"]["version"] == "0.16.2"
+    assert ruff["with"]["version"] == "0.16.5"
     assert ruff.get("continue-on-error") is not True
 
     shear = _step_by_name(

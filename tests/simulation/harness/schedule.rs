@@ -216,7 +216,10 @@ pub enum ScenarioMix {
 /// - `19`: adds [`BackgroundNoise::Swarm`], whose per-run link-policy ranges
 ///   are drawn from the schedule seed before individual directed links are
 ///   materialized.
-pub const SCHEDULE_SCHEMA_VERSION: u32 = 19;
+/// - `20`: includes the fixed five-element sometimes-state observation vector
+///   in deterministic final-summary trace identity. Older schemas retain their
+///   original trace hashes.
+pub const SCHEDULE_SCHEMA_VERSION: u32 = 20;
 /// Hard execution bound for one materialized harness schedule.
 ///
 /// This admits the H-SKEW experiment's 240,001 sampled steps at 15 ms cadence:

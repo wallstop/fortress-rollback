@@ -144,7 +144,7 @@ def test_security_commands_are_explicit_and_fail_closed() -> None:
     assert 'cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources' in run_blocks
     assert (
         'cargo deny --manifest-path "$MANIFEST" --locked '
-        '--config "$LICENSE_CONFIG" check licenses'
+        'check --config "$LICENSE_CONFIG" licenses'
     ) in run_blocks
     assert all(not step.get("continue-on-error", False) for step in steps)
 

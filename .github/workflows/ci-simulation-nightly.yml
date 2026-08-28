@@ -67,6 +67,17 @@ jobs:
             simulation-nightly-${{ runner.os }}-cargo-
             network-nightly-${{ runner.os }}-cargo-
 
+      - name: Prepare sometimes-state census directory
+        run: |
+          set -euo pipefail
+          census_dir="$RUNNER_TEMP/simulation-census"
+          case "$census_dir" in
+            "$RUNNER_TEMP"/*) ;;
+            *) echo "refusing unsafe census path: $census_dir" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$census_dir"
+          mkdir -p "$census_dir"
+
       - name: Run sharded fleet and targeted probes
         run: >-
           cargo nextest run
@@ -78,11 +89,41 @@ jobs:
           --features hot-join
           --no-capture
         env:
+          FORTRESS_SIM_CENSUS_DIR: ${{ runner.temp }}/simulation-census
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Merge and validate sometimes-state census
+        if: always()
+        run: >-
+          cargo test
+          --release
+          --test simulation
+          --features hot-join
+          simulation::sometimes_state::merge_nightly_sometimes_state_census
+          --
+          --ignored
+          --exact
+          --nocapture
+        env:
+          FORTRESS_SIM_CENSUS_DIR: ${{ runner.temp }}/simulation-census
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+
+      - name: Upload sometimes-state census
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simulation-sometimes-state-census-${{ github.run_id }}
+          path: ${{ runner.temp }}/simulation-census/published/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload simulation failure artifacts
         if: failure()

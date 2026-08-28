@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A doc-hidden `P2PSession::diagnostic_sometimes_state_vector` compatibility surface records five
+  fixed-order, monotonic observations for the deterministic nightly simulation census. The census
+  publishes bounded, domain-separated organic and targeted evidence without changing simulation,
+  replay, or wire behavior.
 - `SessionBuilder::try_start_spectator_session` and
   `SessionBuilder::try_start_spectator_session_multi` return the exact structured configuration,
   serialization, protocol, or allocation error from spectator startup. The existing `Option` methods

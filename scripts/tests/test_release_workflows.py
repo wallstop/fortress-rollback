@@ -468,7 +468,7 @@ def test_godot_ci_retains_locked_clippy_gate() -> None:
     text = RUST_CI.read_text(encoding="utf-8")
 
     assert (
-        "cargo +nightly-2026-07-08 clippy --manifest-path "
+        "cargo +nightly-2026-08-26 clippy --manifest-path "
         "tests/godot-emscripten/Cargo.toml --locked --all-targets "
         "--all-features -- -D warnings"
     ) in text

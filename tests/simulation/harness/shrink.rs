@@ -958,6 +958,8 @@ mod tests {
                 violation_allowlist_hits: Vec::new(),
             },
             trace_hash,
+            sometimes_state_by_peer: Vec::new(),
+            sometimes_state: [false; crate::simulation::sometimes_state::SOMETIMES_STATE_COUNT],
             final_confirmed,
             trace_tail: Vec::new(),
             probe_confirmed: Vec::new(),

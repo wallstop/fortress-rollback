@@ -203,6 +203,11 @@ where
     /// This is configurable at construction time. Default is INPUT_QUEUE_LENGTH (128).
     queue_length: usize,
 
+    /// Monotonic observation bit for the stable sometimes-state registry:
+    /// retained ring occupancy has reached exactly `queue_length - 1`.
+    /// Observation only; it never participates in queue behavior.
+    within_one_slot_of_capacity_seen: bool,
+
     /// Our cyclic input queue
     inputs: ProofVec<PlayerInput<T::Input>>,
     /// A pre-allocated prediction we are going to use to return predictions from.
@@ -302,6 +307,7 @@ impl<T: Config> InputQueue<T> {
             inputs,
             player_index,
             queue_length,
+            within_one_slot_of_capacity_seen: false,
             last_confirmed_input: None,
             reclaimed_floor_input: None,
             frozen: false,
@@ -311,6 +317,12 @@ impl<T: Config> InputQueue<T> {
     /// Returns the queue length (size of the circular buffer).
     pub fn queue_length(&self) -> usize {
         self.queue_length
+    }
+
+    /// Returns whether retained ring occupancy has ever reached one slot below
+    /// this queue's fixed capacity.
+    pub(crate) fn within_one_slot_of_capacity_seen(&self) -> bool {
+        self.within_one_slot_of_capacity_seen
     }
 
     /// Returns the maximum allowed frame delay for this queue.
@@ -1674,6 +1686,9 @@ impl<T: Config> InputQueue<T> {
         };
         self.head = next_head;
         self.length = next_length;
+        if self.length == self.queue_length.saturating_sub(1) {
+            self.within_one_slot_of_capacity_seen = true;
+        }
 
         // Verify queue doesn't overflow
         if self.length > self.queue_length {
@@ -3706,6 +3721,48 @@ mod input_queue_tests {
                 first: Frame::new(4),
                 last: Frame::new(7),
             })
+        );
+    }
+
+    #[test]
+    fn within_one_slot_observation_latches_at_exact_retained_length() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid test queue");
+
+        fill_sequential(&mut queue, 1);
+        assert!(
+            !queue.within_one_slot_of_capacity_seen(),
+            "length two is the adjacent negative for a four-slot ring"
+        );
+
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(2), TestInput { inp: 2 })),
+            Frame::new(2)
+        );
+        assert!(queue.within_one_slot_of_capacity_seen());
+
+        queue.discard_confirmed_frames(Frame::new(2));
+        assert!(
+            queue.within_one_slot_of_capacity_seen(),
+            "the observation must remain monotonic after occupancy falls"
+        );
+    }
+
+    #[test]
+    fn high_frame_modulo_does_not_count_as_retained_capacity() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        for raw_frame in 0..=65i32 {
+            let frame = Frame::new(raw_frame);
+            assert_eq!(
+                queue.add_input(PlayerInput::new(frame, TestInput { inp: 1 })),
+                frame
+            );
+            queue.discard_confirmed_frames(frame);
+        }
+        assert!(
+            !queue.within_one_slot_of_capacity_seen(),
+            "many wrapped ring indices with at most two retained entries must not count"
         );
     }
 

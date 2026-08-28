@@ -89,7 +89,7 @@ runs:
     # Check cache first - significantly faster than downloading
     - name: Cache cargo binaries
       id: cargo-bin-cache
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       continue-on-error: true
       with:
         path: ${{ steps.resolve-cache-path.outputs.tool_glob }}
@@ -177,7 +177,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 1)
       id: install-attempt-1
       if: steps.check-installed.outputs.installed != 'true'
-      uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.85.10
+      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
@@ -194,7 +194,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 2)
       id: install-attempt-2
       if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 2 && steps.install-attempt-1.outcome == 'failure'
-      uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.85.10
+      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
@@ -211,7 +211,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 3)
       id: install-attempt-3
       if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 3 && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
-      uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.85.10
+      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true

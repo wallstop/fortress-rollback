@@ -29,6 +29,7 @@ mod simulation {
     pub mod corpus_replay;
     pub mod fleet;
     pub mod harness;
+    pub mod sometimes_state;
     #[cfg(feature = "trace-validation")]
     pub mod trace_validation;
 }

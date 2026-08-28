@@ -91,7 +91,7 @@ jobs:
           MANIFEST: ${{ matrix.manifest }}
         run: |
           cargo deny --manifest-path "$MANIFEST" --locked check advisories bans sources
-          cargo deny --manifest-path "$MANIFEST" --locked --config "$LICENSE_CONFIG" check licenses
+          cargo deny --manifest-path "$MANIFEST" --locked check --config "$LICENSE_CONFIG" licenses
 
   # Unsafe code audit via cargo-geiger
   # Runs on every PR because the pull_request payload does not include changed
