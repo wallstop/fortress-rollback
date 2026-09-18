@@ -248,7 +248,7 @@ jobs:
 
       - name: Track stable benchmark history
         if: steps.gh-pages-check.outputs.exists == 'true'
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1
         with:
           name: Fortress Rollback Benchmarks
           tool: 'cargo'
@@ -265,7 +265,7 @@ jobs:
 
       - name: Track informational benchmark results
         if: steps.gh-pages-check.outputs.exists == 'true'
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1
         with:
           name: Fortress Rollback Informational Benchmarks
           tool: 'cargo'
