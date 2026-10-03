@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787950041929,
+  "lastUpdate": 1790997422948,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "abd2a7febab3e63358fb1324e20150be07a6e12c",
-          "message": "Build simulation failure pipeline and harden disconnect recovery (#218)\n\n## Summary\n\n- build a stable, bounded simulation failure-artifact pipeline with\ndeterministic trace identities, replay, shrinking, corpus promotion, and\nstrict validation\n- expand lifecycle simulation coverage and add a release-mode nightly\nfleet spanning 8 shards, 1,000 disjoint seeds, N=2..16, 5,000 steps, and\nclean/mild/rough/reliable-FIFO networks\n- fix two production failures exposed by the new fleet: Halt\nconfirmation could rise after peer loss (D13), and stale delta-reference\nretransmissions could fail to re-ACK received history (D15)\n- pin the remaining lossy one-caller graceful-removal history rewrite as\nan explicit minimized known defect (D14) without weakening the oracle\n- extend the PeerDrop TLA+ model and update the deterministic sweep cost\nledger\n\n## Root causes\n\nD13 removed disconnected peers from the confirmation fold before\npreserving the last safe public confirmation bound. Later fold values\ncould therefore expose speculative fabricated-input frames as confirmed.\nThe session now latches and min-tightens a durable pre-mutation\nconfirmation ceiling across explicit, timeout, and propagated\nfail-closed paths.\n\nD15's missing-delta-reference input branch merged gossip but neither\napplied the packet's independent piggyback ACK nor re-emitted the\ncurrent cumulative ACK. One lost earlier ACK could leave an\nalready-received pending front forever and exhaust prediction. The\nbranch now applies valid piggyback ACK state and re-ACKs the receive\nhigh-water.\n\n## Test machinery\n\nFailure artifacts use a stable schema, bounded diagnostic payloads, full\nschedules, exact replay options, atomic publication, and a stable\nfinal-step trace. The shrinker preserves failure classes,\ndouble-confirms candidates, catches candidate panics, remaps peers, and\nuses bounded ddmin plus event-adjacent/geometric schedule checkpoints.\nCorpus promotion validates and reproduces through Rust before a locked\nno-clobber publish.\n\nSerialized schedules are bounded before execution: 2..=100,000 steps,\nprediction <=127, 1..=1,000 ms step duration, <=60 s link-delay fields,\n<=100,000 events, and <=8 MiB corpus JSON.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture` — 2,494 passed, 69 skipped\n- ignored D14 exact fixture — frame-327 ConfirmedInputDivergence\nreproduced repeatedly\n- full nightly shard replay — 125/125 seeds at 5,000 steps in release\nmode\n- `scripts/verification/verify-tla.sh --quick PeerDrop` — 4,372\ngenerated / 1,190 distinct states\n- `cargo doc --no-deps`\n- `actionlint`, Markdown lint, shell syntax, and repository agent\npreflight\n- repeated adversarial review — zero remaining issues, including minor\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes core P2P session disconnect/Halt semantics, input-protocol ACK\nbehavior, and hot-join recovery paths—areas where subtle regressions\ncause desync or permanent stalls.\n> \n> **Overview**\n> Adds a **nightly deterministic simulation fleet** (8 shards × 125\nrelease-mode 5,000-step seeds), a **failure-artifact → corpus\npromotion** pipeline, and fixes two rollback/network bugs found by that\ncoverage.\n> \n> **`DisconnectBehavior::Halt`** now latches a durable\n**`halt_confirmed_ceiling`** at the pre-disconnect safe bound so\n`confirmed_frame()` cannot rise into speculative default-input territory\nafter drops; fail-closed paths capture the ceiling before mutation,\n**`check_initial_sync`** and hot-join snapshot apply no longer resurrect\na halted session, and **PeerDrop.tla** models the capped confirmation\nfold.\n> \n> **Stale input retransmissions** whose delta reference was pruned still\nmerge gossip but previously skipped ACK handling; the protocol now\n**applies piggyback ACKs** and **re-emits cumulative `InputAck`** at the\nreceive high-water so a lost earlier ACK cannot strand `pending_output`\nand deadlock prediction windows.\n> \n> Simulation harness gains **bounded failure artifacts**, **corpus\nreplay** (including a pinned cold-start gossip stall schedule), nightly\nlifecycle matrices with retirement quarantined under lossy noise, and an\nexplicit **ignored known defect** for lossy graceful removal rewriting\nconfirmed history; D13 partition-under-Halt tests flip from red to\ngreen.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n382f8fc568020eeb469dd2f15311d4ba68234b16. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-07-10T16:29:31-07:00",
-          "tree_id": "e8a8d876fe74696427a1ccd860f97391cc6ae31c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/abd2a7febab3e63358fb1324e20150be07a6e12c"
-        },
-        "date": 1783726448248,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 112,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 434,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 708,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1025,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 136213,
-            "range": "± 524",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45259,
-            "range": "± 1258",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 90",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3539,6 +3413,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2987,
             "range": "± 224",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d5ac4e053f1d457e8f74b5363e08b368f17500ea",
+          "message": "chore(deps): bump the cargo-workspace group with 2 updates (#334)\n\nBumps the cargo-workspace group with 2 updates:\n[smallvec](https://github.com/servo/rust-smallvec) and\n[z3](https://github.com/prove-rs/z3.rs).\n\nUpdates `smallvec` from 1.16.1 to 1.16.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/servo/rust-smallvec/releases\">smallvec's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.16.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Backport v2’s retain implementation to v1 by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/596\">servo/rust-smallvec#596</a></li>\n<li>Fix element ownership tracking with may_dangle by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/594\">servo/rust-smallvec#594</a></li>\n<li>Fix Cargo manual_readme warning by <a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n<li>chore: bump version by <a\nhref=\"https://github.com/alejandro-vaz\"><code>@​alejandro-vaz</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/617\">servo/rust-smallvec#617</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/ccf5fc71044d491c46a3d79e7ed53948e6da1590\"><code>ccf5fc7</code></a>\nchore: bump version (<a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/617\">#617</a>)</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/af207ccb68496e112f3d7366a66c07c6107ef04a\"><code>af207cc</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/608\">#608</a>\nfrom Rayan-and-beyond/fix/manual-readme-warning-606</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/cda4b73506acb35823a8147ef4397375f7063b82\"><code>cda4b73</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/594\">#594</a>\nfrom astral-sh/charlie/codex-fix-may-dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/d0556cb8e33b02b434074896f753f5f03b20c278\"><code>d0556cb</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/596\">#596</a>\nfrom astral-sh/charlie/codex-v1-compact</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/f73914cf4b523741b9af5d13a98e77d59c54bc13\"><code>f73914c</code></a>\nFlatten retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/954d599e41b074282857e97c44211f0f797e6597\"><code>954d599</code></a>\nMove retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/8d936338dbcefa380b4dd596379b57582ed5d616\"><code>8d93633</code></a>\nRemove added retain benchmark harness</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/88c6bfabd610f34f4f1f9d530f58fb8a74b9a807\"><code>88c6bfa</code></a>\nLimit compaction optimization to retain</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/b9ef17da33c19cb1d11190e0c7c29e459297cd6a\"><code>b9ef17d</code></a>\nFix element ownership tracking with may_dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/42029c27c9243d8a178a0d64464185547b3a7d6f\"><code>42029c2</code></a>\nCompact retained elements directly in retain and dedup_by</li>\n<li>See full diff in <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `z3` from 0.21.0 to 0.21.1\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ffb47c0c2d30259836b93b7dfb01679c4eabbff5\"><code>ffb47c0</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/588\">#588</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/cd52e5c1e4178193272742a20cc9ca6f2fa4eb92\"><code>cd52e5c</code></a>\nchore: turn off semver-check for z3 crate</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/fdf3e46f85cff7381af3cbf43816305365da7d36\"><code>fdf3e46</code></a>\nchore: disable semver-checks for z3-sys</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/30578dbab75aacb762b7b3761a72b170f992b909\"><code>30578db</code></a>\nfix: Fall back to pkg-config on build feature conflict (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/595\">#595</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/85d2a48bce50478dae15841d8db7d4ffce337b89\"><code>85d2a48</code></a>\nfeat: Improve Windows cross-compilation support (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/592\">#592</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/f5e0ba7b69582630dd72ffe6057401420f23a4c7\"><code>f5e0ba7</code></a>\nfix: Use wrap for Goal's clone impl (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/594\">#594</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/3d9064797f210d5f59c1587bf29b3b4c783edfd1\"><code>3d90647</code></a>\nfeat: FuncDecl::as_array() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/591\">#591</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/5d4d57ad3a16aa74303b4a23f02918cb9fd20461\"><code>5d4d57a</code></a>\nrefactor: Replace internal usages of z3_ctx.0 with z3_ctx.as_ptr() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/587\">#587</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.21.0...z3-v0.21.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Patch-only lockfile updates with no direct code changes; z3 affects\noptional verification builds only.\n> \n> **Overview**\n> Bumps workspace dependencies in **`Cargo.lock`** only: **`smallvec`**\n1.16.1 → 1.16.2 and **`z3`** 0.21.0 → 0.21.1 (with **`z3-sys`** 0.13.0 →\n0.13.1). No application or manifest changes in this diff.\n> \n> **smallvec** picks up v1 bugfixes (e.g. `retain`/`dedup_by` compaction\nand `may_dangle` ownership tracking). **z3** is a patch release with\nbuild/cross-compile fixes and minor API tweaks upstream; behavior for\noptional Z3 verification tests should stay the same aside from those\ndependency fixes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb8922e0add3a38378c7d03b8f5b3cb083cafd628. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-10-03T03:02:26Z",
+          "tree_id": "4febf099b20b9b62ce19c164a532f6b17258ac6b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/d5ac4e053f1d457e8f74b5363e08b368f17500ea"
+        },
+        "date": 1790997421665,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 69231,
+            "range": "± 972",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 34960,
+            "range": "± 910",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1679,
+            "range": "± 110",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 89",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2786,
+            "range": "± 414",
             "unit": "ns/iter"
           }
         ]
