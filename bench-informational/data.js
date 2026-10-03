@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787950044050,
+  "lastUpdate": 1790997424577,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Informational Benchmarks": [
@@ -13283,6 +13283,360 @@ window.BENCHMARK_DATA = {
             "name": "H-16P confirmed_frame/steady_mesh/N=16",
             "value": 1570,
             "range": "± 5",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d5ac4e053f1d457e8f74b5363e08b368f17500ea",
+          "message": "chore(deps): bump the cargo-workspace group with 2 updates (#334)\n\nBumps the cargo-workspace group with 2 updates:\n[smallvec](https://github.com/servo/rust-smallvec) and\n[z3](https://github.com/prove-rs/z3.rs).\n\nUpdates `smallvec` from 1.16.1 to 1.16.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/servo/rust-smallvec/releases\">smallvec's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.16.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Backport v2’s retain implementation to v1 by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/596\">servo/rust-smallvec#596</a></li>\n<li>Fix element ownership tracking with may_dangle by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/594\">servo/rust-smallvec#594</a></li>\n<li>Fix Cargo manual_readme warning by <a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n<li>chore: bump version by <a\nhref=\"https://github.com/alejandro-vaz\"><code>@​alejandro-vaz</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/617\">servo/rust-smallvec#617</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/ccf5fc71044d491c46a3d79e7ed53948e6da1590\"><code>ccf5fc7</code></a>\nchore: bump version (<a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/617\">#617</a>)</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/af207ccb68496e112f3d7366a66c07c6107ef04a\"><code>af207cc</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/608\">#608</a>\nfrom Rayan-and-beyond/fix/manual-readme-warning-606</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/cda4b73506acb35823a8147ef4397375f7063b82\"><code>cda4b73</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/594\">#594</a>\nfrom astral-sh/charlie/codex-fix-may-dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/d0556cb8e33b02b434074896f753f5f03b20c278\"><code>d0556cb</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/596\">#596</a>\nfrom astral-sh/charlie/codex-v1-compact</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/f73914cf4b523741b9af5d13a98e77d59c54bc13\"><code>f73914c</code></a>\nFlatten retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/954d599e41b074282857e97c44211f0f797e6597\"><code>954d599</code></a>\nMove retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/8d936338dbcefa380b4dd596379b57582ed5d616\"><code>8d93633</code></a>\nRemove added retain benchmark harness</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/88c6bfabd610f34f4f1f9d530f58fb8a74b9a807\"><code>88c6bfa</code></a>\nLimit compaction optimization to retain</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/b9ef17da33c19cb1d11190e0c7c29e459297cd6a\"><code>b9ef17d</code></a>\nFix element ownership tracking with may_dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/42029c27c9243d8a178a0d64464185547b3a7d6f\"><code>42029c2</code></a>\nCompact retained elements directly in retain and dedup_by</li>\n<li>See full diff in <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `z3` from 0.21.0 to 0.21.1\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ffb47c0c2d30259836b93b7dfb01679c4eabbff5\"><code>ffb47c0</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/588\">#588</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/cd52e5c1e4178193272742a20cc9ca6f2fa4eb92\"><code>cd52e5c</code></a>\nchore: turn off semver-check for z3 crate</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/fdf3e46f85cff7381af3cbf43816305365da7d36\"><code>fdf3e46</code></a>\nchore: disable semver-checks for z3-sys</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/30578dbab75aacb762b7b3761a72b170f992b909\"><code>30578db</code></a>\nfix: Fall back to pkg-config on build feature conflict (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/595\">#595</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/85d2a48bce50478dae15841d8db7d4ffce337b89\"><code>85d2a48</code></a>\nfeat: Improve Windows cross-compilation support (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/592\">#592</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/f5e0ba7b69582630dd72ffe6057401420f23a4c7\"><code>f5e0ba7</code></a>\nfix: Use wrap for Goal's clone impl (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/594\">#594</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/3d9064797f210d5f59c1587bf29b3b4c783edfd1\"><code>3d90647</code></a>\nfeat: FuncDecl::as_array() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/591\">#591</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/5d4d57ad3a16aa74303b4a23f02918cb9fd20461\"><code>5d4d57a</code></a>\nrefactor: Replace internal usages of z3_ctx.0 with z3_ctx.as_ptr() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/587\">#587</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.21.0...z3-v0.21.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Patch-only lockfile updates with no direct code changes; z3 affects\noptional verification builds only.\n> \n> **Overview**\n> Bumps workspace dependencies in **`Cargo.lock`** only: **`smallvec`**\n1.16.1 → 1.16.2 and **`z3`** 0.21.0 → 0.21.1 (with **`z3-sys`** 0.13.0 →\n0.13.1). No application or manifest changes in this diff.\n> \n> **smallvec** picks up v1 bugfixes (e.g. `retain`/`dedup_by` compaction\nand `may_dangle` ownership tracking). **z3** is a patch release with\nbuild/cross-compile fixes and minor API tweaks upstream; behavior for\noptional Z3 verification tests should stay the same aside from those\ndependency fixes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb8922e0add3a38378c7d03b8f5b3cb083cafd628. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-10-03T03:02:26Z",
+          "tree_id": "4febf099b20b9b62ce19c164a532f6b17258ac6b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/d5ac4e053f1d457e8f74b5363e08b368f17500ea"
+        },
+        "date": 1790997424479,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Frame/new",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_null",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame/is_valid",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/10",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/100",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Frame arithmetic/add/1000",
+            "value": 0,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/4",
+            "value": 27,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/8",
+            "value": 29,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/16",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/64",
+            "value": 83,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/zeros/256",
+            "value": 278,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/4",
+            "value": 37,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/8",
+            "value": 44,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/16",
+            "value": 60,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/64",
+            "value": 154,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE encode/random/256",
+            "value": 529,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/4",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/8",
+            "value": 25,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/16",
+            "value": 25,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/64",
+            "value": 26,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "RLE decode/zeros/256",
+            "value": 28,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/8",
+            "value": 105,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/8",
+            "value": 132,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/8",
+            "value": 179,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/16",
+            "value": 193,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/16",
+            "value": 262,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/16",
+            "value": 386,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_4b/32",
+            "value": 349,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_4b/32",
+            "value": 479,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_4b/32",
+            "value": 740,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/8",
+            "value": 190,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/8",
+            "value": 215,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/8",
+            "value": 263,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/16",
+            "value": 351,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/16",
+            "value": 425,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/16",
+            "value": 559,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/idle_encode_8b/32",
+            "value": 655,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/active_encode_8b/32",
+            "value": 788,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression pipeline/fighting_encode_8b/32",
+            "value": 1060,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/idle",
+            "value": 491,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/active",
+            "value": 671,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/fighting",
+            "value": 915,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Compression ratio analysis/roundtrip/analog",
+            "value": 1176,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/2",
+            "value": 94,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_no_rollback/4",
+            "value": 131,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/2",
+            "value": 402,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/4",
+            "value": 647,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncTestSession/advance_frame_with_rollback/7",
+            "value": 904,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "P2PSession/metrics",
+            "value": 18,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message/encoded_len",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=2",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=4",
+            "value": 85,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=8",
+            "value": 334,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "H-16P confirmed_frame/steady_mesh/N=16",
+            "value": 1520,
+            "range": "± 3",
             "unit": "ns/iter"
           }
         ]
