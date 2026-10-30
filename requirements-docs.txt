@@ -2,5 +2,5 @@
 # Using ~= (compatible release) constraints to allow patch updates
 # while preventing breaking changes from major version updates.
 mkdocs~=1.6.1
-mkdocs-material~=9.7.7
+mkdocs-material~=9.8.0
 pymdown-extensions~=12.3.0
