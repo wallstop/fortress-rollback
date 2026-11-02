@@ -15,6 +15,18 @@ on:
       - "wiki/**"
       - "scripts/docs/**"
       - "scripts/tests/**"
+      - ".devcontainer/Dockerfile"
+      - ".devcontainer/ai-backends.sh"
+      - ".devcontainer/check-mcp-env.sh"
+      - ".devcontainer/claude-zai.mcp.json"
+      - ".devcontainer/zai-mcp-vision.sh"
+      - ".devcontainer/devcontainer-bootstrap.sh"
+      - ".devcontainer/devcontainer.json"
+      - ".mcp.json"
+      - ".vscode/mcp.json"
+      - ".codex/config.toml"
+      - ".dockerignore"
+      - "opencode.json"
       - "scripts/release/**"
       - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
@@ -51,6 +63,18 @@ on:
       - "wiki/**"
       - "scripts/docs/**"
       - "scripts/tests/**"
+      - ".devcontainer/Dockerfile"
+      - ".devcontainer/ai-backends.sh"
+      - ".devcontainer/check-mcp-env.sh"
+      - ".devcontainer/claude-zai.mcp.json"
+      - ".devcontainer/zai-mcp-vision.sh"
+      - ".devcontainer/devcontainer-bootstrap.sh"
+      - ".devcontainer/devcontainer.json"
+      - ".mcp.json"
+      - ".vscode/mcp.json"
+      - ".codex/config.toml"
+      - ".dockerignore"
+      - "opencode.json"
       - "scripts/release/**"
       - "specs/tla/**"
       - "scripts/ci/check-doc-claims.sh"
@@ -255,6 +279,9 @@ jobs:
 
       - name: Run script tests
         run: python -m pytest scripts/tests/ -v
+
+      - name: Validate AI backend launchers
+        run: bash scripts/tests/test-ai-backends.sh
 
       - name: Generate wiki (dry-run)
         run: python scripts/docs/sync-wiki.py --dest wiki-test-output

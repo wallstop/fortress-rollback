@@ -16,6 +16,11 @@ test-results/
 *.swp
 *.swo
 
+# Runtime credentials
+.env.local*
+.devcontainer/.mcp.env
+.devcontainer/.mcp.env.*
+
 # Documentation
 docs/
 *.md

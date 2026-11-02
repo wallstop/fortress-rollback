@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "github-mcp-server": { "type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": { "Authorization": "Bearer ${env:GITHUB_PERSONAL_ACCESS_TOKEN}", "X-MCP-Readonly": "true" } },
+    "zai-vision": { "type": "stdio", "command": "zai-mcp-vision", "args": [], "env": { "ZAI_API_KEY": "${env:ZAI_API_KEY}" } },
+    "zai-web-search": { "type": "http", "url": "https://api.z.ai/api/mcp/web_search_prime/mcp", "headers": { "Authorization": "Bearer ${env:ZAI_API_KEY}" } },
+    "zai-web-reader": { "type": "http", "url": "https://api.z.ai/api/mcp/web_reader/mcp", "headers": { "Authorization": "Bearer ${env:ZAI_API_KEY}" } },
+    "zai-zread": { "type": "http", "url": "https://api.z.ai/api/mcp/zread/mcp", "headers": { "Authorization": "Bearer ${env:ZAI_API_KEY}" } }
+  }
+}

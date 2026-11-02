@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "github-mcp-server": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+        "X-MCP-Readonly": "true"
+      }
+    },
+    "zai-vision": {
+      "type": "stdio",
+      "command": "zai-mcp-vision",
+      "args": []
+    },
+    "zai-web-search": {
+      "type": "stdio",
+      "command": "zai-mcp-remote",
+      "args": ["web-search"]
+    },
+    "zai-web-reader": {
+      "type": "stdio",
+      "command": "zai-mcp-remote",
+      "args": ["web-reader"]
+    },
+    "zai-zread": {
+      "type": "stdio",
+      "command": "zai-mcp-remote",
+      "args": ["zread"]
+    }
+  }
+}

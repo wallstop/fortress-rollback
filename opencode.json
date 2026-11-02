@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": { "zai-coding-plan": { "options": { "timeout": 300000, "chunkTimeout": 45000 } } },
+  "mcp": {
+    "github-mcp-server": { "type": "remote", "url": "https://api.githubcopilot.com/mcp/", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer {env:GITHUB_PERSONAL_ACCESS_TOKEN}", "X-MCP-Readonly": "true" } },
+    "zai-vision": { "type": "local", "command": ["zai-mcp-vision"], "enabled": true, "environment": { "ZAI_API_KEY": "{env:ZAI_API_KEY}" } },
+    "zai-web-search": { "type": "remote", "url": "https://api.z.ai/api/mcp/web_search_prime/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer {env:ZAI_API_KEY}" } },
+    "zai-web-reader": { "type": "remote", "url": "https://api.z.ai/api/mcp/web_reader/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer {env:ZAI_API_KEY}" } },
+    "zai-zread": { "type": "remote", "url": "https://api.z.ai/api/mcp/zread/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer {env:ZAI_API_KEY}" } }
+  }
+}

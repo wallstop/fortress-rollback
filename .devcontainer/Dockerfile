@@ -41,6 +41,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     iputils-ping \
     netcat-openbsd \
+    bubblewrap \
+    socat \
     tcpdump \
     # Debugging and profiling
     valgrind \
@@ -138,11 +140,16 @@ ENV NPM_CONFIG_CACHE=/home/vscode/.cache/npm
 ENV PATH=/home/vscode/.local/bin:${PATH}
 RUN mkdir -p "${NPM_CONFIG_PREFIX}/bin" "${NPM_CONFIG_PREFIX}/lib/node_modules" "${NPM_CONFIG_CACHE}" && \
     npm install --global --no-audit --no-fund \
+        --allow-scripts=opencode-ai,@anthropic-ai/claude-code \
         markdownlint-cli@latest \
         markdown-link-check@latest \
         @nanocollective/nanocoder@latest \
         opencode-ai@latest \
-        @openai/codex@latest && \
+        @openai/codex@latest \
+        @anthropic-ai/claude-code@latest \
+        @github/copilot@latest \
+        mcp-remote@latest \
+        @z_ai/mcp-server@latest && \
     npm cache clean --force
 
 # Install Rust nightly toolchain (required for Miri and some Kani features)
@@ -232,6 +239,9 @@ RUN echo '#!/bin/bash\njava -XX:+UseParallelGC -Xmx4g -jar /opt/tla/tla2tools.ja
 # Create helper script for SANY (TLA+ parser)
 RUN echo '#!/bin/bash\njava -cp /opt/tla/tla2tools.jar tla2sany.SANY "$@"' > /usr/local/bin/sany && \
     chmod +x /usr/local/bin/sany
+
+COPY --chmod=0755 .devcontainer/zai-mcp-vision.sh /usr/local/bin/zai-mcp-vision
+COPY --chmod=0755 .devcontainer/zai-mcp-remote.sh /usr/local/bin/zai-mcp-remote
 
 # Switch back to vscode user
 USER vscode

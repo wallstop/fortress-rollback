@@ -45,6 +45,9 @@ This devcontainer provides a complete environment for developing, testing, and f
 - **Nanocoder** - Local-first coding agent (`@nanocollective/nanocoder`)
 - **OpenCode** - Open source coding agent (`opencode-ai`)
 - **Codex CLI** - OpenAI coding agent (`@openai/codex`)
+- **Claude Code** - Anthropic coding agent (`@anthropic-ai/claude-code`)
+- **Copilot CLI** - GitHub coding agent (`@github/copilot`)
+- **Z.ai Vision MCP** - Local vision tools (`@z_ai/mcp-server`)
 
 ### Profiling
 
@@ -67,8 +70,9 @@ After the container starts, verify all tools:
 
 ## AI CLI and npm Setup
 
-The image build installs Nanocoder, OpenCode, and Codex CLI from each npm
-package's `latest` tag. The create hook resolves the tags again, so a cached
+The image build installs Nanocoder, OpenCode, Codex CLI, Claude Code, Copilot
+CLI, and the Z.ai Vision MCP from each npm package's `latest` tag. The create
+hook resolves the tags again, so a cached
 image does not freeze their versions. Each package refresh is failure-tolerant:
 an unavailable registry does not prevent the container from opening, and the
 image-bundled version remains available. Routine start hooks skip registry
@@ -78,7 +82,48 @@ access so reopening an existing container stays fast and offline-safe.
 nanocoder --version
 opencode --version
 codex --version
+claude --version
+copilot --version
 ```
+
+The ordinary `codex` and `claude` commands keep their native OpenAI and
+Anthropic backends. Create/start hooks also install opt-in `codex-zai` and
+`claude-zai` launchers:
+
+```bash
+[ -e .env.local ] || cp .env.local.example .env.local
+# Add or update ZAI_API_KEY and GITHUB_PERSONAL_ACCESS_TOKEN.
+codex-zai
+claude-zai
+```
+
+Switching is per process; exiting returns immediately to the native commands.
+Codex uses a named profile with Z.ai's Responses endpoint. Claude uses Z.ai's
+Anthropic endpoint and separate `~/.claude-zai` state. Credentials remain in
+the process environment and are not written to the repository or generated
+profile. Optional overrides are `CODEX_ZAI_MODEL`,
+`CODEX_ZAI_REASONING_EFFORT` (`low`, `high`, or `max`),
+`ZAI_API_TIMEOUT_MS` (five minutes by default), and
+`CLAUDE_ZAI_CONFIG_DIR`. Claude's normal aliases map to Z.ai's recommended GLM
+models; use `CLAUDE_ZAI_HAIKU_MODEL`, `CLAUDE_ZAI_SONNET_MODEL`, or
+`CLAUDE_ZAI_OPUS_MODEL` to override them. Ordinary shell and unrelated MCP
+children do not inherit the model-server credential. The trusted Z.ai MCP
+servers receive only their required credential. For Claude, their wrappers read
+the filtered mode-`0600` runtime file through `CLAUDE_PROJECT_DIR`; Codex
+forwards only `ZAI_API_KEY` through its MCP credential allowlist for the remote
+servers and keeps the direct stdio wrapper for Vision. The wrappers scrub the
+canonical key and unrelated tokens before starting the MCP process.
+
+Claude's experimental Linux subprocess scrubber depends on `bubblewrap` and
+`socat`. Current Claude Code still requires user and mount namespaces in its
+weaker nested mode, which standard Docker confinement rejects. Inside the
+devcontainer, `claude-zai` therefore disables that redundant inner scrub sandbox
+and relies on the outer container boundary; controlled Bash and stdio MCP probes
+verified that Claude still removes the model-server credential from ordinary
+shell children while deliberately authenticating the selected Z.ai MCP servers.
+Outside a container the scrubber remains enabled. An explicit
+`CLAUDE_ZAI_SUBPROCESS_ENV_SCRUB=1` request runs a bubblewrap preflight and fails
+before model startup if the runtime cannot support it.
 
 Global npm installs use the `vscode` user's `~/.local` prefix and
 `~/.cache/npm` cache. You can install and update packages without `sudo`:
@@ -106,6 +151,134 @@ Notes:
 - `.devcontainer/devcontainer-bootstrap.sh` refreshes all three AI CLIs on
   create and bounds Cargo artifacts on create/start. `.devcontainer/codex-bootstrap.sh`
   then prints Codex readiness guidance.
+
+### Agent network reliability
+
+OpenCode and Nanocoder use the container's ordinary outbound path. Docker's
+default bridge masquerades that traffic through the host, so a failing host
+uplink also fails inside the devcontainer.
+
+On Linux, do not keep wired Ethernet and Wi-Fi active together when both have
+addresses on the same IPv4 subnet. Each link can work alone while their combined
+failure pattern remains consistent with weak-host ARP or return-path ambiguity;
+a packet capture is required to identify the exact mechanism. Confirm the
+topology, the route carrying the current shell, and each interface independently:
+
+```bash
+ip -brief -4 address
+ip -4 route show default
+ip -4 route show scope link
+nmcli device status
+model_ip=$(getent ahostsv4 api.z.ai | awk 'NR == 1 {print $1}')
+ip route get "$model_ip"
+wired_interface=eth0
+gateway_ip=192.168.1.1
+ping -I "$wired_interface" -c 15 "$gateway_ip"
+curl --interface "$wired_interface" --ipv4 --connect-timeout 3 --max-time 10 \
+    --show-error \
+    --write-out '\ncode=%{http_code} total=%{time_total} error=%{errormsg}\n' \
+    https://api.z.ai/api/coding/paas/v4/models
+```
+
+An expected HTTP 401 proves only DNS, TCP, TLS, and HTTP reachability, not an
+authenticated streaming model call. If the shell is remote, do not disconnect
+the interface carrying its route. Verify the alternate link first and keep the
+restore commands below available before changing NetworkManager state.
+
+When both links are healthy in isolation, keep only one active on that LAN. To
+prefer wired Ethernet persistently with NetworkManager:
+
+```bash
+nmcli connection modify "<wifi-profile>" connection.autoconnect no
+nmcli connection down "<wifi-profile>"
+```
+
+Restore Wi-Fi later with:
+
+```bash
+nmcli connection modify "<wifi-profile>" connection.autoconnect yes
+nmcli connection up "<wifi-profile>"
+```
+
+For automatic wired preference with Wi-Fi failover, this host currently uses
+the `prefer-wired-network.service` systemd user service maintained alongside the
+NovaSharp devcontainer tooling. Its policy is configurable in
+`~/.config/prefer-wired-network/config`; it restores Wi-Fi only if it was the
+component that disabled the radio. This is a host repair, so Fortress containers
+inherit it without container-specific networking changes.
+
+The repository's `opencode.json` sets a five-minute Z.ai request timeout and a
+45-second streamed-chunk timeout.
+`.opencode/plugins/bounded-network-retries.js` stops matching network retries
+after the third failed attempt or two minutes after retrying begins. These
+bounds apply only to OpenCode and turn a silent stall into an actionable abort;
+they do not control Nanocoder or repair the host uplink. The single-uplink host
+repair covers both clients. After repairing it, repeat interface-bound and
+in-container probes, then run authenticated streaming and read-only tool
+workloads in both clients. Record counts, latency, and failure class without
+recording credentials or response bodies.
+
+### Project MCP servers
+
+Before devcontainer creation, the host preflight copies only the two allowlisted
+MCP credentials from the ignored `.env.local` into an ignored mode-`0600`
+runtime file. Unrelated project credentials are not injected. The container
+exposes GitHub's hosted MCP server plus all four MCPs currently included with
+the Z.ai Coding Plan: Vision Understanding, Web Search Prime, Web Reader, and
+Zread. Vision is preinstalled as `@z_ai/mcp-server`; the remote servers use
+their official HTTPS endpoints. `.mcp.json`, `.codex/config.toml`,
+`opencode.json`, and `.vscode/mcp.json` make the same catalog available to
+Claude Code, Nanocoder, Copilot CLI, Codex, OpenCode, and VS Code. Nanocoder
+receives the catalog's absolute path, so launching it below the repository root
+still works.
+
+Claude Code 2.1.260 cannot consume the SSE-framed MCP initialization response
+currently returned by the three remote Z.ai endpoints, so `claude-zai` keeps using
+the installed `mcp-remote` stdio bridge for those three servers. Codex 0.153.2
+completed the response but lost the transport while sending the subsequent
+`initialized` notification; after upgrading past that release, the installed
+Codex CLI (currently `codex-cli 0.166.0`) accepts the native streamable HTTP
+transport, and the repository now declares the Z.ai remote servers with
+`url` plus `bearer_token_env_var` instead of a stdio bridge. A stdio bridge
+declared alongside a `url` makes Codex fail the whole MCP bootstrap with
+`url is not supported for stdio`, which prevented Codex from running at all.
+Direct HTTP probes and OpenCode succeed from the same container, so only Claude
+keeps the bridge. Vision remains direct stdio and GitHub remains native HTTP.
+Re-test native HTTP after either client upgrades before removing a bridge.
+
+In Claude Code 2.1.260, `claude-zai mcp list` ignores this per-session strict
+catalog and health-checks `.mcp.json`, so it can falsely report the three native
+HTTP failures. The authoritative check is the `system/init` event from an actual
+`claude-zai --print --output-format stream-json --verbose` session: its
+`mcp_servers` array must show all five entries as `connected`.
+
+Keep model access separate from MCP health. In the 2026-09-04 live probe, all
+five MCPs connected before Z.ai's model API returned HTTP 429, code `1310`, for
+an exhausted weekly/monthly subscription allowance. Claude retries that response
+and can look hung. A rebuild, key rotation, or MCP change cannot repair quota;
+interrupt the retries, check the Z.ai plan's usage/reset time, and retry after
+capacity is available.
+
+If `.env.local` does not already exist, copy `.env.local.example`; otherwise add
+or update the two unquoted MCP keys without overwriting the existing file. Then
+rebuild the container. Claude asks once to approve project MCP servers, and
+Codex requires the repository to be trusted; those security prompts are
+intentionally not bypassed. GitHub is read-only by default through
+`X-MCP-Readonly: true`. Remove that header only for intentional mutations and
+use a least-privilege token. The two keys enter the trusted container process
+environment and remain readable from the mounted workspace, so do not run
+untrusted repository code or agents.
+
+The preceding Claude approval statement applies to native `claude`.
+`claude-zai` pre-approves only the five audited names in its isolated settings.
+
+Sources: [Z.ai Coding Plan MCP overview](https://docs.z.ai/devpack/overview),
+[Claude Code MCP configuration](https://code.claude.com/docs/en/mcp),
+[Codex MCP configuration](https://developers.openai.com/codex/mcp/),
+[Claude Code native SSE failure](https://github.com/anthropics/claude-code/issues/58759),
+[`mcp-remote`](https://github.com/geelen/mcp-remote),
+[GitHub MCP server](https://github.com/github/github-mcp-server), and
+[Dev Container environment files](https://code.visualstudio.com/remote/advancedcontainers/environment-variables).
 
 ## Cargo Artifact Size Policy
 
@@ -234,11 +407,13 @@ cargo install cargo-shear cargo-spellcheck cargo-geiger cargo-careful
 pip3 install --break-system-packages yamllint pre-commit
 # AI tools use the devcontainer's user-owned npm prefix (no sudo)
 npm install --global \
+  --allow-scripts=opencode-ai,@anthropic-ai/claude-code \
   markdownlint-cli@latest \
   markdown-link-check@latest \
   @nanocollective/nanocoder@latest \
   opencode-ai@latest \
-  @openai/codex@latest
+  @openai/codex@latest \
+  @anthropic-ai/claude-code@latest
 
 # actionlint (GitHub Actions linter)
 # Download the script first, then run with bash (avoids shell issues)

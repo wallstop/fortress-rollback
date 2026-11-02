@@ -7,6 +7,11 @@ import os
 import subprocess
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEVCONTAINER_JSON = REPO_ROOT / ".devcontainer" / "devcontainer.json"
@@ -19,6 +24,7 @@ DEVCONTAINER_BUILD_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "devcontainer-build.yml"
 )
 TLA_VERSION_FILE = REPO_ROOT / ".tla-tools-version"
+CODEX_CONFIG = REPO_ROOT / ".codex" / "config.toml"
 GITHUB_TOOL_GUIDANCE_FILES = (
     REPO_ROOT / ".agents" / "skills" / "fortress-development" / "SKILL.md",
     REPO_ROOT / "AGENTS.md",
@@ -93,6 +99,16 @@ class TestCodexDevcontainerConfiguration:
         assert "@nanocollective/nanocoder@latest" in text
         assert "opencode-ai@latest" in text
         assert "@openai/codex@latest" in text
+        assert "@anthropic-ai/claude-code@latest" in text
+        assert "@github/copilot@latest" in text
+        assert "mcp-remote@latest" in text
+        assert "@z_ai/mcp-server@latest" in text
+
+    def test_dockerfile_installs_claude_subprocess_isolation_dependencies(self) -> None:
+        """Claude credential scrubbing requires Linux sandbox dependencies."""
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        assert "bubblewrap \\" in text
+        assert "socat \\" in text
 
     def test_dockerfile_uses_user_owned_npm_prefix(self) -> None:
         """Global npm commands must install below the vscode user's home."""
@@ -109,6 +125,24 @@ class TestCodexDevcontainerConfiguration:
         text = DEVCONTAINER_JSON.read_text(encoding="utf-8")
         assert '"target": "/home/vscode/.codex"' in text
         assert '"source": "fortress-rollback-codex-home"' in text
+
+    def test_codex_zai_mcp_servers_use_native_streamable_http(self) -> None:
+        """Z.ai remote MCP servers must not be declared as Codex stdio bridges.
+
+        A stdio bridge (``command`` + ``args``) merged with a ``url`` makes Codex
+        fail the MCP bootstrap with ``url is not supported for stdio``, which
+        prevents Codex from running at all.
+        """
+        with CODEX_CONFIG.open("rb") as stream:
+            codex_config = tomllib.load(stream)
+        codex = codex_config["mcp_servers"]
+        assert codex["zai-vision"]["command"] == "zai-mcp-vision"
+        for name in ("zai-web-search", "zai-web-reader", "zai-zread"):
+            server = codex[name]
+            assert server["url"].startswith("https://api.z.ai/api/mcp/")
+            assert server["bearer_token_env_var"] == "ZAI_API_KEY"
+            assert "command" not in server
+            assert "args" not in server
 
     def test_devcontainer_runs_bootstrap_on_create_and_start(self) -> None:
         """Lifecycle hooks should refresh tools and enforce storage bounds."""
@@ -135,6 +169,11 @@ class TestCodexDevcontainerConfiguration:
         assert 'check_tool "nanocoder" "nanocoder --version"' in text
         assert 'check_tool "opencode" "opencode --version"' in text
         assert 'check_tool "codex" "codex --version"' in text
+        assert 'check_tool "claude" "claude --version"' in text
+        assert 'check_tool "copilot" "copilot --version"' in text
+        assert 'check_tool "mcp-remote" "mcp-remote --version"' in text
+        assert 'check_tool "bubblewrap" "bwrap --version"' in text
+        assert 'check_tool "socat" "socat -V"' in text
 
     def test_pull_requests_build_devcontainer_without_publishing(self) -> None:
         """Image changes must build before merge without writing to GHCR."""
@@ -294,6 +333,8 @@ class TestCodexBootstrapScript:
         env = os.environ.copy()
         env["HOME"] = str(tmp_path)
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("CODEX_API_KEY", None)
         env["CODEX_STUB_LOGGED_IN"] = "1"
 
         result = subprocess.run(
@@ -338,6 +379,8 @@ class TestCodexBootstrapScript:
         env = os.environ.copy()
         env["HOME"] = str(tmp_path)
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("CODEX_API_KEY", None)
 
         result = subprocess.run(
             ["bash", str(BOOTSTRAP_SCRIPT), "post-start"],
@@ -463,10 +506,16 @@ class TestDevcontainerBootstrapScript:
             "@nanocollective/nanocoder@latest",
             "opencode-ai@latest",
             "@openai/codex@latest",
+            "@anthropic-ai/claude-code@latest",
+            "@github/copilot@latest",
+            "mcp-remote@latest",
+            "@z_ai/mcp-server@latest",
         ):
             assert (
                 f"{expected_prefix}|{expected_cache}|install --global --no-audit "
-                f"--no-fund --prefer-online {package}"
+                "--no-fund --prefer-online "
+                "--allow-scripts=opencode-ai,@anthropic-ai/claude-code "
+                f"{package}"
             ) in log
         assert "sudo" not in log
         assert (tmp_path / ".local" / "bin").is_dir()
@@ -513,6 +562,10 @@ class TestDevcontainerBootstrapScript:
             "@nanocollective/nanocoder",
             "opencode-ai",
             "@openai/codex",
+            "@anthropic-ai/claude-code",
+            "@github/copilot",
+            "mcp-remote",
+            "@z_ai/mcp-server",
         ):
             package_dir = npm_prefix / "lib" / "node_modules" / package_path
             package_dir.mkdir(parents=True)
@@ -538,9 +591,9 @@ class TestDevcontainerBootstrapScript:
 
         assert result.returncode == 0, result.stderr
         log = npm_log.read_text(encoding="utf-8")
-        assert log.count("|view ") == 3
+        assert log.count("|view ") == 7
         assert "|install " not in log
-        assert result.stdout.count("1.2.3 is current") == 3
+        assert result.stdout.count("1.2.3 is current") == 7
 
     def test_unwritable_npm_prefix_skips_refresh_without_sudo(
         self, tmp_path: Path

@@ -18,6 +18,14 @@ site/
 *.zip
 
 .vscode/**
+!.vscode/
+!.vscode/mcp.json
+
+# Local MCP credentials are runtime-only and must never be committed.
+/.env.local*
+!/.env.local.example
+/.devcontainer/.mcp.env
+/.devcontainer/.mcp.env.*
 
 PLAN.md
 *TTrace*

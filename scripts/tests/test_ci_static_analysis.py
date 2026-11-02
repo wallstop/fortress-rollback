@@ -22,6 +22,7 @@ QUALITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-quality.yml"
 LINT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-lint.yml"
 CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-codeql.yml"
 VERIFICATION_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-verification.yml"
+DOCS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
 DEVCONTAINER_DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 RUFF_CONFIG = REPO_ROOT / "ruff.toml"
@@ -247,6 +248,22 @@ def test_shellcheck_is_warning_denied_and_blocking() -> None:
     assert "git ls-files -z -- '*.sh'" in check["run"]
     assert 'shellcheck --severity=warning "${shell_scripts[@]}"' in check["run"]
     assert check.get("continue-on-error") is not True
+
+
+def test_docs_workflow_runs_ai_backend_regression_suite() -> None:
+    workflow = _load_workflow(DOCS_WORKFLOW)
+    triggers = _triggers(workflow)
+    for event in ("push", "pull_request"):
+        assert {
+            ".devcontainer/Dockerfile",
+            ".devcontainer/ai-backends.sh",
+        }.issubset(triggers[event]["paths"])
+
+    job = workflow["jobs"]["wiki-sync-dry-run"]
+    assert job.get("continue-on-error") is not True
+    step = _step_by_name(job["steps"], "Validate AI backend launchers")
+    assert step["run"] == "bash scripts/tests/test-ai-backends.sh"
+    assert step.get("continue-on-error") is not True
 
 
 def test_static_workflow_paths_cover_all_relevant_sources() -> None:

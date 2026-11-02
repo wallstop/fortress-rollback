@@ -91,7 +91,11 @@ refresh_ai_clis() {
     for package in \
         '@nanocollective/nanocoder@latest' \
         'opencode-ai@latest' \
-        '@openai/codex@latest'; do
+        '@openai/codex@latest' \
+        '@anthropic-ai/claude-code@latest' \
+        '@github/copilot@latest' \
+        'mcp-remote@latest' \
+        '@z_ai/mcp-server@latest'; do
         package_name="${package%@latest}"
         package_json="${NPM_USER_PREFIX}/lib/node_modules/${package_name}/package.json"
         installed_version=""
@@ -121,7 +125,8 @@ refresh_ai_clis() {
         fi
 
         run_with_timeout "${NPM_REFRESH_TIMEOUT_SECONDS}" \
-            npm install --global --no-audit --no-fund --prefer-online "${package}"
+            npm install --global --no-audit --no-fund --prefer-online \
+                --allow-scripts=opencode-ai,@anthropic-ai/claude-code "${package}"
         install_status=$?
 
         if [ "${install_status}" -eq 0 ]; then
@@ -231,4 +236,9 @@ else
     log "Skipping npm CLI refresh outside post-create."
 fi
 cleanup_target_if_needed
+if [ -f .devcontainer/ai-backends.sh ]; then
+    if ! bash .devcontainer/ai-backends.sh install; then
+        warn "AI backend launcher setup failed; native CLIs remain available."
+    fi
+fi
 exit 0
