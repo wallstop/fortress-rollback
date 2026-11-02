@@ -313,6 +313,9 @@ def test_codeql_covers_all_repository_languages_and_fails_on_findings() -> None:
     workflow = _load_workflow(CODEQL_WORKFLOW)
     job = workflow["jobs"]["analyze"]
     assert job.get("continue-on-error") is not True
+    # Rust analysis compiles the whole crate and has been observed within a
+    # few minutes of a 30-minute cap, so keep a margin above that boundary.
+    assert job["timeout-minutes"] >= 45
     assert set(job["strategy"]["matrix"]["language"]) == {
         "actions",
         "python",
