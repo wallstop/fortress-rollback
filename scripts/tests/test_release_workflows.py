@@ -189,6 +189,19 @@ def test_required_release_workflows_pin_python_runtime() -> None:
         assert text.count('python-version: "3.13.5"') == 1
 
 
+def test_release_workflows_pin_a_runner_image_supporting_the_pinned_python() -> None:
+    """The dated Python pin requires a runner image that publishes it.
+
+    ``actions/setup-python`` has no 3.13.5 build for ``ubuntu-26.04``, which
+    ``ubuntu-latest`` now resolves to, so these release gates must pin the
+    Ubuntu 24.04 image to keep the exact interpreter available.
+    """
+    for workflow in (PREPARE, PUBLISH, RELEASE_STATE_CI):
+        text = workflow.read_text(encoding="utf-8")
+        assert "runs-on: ubuntu-24.04" in text
+        assert "runs-on: ubuntu-latest" not in text
+
+
 def test_prepare_dry_run_executes_complete_ephemeral_release() -> None:
     text = PREPARE.read_text(encoding="utf-8")
 
@@ -451,7 +464,7 @@ def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
     assert '"**/Cargo.lock"' in text
     assert '"scripts/release/**"' in text
     assert (
-        "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+        "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067"
         in text
     )
     assert "scripts/release/workspace_locks.py check" in text
