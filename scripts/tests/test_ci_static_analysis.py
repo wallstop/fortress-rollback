@@ -34,22 +34,23 @@ CARGO_SHEAR_SHA256 = (
     "21ba04662e0eaa6059ca7e1adf48f3bdf1c6656b613b926f3bda0dc6f5b38f82"
 )
 THIRD_PARTY_ACTION_PINS = {
-    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+    "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
     "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89",
     "benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc",
     "codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5",
-    "crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461",
+    "crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b",
     "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
-    "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
+    "docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6",
     "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",
     "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069",
-    "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067",
+    "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
     "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984",
     "lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8",
     "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
     "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
     "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
     "taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0",
+    "taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037",
 }
 FORBIDDEN_MUTABLE_ACTION_REFS = {
     "Swatinem/rust-cache@v2",

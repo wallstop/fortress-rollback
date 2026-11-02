@@ -450,7 +450,7 @@ def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
     assert install_step["uses"] == (
-        "taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0"
+        "taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037"
     )
     locked_bindgen = _locked_package_version("wasm-bindgen")
     assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"
@@ -597,7 +597,7 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     )
     assert (
         rust_step["uses"]
-        == "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067"
+        == "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8"
     )
     assert rust_step["with"]["toolchain"] == "nightly-2026-08-26"
     assert set(str(rust_step["with"]["components"]).split(",")) == {

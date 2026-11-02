@@ -464,7 +464,7 @@ def test_version_sync_preserves_check_name_and_runs_full_lock_checker() -> None:
     assert '"**/Cargo.lock"' in text
     assert '"scripts/release/**"' in text
     assert (
-        "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067"
+        "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8"
         in text
     )
     assert "scripts/release/workspace_locks.py check" in text
