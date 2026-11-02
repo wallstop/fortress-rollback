@@ -556,9 +556,8 @@ impl<T: Config> Default for HotJoinState<T> {
     }
 }
 
-/// Host-side per-join serving state, held in
-/// [`HotJoinState::joining`](HotJoinState::joining) for the duration of a single
-/// ack-gated join transaction.
+/// Host-side per-join serving state, held in [`HotJoinState::joining`] for the
+/// duration of a single ack-gated join transaction.
 ///
 /// The cached `snapshot` is captured **once** at serve time and re-sent on every
 /// poll until the joiner acks (the reliable retransmit). Because the host is

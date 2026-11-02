@@ -32,8 +32,8 @@
 //!
 //! The supported paths live in this module. The duplicate
 //! `__internal::{rle_encode,rle_decode}` aliases were removed at the reviewed
-//! 0.14 semver boundary; callers should use [`rle::encode`](crate::rle::encode)
-//! or [`rle::decode`](crate::rle::decode) directly.
+//! 0.14 semver boundary; callers should use [`rle::encode`] or [`rle::decode`]
+//! directly.
 
 use crate::error::allocation_failed;
 use crate::report_violation;
