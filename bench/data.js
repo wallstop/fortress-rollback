@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790997422948,
+  "lastUpdate": 1793603179209,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "59f0dcd94d91462f299d6eece700ed1a663186c8",
-          "message": "Harden hot-join metrics and bounded event retention (#219)\n\n## Summary\n\n- Pin the public N-peer hot-join metrics lifecycle: incomplete →\ncompleted, multi-poll, positive injected-clock latency, and stable\ncompletion.\n- Close D9 across P2P, spectator, and replay sessions with fallibly\nreserved event queues and allocation-free priority retention at\ncapacity.\n- Retain routine-vs-durable ordering honestly: evict queued routine\nevents first; reject an incoming routine against a durable-only queue;\notherwise replace the oldest durable event and record the exact loss.\n- Add replay metrics/observer integration, constructor\nallocation-failure coverage, and explicit disconnect-emission tracking\nfor saturated queues.\n- Update user-facing retention contracts and changelog.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- strict workspace clippy with `tokio,json,hot-join`\n- rustdoc with `tokio,json,hot-join`\n- changed-file agent preflight, changelog rule, link checks, and\nmarkdown lint\n- default nextest: 2,506 passed, 69 skipped\n- hot-join nextest: 2,753 passed, 69 skipped\n- nine adversarial sub-agent rounds; final verdict: zero D9 issues\n- mutation check proves the N-peer metrics assertion detects removal of\nactivation recording\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes how session event queues drop notifications under load\n(including disconnect/desync paths) across P2P, spectator, and replay;\nbehavior is heavily tested but affects core session lifecycle semantics.\n> \n> **Overview**\n> Replaces **FIFO event-queue trimming** with **routine-vs-durable\nretention** shared by P2P, spectator, and replay sessions. At capacity,\nthe oldest queued routine/advisory event is evicted first; if the queue\nis durable-only, incoming routine events are dropped and incoming\ndurable events replace the oldest durable slot. Enqueues go through\n`enqueue_event_bounded` with **fallible queue reservation** at session\nbuild time, **inline** `SessionMetrics` discard accounting, and\nrate-limited overflow warnings on every emission path (not only after\n`handle_event`).\n> \n> **Replay** gains the same bound plus `ReplaySession::metrics()`,\nbuilder wiring for queue size and violation observer, and\nallocation-failure handling. **P2P disconnect** uses tracked emission so\na saturated queue does not duplicate `Disconnected` when graceful-drop\ncleanup fails after the terminal event was already enqueued.\nDocs/changelog describe the retention contract; regressions cover\ndurable canaries, desync under pressure, and replay validation overflow.\n> \n> N-peer **hot-join metrics** tests assert completion, multi-poll span,\nand positive clock latency on the public mesh path.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nda603e5b03be2905228308c87aec627b792969f7. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-10T19:31:20-07:00",
-          "tree_id": "9088d71ea74a20f2948035f25a7262dadca9526e",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/59f0dcd94d91462f299d6eece700ed1a663186c8"
-        },
-        "date": 1783737390585,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 122,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 163,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 468,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 718,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1051,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 125814,
-            "range": "± 1543",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 47323,
-            "range": "± 778",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1605,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3467,6 +3341,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2786,
             "range": "± 414",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "wallstop",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "wallstop",
+            "username": "wallstop"
+          },
+          "distinct": false,
+          "id": "0720b06e73b64d79419389de594e4fdc6d6c7e98",
+          "message": "ci(codeql): raise the analyze time budget above the 30-minute boundary\n\nRust CodeQL analysis compiles the whole crate; the last two runs took\n28m37s and then exceeded the 30-minute job cap. Raise the budget to 60\nminutes and assert a margin in the workflow contract test so the gate\nstops flaking on slower runners.",
+          "timestamp": "2026-11-01T22:19:05-08:00",
+          "tree_id": "80ab7833d2f253cb1d866ff93335b7a68d5d096c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/0720b06e73b64d79419389de594e4fdc6d6c7e98"
+        },
+        "date": 1793603178166,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 50494,
+            "range": "± 236",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 33049,
+            "range": "± 687",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1407,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1603,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3250,
+            "range": "± 213",
             "unit": "ns/iter"
           }
         ]
