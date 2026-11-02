@@ -137,10 +137,12 @@ class TestCodexDevcontainerConfiguration:
             codex_config = tomllib.load(stream)
         codex = codex_config["mcp_servers"]
         assert codex["zai-vision"]["command"] == "zai-mcp-vision"
+        # Environment variable *name*, never a credential value.
+        expected_env_var = "ZAI_API_KEY"  # noqa: S105
         for name in ("zai-web-search", "zai-web-reader", "zai-zread"):
             server = codex[name]
             assert server["url"].startswith("https://api.z.ai/api/mcp/")
-            assert server["bearer_token_env_var"] == "ZAI_API_KEY"
+            assert server["bearer_token_env_var"] == expected_env_var
             assert "command" not in server
             assert "args" not in server
 

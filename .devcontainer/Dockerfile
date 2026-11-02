@@ -124,7 +124,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 --retry-all-
     bash /tmp/nodesource_setup.sh && \
     rm /tmp/nodesource_setup.sh && \
     apt-get install -y --no-install-recommends nodejs && \
-    pip3 install --no-cache-dir --break-system-packages pre-commit && \
+    pip3 install --no-cache-dir --break-system-packages --ignore-installed pre-commit && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================================================
