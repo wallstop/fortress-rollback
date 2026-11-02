@@ -2269,7 +2269,10 @@ mod tests {
             },
         );
         remote.send_payload(old, 9);
-        assert!(remote.recv_payloads().is_empty()); // pump 9 into the live socket inbox
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "payload 9 is pumped into the live socket inbox"
+        );
         remote.send_payload(old, 10); // remains in flight until after the rebind
 
         assert_eq!(binding.rebind(fresh), Ok(old));
@@ -2297,7 +2300,10 @@ mod tests {
         binding.detach();
         assert_eq!(binding.rebind(old), Err(SimRebindError::Detached));
         socket.send_payload(peer, 45);
-        assert!(remote.recv_payloads().is_empty());
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "remote.recv_payloads() is expected to be empty"
+        );
         remote.send_payload(fresh, 50);
         let _ = remote.recv_payloads();
         assert_eq!(net.stats().dropped_unattached, 2);
@@ -2334,7 +2340,10 @@ mod tests {
         socket.send_payload(peer, 1);
         assert_eq!(binding.rebind(fresh), Ok(old));
         socket.send_payload(peer, 2);
-        assert!(remote.recv_payloads().is_empty());
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "remote.recv_payloads() is expected to be empty"
+        );
 
         net.heal_all();
         assert_eq!(remote.recv_payloads(), vec![(old, 1), (fresh, 2)]);
@@ -2583,7 +2592,10 @@ mod tests {
 
         a.send_payload(addr(2), 1);
         a.send_payload(addr(2), 2);
-        assert!(b.recv_payloads().is_empty());
+        assert!(
+            b.recv_payloads().is_empty(),
+            "b.recv_payloads() is expected to be empty"
+        );
         offset.store(100, AtomicOrdering::Relaxed);
         assert_eq!(b.recv_payloads(), vec![(addr(1), 1), (addr(1), 2)]);
         let stats = net.stats();
@@ -2624,7 +2636,10 @@ mod tests {
         assert_eq!(remote.recv_payloads(), vec![(old, 1)]);
         assert_eq!(binding.rebind(fresh), Ok(old));
         socket.send_payload(peer, 2);
-        assert!(remote.recv_payloads().is_empty());
+        assert!(
+            remote.recv_payloads().is_empty(),
+            "remote.recv_payloads() is expected to be empty"
+        );
         assert_eq!(net.stats().gilbert_elliott_bad_sends, 1);
         assert_eq!(net.stats().gilbert_elliott_loss_events, 1);
     }
@@ -2679,7 +2694,10 @@ mod tests {
         net.set_blocked(addr(2), addr(1), true);
         net.set_holding(addr(1), addr(2), false);
         a.send_payload(addr(2), 1); // dropped by policy
-        assert!(b.recv_payloads().is_empty());
+        assert!(
+            b.recv_payloads().is_empty(),
+            "b.recv_payloads() is expected to be empty"
+        );
 
         net.heal_all();
         a.send_payload(addr(2), 2);
@@ -2771,7 +2789,10 @@ mod tests {
             vec![1]
         );
         offset.fetch_add(99, AtomicOrdering::Relaxed);
-        assert!(receiver.recv_payloads().is_empty());
+        assert!(
+            receiver.recv_payloads().is_empty(),
+            "receiver.recv_payloads() is expected to be empty"
+        );
         offset.fetch_add(1, AtomicOrdering::Relaxed);
         assert_eq!(receiver.recv_payloads()[0].1.id, 2);
         offset.fetch_add(100, AtomicOrdering::Relaxed);
@@ -2994,7 +3015,10 @@ mod tests {
             },
         );
 
-        assert!(receiver.recv_payloads().is_empty());
+        assert!(
+            receiver.recv_payloads().is_empty(),
+            "receiver.recv_payloads() is expected to be empty"
+        );
         assert_eq!(net.stats().bandwidth_oversize_drops, 1);
         assert_eq!(
             net.link_stats()[&(addr(1), addr(2))].bandwidth_oversize_drops,
@@ -3088,7 +3112,10 @@ mod tests {
             },
         );
 
-        assert!(receiver.recv_payloads().is_empty());
+        assert!(
+            receiver.recv_payloads().is_empty(),
+            "receiver.recv_payloads() is expected to be empty"
+        );
         assert_eq!(net.stats().bandwidth_admitted_datagrams, 1);
         assert_eq!(net.stats().bandwidth_admitted_bytes, 2_000);
         assert_eq!(net.stats().fragmentation_loss_events, 1);
@@ -3594,7 +3621,10 @@ mod tests {
                 is_input: false,
             },
         );
-        assert!(receiver.recv_payloads().is_empty());
+        assert!(
+            receiver.recv_payloads().is_empty(),
+            "receiver.recv_payloads() is expected to be empty"
+        );
         let stats = net.stats();
         assert_eq!(stats.fragmentation_fragments_modeled, 0);
         assert_eq!(stats.fragmentation_fragment_cap_hits, 1);
@@ -3946,7 +3976,13 @@ mod tests {
         sess2
             .add_local_input(PlayerHandle::new(1), StubInput { inp: 2 })
             .unwrap();
-        assert!(!sess1.advance_frame().unwrap().is_empty());
-        assert!(!sess2.advance_frame().unwrap().is_empty());
+        assert!(
+            !sess1.advance_frame().unwrap().is_empty(),
+            "sess1.advance_frame().unwrap() is expected to be non-empty"
+        );
+        assert!(
+            !sess2.advance_frame().unwrap().is_empty(),
+            "sess2.advance_frame().unwrap() is expected to be non-empty"
+        );
     }
 }

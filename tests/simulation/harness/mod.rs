@@ -4677,7 +4677,10 @@ mod tests {
             },
         );
         let without_probe = run(&schedule, &RunOptions::default());
-        assert!(without_probe.probe_peer_wire_by_link.is_empty());
+        assert!(
+            without_probe.probe_peer_wire_by_link.is_empty(),
+            "without_probe.probe_peer_wire_by_link is expected to be empty"
+        );
 
         let report = run(
             &schedule,

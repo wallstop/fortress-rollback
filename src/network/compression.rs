@@ -536,7 +536,7 @@ mod compression_tests {
 
         // The infallible convenience wrapper reports the violation and returns
         // an empty batch rather than silently dropping the mismatched frame.
-        assert!(encoded.is_empty());
+        assert!(encoded.is_empty(), "encoded is expected to be empty");
     }
 
     // =========================================================================

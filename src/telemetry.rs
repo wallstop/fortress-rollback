@@ -2205,7 +2205,7 @@ mod tests {
     #[test]
     fn test_collecting_observer() {
         let observer = CollectingObserver::new();
-        assert!(observer.is_empty());
+        assert!(observer.is_empty(), "observer is expected to be empty");
         assert_eq!(observer.len(), 0);
 
         let violation1 = SpecViolation::new(
@@ -2224,7 +2224,7 @@ mod tests {
         observer.on_violation(&violation1);
         observer.on_violation(&violation2);
 
-        assert!(!observer.is_empty());
+        assert!(!observer.is_empty(), "observer is expected to be non-empty");
         assert_eq!(observer.len(), 2);
         assert!(observer.has_violation(ViolationKind::FrameSync));
         assert!(observer.has_violation(ViolationKind::InputQueue));
@@ -2305,10 +2305,10 @@ mod tests {
             "test",
             "test.rs:1",
         ));
-        assert!(!observer.is_empty());
+        assert!(!observer.is_empty(), "observer is expected to be non-empty");
 
         observer.clear();
-        assert!(observer.is_empty());
+        assert!(observer.is_empty(), "observer is expected to be empty");
     }
 
     // ==========================================
@@ -2480,7 +2480,7 @@ mod tests {
         // With std::sync::Mutex, this would panic with "PoisonError"
         // With parking_lot::Mutex, this works fine
         assert_eq!(observer.len(), 1);
-        assert!(!observer.is_empty());
+        assert!(!observer.is_empty(), "observer is expected to be non-empty");
 
         // Should still be able to add violations
         observer.on_violation(&SpecViolation::new(
@@ -3314,12 +3314,18 @@ mod tests {
         telemetry.on_rollback(1, Frame::new(1));
         telemetry.on_frame_advance(Frame::new(2));
         assert_eq!(telemetry.len(), 2);
-        assert!(!telemetry.is_empty());
+        assert!(
+            !telemetry.is_empty(),
+            "telemetry is expected to be non-empty"
+        );
 
         telemetry.clear();
         assert_eq!(telemetry.len(), 0);
-        assert!(telemetry.is_empty());
-        assert!(telemetry.events().is_empty());
+        assert!(telemetry.is_empty(), "telemetry is expected to be empty");
+        assert!(
+            telemetry.events().is_empty(),
+            "telemetry.events() is expected to be empty"
+        );
     }
 
     #[test]
@@ -3339,11 +3345,20 @@ mod tests {
     #[test]
     fn collecting_telemetry_new_is_empty() {
         let telemetry = CollectingTelemetry::new();
-        assert!(telemetry.is_empty());
+        assert!(telemetry.is_empty(), "telemetry is expected to be empty");
         assert_eq!(telemetry.len(), 0);
-        assert!(telemetry.events().is_empty());
-        assert!(telemetry.rollbacks().is_empty());
-        assert!(telemetry.prediction_misses().is_empty());
+        assert!(
+            telemetry.events().is_empty(),
+            "telemetry.events() is expected to be empty"
+        );
+        assert!(
+            telemetry.rollbacks().is_empty(),
+            "telemetry.rollbacks() is expected to be empty"
+        );
+        assert!(
+            telemetry.prediction_misses().is_empty(),
+            "telemetry.prediction_misses() is expected to be empty"
+        );
     }
 
     #[test]

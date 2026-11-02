@@ -1592,6 +1592,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)] // Verifying the Clone impl itself is the point.
     fn test_save_mode_clone() {
         let mode = SaveMode::Sparse;
         // Intentionally using clone to verify Clone trait works

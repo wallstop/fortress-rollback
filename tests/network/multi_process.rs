@@ -4189,7 +4189,10 @@ mod infrastructure_tests {
 
         assert_eq!(config.local_port, 0);
         assert_eq!(config.player_index, 0);
-        assert!(config.peer_addr.is_empty());
+        assert!(
+            config.peer_addr.is_empty(),
+            "config.peer_addr is expected to be empty"
+        );
         assert_eq!(config.frames, 100);
         assert!((config.packet_loss - 0.0).abs() < f64::EPSILON);
         assert_eq!(config.latency_ms, 0);

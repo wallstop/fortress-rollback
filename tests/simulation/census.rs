@@ -96,14 +96,14 @@ fn pollcap_schedule(plant_target_backlog: bool, steps: u32) -> Schedule {
 fn assert_all_peer_pairs_synchronized(report: &RunReport) {
     let n = report.first_synchronized_step.len();
     assert_eq!(n, 16);
-    for local in 0..n {
-        assert_eq!(report.first_synchronized_step[local].len(), n);
-        for remote in 0..n {
+    for (local, row) in report.first_synchronized_step.iter().enumerate() {
+        assert_eq!(row.len(), n);
+        for (remote, entry) in row.iter().enumerate() {
             if local == remote {
-                assert_eq!(report.first_synchronized_step[local][remote], None);
+                assert_eq!(*entry, None);
             } else {
                 assert!(
-                    report.first_synchronized_step[local][remote].is_some(),
+                    entry.is_some(),
                     "missing Synchronized event for {local}->{remote}"
                 );
             }
@@ -783,7 +783,10 @@ fn constrained_uplink_builds_queue_then_tail_drops_and_recovers() {
     first.expect_pass(&schedule);
     assert_eq!(first.trace_hash, replay.trace_hash);
     assert_eq!(first.progress_samples, replay.progress_samples);
-    assert!(!first.progress_samples.is_empty());
+    assert!(
+        !first.progress_samples.is_empty(),
+        "first.progress_samples is expected to be non-empty"
+    );
     assert_eq!(first.net_stats, replay.net_stats);
     assert_eq!(first.link_stats_by_link, replay.link_stats_by_link);
     assert_eq!(first.recovered_within_b, Some(true));
@@ -1023,7 +1026,10 @@ fn input_redundancy_window_recovers_at_limit_and_fails_closed_beyond() {
         127
     );
     assert_eq!(at.recovered_within_b, Some(true));
-    assert!(at.violation_census.is_empty());
+    assert!(
+        at.violation_census.is_empty(),
+        "at.violation_census is expected to be empty"
+    );
 
     // The next lost Input cannot grow the bounded pending-output queue beyond
     // 128. The sender disconnects before a 129th entry is retained; the oracle
@@ -1044,7 +1050,10 @@ fn input_redundancy_window_recovers_at_limit_and_fails_closed_beyond() {
         1
     );
     assert_eq!(over.recovered_within_b, Some(false));
-    assert!(over.violation_census.is_empty());
+    assert!(
+        over.violation_census.is_empty(),
+        "over.violation_census is expected to be empty"
+    );
     assert_eq!(over.verdict.failures.len(), 4);
     assert!(over.verdict.failures.iter().all(|failure| matches!(
         failure,
@@ -1656,9 +1665,9 @@ fn nat_rebind_is_observable_and_fails_closed_deterministically() {
         first.net_stats.dropped_unattached > 0,
         "survivors must keep sending to the abandoned canonical address"
     );
-    for peer in 0..2 {
+    for (peer, metrics) in first.metrics.iter().take(2).enumerate() {
         assert!(
-            first.metrics[peer].unknown_source_packets > 0,
+            metrics.unknown_source_packets > 0,
             "survivor {peer} must observe decoded traffic from the rebound source"
         );
     }

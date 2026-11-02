@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn try_encode_distinguishes_valid_empty_output_from_allocation_failure() {
         let empty = try_encode([]).expect("empty input is valid");
-        assert!(empty.is_empty());
+        assert!(empty.is_empty(), "empty is expected to be empty");
 
         let error = try_encode_with_offset_and_reserve(&[1_u8], 0, |_, _| {
             Vec::<u8>::new().try_reserve(usize::MAX)

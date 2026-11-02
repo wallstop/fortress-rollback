@@ -2104,6 +2104,7 @@ mod sync_layer_tests {
     }
 
     #[test]
+    #[allow(clippy::used_underscore_items)] // The const exists only for its compile-time assert.
     fn input_queue_length_constant_is_valid_for_with_queue_length() {
         // `_INPUT_QUEUE_LENGTH_IS_VALID` is a non-generic, module-level
         // const, so the `assert!` is evaluated unconditionally at compile

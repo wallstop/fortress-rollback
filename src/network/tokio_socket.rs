@@ -745,7 +745,10 @@ mod tests {
         let inner = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut socket = TokioUdpSocket::new(inner);
         socket.recv_buffer = Vec::new();
-        assert!(socket.receive_all_messages().is_empty());
+        assert!(
+            socket.receive_all_messages().is_empty(),
+            "socket.receive_all_messages() is expected to be empty"
+        );
     }
 
     #[tokio::test]
@@ -773,7 +776,7 @@ mod tests {
         let mut socket = TokioUdpSocket::bind_to_port(0).await.unwrap();
         // receive_all_messages should return immediately even with no messages
         let messages = socket.receive_all_messages();
-        assert!(messages.is_empty());
+        assert!(messages.is_empty(), "messages is expected to be empty");
     }
 
     #[tokio::test]

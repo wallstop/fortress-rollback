@@ -2077,7 +2077,10 @@ mod tests {
             .build();
         let mut socket = ChaosSocket::new(inner, config);
 
-        assert!(socket.receive_all_messages().is_empty());
+        assert!(
+            socket.receive_all_messages().is_empty(),
+            "socket.receive_all_messages() is expected to be empty"
+        );
         assert_eq!(socket.packets_in_flight(), 1);
     }
 

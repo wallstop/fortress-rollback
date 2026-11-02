@@ -302,7 +302,7 @@ mod tests {
         let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         // receive_all_messages should return immediately even with no messages
         let messages = socket.receive_all_messages();
-        assert!(messages.is_empty());
+        assert!(messages.is_empty(), "messages is expected to be empty");
     }
 
     #[test]
@@ -425,10 +425,10 @@ mod tests {
         let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
         // Should return empty vec immediately (non-blocking)
         let messages = socket.receive_all_messages();
-        assert!(messages.is_empty());
+        assert!(messages.is_empty(), "messages is expected to be empty");
         // Call again - should still be empty and not panic
         let messages2 = socket.receive_all_messages();
-        assert!(messages2.is_empty());
+        assert!(messages2.is_empty(), "messages2 is expected to be empty");
     }
 
     #[test]

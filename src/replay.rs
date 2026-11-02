@@ -921,7 +921,10 @@ mod tests {
         let bytes = replay.to_bytes().unwrap();
         let restored = Replay::<u8>::from_bytes(&bytes).unwrap();
         assert_eq!(restored.total_frames(), 0);
-        assert!(restored.frames.is_empty());
+        assert!(
+            restored.frames.is_empty(),
+            "restored.frames is expected to be empty"
+        );
     }
 
     #[test]
@@ -1225,7 +1228,10 @@ mod tests {
         let replay = recorder.into_replay();
         assert_eq!(replay.num_players, 3);
         assert_eq!(replay.total_frames(), 0);
-        assert!(replay.frames.is_empty());
+        assert!(
+            replay.frames.is_empty(),
+            "replay.frames is expected to be empty"
+        );
     }
 
     #[test]

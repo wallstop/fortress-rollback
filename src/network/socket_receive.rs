@@ -259,7 +259,10 @@ mod tests {
 
         for _ in 0..2 {
             let mut packets = VecDeque::from([vec![0xF5]]);
-            assert!(receive_packets(&mut packets, addr).is_empty());
+            assert!(
+                receive_packets(&mut packets, addr).is_empty(),
+                "receive_packets(&mut packets, addr) is expected to be empty"
+            );
         }
 
         assert_eq!(observer.len(), 2);

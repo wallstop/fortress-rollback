@@ -3703,8 +3703,14 @@ fn rollback_cpu_feedback_is_bounded_without_runaway_resimulation() {
         spike_late.saturating_mul(100) <= clean_late.saturating_mul(105),
         "late rollback work did not return to the matched CPU-control envelope"
     );
-    assert!(fixed_clean.cpu_feedback.is_empty());
-    assert!(fixed_spike.cpu_feedback.is_empty());
+    assert!(
+        fixed_clean.cpu_feedback.is_empty(),
+        "fixed_clean.cpu_feedback is expected to be empty"
+    );
+    assert!(
+        fixed_spike.cpu_feedback.is_empty(),
+        "fixed_spike.cpu_feedback is expected to be empty"
+    );
 }
 
 /// H-META-RB-OPENLOOP: under the harness's fixed poll cadence, a two-second
@@ -4048,7 +4054,10 @@ fn skew_gated_frame_model_exercises_rate_drift_deterministically() {
     assert_eq!(skewed_report.frame_opportunities, vec![1_151, 575]);
     assert_eq!(skewed_report.trace_hash, replay.trace_hash);
     assert_eq!(skewed_report.progress_samples, replay.progress_samples);
-    assert!(!skewed_report.progress_samples.is_empty());
+    assert!(
+        !skewed_report.progress_samples.is_empty(),
+        "skewed_report.progress_samples is expected to be non-empty"
+    );
     assert!(skewed_report.progress_samples.len() <= 12);
     assert_ne!(exact_report.trace_hash, skewed_report.trace_hash);
 }
@@ -4090,7 +4099,10 @@ fn schema_v15_skew_progress_preserves_legacy_trace_shape() {
     let replay = run(&schedule, &RunOptions::default());
     first.expect_pass(&schedule);
     assert_eq!(first.trace_hash, replay.trace_hash);
-    assert!(!first.progress_samples.is_empty());
+    assert!(
+        !first.progress_samples.is_empty(),
+        "first.progress_samples is expected to be non-empty"
+    );
     assert!(first
         .progress_samples
         .iter()
@@ -4586,7 +4598,6 @@ fn event_starvation_config(starve: bool) -> SimConfig {
 #[test]
 fn event_starvation_overflows_the_bounded_event_queue() {
     let seed = 0xE7A2;
-    let n = event_starvation_config(true).n_players;
 
     // Fire: peer 0 never drains its 10-slot queue; the session trims the
     // overflow and D9 fires — for peer 0 only.
@@ -4605,12 +4616,12 @@ fn event_starvation_overflows_the_bounded_event_queue() {
     // its high-water is one cold-start poll burst (≈N-1 < cap at N=8). This is
     // load-bearing on N — see `event_starvation_config` (it fails loudly, not
     // silently, if a future N-bump pushes the burst past the cap).
-    for i in 1..n {
+    for (i, metrics) in starved.metrics.iter().enumerate().skip(1) {
         assert_eq!(
-            starved.metrics[i].events_discarded_total, 0,
+            metrics.events_discarded_total, 0,
             "a draining peer must not overflow (single-poll burst < cap): \
              peer {i} discarded {}",
-            starved.metrics[i].events_discarded_total
+            metrics.events_discarded_total
         );
     }
 
@@ -4619,12 +4630,12 @@ fn event_starvation_overflows_the_bounded_event_queue() {
     let drained_schedule = generate(seed, event_starvation_config(false));
     let drained = run(&drained_schedule, &RunOptions::default());
     drained.expect_pass(&drained_schedule);
-    for i in 0..n {
+    for (i, metrics) in drained.metrics.iter().enumerate() {
         assert_eq!(
-            drained.metrics[i].events_discarded_total, 0,
+            metrics.events_discarded_total, 0,
             "with every peer draining, no queue may overflow — starvation is the \
              only cause of D9: peer {i} discarded {}",
-            drained.metrics[i].events_discarded_total
+            metrics.events_discarded_total
         );
     }
 }

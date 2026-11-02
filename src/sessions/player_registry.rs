@@ -569,9 +569,18 @@ mod tests {
         let registry = PlayerRegistry::<TestConfig>::new();
         assert_eq!(registry.num_players(), 0);
         assert_eq!(registry.num_spectators(), 0);
-        assert!(registry.local_player_handles().is_empty());
-        assert!(registry.remote_player_handles().is_empty());
-        assert!(registry.spectator_handles().is_empty());
+        assert!(
+            registry.local_player_handles().is_empty(),
+            "registry.local_player_handles() is expected to be empty"
+        );
+        assert!(
+            registry.remote_player_handles().is_empty(),
+            "registry.remote_player_handles() is expected to be empty"
+        );
+        assert!(
+            registry.spectator_handles().is_empty(),
+            "registry.spectator_handles() is expected to be empty"
+        );
     }
 
     #[test]
@@ -593,8 +602,14 @@ mod tests {
             registry.local_player_handles(),
             HandleVec::from_iter([handle])
         );
-        assert!(registry.remote_player_handles().is_empty());
-        assert!(registry.spectator_handles().is_empty());
+        assert!(
+            registry.remote_player_handles().is_empty(),
+            "registry.remote_player_handles() is expected to be empty"
+        );
+        assert!(
+            registry.spectator_handles().is_empty(),
+            "registry.spectator_handles() is expected to be empty"
+        );
     }
 
     #[test]
@@ -606,12 +621,18 @@ mod tests {
 
         assert_eq!(registry.num_players(), 1);
         assert_eq!(registry.num_spectators(), 0);
-        assert!(registry.local_player_handles().is_empty());
+        assert!(
+            registry.local_player_handles().is_empty(),
+            "registry.local_player_handles() is expected to be empty"
+        );
         assert_eq!(
             registry.remote_player_handles(),
             HandleVec::from_iter([handle])
         );
-        assert!(registry.spectator_handles().is_empty());
+        assert!(
+            registry.spectator_handles().is_empty(),
+            "registry.spectator_handles() is expected to be empty"
+        );
     }
 
     #[test]
@@ -623,8 +644,14 @@ mod tests {
 
         assert_eq!(registry.num_players(), 0);
         assert_eq!(registry.num_spectators(), 1);
-        assert!(registry.local_player_handles().is_empty());
-        assert!(registry.remote_player_handles().is_empty());
+        assert!(
+            registry.local_player_handles().is_empty(),
+            "registry.local_player_handles() is expected to be empty"
+        );
+        assert!(
+            registry.remote_player_handles().is_empty(),
+            "registry.remote_player_handles() is expected to be empty"
+        );
         let spectators = registry.spectator_handles();
         assert_eq!(spectators, HandleVec::from_iter([handle]));
     }
@@ -701,7 +728,7 @@ mod tests {
 
         // Look up different address
         let found = registry.handles_by_address(&other_addr);
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "found is expected to be empty");
     }
 
     #[test]
@@ -713,7 +740,7 @@ mod tests {
 
         // Local players don't have addresses, so any address lookup returns empty
         let found = registry.handles_by_address(&test_addr(1234));
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "found is expected to be empty");
     }
 
     #[test]

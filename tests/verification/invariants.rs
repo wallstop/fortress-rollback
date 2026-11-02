@@ -243,7 +243,10 @@ mod input_queue_invariants {
             Ok(()) => {}, // Expected for valid queue
             Err(violation) => {
                 // If somehow invalid, ensure we get proper error info
-                assert!(!violation.to_string().is_empty());
+                assert!(
+                    !violation.to_string().is_empty(),
+                    "violation.to_string() is expected to be non-empty"
+                );
             },
         }
     }

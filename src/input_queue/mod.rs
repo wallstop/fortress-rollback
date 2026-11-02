@@ -4527,7 +4527,7 @@ mod property_tests {
 /// Kani proofs require sufficient unwind bounds to verify loops. Key considerations:
 ///
 /// 1. **Buffer initialization**: Creating `InputQueue` via `test_queue()` fills its
-///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`]) with
+///    backing buffer (a `#[cfg(kani)]` heap-free [`ProofVec`](crate::proof_vec::ProofVec)) with
 ///    `INPUT_QUEUE_LENGTH` (7 under Kani) blank inputs via a `0..queue_length` push
 ///    loop, so the harness needs unwind >= 8 (7 fill iterations + 1 for the
 ///    unwinding-assertion check). The proofs here use 10 for margin.

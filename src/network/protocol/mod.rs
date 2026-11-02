@@ -3863,7 +3863,7 @@ mod tests {
         let events = protocol
             .poll(&[ConnectionStatus::default(); 2])
             .collect::<Vec<_>>();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
     }
 
     #[test]
@@ -3885,7 +3885,7 @@ mod tests {
         let events = protocol
             .poll(&[ConnectionStatus::default(); 2])
             .collect::<Vec<_>>();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
         protocol.disconnect();
         assert_eq!(protocol.state, ProtocolState::Disconnected);
     }
@@ -3945,7 +3945,10 @@ mod tests {
         assert!(!protocol.is_synchronized());
         assert!(!protocol.is_running());
         // But it should have queued a sync request
-        assert!(!protocol.send_queue.is_empty());
+        assert!(
+            !protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be non-empty"
+        );
     }
 
     #[test]
@@ -4496,8 +4499,11 @@ mod tests {
 
         advance_test_clock(&clock, Duration::from_secs(1));
         let events: Vec<_> = protocol.poll(&[]).collect();
-        assert!(events.is_empty());
-        assert!(protocol.send_queue.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
 
         protocol.on_sync_request(theirs.request(2));
         assert_eq!(
@@ -4607,7 +4613,10 @@ mod tests {
         protocol.handle_message(&msg);
 
         // Event queue should be empty
-        assert!(protocol.event_queue.is_empty());
+        assert!(
+            protocol.event_queue.is_empty(),
+            "protocol.event_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -4634,7 +4643,10 @@ mod tests {
         protocol.handle_message(&msg);
 
         // Should be ignored - no state changes
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -4943,7 +4955,10 @@ mod tests {
         };
 
         protocol.handle_message(&goodbye);
-        assert!(protocol.event_queue.is_empty());
+        assert!(
+            protocol.event_queue.is_empty(),
+            "protocol.event_queue is expected to be empty"
+        );
 
         let first_random = protocol
             .send_queue
@@ -5006,7 +5021,10 @@ mod tests {
         protocol.disconnect_remote();
 
         assert_eq!(protocol.state, ProtocolState::Disconnected);
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -6189,8 +6207,14 @@ mod tests {
         protocol.send_input(&inputs, &connect_status);
 
         // Should not queue any messages
-        assert!(protocol.send_queue.is_empty());
-        assert!(protocol.pending_output.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
+        assert!(
+            protocol.pending_output.is_empty(),
+            "protocol.pending_output is expected to be empty"
+        );
     }
 
     // ==========================================
@@ -6617,11 +6641,14 @@ mod tests {
         let events: Vec<_> = protocol.poll(&connect_status).collect();
 
         // Should have Synchronizing events and Synchronized event
-        assert!(!events.is_empty());
+        assert!(!events.is_empty(), "events is expected to be non-empty");
         assert!(events.iter().any(|e| matches!(e, Event::Synchronized)));
 
         // Queue should be empty after drain
-        assert!(protocol.event_queue.is_empty());
+        assert!(
+            protocol.event_queue.is_empty(),
+            "protocol.event_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -7949,7 +7976,10 @@ mod tests {
         assert_eq!(protocol.pending_output.len(), pending_before);
         assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
         assert_eq!(protocol.peer_connect_status, status_before);
-        assert!(protocol.event_queue.is_empty());
+        assert!(
+            protocol.event_queue.is_empty(),
+            "protocol.event_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -8007,7 +8037,10 @@ mod tests {
         assert_eq!(protocol.recv_inputs.len(), inputs_before);
         assert_eq!(protocol.pending_output.len(), pending_before);
         assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
-        assert!(protocol.event_queue.is_empty());
+        assert!(
+            protocol.event_queue.is_empty(),
+            "protocol.event_queue is expected to be empty"
+        );
     }
 
     /// Test frame gap boundary: gap of exactly 2 is rejected
@@ -8144,7 +8177,10 @@ mod tests {
 
         let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
 
-        assert!(!result.bytes.is_empty());
+        assert!(
+            !result.bytes.is_empty(),
+            "result.bytes is expected to be non-empty"
+        );
         assert_eq!(result.frame, Frame::new(5));
     }
 
@@ -8174,7 +8210,10 @@ mod tests {
         let result = InputBytes::from_inputs::<TestConfig>(2, &inputs);
 
         // Should work without violation
-        assert!(!result.bytes.is_empty());
+        assert!(
+            !result.bytes.is_empty(),
+            "result.bytes is expected to be non-empty"
+        );
         assert_eq!(result.frame, Frame::new(5));
     }
 
@@ -9154,7 +9193,10 @@ mod tests {
         protocol.send_input(&inputs, &connect_status);
 
         assert_eq!(protocol.pending_output.len(), small_limit);
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
         assert!(protocol
             .event_queue
             .iter()
@@ -9330,8 +9372,14 @@ mod tests {
 
         protocol.send_input(&inputs, &connect_status);
 
-        assert!(protocol.pending_output.is_empty());
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.pending_output.is_empty(),
+            "protocol.pending_output is expected to be empty"
+        );
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -9374,8 +9422,14 @@ mod tests {
 
         protocol.send_input(&inputs, &connect_status);
 
-        assert!(protocol.pending_output.is_empty());
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.pending_output.is_empty(),
+            "protocol.pending_output is expected to be empty"
+        );
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     fn drop_control_messages() -> [DropControlMessage; 5] {
@@ -9437,7 +9491,10 @@ mod tests {
         for message in drop_control_messages() {
             protocol.send_drop_control_message(message);
         }
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
 
         protocol.force_running_for_tests();
         let messages = drop_control_messages();
@@ -9678,7 +9735,10 @@ mod tests {
         });
         protocol.send_state_snapshot_ack(Frame::new(1));
 
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -9799,7 +9859,10 @@ mod tests {
         protocol.send_reactivate_slot(1, Frame::new(1));
         protocol.send_reactivate_slot_ack(1, Frame::new(1));
 
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]
@@ -9878,7 +9941,10 @@ mod tests {
         protocol.send_join_committed(1, Frame::new(1));
         protocol.send_join_aborted(1, Frame::new(1));
 
-        assert!(protocol.send_queue.is_empty());
+        assert!(
+            protocol.send_queue.is_empty(),
+            "protocol.send_queue is expected to be empty"
+        );
     }
 
     #[test]

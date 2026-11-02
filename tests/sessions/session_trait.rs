@@ -131,7 +131,7 @@ fn synctest_advance_frame_via_trait() -> Result<(), FortressError> {
     let requests = Session::advance_frame(&mut sess)?;
 
     // Assert — should have at least one request (advance frame)
-    assert!(!requests.is_empty());
+    assert!(!requests.is_empty(), "requests is expected to be non-empty");
     Ok(())
 }
 

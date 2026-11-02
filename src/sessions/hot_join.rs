@@ -34,7 +34,7 @@
 //! hostile peer is a clean decode error, not an uncatchable abort. (A
 //! `Config::State` nested *within* that generous limit decodes normally; the
 //! limit is far deeper than any realistic game state.) See `decode_bounded` /
-//! `codec_depth` in the [`codec`] module for the full
+//! `codec_depth` in the [`codec`](crate::network::codec) module for the full
 //! allocation- and depth-bound analysis.
 
 use crate::network::codec;

@@ -3124,7 +3124,7 @@ mod tests {
     fn spectator_session_events_initially_empty() {
         let mut session = create_test_spectator_session().unwrap();
         let events: Vec<_> = session.events().collect();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
     }
 
     #[test]
@@ -3133,11 +3133,11 @@ mod tests {
 
         // First call to events
         let events1: Vec<_> = session.events().collect();
-        assert!(events1.is_empty());
+        assert!(events1.is_empty(), "events1 is expected to be empty");
 
         // Second call should also be empty (queue was drained)
         let events2: Vec<_> = session.events().collect();
-        assert!(events2.is_empty());
+        assert!(events2.is_empty(), "events2 is expected to be empty");
     }
 
     // ==========================================
@@ -3529,12 +3529,12 @@ mod tests {
 
         // Drain events
         let events: Vec<_> = session.events().collect();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
 
         // Poll and drain again
         session.poll_remote_clients();
         let events: Vec<_> = session.events().collect();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
     }
 
     // ==========================================

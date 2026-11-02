@@ -179,7 +179,10 @@ mod tests {
                 assert_eq!(ev_input.frame, Frame::new(42));
                 assert_eq!(ev_input.input, TestInput(123));
                 assert_eq!(ev_player, PlayerHandle::new(1));
-                assert!(peer_connect_status.is_empty());
+                assert!(
+                    peer_connect_status.is_empty(),
+                    "peer_connect_status is expected to be empty"
+                );
             },
             _ => panic!("Expected Input variant"),
         }

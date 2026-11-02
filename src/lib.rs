@@ -2429,7 +2429,7 @@ pub trait Config: 'static + Send + Sync {
     /// `Clone` is required so a hot-join host can capture a snapshot of its
     /// saved state to serve to a joiner, and `Serialize + DeserializeOwned` so
     /// that snapshot can be sent to and reconstructed by the joiner (see
-    /// [`SessionBuilder::start_hot_join_session`]).
+    /// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session)).
     type State: Clone + Send + Sync + Serialize + DeserializeOwned;
 
     /// The address type which identifies the remote clients
@@ -2537,7 +2537,7 @@ pub trait Config: 'static {
     /// `Clone` is required so a hot-join host can capture a snapshot of its
     /// saved state to serve to a joiner, and `Serialize + DeserializeOwned` so
     /// that snapshot can be sent to and reconstructed by the joiner (see
-    /// [`SessionBuilder::start_hot_join_session`]).
+    /// [`SessionBuilder::start_hot_join_session`](crate::SessionBuilder::start_hot_join_session)).
     type State: Clone + Serialize + DeserializeOwned;
 
     /// The address type which identifies the remote clients

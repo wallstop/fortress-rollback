@@ -556,8 +556,9 @@ impl<T: Config> Default for HotJoinState<T> {
     }
 }
 
-/// Host-side per-join serving state, held in [`HotJoinState::joining`] for the
-/// duration of a single ack-gated join transaction.
+/// Host-side per-join serving state, held in
+/// [`HotJoinState::joining`](HotJoinState::joining) for the duration of a single
+/// ack-gated join transaction.
 ///
 /// The cached `snapshot` is captured **once** at serve time and re-sent on every
 /// poll until the joiner acks (the reliable retransmit). Because the host is
@@ -13771,7 +13772,10 @@ mod tests {
     #[test]
     fn p2p_session_spectator_handles_initially_empty() {
         let session = create_two_player_session();
-        assert!(session.spectator_handles().is_empty());
+        assert!(
+            session.spectator_handles().is_empty(),
+            "session.spectator_handles() is expected to be empty"
+        );
     }
 
     #[test]
@@ -13938,7 +13942,7 @@ mod tests {
             .expect("Input failed");
         let requests = session.advance_frame().expect("Advance failed");
         // Should have at least one request (likely SaveGameState and AdvanceFrame)
-        assert!(!requests.is_empty());
+        assert!(!requests.is_empty(), "requests is expected to be non-empty");
     }
 
     #[test]
@@ -14674,7 +14678,7 @@ mod tests {
         let session = create_two_player_session();
         let unknown_addr = test_addr(9999);
         let handles = session.handles_by_address(&unknown_addr);
-        assert!(handles.is_empty());
+        assert!(handles.is_empty(), "handles is expected to be empty");
     }
 
     // ==========================================
@@ -14685,7 +14689,7 @@ mod tests {
     fn events_initially_empty() {
         let mut session = create_local_only_session();
         let events: Vec<_> = session.events().collect();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
     }
 
     #[test]
@@ -14695,7 +14699,7 @@ mod tests {
         let _: Vec<_> = session.events().collect();
         // Second drain should also be empty
         let events: Vec<_> = session.events().collect();
-        assert!(events.is_empty());
+        assert!(events.is_empty(), "events is expected to be empty");
     }
 
     // ==========================================
@@ -15957,7 +15961,7 @@ mod tests {
     fn all_sync_health_no_remotes_returns_empty() {
         let session = create_local_only_session();
         let health = session.all_sync_health();
-        assert!(health.is_empty());
+        assert!(health.is_empty(), "health is expected to be empty");
     }
 
     #[test]
@@ -16005,7 +16009,7 @@ mod tests {
                 .add_local_input(PlayerHandle::new(0), i as u8)
                 .expect("Input failed");
             let requests = session.advance_frame().expect("Advance failed");
-            assert!(!requests.is_empty());
+            assert!(!requests.is_empty(), "requests is expected to be non-empty");
         }
 
         // Verify frame advancement
@@ -16029,7 +16033,10 @@ mod tests {
 
         assert_eq!(session.num_players(), 1);
         assert_eq!(session.num_spectators(), 1);
-        assert!(!session.spectator_handles().is_empty());
+        assert!(
+            !session.spectator_handles().is_empty(),
+            "session.spectator_handles() is expected to be non-empty"
+        );
     }
 
     // ==========================================

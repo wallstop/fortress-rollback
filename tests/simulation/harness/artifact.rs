@@ -1290,10 +1290,22 @@ mod tests {
             },
         );
         assert!(!report.verdict.passed(), "negative control must fail");
-        assert!(report.wait_recommendation_max.is_empty());
-        assert!(report.wait_recommendation_frames.is_empty());
-        assert!(report.wait_recommendations_accepted.is_empty());
-        assert!(report.wait_frames_accepted.is_empty());
+        assert!(
+            report.wait_recommendation_max.is_empty(),
+            "report.wait_recommendation_max is expected to be empty"
+        );
+        assert!(
+            report.wait_recommendation_frames.is_empty(),
+            "report.wait_recommendation_frames is expected to be empty"
+        );
+        assert!(
+            report.wait_recommendations_accepted.is_empty(),
+            "report.wait_recommendations_accepted is expected to be empty"
+        );
+        assert!(
+            report.wait_frames_accepted.is_empty(),
+            "report.wait_frames_accepted is expected to be empty"
+        );
 
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
@@ -1619,8 +1631,14 @@ mod tests {
         assert!(object.remove("link_queues").is_some());
         let legacy: ProgressSample =
             serde_json::from_value(value).expect("legacy progress sample uses defaults");
-        assert!(legacy.endpoints.is_empty());
-        assert!(legacy.link_queues.is_empty());
+        assert!(
+            legacy.endpoints.is_empty(),
+            "legacy.endpoints is expected to be empty"
+        );
+        assert!(
+            legacy.link_queues.is_empty(),
+            "legacy.link_queues is expected to be empty"
+        );
     }
 
     #[test]

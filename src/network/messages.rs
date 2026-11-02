@@ -797,10 +797,16 @@ mod tests {
     #[test]
     fn test_input_default() {
         let input = Input::default();
-        assert!(input.peer_connect_status.is_empty());
+        assert!(
+            input.peer_connect_status.is_empty(),
+            "input.peer_connect_status is expected to be empty"
+        );
         assert_eq!(input.start_frame, Frame::NULL);
         assert_eq!(input.ack_frame, Frame::NULL);
-        assert!(input.bytes.is_empty());
+        assert!(
+            input.bytes.is_empty(),
+            "input.bytes is expected to be empty"
+        );
     }
 
     #[test]
@@ -910,7 +916,10 @@ mod tests {
     fn test_floor_reply_default() {
         let reply = FloorReply::default();
         assert_eq!(reply.round_seq, 0);
-        assert!(reply.floors.is_empty());
+        assert!(
+            reply.floors.is_empty(),
+            "reply.floors is expected to be empty"
+        );
     }
 
     #[test]

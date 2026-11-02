@@ -550,7 +550,10 @@ mod tests {
     fn zeroed_with_zero_players_creates_empty_bytes() {
         let input_bytes = InputBytes::zeroed::<TestConfig>(0).unwrap();
         assert_eq!(input_bytes.frame, Frame::NULL);
-        assert!(input_bytes.bytes.is_empty());
+        assert!(
+            input_bytes.bytes.is_empty(),
+            "input_bytes.bytes is expected to be empty"
+        );
     }
 
     #[test]
@@ -611,7 +614,10 @@ mod tests {
         let inputs = BTreeMap::new();
         let input_bytes = InputBytes::from_inputs::<TestConfig>(0, &inputs);
         assert_eq!(input_bytes.frame, Frame::NULL);
-        assert!(input_bytes.bytes.is_empty());
+        assert!(
+            input_bytes.bytes.is_empty(),
+            "input_bytes.bytes is expected to be empty"
+        );
     }
 
     #[test]
@@ -750,7 +756,10 @@ mod tests {
     fn to_player_inputs_with_zero_players_returns_empty() {
         let input_bytes = InputBytes::zeroed::<TestConfig>(0).unwrap();
         let player_inputs = input_bytes.to_player_inputs::<TestConfig>(0);
-        assert!(player_inputs.is_empty());
+        assert!(
+            player_inputs.is_empty(),
+            "player_inputs is expected to be empty"
+        );
     }
 
     #[test]
@@ -762,7 +771,10 @@ mod tests {
 
         // Should return empty because bytes not divisible by num_players
         let player_inputs = input_bytes.to_player_inputs::<TestConfig>(2);
-        assert!(player_inputs.is_empty());
+        assert!(
+            player_inputs.is_empty(),
+            "player_inputs is expected to be empty"
+        );
     }
 
     #[test]
@@ -779,7 +791,10 @@ mod tests {
 
         let player_inputs = input_bytes.to_player_inputs::<TestConfig>(2);
 
-        assert!(player_inputs.is_empty());
+        assert!(
+            player_inputs.is_empty(),
+            "player_inputs is expected to be empty"
+        );
     }
 
     #[test]

@@ -325,7 +325,7 @@ loom = "0.7"
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 serial_test = "3.5"
 tracing-subscriber = "0.3"
-proptest = "1.11"
+proptest = "~1.11"
 # JSON parsing for tests (also enables the "json" feature for telemetry tests).
 # float_roundtrip: simulation-schedule corpus artifacts embed f64 fault rates
 # and must round-trip losslessly (an ULP shift changes seeded RNG threshold

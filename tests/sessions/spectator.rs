@@ -671,7 +671,7 @@ fn test_full_spectator_flow() -> Result<(), FortressError> {
 
     // Spectator should be able to get inputs now
     let requests = spec_sess.advance_frame()?;
-    assert!(!requests.is_empty());
+    assert!(!requests.is_empty(), "requests is expected to be non-empty");
 
     Ok(())
 }

@@ -1107,7 +1107,10 @@ mod tests {
     fn event_kind_as_str_labels_are_unique_and_nonempty() {
         let mut seen = std::collections::BTreeSet::new();
         for kind in EventKind::ALL {
-            assert!(!kind.as_str().is_empty());
+            assert!(
+                !kind.as_str().is_empty(),
+                "kind.as_str() is expected to be non-empty"
+            );
             assert!(
                 seen.insert(kind.as_str()),
                 "duplicate label {}",
@@ -1438,7 +1441,10 @@ mod tests {
     fn message_kind_as_str_labels_are_unique_and_nonempty() {
         let mut seen = std::collections::BTreeSet::new();
         for kind in MessageKind::ALL {
-            assert!(!kind.as_str().is_empty());
+            assert!(
+                !kind.as_str().is_empty(),
+                "kind.as_str() is expected to be non-empty"
+            );
             assert!(
                 seen.insert(kind.as_str()),
                 "duplicate label {}",
