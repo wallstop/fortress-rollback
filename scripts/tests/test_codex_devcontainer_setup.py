@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -190,14 +191,53 @@ class TestCodexDevcontainerConfiguration:
         assert 'check_tool "opencode (v2)"' in text
         assert "opencode --version | grep" in text
 
-    def test_dependabot_holds_zero_major_parking_lot_minor_updates(self) -> None:
-        """The Rust-1.95 parking_lot 0.13 line is a minor update from 0.12."""
-        text = DEPENDABOT_CONFIG.read_text(encoding="utf-8")
-        rule = text.split('dependency-name: "parking_lot"', 1)[1].split(
-            "dependency-name:", 1
-        )[0]
-        assert '"version-update:semver-minor"' in rule
-        assert '"version-update:semver-major"' in rule
+    def test_dependabot_applies_msrv_holds_to_every_cargo_workspace(self) -> None:
+        """Path-dependent workspaces must not bypass the root manifest's MSRV holds."""
+        config = yaml.safe_load(DEPENDABOT_CONFIG.read_text(encoding="utf-8"))
+        expected_holds = {
+            "bincode-next": {"version-update:semver-major"},
+            "serial_test": {"version-update:semver-major"},
+            "parking_lot": {
+                "version-update:semver-minor",
+                "version-update:semver-major",
+            },
+            "proptest": {
+                "version-update:semver-minor",
+                "version-update:semver-major",
+            },
+            "z3": {
+                "version-update:semver-minor",
+                "version-update:semver-major",
+            },
+        }
+        cargo_updates = [
+            update
+            for update in config["updates"]
+            if update["package-ecosystem"] == "cargo"
+        ]
+        assert {update["directory"] for update in cargo_updates} == {
+            "/",
+            "/fuzz",
+            "/loom-tests",
+            "/tests/godot-emscripten",
+        }
+        root_ignore = next(
+            update for update in cargo_updates if update["directory"] == "/"
+        ).get("ignore", [])
+        for update in cargo_updates:
+            rules = {
+                rule["dependency-name"]: set(rule.get("update-types", []))
+                for rule in update.get("ignore", [])
+            }
+            for dependency, update_types in expected_holds.items():
+                assert update_types <= rules.get(dependency, set()), (
+                    f"{update['directory']} must hold {dependency} updates that "
+                    "exceed the Rust 1.86 MSRV"
+                )
+            if update["directory"] != "/":
+                assert all(
+                    rule in update.get("ignore", []) for rule in root_ignore
+                ), f"{update['directory']} must include every root Cargo ignore rule"
 
     def test_pull_requests_build_devcontainer_without_publishing(self) -> None:
         """Image changes must build before merge without writing to GHCR."""

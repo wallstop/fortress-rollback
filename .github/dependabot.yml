@@ -64,6 +64,26 @@ updates:
       cargo-fuzz:
         patterns:
           - "*"
+    # Path-dependency updates must not bypass the root Rust 1.86 MSRV holds.
+    ignore:
+      - dependency-name: "bincode-next"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "serial_test"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "parking_lot"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "proptest"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "z3"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     open-pull-requests-limit: 1
 
   # Rust dependencies for loom-tests directory (separate workspace,
@@ -82,6 +102,26 @@ updates:
       cargo-loom-tests:
         patterns:
           - "*"
+    # Path-dependency updates must not bypass the root Rust 1.86 MSRV holds.
+    ignore:
+      - dependency-name: "bincode-next"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "serial_test"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "parking_lot"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "proptest"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "z3"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     open-pull-requests-limit: 1
 
   # Rust dependencies for the standalone Godot Emscripten smoke-test crate
@@ -99,6 +139,26 @@ updates:
       cargo-godot-emscripten:
         patterns:
           - "*"
+    # Path-dependency updates must not bypass the root Rust 1.86 MSRV holds.
+    ignore:
+      - dependency-name: "bincode-next"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "serial_test"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "parking_lot"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "proptest"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "z3"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     open-pull-requests-limit: 1
 
   # GitHub Actions dependencies
