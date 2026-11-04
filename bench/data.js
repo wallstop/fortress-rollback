@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793603179209,
+  "lastUpdate": 1793826827852,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "2b2ba0161abf4af5011484ff148eece8a611e137",
-          "message": "Add asymmetric minority partition census (#220)\n\n## Summary\n\n- add a premise-asserted N=5 one-way/minority partition census for\nPLAN.md §28.3(a,b)\n- pin the resulting D14 confirmed-history rewrite as an ignored\nknown-red regression until the M5 coordinated drop barrier lands\n- document the devcontainer's connector-first GitHub workflow: local Git\nover the VS Code-forwarded SSH agent, connected GitHub app for PR/review\noperations, and `gh` only when an applicable workflow requires it\n\n## Why\n\nThe asymmetric/minority partition row had remained unexecuted. The\nexperiment showed that a single blocked `4→0` direction forms a\nfour-peer majority and one-peer island through disconnect gossip, but\nalso independently reproduces D14. The regression now proves the exact\ncausal premises and accepts only the D14-shaped peer-4 input rewrite.\n\nPrevious automation also incorrectly treated an unauthenticated `gh` CLI\nas a publish blocker even though the devcontainer's SSH Git transport\nand connected GitHub app were both functional. The canonical LLM\ninstructions now describe the verified hybrid path.\n\n## Validation\n\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture` (2,506 passed)\n- focused census suite under default and `hot-join`\n- ignored D14 census regression executed directly\n- `scripts/docs/check-llm-skills.sh`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `git push --dry-run origin HEAD:refs/heads/dev/wallstop/hardening-30`\n\nNo changelog entry: production behavior and public API are unchanged.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests and agent documentation;\nproduction networking behavior and public APIs are unchanged.\n> \n> **Overview**\n> Adds a **PLAN §28.3** simulation census for a five-peer mesh with a\n**one-way block on `4→0`**: peer 0 times out and drops peer 4 while\n`0→4` stays open, forming a four-peer majority and a one-peer island\nunder `ContinueWithout`.\n> \n> The new\n**`one_way_minority_partition_rewrites_confirmed_history_known_defect`**\ntest is **`#[ignore]`** and pins the **D14** failure\nshape—`ConfirmedInputDivergence` rewriting only peer 4’s input on the\nmajority, plus expected gossip/drop/network-interruption premises and\ndeterministic trace replay—until an M5 coordinated drop barrier is\nexpected to fix it.\n> \n> **`.llm/context.md`** tightens the quality checklist bullets and adds\n**GitHub Access in Devcontainers**: prefer `git ls-remote` / `git push\n--dry-run` and the connected GitHub app over treating unauthenticated\n`gh` as a publish blocker.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n73e139e46d1821d77aff6a1a0992c46f4581629d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-10T22:03:24-07:00",
-          "tree_id": "f5867372dbfa183ec5cee17a89836d71fa8cab36",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/2b2ba0161abf4af5011484ff148eece8a611e137"
-        },
-        "date": 1783746474325,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 114,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 160,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 502,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 692,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1024,
-            "range": "± 104",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 139900,
-            "range": "± 351",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 45274,
-            "range": "± 256",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 28",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 84",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3395,6 +3269,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3250,
             "range": "± 213",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "966a95b83ef1c38ee175dd9edebcf597cf78644f",
+          "message": "fix(devcontainer): harden MCP tooling and refresh consistency evidence (#358)\n\n## Summary\n\n- Make project MCP credentials optional and independently configurable,\nadd a secret-safe health report, and diagnose stale file/process\nenvironment drift.\n- Migrate devcontainer OpenCode installation and the\nbounded-network-retry plugin to OpenCode 2, including legacy V1 cleanup\nand interruption recovery.\n- Refresh all MSRV-compatible Cargo lockfile dependencies and prevent\nknown-incompatible Dependabot release lines from recurring.\n- Define the confirmed-prefix consistency/availability contract and\nrevalidate the schema-v3 simulation baseline at current HEAD.\n\n## Consistency evidence\n\n- `sweep_pr_gate`: 10/10 cells matched every checked-in baseline field\nexactly; both replay checks passed; zero desyncs.\n- Release `full_matrix_sweep`: 136/136 cells passed at 5,000 steps and\nseed 1 across N=2/3/4/8/12/16; zero desyncs.\n- The tuning guide now distinguishes confirmed consistency, speculative\nresponsiveness, and confirmed availability, and states\ndeterministic-game, polling, delivery, and CAP assumptions.\n- Reorder, duplication, burst, asymmetry, partition/flap, and poll-stall\nevidence remain explicitly queued in `PLAN.md`; this PR does not claim\nthose axes are covered.\n\n## Dependency disposition\n\nAll four Cargo workspaces now select zero compatible updates. Remaining\nnewer releases exceed the Rust 1.86 MSRV: bincode-next 3.1.1 (1.90),\nparking_lot 0.13 (1.95), proptest 1.12 and z3 0.22 (1.88), and\nserial_test 4.0.1 (1.93.1). Dependabot holds those release lines while\nallowing compatible patches.\n\n## Validation\n\n- `bash scripts/tests/test-ai-backends.sh` — pass\n- `.venv/bin/pytest scripts/tests/test_codex_devcontainer_setup.py -q` —\n48 passed\n- `.venv/bin/pytest scripts/tests -q` — 2,186 passed\n- `cargo clippy --workspace --all-targets --features tokio,json` — pass\n- `cargo nextest run --no-capture` — 2,975 passed, 72 skipped\n- `cargo +1.86.0 check --locked --all-targets` — pass\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps` — pass\n- `cargo test --doc -- --nocapture` — 160 passed, 50 ignored\n- `python3 scripts/release/workspace_locks.py check` — all four locks\npass\n- `actionlint`, shell portability, Markdownlint, wiki sync/consistency,\nlink checks, doc claims, typos, plan hygiene, and changed-file-aware\nagent preflight — pass\n\nNo changelog entry: tooling, documentation, and compatible lockfile-only\nchanges do not alter the public crate API, wire format, or library\nbehavior.\n\n## Operational note\n\nReal credentialed MCP health verification still requires the owner's\n`.env.local` and a devcontainer rebuild. The health report intentionally\nexits `2` with setup guidance when optional credentials are absent.",
+          "timestamp": "2026-11-04T13:04:50-08:00",
+          "tree_id": "f4685543acd26b1bf457227dd4a8e0f1ef910ea1",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/966a95b83ef1c38ee175dd9edebcf597cf78644f"
+        },
+        "date": 1793826826749,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 50043,
+            "range": "± 526",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 32345,
+            "range": "± 170",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1406,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1602,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3194,
+            "range": "± 217",
             "unit": "ns/iter"
           }
         ]
