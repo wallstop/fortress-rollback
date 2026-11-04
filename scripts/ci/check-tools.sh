@@ -163,7 +163,7 @@ echo ""
 
 echo "AI Tooling:"
 check_tool "nanocoder" "nanocoder --version" "false"
-check_tool "opencode" "opencode --version" "false"
+check_tool "opencode (v2)" "opencode --version | grep -Eq '(^|[[:space:]])v?2[.]'" "false"
 check_tool "codex" "codex --version" "false"
 check_tool "claude" "claude --version" "false"
 check_tool "copilot" "copilot --version" "false"

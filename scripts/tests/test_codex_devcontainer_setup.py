@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 try:
     import tomllib
@@ -25,6 +29,8 @@ DEVCONTAINER_BUILD_WORKFLOW = (
 )
 TLA_VERSION_FILE = REPO_ROOT / ".tla-tools-version"
 CODEX_CONFIG = REPO_ROOT / ".codex" / "config.toml"
+OPENCODE_PLUGIN = REPO_ROOT / ".opencode" / "plugins" / "bounded-network-retries.js"
+DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 GITHUB_TOOL_GUIDANCE_FILES = (
     REPO_ROOT / ".agents" / "skills" / "fortress-development" / "SKILL.md",
     REPO_ROOT / "AGENTS.md",
@@ -97,7 +103,8 @@ class TestCodexDevcontainerConfiguration:
         """Every requested AI CLI must resolve latest during image build."""
         text = DOCKERFILE.read_text(encoding="utf-8")
         assert "@nanocollective/nanocoder@latest" in text
-        assert "opencode-ai@latest" in text
+        assert "@opencode/cli@latest" in text
+        assert "opencode-ai@latest" not in text
         assert "@openai/codex@latest" in text
         assert "@anthropic-ai/claude-code@latest" in text
         assert "@github/copilot@latest" in text
@@ -169,13 +176,28 @@ class TestCodexDevcontainerConfiguration:
         """The post-open verifier should report every requested AI CLI."""
         text = CHECK_TOOLS_SCRIPT.read_text(encoding="utf-8")
         assert 'check_tool "nanocoder" "nanocoder --version"' in text
-        assert 'check_tool "opencode" "opencode --version"' in text
+        assert 'check_tool "opencode (v2)"' in text
         assert 'check_tool "codex" "codex --version"' in text
         assert 'check_tool "claude" "claude --version"' in text
         assert 'check_tool "copilot" "copilot --version"' in text
         assert 'check_tool "mcp-remote" "mcp-remote --version"' in text
         assert 'check_tool "bubblewrap" "bwrap --version"' in text
         assert 'check_tool "socat" "socat -V"' in text
+
+    def test_tool_checker_does_not_accept_opencode_v1(self) -> None:
+        """A stale V1 binary must not count as the installed V2 CLI."""
+        text = CHECK_TOOLS_SCRIPT.read_text(encoding="utf-8")
+        assert 'check_tool "opencode (v2)"' in text
+        assert "opencode --version | grep" in text
+
+    def test_dependabot_holds_zero_major_parking_lot_minor_updates(self) -> None:
+        """The Rust-1.95 parking_lot 0.13 line is a minor update from 0.12."""
+        text = DEPENDABOT_CONFIG.read_text(encoding="utf-8")
+        rule = text.split('dependency-name: "parking_lot"', 1)[1].split(
+            "dependency-name:", 1
+        )[0]
+        assert '"version-update:semver-minor"' in rule
+        assert '"version-update:semver-major"' in rule
 
     def test_pull_requests_build_devcontainer_without_publishing(self) -> None:
         """Image changes must build before merge without writing to GHCR."""
@@ -411,6 +433,20 @@ def _write_npm_stub(tmp_path: Path) -> Path:
         "case \"$*\" in\n"
         "  *\"${NPM_STUB_FAIL_PACKAGE:-__never__}\"*) exit 1 ;;\n"
         "esac\n"
+        "if [[ \"$*\" == *\"install --global\"* ]] "
+        "&& [[ \"$*\" == *\"${NPM_STUB_FAIL_INSTALL_PACKAGE:-__never__}\"* ]]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        "if [[ \"$*\" == *\"uninstall --global --no-audit --no-fund opencode-ai\"* ]] "
+        "&& [[ \"${NPM_STUB_MODEL_OPENCODE_RELINK:-0}\" == \"1\" ]]; then\n"
+        "  rm -f \"${NPM_CONFIG_PREFIX}/bin/opencode\"\n"
+        "fi\n"
+        "if [[ \"$*\" == *\"install --global\"*\"@opencode/cli@latest\"* ]] "
+        "&& [[ \"${NPM_STUB_MODEL_OPENCODE_RELINK:-0}\" == \"1\" ]]; then\n"
+        "  printf '#!/bin/sh\\necho 2.0.0-test\\n' "
+        "> \"${NPM_CONFIG_PREFIX}/bin/opencode\"\n"
+        "  chmod 755 \"${NPM_CONFIG_PREFIX}/bin/opencode\"\n"
+        "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -431,6 +467,24 @@ def _write_node_stub(tmp_path: Path) -> Path:
     )
     node_path.chmod(0o755)
     return node_path
+
+
+def _write_opencode_v2_package(npm_prefix: Path, version: str) -> None:
+    """Model an installed V2 package and its shared opencode bin symlink."""
+    package_dir = npm_prefix / "lib" / "node_modules" / "@opencode" / "cli"
+    package_dir.mkdir(parents=True)
+    (package_dir / "package.json").write_text(
+        f'{{"version":"{version}"}}\n', encoding="utf-8"
+    )
+    executable = package_dir / "bin" / "opencode.exe"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\necho 2.0.0-test\n", encoding="utf-8")
+    executable.chmod(0o755)
+    bin_dir = npm_prefix / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "opencode").symlink_to(
+        "../lib/node_modules/@opencode/cli/bin/opencode.exe"
+    )
 
 
 def _write_cargo_stub(tmp_path: Path) -> Path:
@@ -457,7 +511,13 @@ def _mark_cargo_target(target_dir: Path) -> None:
 def _bootstrap_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """Return a subprocess environment isolated from host npm/cache settings."""
     env = os.environ.copy()
-    for variable in ("NPM_CONFIG_PREFIX", "NPM_CONFIG_CACHE", "XDG_CACHE_HOME"):
+    for variable in (
+        "NPM_CONFIG_PREFIX",
+        "NPM_CONFIG_CACHE",
+        "XDG_CACHE_HOME",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ZAI_API_KEY",
+    ):
         env.pop(variable, None)
     env["HOME"] = str(tmp_path)
     env["PATH"] = f"{tmp_path / 'bin'}:/usr/bin:/bin"
@@ -506,7 +566,7 @@ class TestDevcontainerBootstrapScript:
         expected_cache = f"{tmp_path}/.cache/npm"
         for package in (
             "@nanocollective/nanocoder@latest",
-            "opencode-ai@latest",
+            "@opencode/cli@latest",
             "@openai/codex@latest",
             "@anthropic-ai/claude-code@latest",
             "@github/copilot@latest",
@@ -516,12 +576,123 @@ class TestDevcontainerBootstrapScript:
             assert (
                 f"{expected_prefix}|{expected_cache}|install --global --no-audit "
                 "--no-fund --prefer-online "
-                "--allow-scripts=opencode-ai,@anthropic-ai/claude-code "
+                "--allow-scripts=@opencode/cli,@anthropic-ai/claude-code "
                 f"{package}"
             ) in log
         assert "sudo" not in log
         assert (tmp_path / ".local" / "bin").is_dir()
         assert (tmp_path / ".cache" / "npm").is_dir()
+
+    def test_legacy_opencode_v1_removal_restores_shared_v2_executable(
+        self, tmp_path: Path
+    ) -> None:
+        """Uninstalling V1 must relink V2 even when its package is already latest."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_npm_stub(bin_dir)
+        _write_node_stub(bin_dir)
+        npm_log = tmp_path / "npm.log"
+        npm_prefix = tmp_path / ".local"
+        legacy_package = npm_prefix / "lib" / "node_modules" / "opencode-ai"
+        legacy_package.mkdir(parents=True)
+        (legacy_package / "package.json").write_text(
+            '{"version":"1.19.5"}\n', encoding="utf-8"
+        )
+        _write_opencode_v2_package(npm_prefix, "1.2.3")
+
+        env = _bootstrap_env(
+            tmp_path,
+            NPM_STUB_LOG=str(npm_log),
+            NPM_STUB_VIEW_VERSION="1.2.3",
+            NPM_STUB_MODEL_OPENCODE_RELINK="1",
+            DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+            DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-create"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Removing legacy OpenCode 1 package" in result.stdout
+        assert "OpenCode 2 executable verified" in result.stdout
+        assert (npm_prefix / "bin" / "opencode").is_file()
+        lines = npm_log.read_text(encoding="utf-8").splitlines()
+        uninstall_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line.endswith("|uninstall --global --no-audit --no-fund opencode-ai")
+        ]
+        v2_install_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line.endswith(
+                "|install --global --no-audit --no-fund --prefer-online "
+                "--allow-scripts=@opencode/cli,@anthropic-ai/claude-code @opencode/cli@latest"
+            )
+        ]
+        assert len(uninstall_indexes) == 1
+        assert not v2_install_indexes, "an already-current V2 package needs no npm reinstall"
+        assert "opencode-ai@latest" not in "\n".join(lines)
+
+    def test_legacy_removal_restores_installed_v2_without_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """Unlink followed by lookup/install failure must leave a usable V2 CLI."""
+        for failure in ("view", "install"):
+            case_root = tmp_path / failure
+            bin_dir = case_root / "bin"
+            bin_dir.mkdir(parents=True)
+            _write_npm_stub(bin_dir)
+            _write_node_stub(bin_dir)
+            npm_log = case_root / "npm.log"
+            npm_prefix = case_root / ".local"
+            legacy_package = npm_prefix / "lib" / "node_modules" / "opencode-ai"
+            legacy_package.mkdir(parents=True)
+            (legacy_package / "package.json").write_text(
+                '{"version":"1.19.5"}\n', encoding="utf-8"
+            )
+            _write_opencode_v2_package(npm_prefix, "1.0.0")
+            failure_override = {
+                "NPM_STUB_FAIL_PACKAGE"
+                if failure == "view"
+                else "NPM_STUB_FAIL_INSTALL_PACKAGE": "@opencode/cli"
+            }
+
+            env = _bootstrap_env(
+                case_root,
+                NPM_STUB_LOG=str(npm_log),
+                NPM_STUB_VIEW_VERSION="1.2.3",
+                NPM_STUB_MODEL_OPENCODE_RELINK="1",
+                DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+                DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
+                **failure_override,
+            )
+            result = subprocess.run(
+                ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-create"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                timeout=10,
+            )
+
+            assert result.returncode == 0, failure
+            assert "OpenCode 2 executable verified" in result.stdout, failure
+            executable = npm_prefix / "bin" / "opencode"
+            assert executable.is_file(), failure
+            version = subprocess.run(
+                [str(executable), "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            assert version.stdout.strip() == "2.0.0-test", failure
 
     def test_one_npm_failure_is_non_blocking_and_other_tools_continue(
         self, tmp_path: Path
@@ -535,7 +706,7 @@ class TestDevcontainerBootstrapScript:
         env = _bootstrap_env(
             tmp_path,
             NPM_STUB_LOG=str(npm_log),
-            NPM_STUB_FAIL_PACKAGE="opencode-ai",
+            NPM_STUB_FAIL_PACKAGE="@opencode/cli",
             DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
             DEVCONTAINER_SKIP_CODEX_BOOTSTRAP="1",
         )
@@ -549,10 +720,12 @@ class TestDevcontainerBootstrapScript:
         )
 
         assert result.returncode == 0
-        assert "opencode-ai@latest refresh failed" in result.stderr
+        assert "@opencode/cli@latest refresh failed" in result.stderr
         assert "@openai/codex@latest" in npm_log.read_text(encoding="utf-8")
 
-    def test_current_versions_skip_expensive_reinstallation(self, tmp_path: Path) -> None:
+    def test_current_versions_skip_expensive_reinstallation(
+        self, tmp_path: Path
+    ) -> None:
         """A warm container should resolve latest tags without replacing packages."""
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -562,7 +735,7 @@ class TestDevcontainerBootstrapScript:
         npm_prefix = tmp_path / ".local"
         for package_path in (
             "@nanocollective/nanocoder",
-            "opencode-ai",
+            "@opencode/cli",
             "@openai/codex",
             "@anthropic-ai/claude-code",
             "@github/copilot",
@@ -1048,3 +1221,355 @@ class TestDevcontainerBootstrapScript:
         assert "FORTRESS_TARGET_CLEAN_MIN_AGE_DAYS" in result.stderr
         assert not cargo_log.exists()
         assert artifact.read_bytes() == b"preserve"
+
+    def test_reports_unconfigured_project_mcp_servers(self, tmp_path: Path) -> None:
+        """A missing runtime MCP environment must be reported, not silent."""
+        workspace = tmp_path / "workspace"
+        (workspace / ".devcontainer").mkdir(parents=True)
+
+        env = _bootstrap_env(
+            tmp_path,
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace),
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Project MCP servers are disabled" in result.stderr
+        assert ".env.local.example" in result.stderr
+        assert "restart is not enough" in result.stderr
+
+    def test_reports_partially_configured_project_mcp_servers(
+        self, tmp_path: Path
+    ) -> None:
+        """A GitHub-only configuration must name the servers it cannot enable."""
+        workspace = tmp_path / "workspace"
+        runtime_env = workspace / ".devcontainer" / ".mcp.env"
+        runtime_env.parent.mkdir(parents=True)
+        runtime_env.write_text(
+            "GITHUB_PERSONAL_ACCESS_TOKEN=test-value\n", encoding="utf-8"
+        )
+
+        credentials = {"GITHUB_PERSONAL_ACCESS_TOKEN": "test-value"}
+        env = _bootstrap_env(
+            tmp_path,
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace),
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+            **credentials,
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "partially configured" in result.stderr
+        assert "zai-*" in result.stderr
+        assert "test-value" not in result.stderr
+
+    def test_mcp_file_process_mismatch_requires_rebuild(self, tmp_path: Path) -> None:
+        """File-only, env-only, and differing credentials must not look injected."""
+        scenarios = (
+            ("file-only", "GITHUB_PERSONAL_ACCESS_TOKEN=file-test\n", {}),
+            ("env-only", "", {"GITHUB_PERSONAL_ACCESS_TOKEN": "env-test"}),
+            (
+                "differing",
+                "GITHUB_PERSONAL_ACCESS_TOKEN=file-test\n",
+                {"GITHUB_PERSONAL_ACCESS_TOKEN": "process-test"},
+            ),
+        )
+        for label, file_contents, credentials in scenarios:
+            workspace = tmp_path / label
+            runtime_env = workspace / ".devcontainer" / ".mcp.env"
+            runtime_env.parent.mkdir(parents=True)
+            runtime_env.write_text(file_contents, encoding="utf-8")
+            env = _bootstrap_env(
+                tmp_path,
+                DEVCONTAINER_WORKSPACE_DIR=str(workspace),
+                DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+                DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+                **credentials,
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                timeout=10,
+            )
+
+            assert result.returncode == 0, label
+            assert "does not match" in result.stderr, label
+            assert "rebuild required" in result.stderr, label
+            assert "file-test" not in result.stderr, label
+            assert "process-test" not in result.stderr, label
+
+    def test_silent_when_project_mcp_servers_are_configured(
+        self, tmp_path: Path
+    ) -> None:
+        """A complete runtime environment must not produce MCP noise."""
+        workspace = tmp_path / "workspace"
+        runtime_env = workspace / ".devcontainer" / ".mcp.env"
+        runtime_env.parent.mkdir(parents=True)
+        runtime_env.write_text(
+            "GITHUB_PERSONAL_ACCESS_TOKEN=test-value\nZAI_API_KEY=test-value\n",
+            encoding="utf-8",
+        )
+
+        credentials = {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "test-value",
+            "ZAI_API_KEY": "test-value",
+        }
+        env = _bootstrap_env(
+            tmp_path,
+            DEVCONTAINER_WORKSPACE_DIR=str(workspace),
+            DEVCONTAINER_SKIP_TOOL_REFRESH="1",
+            DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+            **credentials,
+        )
+
+        result = subprocess.run(
+            ["/bin/bash", str(DEVCONTAINER_BOOTSTRAP_SCRIPT), "post-start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "Project MCP servers" not in result.stderr
+
+
+def _write_opencode_plugin_stub(root: Path) -> None:
+    """Provide the V2 plugin SDK surface that a local plugin imports."""
+    package_dir = root / "node_modules" / "@opencode" / "plugin"
+    package_dir.mkdir(parents=True)
+    (package_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@opencode/plugin",
+                "version": "0.0.0-test",
+                "type": "module",
+                "exports": "./index.js",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (package_dir / "index.js").write_text(
+        "export const Plugin = { define: (definition) => definition }\n",
+        encoding="utf-8",
+    )
+
+
+OPENCODE_PLUGIN_HARNESS = """
+import assert from "node:assert/strict"
+
+const timers = new Map()
+const clearedTimers = []
+let nextTimerID = 0
+globalThis.setTimeout = (callback, delay) => {
+  const timer = { id: ++nextTimerID, callback, delay, unref() {} }
+  timers.set(timer.id, timer)
+  return timer
+}
+globalThis.clearTimeout = (timer) => {
+  clearedTimers.push(timer.id)
+  timers.delete(timer.id)
+}
+
+const { default: plugin } = await import(new URL("plugin.mjs", import.meta.url).href)
+
+const interrupts = []
+const failOnce = new Set()
+const hungOnce = new Set()
+const deferOnce = new Set()
+let deferredReject = null
+const queue = []
+let wake = null
+
+const subscribe = ({ signal } = {}) => ({
+  async *[Symbol.asyncIterator]() {
+    while (!signal?.aborted) {
+      if (queue.length === 0) {
+        await new Promise((resolve) => {
+          wake = resolve
+        })
+        continue
+      }
+      yield queue.shift()
+    }
+  },
+})
+
+const cleanup = plugin.setup({
+  event: { subscribe },
+  session: {
+    async interrupt(input) {
+      interrupts.push(input)
+      if (failOnce.delete(input.sessionID)) throw new Error("fake interrupt failure")
+      if (hungOnce.delete(input.sessionID)) return new Promise(() => {})
+      if (deferOnce.delete(input.sessionID)) {
+        return new Promise((_, reject) => {
+          deferredReject = reject
+        })
+      }
+    },
+  },
+})
+
+const flush = async () => {
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
+const emit = async (sessionID, status) => {
+  queue.push({ type: "session.status", data: { sessionID, status } })
+  const resume = wake
+  wake = null
+  resume?.()
+  await flush()
+}
+
+const fireTimer = async (delay) => {
+  const entry = [...timers.entries()].find(([, timer]) => timer.delay === delay)
+  assert.ok(entry, `expected a pending ${delay}ms timer`)
+  const [timerID, timer] = entry
+  timers.delete(timerID)
+  timer.callback()
+  await flush()
+}
+
+// Idle must really cancel the first timer and allow a later retry to arm another.
+await emit("a", { type: "retry", attempt: 1, message: "fetch failed" })
+assert.equal(timers.size, 1)
+assert.equal(timers.get(1).delay, 120_000)
+await emit("a", { type: "idle" })
+assert.equal(timers.size, 0)
+assert.deepEqual(clearedTimers, [1])
+await emit("a", { type: "retry", attempt: 1, message: "fetch failed" })
+assert.equal(timers.size, 1)
+await fireTimer(120_000)
+assert.deepEqual(interrupts, [{ sessionID: "a", resume: false }])
+await emit("a", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 1, "a successful interrupt remains in flight until idle")
+await emit("a", { type: "idle" })
+
+// A failed attempt-limit interrupt must be retryable by the very next event.
+failOnce.add("b")
+await emit("b", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 2)
+assert.equal(timers.size, 1, "failed interrupt should retain bounded recovery")
+await emit("b", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 3, "failed interrupt marker must be cleared")
+assert.equal(timers.size, 0)
+await emit("b", { type: "idle" })
+
+// Timer-triggered failure must recover without requiring another status event.
+failOnce.add("c")
+await emit("c", { type: "retry", attempt: 1, message: "connection reset" })
+await fireTimer(120_000)
+assert.equal(interrupts.length, 4)
+assert.equal(timers.size, 1, "failed timer interrupt should schedule one replacement")
+await fireTimer(120_000)
+assert.equal(interrupts.length, 5)
+assert.equal(timers.size, 0)
+await emit("c", { type: "idle" })
+
+await emit("d", { type: "retry", attempt: 1, message: "model overloaded" })
+assert.equal(interrupts.length, 5)
+assert.equal(timers.size, 0)
+
+// A hung interrupt must not block unrelated events and must time out into recovery.
+hungOnce.add("e")
+await emit("e", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 6)
+assert.ok([...timers.values()].some((timer) => timer.delay === 10_000))
+await emit("f", { type: "retry", attempt: 1, message: "fetch failed" })
+assert.ok([...timers.values()].some((timer) => timer.delay === 120_000))
+await emit("f", { type: "idle" })
+await fireTimer(10_000)
+assert.ok([...timers.values()].some((timer) => timer.delay === 120_000))
+await emit("e", { type: "idle" })
+assert.equal(timers.size, 0)
+
+// An old interrupt settling after idle must not disarm or rearm a newer attempt.
+hungOnce.add("g")
+await emit("g", { type: "retry", attempt: 3, message: "socket hang up" })
+await emit("g", { type: "idle" })
+await emit("g", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 8, "the newer interrupt must not be blocked by the old one")
+await fireTimer(10_000)
+assert.equal(timers.size, 0, "the stale failure must not arm recovery after newer success")
+await emit("g", { type: "idle" })
+
+// Cleanup must cancel pending timeouts and late rejection must not revive timers.
+deferOnce.add("h")
+await emit("h", { type: "retry", attempt: 3, message: "socket hang up" })
+assert.equal(interrupts.length, 9)
+assert.equal(typeof deferredReject, "function")
+cleanup()
+assert.equal(timers.size, 0)
+deferredReject(new Error("late interrupt failure"))
+await flush()
+assert.equal(timers.size, 0, "disposal must prevent late timer revival")
+console.log("ok")
+"""
+
+
+class TestOpenCodeBoundedNetworkRetriesPlugin:
+    """Checks that the V1 plugin implementation is ported to the V2 plugin API."""
+
+    def test_plugin_uses_v2_definition_and_event_api(self) -> None:
+        """V2 does not run V1 plugin functions, so the file must use the V2 entrypoint."""
+        text = OPENCODE_PLUGIN.read_text(encoding="utf-8")
+        assert 'from "@opencode/plugin"' in text
+        assert "Plugin.define(" in text
+        assert 'id: "fortress.bounded-network-retries"' in text
+        assert "ctx.event.subscribe(" in text
+        assert 'types: ["session.status"]' in text
+        assert "ctx.session.interrupt(" in text
+        assert "client.session.abort" not in text
+        assert "export default async (" not in text
+
+    def test_plugin_interrupts_retries_after_the_attempt_limit(
+        self, tmp_path: Path
+    ) -> None:
+        """The ported plugin must keep the retry limit, idle reset, and message filter."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is required to exercise the OpenCode plugin")
+
+        _write_opencode_plugin_stub(tmp_path)
+        (tmp_path / "plugin.mjs").write_text(
+            OPENCODE_PLUGIN.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        (tmp_path / "harness.mjs").write_text(OPENCODE_PLUGIN_HARNESS, encoding="utf-8")
+        (tmp_path / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+
+        result = subprocess.run(
+            [node, str(tmp_path / "harness.mjs")],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout

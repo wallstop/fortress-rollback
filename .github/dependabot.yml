@@ -31,6 +31,22 @@ updates:
       - dependency-name: "serial_test"
         update-types:
           - "version-update:semver-major"
+      # parking_lot 0.13 requires Rust 1.95. Patch-level 0.12 updates
+      # remain eligible.
+      - dependency-name: "parking_lot"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      # proptest 1.12 and z3 0.22 require Rust 1.88. Allow compatible
+      # patches while holding minor/major releases until the MSRV rises.
+      - dependency-name: "proptest"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "z3"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     open-pull-requests-limit: 2
 
   # Rust dependencies for fuzz directory (separate workspace)

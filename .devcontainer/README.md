@@ -43,7 +43,7 @@ This devcontainer provides a complete environment for developing, testing, and f
 ### AI Coding CLIs
 
 - **Nanocoder** - Local-first coding agent (`@nanocollective/nanocoder`)
-- **OpenCode** - Open source coding agent (`opencode-ai`)
+- **OpenCode** - Open source coding agent (`@opencode/cli`, OpenCode 2)
 - **Codex CLI** - OpenAI coding agent (`@openai/codex`)
 - **Claude Code** - Anthropic coding agent (`@anthropic-ai/claude-code`)
 - **Copilot CLI** - GitHub coding agent (`@github/copilot`)
@@ -71,12 +71,17 @@ After the container starts, verify all tools:
 ## AI CLI and npm Setup
 
 The image build installs Nanocoder, OpenCode, Codex CLI, Claude Code, Copilot
-CLI, and the Z.ai Vision MCP from each npm package's `latest` tag. The create
-hook resolves the tags again, so a cached
-image does not freeze their versions. Each package refresh is failure-tolerant:
-an unavailable registry does not prevent the container from opening, and the
-image-bundled version remains available. Routine start hooks skip registry
-access so reopening an existing container stays fast and offline-safe.
+CLI, and the Z.ai Vision MCP from each npm package's `latest` tag. OpenCode uses
+the OpenCode 2 package, `@opencode/cli`; the legacy OpenCode 1 package,
+`opencode-ai`, is removed when an existing container still has it because both
+packages publish an `opencode` executable. The create hook resolves the tags
+again, restores the shared executable directly from the installed V2 package
+after legacy removal, and verifies that `opencode --version` reports V2. Local
+restoration does not require registry access. Each package refresh is
+failure-tolerant: an unavailable registry does not prevent the container from
+opening, and an already-installed CLI remains available. Routine start hooks
+skip registry access so reopening an existing container stays fast and
+offline-safe.
 
 ```bash
 nanocoder --version
@@ -208,29 +213,37 @@ component that disabled the radio. This is a host repair, so Fortress containers
 inherit it without container-specific networking changes.
 
 The repository's `opencode.json` sets a five-minute Z.ai request timeout and a
-45-second streamed-chunk timeout.
-`.opencode/plugins/bounded-network-retries.js` stops matching network retries
-after the third failed attempt or two minutes after retrying begins. These
-bounds apply only to OpenCode and turn a silent stall into an actionable abort;
-they do not control Nanocoder or repair the host uplink. The single-uplink host
-repair covers both clients. After repairing it, repeat interface-bound and
-in-container probes, then run authenticated streaming and read-only tool
-workloads in both clients. Record counts, latency, and failure class without
-recording credentials or response bodies.
+45-second streamed-chunk timeout. It keeps V1 configuration syntax, which OpenCode
+2 reads without converting the file.
+`.opencode/plugins/bounded-network-retries.js` uses the OpenCode 2 plugin API
+and stops matching network retries after the third failed attempt or two minutes
+after retrying begins. Interrupt calls have a ten-second deadline and do not block
+status-event handling. A failed or hung interrupt clears its in-flight marker and
+keeps one bounded recovery timer; idle transitions invalidate older calls, and
+plugin disposal cancels pending timers. These bounds apply only to OpenCode and
+turn a silent stall into an actionable abort; they do not control Nanocoder or
+repair the host uplink. The single-uplink host repair covers both clients. After repairing it,
+repeat interface-bound and in-container probes, then run authenticated streaming
+and read-only tool workloads in both clients. Record counts, latency, and failure
+class without recording credentials or response bodies.
 
 ### Project MCP servers
 
-Before devcontainer creation, the host preflight copies only the two allowlisted
-MCP credentials from the ignored `.env.local` into an ignored mode-`0600`
-runtime file. Unrelated project credentials are not injected. The container
-exposes GitHub's hosted MCP server plus all four MCPs currently included with
-the Z.ai Coding Plan: Vision Understanding, Web Search Prime, Web Reader, and
-Zread. Vision is preinstalled as `@z_ai/mcp-server`; the remote servers use
-their official HTTPS endpoints. `.mcp.json`, `.codex/config.toml`,
-`opencode.json`, and `.vscode/mcp.json` make the same catalog available to
-Claude Code, Nanocoder, Copilot CLI, Codex, OpenCode, and VS Code. Nanocoder
-receives the catalog's absolute path, so launching it below the repository root
-still works.
+Before devcontainer creation, the host preflight copies only the allowlisted
+MCP credentials that are set from the ignored `.env.local` into an ignored
+mode-`0600` runtime file. Unrelated project credentials are not injected. The
+credentials are optional: when `.env.local` is absent, or when its values are
+still blank, the preflight writes an empty runtime file so the container still
+starts and the project MCP servers remain unavailable. Each key is independent,
+so a contributor with only a GitHub token still gets `github-mcp-server`, and a
+key left blank only disables its own group. The container exposes GitHub's
+hosted MCP server plus all four MCPs currently included with the Z.ai Coding
+Plan: Vision Understanding, Web Search Prime, Web Reader, and Zread. Vision is
+preinstalled as `@z_ai/mcp-server`; the remote servers use their official HTTPS
+endpoints. `.mcp.json`, `.codex/config.toml`, `opencode.json`, and
+`.vscode/mcp.json` make the same catalog available to Claude Code, Nanocoder,
+Copilot CLI, Codex, OpenCode, and VS Code. Nanocoder receives the catalog's
+absolute path, so launching it below the repository root still works.
 
 Claude Code 2.1.260 cannot consume the SSE-framed MCP initialization response
 currently returned by the three remote Z.ai endpoints, so `claude-zai` keeps using
@@ -259,15 +272,15 @@ and can look hung. A rebuild, key rotation, or MCP change cannot repair quota;
 interrupt the retries, check the Z.ai plan's usage/reset time, and retry after
 capacity is available.
 
-If `.env.local` does not already exist, copy `.env.local.example`; otherwise add
-or update the two unquoted MCP keys without overwriting the existing file. Then
-rebuild the container. Claude asks once to approve project MCP servers, and
-Codex requires the repository to be trusted; those security prompts are
-intentionally not bypassed. GitHub is read-only by default through
-`X-MCP-Readonly: true`. Remove that header only for intentional mutations and
-use a least-privilege token. The two keys enter the trusted container process
-environment and remain readable from the mounted workspace, so do not run
-untrusted repository code or agents.
+Project MCP servers are optional. To enable them, copy `.env.local.example` to
+`.env.local` and fill the keys you have, leaving the rest blank; otherwise add or
+update the keys without overwriting the existing file. Then rebuild the
+container. Claude asks once to approve project MCP servers, and Codex requires
+the repository to be trusted; those security prompts are intentionally not
+bypassed. GitHub is read-only by default through `X-MCP-Readonly: true`. Remove
+that header only for intentional mutations and use a least-privilege token. The
+two keys enter the trusted container process environment and remain readable
+from the mounted workspace, so do not run untrusted repository code or agents.
 
 The preceding Claude approval statement applies to native `claude`.
 `claude-zai` pre-approves only the five audited names in its isolated settings.
@@ -407,11 +420,11 @@ cargo install cargo-shear cargo-spellcheck cargo-geiger cargo-careful
 pip3 install --break-system-packages yamllint pre-commit
 # AI tools use the devcontainer's user-owned npm prefix (no sudo)
 npm install --global \
-  --allow-scripts=opencode-ai,@anthropic-ai/claude-code \
+  --allow-scripts=@opencode/cli,@anthropic-ai/claude-code \
   markdownlint-cli@latest \
   markdown-link-check@latest \
   @nanocollective/nanocoder@latest \
-  opencode-ai@latest \
+  @opencode/cli@latest \
   @openai/codex@latest \
   @anthropic-ai/claude-code@latest
 
@@ -467,6 +480,48 @@ docker images | grep fortress-rollback | awk '{print $3}' | xargs -r docker rmi 
 docker system prune -a
 ```
 
+### Project MCP servers are unavailable
+
+Devcontainer startup does not require MCP credentials. To enable the project MCP
+servers, copy `.env.local.example` to `.env.local`, fill the keys you have
+without quotes, and rebuild the container. Credentials are injected when the
+container is created, so restarting an existing container is not enough.
+
+Run the read-only health report before changing anything else:
+
+```bash
+bash .devcontainer/check-mcp-health.sh            # probe every configured server
+bash .devcontainer/check-mcp-health.sh --offline  # configuration only; probes skipped
+```
+
+The report never prints a credential. It uses the actual container process
+environment and requires `.mcp.env` to match it with mode `0600`; a mismatch or
+unsafe file exits `1` and requires a rebuild. It exits `0` when every configured
+server responds, `1` when validation or a probe fails, and `2` when no credentials
+are configured. Offline mode skips all HTTP and stdio probes. A `NETWORK` row
+means Docker or the host uplink is unreachable; an `AUTH` row means
+the key is wrong, expired, or lacks plan access; a `FAIL` row on `zai-vision`
+usually means the wrapper or `@z_ai/mcp-server` package is missing and the image
+needs rebuilding. `zai-vision` only proves the stdio handshake, so key validity
+is covered by the remote Z.ai rows that use the same key.
+
+### OpenCode still reports version 1
+
+OpenCode 1 (`opencode-ai`) and OpenCode 2 (`@opencode/cli`) both install an
+`opencode` executable. If `opencode --version` reports a `v1.x` release, remove
+the legacy package and reinstall OpenCode 2 into the user-owned prefix:
+
+```bash
+npm uninstall --global opencode-ai
+npm install --global --allow-scripts=@opencode/cli @opencode/cli@latest
+opencode --version
+```
+
+The devcontainer create hook performs the removal automatically when it finds a
+legacy package, then refreshes OpenCode 2 to the current `latest` tag. Running
+`./scripts/ci/check-tools.sh` reports a missing `opencode (v2)` entry when a V1
+binary still shadows the upgrade.
+
 ### Kani Setup Fails
 
 Kani requires downloading CBMC. Run:
@@ -498,4 +553,6 @@ curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/tlaplus/tlaplus/releas
 
 - `devcontainer.json` - Main configuration
 - `Dockerfile` - Custom image with all tools
+- `check-mcp-env.sh` - Host preflight that filters `.env.local` into `.mcp.env`
+- `check-mcp-health.sh` - Read-only MCP credential and endpoint report
 - `welcome.sh` - Startup information display

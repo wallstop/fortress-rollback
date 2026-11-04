@@ -50,6 +50,51 @@ run_with_timeout() {
     fi
 }
 
+restore_opencode_v2_executable() {
+    local relative_target="../lib/node_modules/@opencode/cli/bin/opencode.exe"
+    local v2_executable="${NPM_USER_PREFIX}/lib/node_modules/@opencode/cli/bin/opencode.exe"
+
+    [ -x "${v2_executable}" ] || return 1
+    ln -sfn "${relative_target}" "${NPM_USER_PREFIX}/bin/opencode" || return 1
+}
+
+# OpenCode 1 (npm package ``opencode-ai``) and OpenCode 2 (``@opencode/cli``)
+# both publish an ``opencode`` executable. Refresh V2 before removing V1, then
+# restore the shared bin from the installed package without relying on npm access.
+remove_legacy_opencode_v1() {
+    local legacy_package_dir="${NPM_USER_PREFIX}/lib/node_modules/opencode-ai"
+    local v2_executable="${NPM_USER_PREFIX}/lib/node_modules/@opencode/cli/bin/opencode.exe"
+
+    if [ ! -d "${legacy_package_dir}" ]; then
+        return 0
+    fi
+    if [ ! -x "${v2_executable}" ]; then
+        warn "Keeping legacy opencode-ai because no usable OpenCode 2 executable is installed."
+        return 0
+    fi
+
+    log "Removing legacy OpenCode 1 package; restoring the installed OpenCode 2 executable."
+    if run_with_timeout "${NPM_REFRESH_TIMEOUT_SECONDS}" \
+        npm uninstall --global --no-audit --no-fund opencode-ai; then
+        if restore_opencode_v2_executable; then
+            log "Removed legacy opencode-ai and restored the OpenCode 2 executable."
+        else
+            warn "Removed legacy opencode-ai but could not restore the OpenCode 2 executable."
+        fi
+    else
+        warn "Could not remove legacy opencode-ai; a stale OpenCode 1 binary may shadow OpenCode 2."
+    fi
+}
+
+verify_opencode_v2() {
+    if run_with_timeout "${NPM_REFRESH_TIMEOUT_SECONDS}" opencode --version 2>/dev/null \
+        | grep -Eq '(^|[[:space:]])v?2[.]'; then
+        log "OpenCode 2 executable verified."
+    else
+        warn "OpenCode 2 is not available after refresh; check for a stale V1 executable and rebuild."
+    fi
+}
+
 refresh_ai_clis() {
     local package package_name package_json installed_version latest_version
     local lookup_status install_status
@@ -90,7 +135,7 @@ refresh_ai_clis() {
     log "Refreshing AI CLIs from npm latest tags in ${NPM_USER_PREFIX}."
     for package in \
         '@nanocollective/nanocoder@latest' \
-        'opencode-ai@latest' \
+        '@opencode/cli@latest' \
         '@openai/codex@latest' \
         '@anthropic-ai/claude-code@latest' \
         '@github/copilot@latest' \
@@ -126,7 +171,7 @@ refresh_ai_clis() {
 
         run_with_timeout "${NPM_REFRESH_TIMEOUT_SECONDS}" \
             npm install --global --no-audit --no-fund --prefer-online \
-                --allow-scripts=opencode-ai,@anthropic-ai/claude-code "${package}"
+                --allow-scripts=@opencode/cli,@anthropic-ai/claude-code "${package}"
         install_status=$?
 
         if [ "${install_status}" -eq 0 ]; then
@@ -135,6 +180,9 @@ refresh_ai_clis() {
             warn "${package} refresh failed; continuing with any installed version."
         fi
     done
+
+    remove_legacy_opencode_v1
+    verify_opencode_v2
 }
 
 cleanup_target_if_needed() {
@@ -229,6 +277,59 @@ cleanup_target_if_needed() {
     fi
 }
 
+# Report the credentials actually present in this process. The generated file is
+# only a cross-check: stale or file-only values must never look successfully injected.
+report_mcp_configuration() {
+    if [ "${DEVCONTAINER_SKIP_MCP_NOTICE:-0}" = "1" ]; then
+        return 0
+    fi
+
+    local runtime_env="${WORKSPACE_DIR}/.devcontainer/.mcp.env"
+    local github_token="${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+    local zai_token="${ZAI_API_KEY:-}"
+    local key file_value process_value definition_count
+    local missing_groups=""
+
+    if [ ! -f "${runtime_env}" ] || [ -L "${runtime_env}" ]; then
+        if [ -n "${github_token}" ] || [ -n "${zai_token}" ]; then
+            warn "Project MCP process credentials do not match the missing runtime file; rebuild required (a restart is not enough)."
+        else
+            warn "Project MCP servers are disabled: no MCP credentials were injected. Copy .env.local.example to .env.local, fill the keys you have, and rebuild the container (a restart is not enough)."
+        fi
+        return 0
+    fi
+
+    for key in GITHUB_PERSONAL_ACCESS_TOKEN ZAI_API_KEY; do
+        definition_count="$({ grep -Ec "^${key}=" "${runtime_env}" || true; })"
+        file_value=""
+        if [ "${definition_count}" = "1" ]; then
+            file_value="$(sed -n "s/^${key}=//p" "${runtime_env}")"
+            file_value="${file_value%$'\r'}"
+        elif [ "${definition_count}" != "0" ]; then
+            warn "Project MCP runtime file has duplicate ${key} entries; rebuild required after fixing .env.local."
+            return 0
+        fi
+        process_value="${!key:-}"
+        if [ "${file_value}" != "${process_value}" ]; then
+            warn "Project MCP runtime file does not match the actual process environment; rebuild required (a restart is not enough)."
+            return 0
+        fi
+    done
+    if [ -z "${github_token}" ] && [ -z "${zai_token}" ]; then
+        warn "Project MCP servers are disabled: no MCP credentials were injected. Copy .env.local.example to .env.local, fill the keys you have, and rebuild the container (a restart is not enough)."
+        return 0
+    fi
+    if [ -z "${github_token}" ]; then
+        missing_groups="${missing_groups} github-mcp-server"
+    fi
+    if [ -z "${zai_token}" ]; then
+        missing_groups="${missing_groups} zai-*"
+    fi
+    if [ -n "${missing_groups}" ]; then
+        warn "Project MCP servers are partially configured; still disabled:${missing_groups}. Fill the missing keys in .env.local and rebuild the container."
+    fi
+}
+
 log "phase=${HOOK_PHASE}"
 if [ "${HOOK_PHASE}" = "post-create" ]; then
     refresh_ai_clis
@@ -241,4 +342,5 @@ if [ -f .devcontainer/ai-backends.sh ]; then
         warn "AI backend launcher setup failed; native CLIs remain available."
     fi
 fi
+report_mcp_configuration
 exit 0

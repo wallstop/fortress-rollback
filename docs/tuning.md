@@ -6,16 +6,42 @@ Tune from measurements, not labels such as “Wi-Fi” or “mobile.” Input de
 latency for fewer/deeper rollbacks; the prediction window trades short outage tolerance for more
 speculative work. Increasing either does not repair nondeterministic game logic.
 
+## Consistency and availability contract
+
+**Consistency** means that peers in one session agree on the ordered inputs and deterministic game
+state for every frame in their shared confirmed prefix. Speculative frames may differ and roll back;
+that responsiveness is a separate property, measured by visible frame progress, rollback frequency,
+and correction depth. **Confirmed availability** is also separate: measure confirmed-frame progress,
+confirmation lag, and stall duration rather than inferring them from speculative rendering.
+
+These guarantees assume a deterministic game, fixed-width network inputs, matching session and
+lifecycle configuration, and an application that polls the network and drains events even while
+obeying `WaitRecommendation`. The simulation harness supplies one poll opportunity per 16 ms virtual
+step. Recovery measurements also require delivery to resume after the injected fault heals; a
+permanent partition has no recovery-time bound.
+
+The CAP boundary is explicit: a permanent partition cannot both advance confirmed play in every
+component and preserve one history. Fortress must preserve the held confirmed prefix and stop or fail
+closed until healing or a valid coordinated drop establishes one successor history. Speculative
+progress during a partition is not evidence of confirmed availability. See the
+[disconnect and rejoin playbook](reconnect-playbook.md) for the application-facing lifecycle.
+
 ## Measured baseline
 
-The 2–4 player rows below are from `tests/simulation/baselines/sweep-v3.json`, schema v3, measured
-on base commit `94f33a8`. The 16-player rows come from the prior schema's release-mode full
-matrix at commit `991559c` (5,000 steps, seed 1). Sessions are configured for 60 FPS; the harness
-advances once every 16 ms, providing 62.5 update opportunities per virtual second. Runs use input
-delay 0, max prediction 8, and deterministic virtual time. Encoded payload demand is measured when
-Fortress enqueues messages and excludes IP/UDP headers; it is not observed transport throughput.
-Schema v3 also records protocol messages enqueued for eventual socket submission per player per
-second. The clean two-player row is 135.8125, including one-time synchronization traffic.
+The rows below use schema v3. At commit `c143e16`, all ten PR-gate cells matched
+`tests/simulation/baselines/sweep-v3.json` bit-for-bit (1,000 steps, seed 1), and the release-mode
+full matrix passed all 136 cells (5,000 steps, seed 1) with zero desyncs. The 16-player row comes
+from that current full matrix. Sessions are configured for 60 FPS; the harness advances once every
+16 ms, providing 62.5 update opportunities per virtual second. Runs use input delay 0, max prediction
+8, and deterministic virtual time. Encoded payload demand is measured when Fortress enqueues
+messages and excludes IP/UDP headers; it is not observed transport throughput. Schema v3 also records
+protocol messages enqueued for eventual socket submission per player per second. The clean
+two-player row is 135.8125, including one-time synchronization traffic.
+
+The checked-in gate covers constant loss, RTT, and jitter for the listed two- and four-player cells;
+the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. Neither run covers reordering,
+duplication, bursts, partitions, or poll stalls. Measure each axis with reproducible rows and
+nonzero injection counters before extending the consistency claim.
 
 | Players / path | Loss / RTT / jitter | Input | Rollbacks / 100 frames | Rollback p99 | Encoded KiB/s/player | Mean / max confirmation lag | Stalls/min |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
