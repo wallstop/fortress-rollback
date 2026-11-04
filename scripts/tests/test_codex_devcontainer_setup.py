@@ -1258,12 +1258,13 @@ class TestDevcontainerBootstrapScript:
             "GITHUB_PERSONAL_ACCESS_TOKEN=test-value\n", encoding="utf-8"
         )
 
+        credentials = {"GITHUB_PERSONAL_ACCESS_TOKEN": "test-value"}
         env = _bootstrap_env(
             tmp_path,
             DEVCONTAINER_WORKSPACE_DIR=str(workspace),
-            GITHUB_PERSONAL_ACCESS_TOKEN="test-value",
             DEVCONTAINER_SKIP_TOOL_REFRESH="1",
             DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+            **credentials,
         )
 
         result = subprocess.run(
@@ -1330,13 +1331,16 @@ class TestDevcontainerBootstrapScript:
             encoding="utf-8",
         )
 
+        credentials = {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "test-value",
+            "ZAI_API_KEY": "test-value",
+        }
         env = _bootstrap_env(
             tmp_path,
             DEVCONTAINER_WORKSPACE_DIR=str(workspace),
-            GITHUB_PERSONAL_ACCESS_TOKEN="test-value",
-            ZAI_API_KEY="test-value",
             DEVCONTAINER_SKIP_TOOL_REFRESH="1",
             DEVCONTAINER_SKIP_TARGET_CLEANUP="1",
+            **credentials,
         )
 
         result = subprocess.run(
