@@ -9,9 +9,9 @@
 		"dockerfile": "Dockerfile",
 		"context": ".."
 	},
-	// Validate the ignored credential file before Docker consumes it.
+	// Validate optional credentials and generate the ignored runtime env file.
 	"initializeCommand": "bash .devcontainer/check-mcp-env.sh \"${localWorkspaceFolder}\"",
-	// Inject credentials only at container runtime; they never enter image layers.
+	// Inject configured credentials only at container runtime; they never enter image layers.
 	"runArgs": ["--env-file", ".devcontainer/.mcp.env"],
 	//
 	// Option B: Use a pre-built image from GHCR when available (~30 seconds, pull only)

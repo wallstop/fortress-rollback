@@ -140,11 +140,11 @@ ENV NPM_CONFIG_CACHE=/home/vscode/.cache/npm
 ENV PATH=/home/vscode/.local/bin:${PATH}
 RUN mkdir -p "${NPM_CONFIG_PREFIX}/bin" "${NPM_CONFIG_PREFIX}/lib/node_modules" "${NPM_CONFIG_CACHE}" && \
     npm install --global --no-audit --no-fund \
-        --allow-scripts=opencode-ai,@anthropic-ai/claude-code \
+        --allow-scripts=@opencode/cli,@anthropic-ai/claude-code \
         markdownlint-cli@latest \
         markdown-link-check@latest \
         @nanocollective/nanocoder@latest \
-        opencode-ai@latest \
+        @opencode/cli@latest \
         @openai/codex@latest \
         @anthropic-ai/claude-code@latest \
         @github/copilot@latest \
