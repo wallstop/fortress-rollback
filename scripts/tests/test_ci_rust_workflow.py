@@ -450,7 +450,7 @@ def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
     assert install_step["uses"] == (
-        "taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037"
+        "taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b"
     )
     locked_bindgen = _locked_package_version("wasm-bindgen")
     assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"

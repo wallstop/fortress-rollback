@@ -177,7 +177,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 1)
       id: install-attempt-1
       if: steps.check-installed.outputs.installed != 'true'
-      uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
@@ -194,7 +194,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 2)
       id: install-attempt-2
       if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 2 && steps.install-attempt-1.outcome == 'failure'
-      uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
@@ -211,7 +211,7 @@ runs:
     - name: Install ${{ inputs.tool }} (attempt 3)
       id: install-attempt-3
       if: steps.check-installed.outputs.installed != 'true' && fromJSON(inputs.max-retries) >= 3 && steps.install-attempt-1.outcome == 'failure' && steps.install-attempt-2.outcome == 'failure'
-      uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
       with:
         tool: ${{ inputs.tool }}${{ inputs.version && format('@{0}', inputs.version) || '' }}
       continue-on-error: true
