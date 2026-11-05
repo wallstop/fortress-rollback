@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793826827852,
+  "lastUpdate": 1793904785912,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "1e3056cf433220ae19a20ce7a2b177db57d0b011",
-          "message": "Expose unknown-source packet telemetry (#221)\n\n## What changed\n\n- add `SessionMetrics::unknown_source_packets` for decoded messages from\nunregistered endpoints\n- instrument both P2P and spectator receive paths\n- emit one lifetime-bounded warning with the first offending address\n- document the decode boundary and serialize the new counter through the\nJSON metrics API\n\n## Why\n\nUnknown-source traffic was silently discarded, making NAT rebinding,\nstale traffic, and spoofing indistinguishable from pure peer silence.\nThis closes PLAN.md §30.3a and provides the observable prerequisite for\nthe planned `Rebind{peer}` simulation lifecycle.\n\n## Validation\n\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo nextest run --no-capture` — 2,509 passed, 70 skipped\n- `cargo doc --no-deps`\n- adversarial review: zero remaining issues\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A\n- CHANGELOG reviewed: YES\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes touch rollback input retention, session liveness on queue\nexhaustion, and large simulation/network test paths; unknown-source\ncounting alone is low risk but bundled sync-layer and fail-closed\nreceive handling can affect live P2P stability.\n> \n> **Overview**\n> Adds **`SessionMetrics::unknown_source_packets`** and wires P2P and\nspectator receive loops to count decoded messages from addresses that\nare not configured remotes/spectators (or hosts), emit **one\nper-session** `NetworkProtocol` warning naming the first offender, and\nexpose the counter in JSON metrics. Malformed pre-decode datagrams stay\noutside this boundary.\n> \n> Separately hardens **input recovery at the redundancy limit**: full\nrings can **reclaim** only history at or below a **global\nrollback-window floor** from `SyncLayer`, keeping the floor frame in a\n**`reclaimed_floor_input`** side slot; unsafe overlap fails without\nmutating receipt state. **Rollback/synctest construction** and\n**`set_input_delay`** now require `max_prediction + input_delay <\nqueue_length`; remote inputs that cannot be retained trigger\n**fail-closed** disconnect instead of advancing ACK state.\n> \n> **Test/simulation fabric** grows substantially: `SimNet` gains\noptional **Gilbert–Elliott** loss, **IPv4-style fragmentation** loss\n(size-aware), **NAT rebind** on live sockets, and richer link telemetry;\nsimulation **census** and **baseline_sweep** add schedules for those\nfaults, input-window boundaries, and hot-join scenarios. Docs\n(**CHANGELOG**, **migration.md**, design-history) and an unstable\n**`message_metadata`** test hook accompany the behavior changes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n810ca0e01611b7ce16e7cb6888bf69987a51d42d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-11T08:29:49-07:00",
-          "tree_id": "4a148d8682768320805c74bf676c293b9f08042c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/1e3056cf433220ae19a20ce7a2b177db57d0b011"
-        },
-        "date": 1783784047479,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 98,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 135,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 371,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 593,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 857,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 99032,
-            "range": "± 321",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 38108,
-            "range": "± 1350",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3323,6 +3197,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3194,
             "range": "± 217",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab451d28c080138b8a92a578bd0eb38fb7751ae2",
+          "message": "fix: close partition forks and expand consistency evidence (#364)\n\n## Description\n\nThis aggregate change repairs current-main dependency breakage, advances\nthe active consistency-evidence P0, and fixes the split-brain defect\nfound by the new matrix.\n\n- Restore `parking_lot` 0.12 after #359 followed a Loom path dependency\nand changed the root manifest to the Rust-1.95-only 0.13 line without\nsynchronizing all locks. Apply every root MSRV hold to every auxiliary\nCargo updater, with a drift-proof regression test.\n- Supersede stale install-action 2.89.0 update #362 with immutable\nv2.90.1 pins at every use, including the composite installer.\n- Add an expectation-aware partition ledger at N=2/3/4/8/16. It\npreserves complete oracle diagnostics and replay evidence, checks\npre-cut progress and every directed injection, classifies bounded\nrecovery/safe failure/defect/invalid evidence, and runs matched\ncorruption controls.\n- Fix witnessless automatic `ContinueWithout` timeouts so two-endpoint\npartitions cannot commit opposite one-member certificates. Explicit\n`remove_player` and remote Goodbye retain their existing one-survivor\nbehavior; uncertified `Disconnected` events stay suppressed, and\nspectator same-poll Goodbye handling stays consistent.\n- Enforce the complete oracle verdict in the existing healthy cost sweep\nwithout changing the sweep-v3 JSON schema. Publish both matrices through\nnightly artifacts and document exact evidence at `8c8660b`.\n\nThe active plan remains open for reorder, duplication, bursts,\nasymmetry, repeated flaps, poll stalls, exact timing/resource\nmeasurements, and component-scoped majority/minority state evidence.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No new `unwrap()` in production code\n  - No new `expect()` in production code\n  - No new `panic!()` or `todo!()`\n  - New production errors use existing explicit state/error paths\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory (no\nAPI signatures or example behavior required changes)\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Witnessless two-endpoint and multi-handle automatic-timeout\nregressions.\n- Explicit local removal and receiver-side Goodbye compatibility\ncoverage.\n- Spectator same-poll input-plus-Goodbye regression coverage.\n- Hot-join witnessless-timeout terminal-state coverage; obsolete\nauto-drop/rejoin assumptions removed.\n- Dependabot root/child MSRV-rule drift regression.\n- Partition schedule, classifier, replay, premise, terminal-plateau, and\nmatched negative-control coverage.\n\n**Validation performed:**\n\n- `cargo nextest run --no-capture`: **2,981 passed, 73 skipped**.\n- `cargo nextest run --features hot-join --no-fail-fast --no-capture`:\n**3,239 passed, 74 skipped**.\n- Exact nightly release matrices at\n`8c8660bf37341eff246bf85d7913d2e2c6ce0c18`: **2 passed**; 136 cost rows\nplus 24 partition rows.\n- Partition ledger: **5 bounded recoveries, 15 safe failures, 4\nintentional defect controls**; zero replay mismatches, zero premise\nviolations, four typed controls, and a 64-step plateau in every\nsafe-failure row.\n- Exact PR gates: **2 passed**; ten baseline rows match the checked-in\ncost ledger with zero desyncs.\n- `cargo +1.86.0 check --locked --all-targets`: **passed**.\n- `python3 scripts/release/workspace_locks.py check`: **all four\nworkspaces passed**.\n- `cargo update --dry-run`: **zero compatible updates** in every Cargo\nworkspace; only intentional MSRV-held root releases remain outdated.\n- `.venv/bin/pytest scripts/tests -q`: **2,186 passed**.\n- `cargo test --doc -- --nocapture`: **160 passed, 50 ignored**.\n- Rustdoc with `-D warnings`, Actionlint, Markdownlint, plan hygiene,\nchangelog policy, wiki consistency, link checking, doc claims, and\nbranch-explicit agent preflight: **passed**.\n- Final adversarial review after Goodbye and spectator fixes: **zero\nfindings**.\n\n## Related Issues\n\n- Supersedes #362 with the newer install-action release and the required\nmain-lock repair.\n- Advances the active P0 in `PLAN.md`; no open GitHub issues existed\nwhen this work began.",
+          "timestamp": "2026-11-05T10:44:08-08:00",
+          "tree_id": "41ce73583aee3306fd54af4d46ee938429c83570",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ab451d28c080138b8a92a578bd0eb38fb7751ae2"
+        },
+        "date": 1793904785291,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60433,
+            "range": "± 639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 30863,
+            "range": "± 359",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1785,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 114",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2995,
+            "range": "± 230",
             "unit": "ns/iter"
           }
         ]
