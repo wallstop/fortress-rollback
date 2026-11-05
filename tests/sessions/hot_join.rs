@@ -2984,6 +2984,7 @@ fn witnessless_hot_join_timeout_fails_closed_without_rejoin() -> Result<(), Fort
     let mut timeout_events = Vec::new();
     // 2000ms timeout / 50ms poll = 40 polls; advance generously past it.
     for i in 0..120_u32 {
+        host.poll_remote_clients();
         timeout_events.extend(drain_events(&mut host));
         host.add_local_input(PlayerHandle::new(0), StubInput { inp: 3000 + i })?;
         match host.advance_frame() {
@@ -3007,6 +3008,12 @@ fn witnessless_hot_join_timeout_fails_closed_without_rejoin() -> Result<(), Fort
     assert!(
         host.current_frame().as_i32() > frame_at_silence,
         "host must have advanced solo past silence frame {frame_at_silence}"
+    );
+    assert!(
+        timeout_events
+            .iter()
+            .any(|event| matches!(event, FortressEvent::NetworkInterrupted { .. })),
+        "the real protocol timeout must first emit NetworkInterrupted: {timeout_events:?}"
     );
     assert_eq!(host.current_state(), SessionState::Synchronizing);
     assert!(
