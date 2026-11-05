@@ -125,16 +125,17 @@ jobs:
             network-nightly-${{ runner.os }}-cargo-
             network-${{ runner.os }}-cargo-
 
-      - name: Run deterministic baseline full matrix (Linux)
+      - name: Run deterministic baseline and partition matrices (Linux)
         id: baseline-sweep
         if: runner.os == 'Linux'
         continue-on-error: true
         run: |
           rm -rf "$RUNNER_TEMP/fortress-sweep"
           mkdir -p "$RUNNER_TEMP/fortress-sweep"
-          cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(full_matrix_sweep)' --test simulation --no-capture
+          cargo nextest run --profile ci-network-nightly --release --run-ignored ignored-only -E 'test(full_matrix_sweep) | test(partition_sweep_full)' --test simulation --no-capture
         env:
           FORTRESS_SWEEP_OUT: ${{ runner.temp }}/fortress-sweep/full-matrix.jsonl
+          FORTRESS_PARTITION_SWEEP_OUT: ${{ runner.temp }}/fortress-sweep/partition-matrix.jsonl
           FORTRESS_SWEEP_GIT_SHA: ${{ github.sha }}
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -142,12 +143,12 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      - name: Upload deterministic baseline sweep artifact
+      - name: Upload deterministic consistency sweep artifacts
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: baseline-sweep-nightly-results
-          path: ${{ runner.temp }}/fortress-sweep/full-matrix.jsonl
+          name: deterministic-sweep-nightly-results
+          path: ${{ runner.temp }}/fortress-sweep
           if-no-files-found: warn
           retention-days: 30
 
