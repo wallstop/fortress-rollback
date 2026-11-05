@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2716
-# textual-paths=2710
+# symbols=2718
+# textual-paths=2712
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -890,6 +890,7 @@ fortress_rollback::__internal::ConnectionStatus::epoch	struct_field	no-default+a
 fortress_rollback::__internal::ConnectionStatus::last_frame	struct_field	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/messages.rs
 fortress_rollback::__internal::Event	enum	no-default+all-features	no	verification	workspace-verification-api	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
 fortress_rollback::__internal::Event::Disconnected	variant	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
+fortress_rollback::__internal::Event::Goodbye	variant	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
 fortress_rollback::__internal::Event::Incompatible	variant	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
 fortress_rollback::__internal::Event::Incompatible::reason	struct_field	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
 fortress_rollback::__internal::Event::Input	variant	no-default+all-features	no	verification	public-data-shape	hidden-semver-surface	keep-verification-compatibility	-	src/network/protocol/event.rs
@@ -1611,6 +1612,7 @@ fortress_rollback::network::network_stats::NetworkStats::send_queue_len	struct_f
 fortress_rollback::network::protocol	module	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/protocol/mod.rs
 fortress_rollback::network::protocol::Event	alias	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event	src/network/protocol/mod.rs
 fortress_rollback::network::protocol::Event::Disconnected	variant	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event::Disconnected	src/network/protocol/event.rs
+fortress_rollback::network::protocol::Event::Goodbye	variant	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event::Goodbye	src/network/protocol/event.rs
 fortress_rollback::network::protocol::Event::Incompatible	variant	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event::Incompatible	src/network/protocol/event.rs
 fortress_rollback::network::protocol::Event::Incompatible::reason	struct_field	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event::Incompatible::reason	src/network/protocol/event.rs
 fortress_rollback::network::protocol::Event::Input	variant	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::__internal::Event::Input	src/network/protocol/event.rs

@@ -49,8 +49,7 @@ THIRD_PARTY_ACTION_PINS = {
     "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
     "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
     "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
-    "taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0",
-    "taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037",
+    "taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b",
 }
 FORBIDDEN_MUTABLE_ACTION_REFS = {
     "Swatinem/rust-cache@v2",

@@ -41,8 +41,10 @@ where
         /// Connection status snapshot from the packet that carried this input.
         peer_connect_status: Arc<[ConnectionStatus]>,
     },
-    /// The remote client has disconnected.
+    /// The local endpoint detected a timeout or backpressure disconnect.
     Disconnected,
+    /// The remote client explicitly sent a `Goodbye` message.
+    Goodbye,
     /// The session has not received packets from the remote client since `disconnect_timeout` ms.
     NetworkInterrupted { disconnect_timeout: u128 },
     /// Sent only after a `NetworkInterrupted` event, if communication has resumed.
@@ -83,6 +85,7 @@ impl<T: Config> std::fmt::Display for Event<T> {
                 )
             },
             Self::Disconnected => write!(f, "Disconnected"),
+            Self::Goodbye => write!(f, "Goodbye"),
             Self::NetworkInterrupted { disconnect_timeout } => {
                 write!(f, "NetworkInterrupted(timeout={}ms)", disconnect_timeout)
             },
@@ -193,6 +196,13 @@ mod tests {
         let event: Event<TestConfig> = Event::Disconnected;
 
         assert!(matches!(event, Event::Disconnected));
+    }
+
+    #[test]
+    fn event_goodbye_construction() {
+        let event: Event<TestConfig> = Event::Goodbye;
+
+        assert!(matches!(event, Event::Goodbye));
     }
 
     #[test]
@@ -420,6 +430,13 @@ mod tests {
         let event: Event<TestConfig> = Event::Disconnected;
         let display = format!("{}", event);
         assert_eq!(display, "Disconnected");
+    }
+
+    #[test]
+    fn event_display_goodbye() {
+        let event: Event<TestConfig> = Event::Goodbye;
+        let display = format!("{}", event);
+        assert_eq!(display, "Goodbye");
     }
 
     #[test]

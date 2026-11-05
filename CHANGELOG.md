@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** automatic `ContinueWithout` timeouts now fail closed when no independent
+  surviving endpoint can witness the graceful-drop certificate. Two-endpoint partitions no longer
+  commit opposite one-member certificates and fork confirmed history; explicit `remove_player`
+  calls retain the one-survivor removal path.
 - **Pre-existing:** Cargo lockfile refreshes no longer cancel the semver gate before its cold
   dependency build can finish and populate the shared cache.
 - **Pre-existing:** synchronization and disconnect timers now compare monotonic elapsed durations

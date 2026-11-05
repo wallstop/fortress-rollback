@@ -1202,6 +1202,19 @@ impl<T: Config> P2PSession<T> {
         })
     }
 
+    /// Whether another live endpoint can independently witness an automatic
+    /// graceful-drop certificate for `target_addr`.
+    ///
+    /// Explicit application removal deliberately supports a one-member survivor
+    /// certificate. An automatic timeout does not: without another witness,
+    /// isolated endpoints could each certify a different successor history.
+    fn coordinated_drop_has_independent_witness(&self, target_addr: &T::Address) -> bool {
+        self.player_reg
+            .remotes
+            .iter()
+            .any(|(addr, endpoint)| addr != target_addr && endpoint.is_running())
+    }
+
     fn begin_coordinated_drop(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         if let Some(active) = self.coordinated_drop.active.as_ref() {
             if active
@@ -11962,6 +11975,7 @@ impl<T: Config> P2PSession<T> {
         player_handles: Arc<[PlayerHandle]>,
         addr: T::Address,
     ) {
+        let peer_sent_goodbye = matches!(event, Event::Goodbye);
         match event {
             // forward to user
             Event::Synchronizing {
@@ -11995,7 +12009,7 @@ impl<T: Config> P2PSession<T> {
                 self.enqueue_event(FortressEvent::Synchronized { addr });
             },
             // disconnect the player, then forward to user
-            Event::Disconnected => {
+            Event::Disconnected | Event::Goodbye => {
                 // Capture before the hot-join pending-close path or ordinary
                 // disconnect machinery mutates endpoint/status/freeze state.
                 let confirmed_before_disconnect = self.confirmed_frame();
@@ -12104,6 +12118,14 @@ impl<T: Config> P2PSession<T> {
                 match self.player_reg.handles.get(&target_handle) {
                     Some(PlayerType::Remote(_)) => {
                         if self.disconnect_behavior == DisconnectBehavior::ContinueWithout {
+                            if !peer_sent_goodbye
+                                && !self.coordinated_drop_has_independent_witness(&addr)
+                            {
+                                self.enter_fail_closed_disconnect_state_at(
+                                    confirmed_before_disconnect,
+                                );
+                                return;
+                            }
                             if let Err(error) = self.begin_coordinated_drop(target_handle) {
                                 report_violation!(
                                     ViolationSeverity::Error,

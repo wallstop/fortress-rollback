@@ -15,6 +15,7 @@
 //! is bit-for-bit reproducible. `FORTRESS_SWEEP_OUT`, if set, receives the
 //! reports as JSON Lines for offline analysis.
 //!
+use super::harness::artifact::{ArtifactFailure, FailureClass};
 use super::harness::schedule::{Schedule, SimConfig, SCHEDULE_SCHEMA_VERSION};
 use super::harness::{
     run_with_input, PeerWireTotals, RunOptions, RunReport, SimInput, WideStubInput,
@@ -157,6 +158,11 @@ pub struct CellReport {
     /// Confirmed-frame checksum mismatches — the load-bearing invariant. **Any
     /// nonzero value is a real desync and fails the sweep.**
     pub desync_incidents: u64,
+    /// Complete in-memory oracle diagnostics. This is deliberately excluded
+    /// from sweep-v3 JSON: correctness gating must not discard non-checksum
+    /// failures merely because the cost ledger has no failure column.
+    #[serde(skip)]
+    pub oracle_failures: Vec<ArtifactFailure>,
 }
 
 /// Sums one bucket-aligned rollback-depth histogram across peers.
@@ -373,6 +379,15 @@ fn run_cell_with_input<I: SimInput>(params: CellParams) -> CellReport {
         stalls_per_min,
         wait_recommendations: total_wait_recs,
         desync_incidents,
+        oracle_failures: report
+            .verdict
+            .failures
+            .iter()
+            .map(|failure| ArtifactFailure {
+                class: FailureClass::from(failure),
+                details: format!("{failure:?}"),
+            })
+            .collect(),
     }
 }
 
@@ -777,6 +792,13 @@ fn input_width_axis_changes_measured_raw_input_bytes() {
 
 fn assert_cell_health(r: &CellReport) {
     let ctx = || format!("cell {}: {r:?}", r.label);
+    // The cost sweep is a healthy-run oracle too: a zero checksum counter must
+    // never hide a state, harness, telemetry, or liveness failure.
+    assert!(
+        r.oracle_failures.is_empty(),
+        "oracle failure in a clean cell — {}",
+        ctx()
+    );
     // The load-bearing invariant: constant-conditions meshes never desync.
     assert_eq!(r.desync_incidents, 0, "desync in a clean cell — {}", ctx());
     // Liveness: every cell confirms real frames (a stalled mesh would pin near

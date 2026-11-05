@@ -1128,7 +1128,7 @@ impl<T: Config> SpectatorSession<T> {
             if !batch
                 .events
                 .iter()
-                .any(|event| matches!(event, Event::Disconnected))
+                .any(|event| matches!(event, Event::Disconnected | Event::Goodbye))
             {
                 continue;
             }
@@ -2218,7 +2218,7 @@ impl<T: Config> SpectatorSession<T> {
             },
             // disconnect the host, then forward to user. The host is removed by the
             // caller after all events have been handled.
-            Event::Disconnected => {
+            Event::Disconnected | Event::Goodbye => {
                 disconnected_host = Some(host_index);
                 self.enqueue_event(FortressEvent::Disconnected { addr });
             },

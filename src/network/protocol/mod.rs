@@ -2507,7 +2507,7 @@ impl<T: Config> UdpProtocol<T> {
 
     fn on_goodbye(&mut self, _body: Goodbye) {
         if !self.disconnect_event_sent {
-            self.event_queue.push_back(Event::Disconnected);
+            self.event_queue.push_back(Event::Goodbye);
             self.disconnect_event_sent = true;
         }
     }
@@ -4928,7 +4928,7 @@ mod tests {
     }
 
     #[test]
-    fn on_goodbye_emits_exactly_one_disconnect_event() {
+    fn on_goodbye_emits_exactly_one_goodbye_event() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
         protocol.synchronize().unwrap();
@@ -4940,7 +4940,7 @@ mod tests {
 
         let events: Vec<_> = protocol.event_queue.drain(..).collect();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events.first(), Some(Event::Disconnected)));
+        assert!(matches!(events.first(), Some(Event::Goodbye)));
     }
 
     #[test]
@@ -4993,7 +4993,7 @@ mod tests {
         assert!(protocol
             .event_queue
             .iter()
-            .any(|event| matches!(event, Event::Disconnected)));
+            .any(|event| matches!(event, Event::Goodbye)));
     }
 
     #[test]
