@@ -880,6 +880,64 @@ fn p2p_continue_without_late_packets_after_freeze_do_not_mutate_input() -> Resul
 }
 
 #[test]
+fn p2p_continue_without_goodbye_commits_receiver_without_timeout() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (s1, s2, a1, a2) = create_channel_pair();
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_player(PlayerType::Remote(a2), PlayerHandle::new(1))?
+        .start_p2p_session(s1)?;
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .add_player(PlayerType::Remote(a1), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_p2p_session(s2)?;
+
+    synchronize_sessions_deterministic(&mut sess1, &mut sess2, &clock, &SyncConfig::default())
+        .expect("sessions should sync");
+    drain_sync_events(&mut sess1, &mut sess2);
+    let disconnect_started = clock.now();
+
+    sess1.disconnect_player(PlayerHandle::new(1))?;
+    poll_with_advance(&mut sess1, &mut sess2, &clock, 3);
+
+    let events: Vec<_> = sess2.events().collect();
+    let peer_dropped_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                FortressEvent::PeerDropped { handle, addr }
+                    if *handle == PlayerHandle::new(0) && *addr == a1
+            )
+        })
+        .count();
+    assert_eq!(
+        peer_dropped_count, 1,
+        "an explicit Goodbye must commit the receiver-side one-member certificate: {events:?}"
+    );
+    let disconnected_count = events
+        .iter()
+        .filter(|event| matches!(event, FortressEvent::Disconnected { addr } if *addr == a1))
+        .count();
+    assert_eq!(
+        disconnected_count, 1,
+        "an explicit Goodbye must retain the address-level disconnect event: {events:?}"
+    );
+    assert_eq!(sess2.current_state(), SessionState::Running);
+    assert!(
+        clock.now() - disconnect_started < Duration::from_secs(1),
+        "Goodbye must not wait for the default disconnect timeout"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn p2p_continue_without_witnessless_timeout_fails_closed() -> Result<(), FortressError> {
     // A two-endpoint automatic timeout has no independent survivor witness.
     // Unlike an explicit remove_player request, it must not create a one-member

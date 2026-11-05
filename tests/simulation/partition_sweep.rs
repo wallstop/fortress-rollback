@@ -469,11 +469,15 @@ impl RunEvidence {
         }
     }
 
-    fn peer_dropped_count(&self) -> u64 {
+    fn peer_event_count(&self, kind: EventKind) -> u64 {
         self.peer_event_counts
             .iter()
-            .filter(|entry| entry.kind == EventKind::PeerDropped)
+            .filter(|entry| entry.kind == kind)
             .fold(0_u64, |total, entry| total.saturating_add(entry.count))
+    }
+
+    fn peer_dropped_count(&self) -> u64 {
+        self.peer_event_count(EventKind::PeerDropped)
     }
 }
 
@@ -789,6 +793,8 @@ fn classify_safe_failure(
     }
     if !evidence.verdict.violation_allowlist_hits.is_empty()
         || evidence.peer_dropped_count() != 0
+        || (case.scenario == ScenarioKind::PermanentContinue
+            && evidence.peer_event_count(EventKind::Disconnected) != 0)
         || evidence.recovered_within_b != evidence.verdict.recovered_within_b
     {
         return Classification::Defect;
