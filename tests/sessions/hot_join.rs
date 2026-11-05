@@ -2850,40 +2850,16 @@ fn graceful_dropped_slot_is_rejoinable_end_to_end() -> Result<(), FortressError>
 }
 
 // ============================================================================
-// Auto disconnect-timeout drop then rejoin (regression for the activation-frame
-// prediction-skip desync)
+// Witnessless automatic timeout fails closed for a live hot-join slot
 // ============================================================================
 
-/// A hot-join slot that is dropped by the **automatic disconnect timeout** (the
-/// silent-peer path under [`DisconnectBehavior::ContinueWithout`], which
-/// BACKDATES the drop to the peer's last-received frame) is re-armed and a fresh
-/// peer re-joins it from the same address, running in lockstep with the host and
-/// **no desync**.
-///
-/// This is the auto-timeout analogue of
-/// [`graceful_dropped_slot_is_rejoinable_end_to_end`] (which drops via an
-/// explicit `remove_player`). It is the regression guard for a latent
-/// activation-frame bug in the reserved-slot reactivation path:
-///
-/// On reactivation at frame `F = last_saved_frame`, the host is paused at
-/// `current_frame = F + 1`. Before the fix, the host's first input request for
-/// the reactivated handle was for `F + 1`, which anchored its input-queue
-/// prediction at `F + 1` and *skipped* frame `F`. The returning joiner, however,
-/// loads the snapshot at `F` and contributes its first real input for frame `F`;
-/// that input arrived "late" and was silently dropped by the queue's
-/// prediction-frame check, so the host permanently simulated frame `F` with the
-/// *previous* occupant's stale frozen input. Whenever that stale value reduced
-/// to a different game state than the joiner's real frame-`F` input, frame
-/// `F + 1` onward diverged (`DesyncDetected`). The auto-timeout drop's backdating
-/// changes the previous occupant's last-confirmed input enough to break the
-/// game-state coincidence that masks the bug for `remove_player` /
-/// build-time-reserved joins.
-///
-/// The fix re-roots the host's rollback at `F` on reactivation, anchoring the
-/// prediction at `F` so the joiner's real frame-`F` input is accepted and the
-/// standard misprediction -> rollback path reconciles it.
+/// A two-party automatic timeout under [`DisconnectBehavior::ContinueWithout`]
+/// has no independent witness, so it fails closed without a certified drop or
+/// terminal drop events. Later polls cannot reopen that session or re-arm its
+/// old slot. Explicit-removal reactivation remains covered by
+/// [`graceful_dropped_slot_is_rejoinable_end_to_end`].
 #[test]
-fn auto_timeout_dropped_slot_is_rejoinable_without_desync() -> Result<(), FortressError> {
+fn witnessless_hot_join_timeout_fails_closed_without_rejoin() -> Result<(), FortressError> {
     let clock = TestClock::new();
     let bus = RoutingBus::new();
     let host_addr: std::net::SocketAddr = ([127, 0, 0, 1], 20011).into();
@@ -3002,273 +2978,52 @@ fn auto_timeout_dropped_slot_is_rejoinable_without_desync() -> Result<(), Fortre
     );
     let frame_at_silence = host.current_frame().as_i32();
 
-    // ---- Joiner #1 goes SILENT; host auto-drops it on the timeout ---------
-    // Stop polling joiner #1 entirely. Keep the host advancing solo while the
-    // clock crosses the 2000ms disconnect timeout (default). The host's
-    // `status[1].last_frame` is frozen at joiner #1's last input frame, but
-    // `current_frame` keeps climbing — producing the backdating gap.
+    // ---- Joiner #1 goes SILENT; the witnessless timeout fails closed -------
     drop(joiner1);
-
-    // The auto-timeout drop is EXPECTED to emit both `PeerDropped` (graceful
-    // signal) and an address-level `Disconnected` (back-compat). We track the
-    // drop via `PeerDropped`; the drop's own `Disconnected` is expected and is
-    // intentionally NOT counted as a spurious disconnect. (`host_disconnected`
-    // below guards only the join/lockstep phases.)
-    let mut auto_dropped = false;
-    let mut peer_dropped = false;
+    let mut witnessless_timeout = false;
+    let mut timeout_events = Vec::new();
     // 2000ms timeout / 50ms poll = 40 polls; advance generously past it.
-    for _ in 0..120 {
-        host.poll_remote_clients();
-        for e in drain_events(&mut host) {
-            match e {
-                FortressEvent::PeerDropped { handle, .. } if handle == PlayerHandle::new(1) => {
-                    peer_dropped = true;
-                    auto_dropped = true;
-                },
-                FortressEvent::Disconnected { .. } => {
-                    // Expected as part of the auto-drop; also a sufficient drop
-                    // signal if PeerDropped was somehow missed.
-                    auto_dropped = true;
-                },
-                _ => {},
-            }
+    for i in 0..120_u32 {
+        timeout_events.extend(drain_events(&mut host));
+        host.add_local_input(PlayerHandle::new(0), StubInput { inp: 3000 + i })?;
+        match host.advance_frame() {
+            Ok(requests) => host_stub.handle_requests_recording(requests, &mut host_states),
+            Err(FortressError::NotSynchronized) => {
+                witnessless_timeout = true;
+            },
+            Err(err) => return Err(err),
         }
+        timeout_events.extend(drain_events(&mut host));
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
-        if host.current_state() == SessionState::Running {
-            advance_and_record(
-                &mut host,
-                &mut host_stub,
-                PlayerHandle::new(0),
-                3000,
-                &mut host_states,
-            )?;
-        }
-        if auto_dropped {
-            // Advance a few more frames so the backdated rollback (driven by
-            // `self.disconnect_frame`) actually runs and re-confirms the gap.
-            for _ in 0..8 {
-                host.poll_remote_clients();
-                let _ = drain_events(&mut host);
-                clock.advance(POLL_INTERVAL_DETERMINISTIC);
-                if host.current_state() == SessionState::Running {
-                    advance_and_record(
-                        &mut host,
-                        &mut host_stub,
-                        PlayerHandle::new(0),
-                        3100,
-                        &mut host_states,
-                    )?;
-                }
-            }
+        if witnessless_timeout {
             break;
         }
     }
 
     assert!(
-        auto_dropped,
-        "host must auto-drop joiner #1 on the disconnect timeout (Disconnected/PeerDropped)"
+        witnessless_timeout,
+        "host must observe the witnessless disconnect timeout"
     );
-    // Non-vacuity: the host advanced while the joiner was silent, so the drop is
-    // genuinely backdated (current_frame moved past frame_at_silence). This is
-    // what distinguishes the auto-timeout path from `remove_player`.
     assert!(
         host.current_frame().as_i32() > frame_at_silence,
-        "host must have advanced solo past the silence frame {frame_at_silence} (got {}), \
-         so the auto-drop is backdated",
-        host.current_frame()
+        "host must have advanced solo past silence frame {frame_at_silence}"
     );
-    // The auto-drop must take the graceful (re-arm-eligible) path, so it emits
-    // PeerDropped (not just a bare Disconnected).
+    assert_eq!(host.current_state(), SessionState::Synchronizing);
     assert!(
-        peer_dropped,
-        "auto-timeout drop under ContinueWithout must emit PeerDropped (graceful re-arm path)"
+        timeout_events.iter().all(|event| !matches!(
+            event,
+            FortressEvent::PeerDropped { .. } | FortressEvent::Disconnected { .. }
+        )),
+        "an uncertified timeout must not emit PeerDropped or Disconnected: {timeout_events:?}"
     );
 
-    let frame_before_rejoin = host.current_frame().as_i32();
-
-    // ---- Joiner #2 re-joins the SAME (auto-dropped, re-armed) slot --------
-    let mut joiner2 = SessionBuilder::<StubConfig>::new()
-        .with_protocol_config(protocol_config(&clock))
-        .with_num_players(2)?
-        .with_desync_detection_mode(DesyncDetection::On { interval: 2 })
-        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
-        .add_player(PlayerType::Local, PlayerHandle::new(1))?
-        .start_hot_join_session(bus.socket(joiner_addr), host_addr)?;
-    assert_eq!(joiner2.current_state(), SessionState::HotJoining);
-
-    let mut joiner2_stub = GameStub::new();
-    let mut joiner2_states: BTreeMap<i32, StateStub> = BTreeMap::new();
-    let mut host_peer_joined_again = false;
-
-    let snapshot2 = drive_until_joiner_loads_snapshot(
-        &mut host,
-        &mut joiner2,
-        &mut host_stub,
-        &mut joiner2_stub,
-        &mut host_states,
-        &mut joiner2_states,
-        &clock,
-        PlayerHandle::new(0),
-        &mut host_peer_joined_again,
-        &mut host_disconnected,
-    )?;
-
-    // Non-vacuity: the rejoin snapshot is at/after the host's solo-advanced frame
-    // (a genuine re-join after the auto-drop, not a replay of the first join).
-    assert!(
-        snapshot2.as_i32() >= frame_before_rejoin,
-        "rejoin snapshot frame {snapshot2:?} should be at/after the host's solo-advanced frame {frame_before_rejoin}"
-    );
-
-    // Joiner #2's loaded state must byte-equal the host's state at that frame.
-    let host_state_at_snap2 = host_states
-        .get(&snapshot2.as_i32())
-        .copied()
-        .expect("host recorded a state at joiner #2's rejoin snapshot frame");
-    assert_eq!(
-        joiner2_stub.gs, host_state_at_snap2,
-        "joiner #2's loaded state must byte-equal the host's state at the rejoin snapshot frame"
-    );
-
-    // ---- Both advance in lockstep after the rejoin, no desync -------------
-    for i in 0..20_u32 {
-        for _ in 0..3 {
-            host.poll_remote_clients();
-            for e in drain_events(&mut host) {
-                if matches!(e, FortressEvent::PeerJoined { .. }) {
-                    host_peer_joined_again = true;
-                }
-                if matches!(e, FortressEvent::Disconnected { .. }) {
-                    host_disconnected = true;
-                }
-            }
-            joiner2.poll_remote_clients();
-            clock.advance(POLL_INTERVAL_DETERMINISTIC);
-        }
-        if host.current_state() == SessionState::Running {
-            advance_and_record(
-                &mut host,
-                &mut host_stub,
-                PlayerHandle::new(0),
-                4000 + i,
-                &mut host_states,
-            )?;
-        }
-        if joiner2.current_state() == SessionState::Running {
-            // NOTE: StateStub folds inputs by parity. joiner #2 is the RE-JOINING
-            // peer; the slot's frozen value at the rejoin activation frame is
-            // joiner #1's last-confirmed (backdated) input, which we kept EVEN (see
-            // joiner #1's NOTE). We feed joiner #2 ALWAYS-ODD inputs (`5001 + 2*i`)
-            // so that if the reactivation activation-frame fix regresses and the
-            // host folds the stale even frozen value instead of joiner #2's real
-            // odd input, StateStub's parity flips and the state diverges — keeping
-            // this auto-timeout rejoin proof non-vacuous w.r.t. the fix.
-            advance_and_record(
-                &mut joiner2,
-                &mut joiner2_stub,
-                PlayerHandle::new(1),
-                5001 + 2 * i,
-                &mut joiner2_states,
-            )?;
-        }
-    }
-    // Pure-poll drain so the last in-flight inputs/checksums land and are compared.
-    for _ in 0..60 {
+    // Later polls cannot reopen the terminal session or re-arm its old slot.
+    for _ in 0..8 {
         host.poll_remote_clients();
-        for e in drain_events(&mut host) {
-            if matches!(e, FortressEvent::PeerJoined { .. }) {
-                host_peer_joined_again = true;
-            }
-            if matches!(e, FortressEvent::Disconnected { .. }) {
-                host_disconnected = true;
-            }
-        }
-        joiner2.poll_remote_clients();
+        let _ = drain_events(&mut host);
         clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        assert_eq!(host.current_state(), SessionState::Synchronizing);
     }
-
-    // SECOND PeerJoined: the re-armed auto-dropped slot was filled again.
-    assert!(
-        host_peer_joined_again,
-        "host must emit a SECOND PeerJoined when the re-armed auto-dropped slot is re-joined"
-    );
-
-    // The host must NEVER have emitted a spurious Disconnected across the whole
-    // lifecycle (PeerDropped is the only drop signal a graceful drop emits).
-    let tail_host_events = drain_events(&mut host);
-    if tail_host_events
-        .iter()
-        .any(|e| matches!(e, FortressEvent::Disconnected { .. }))
-    {
-        host_disconnected = true;
-    }
-    assert!(
-        !host_disconnected,
-        "host must NOT emit a spurious Disconnected across the auto-drop/rejoin; got {tail_host_events:?}"
-    );
-
-    // No DesyncDetected on either side — the core regression assertion. Before the
-    // fix this fails (DesyncDetected fires on both sides shortly after the rejoin).
-    let joiner2_events = drain_events(&mut joiner2);
-    assert!(
-        !tail_host_events
-            .iter()
-            .any(|e| matches!(e, FortressEvent::DesyncDetected { .. })),
-        "host must not detect a desync after the auto-timeout rejoin; got {tail_host_events:?}"
-    );
-    assert!(
-        !joiner2_events
-            .iter()
-            .any(|e| matches!(e, FortressEvent::DesyncDetected { .. })),
-        "joiner #2 must not detect a desync after the auto-timeout rejoin; got {joiner2_events:?}"
-    );
-
-    // Non-vacuous desync gate: both sides must have verified checksums past the
-    // rejoin snapshot frame (proves the checksum path actually ran and agreed).
-    let host_verified = host
-        .last_verified_frame()
-        .expect("host must verify a checksum frame after the rejoin");
-    let joiner2_verified = joiner2
-        .last_verified_frame()
-        .expect("joiner #2 must verify a checksum frame after the rejoin");
-    assert!(
-        host_verified.as_i32() > snapshot2.as_i32(),
-        "host must verify checksums past the rejoin snapshot frame; verified={host_verified:?}, snapshot={snapshot2:?}"
-    );
-    assert!(
-        joiner2_verified.as_i32() > snapshot2.as_i32(),
-        "joiner #2 must verify checksums past the rejoin snapshot frame; verified={joiner2_verified:?}, snapshot={snapshot2:?}"
-    );
-
-    // CORRECTNESS GATE: every confirmed frame at/after the rejoin snapshot that
-    // both sides recorded must be byte-equal (proves the rollback machinery
-    // reconciled the re-joined peer into one shared simulation — and specifically
-    // that the activation frame's input was applied, not skipped).
-    let min_confirmed = std::cmp::min(
-        host.confirmed_frame().as_i32(),
-        joiner2.confirmed_frame().as_i32(),
-    );
-    assert!(
-        min_confirmed > snapshot2.as_i32(),
-        "both peers should confirm past the rejoin snapshot frame; min_confirmed={min_confirmed}, snapshot={snapshot2:?}"
-    );
-    let mut compared = 0;
-    for (frame, host_state) in &host_states {
-        if *frame < snapshot2.as_i32() || *frame > min_confirmed {
-            continue;
-        }
-        if let Some(joiner_state) = joiner2_states.get(frame) {
-            assert_eq!(
-                host_state, joiner_state,
-                "host and joiner #2 game state must byte-equal at confirmed frame {frame} after the auto-timeout rejoin"
-            );
-            compared += 1;
-        }
-    }
-    assert!(
-        compared >= 5,
-        "expected at least 5 overlapping confirmed frames after the rejoin; got {compared}"
-    );
 
     Ok(())
 }
@@ -3277,7 +3032,7 @@ fn auto_timeout_dropped_slot_is_rejoinable_without_desync() -> Result<(), Fortre
 // Negative (F13): an auto-timeout drop under `Halt` does NOT re-arm the slot
 // ============================================================================
 
-/// The exact inverse of [`auto_timeout_dropped_slot_is_rejoinable_without_desync`]:
+/// The fail-closed counterpart of [`witnessless_hot_join_timeout_fails_closed_without_rejoin`]:
 /// a hot-join-serving host built with [`DisconnectBehavior::Halt`] (instead of
 /// `ContinueWithout`) must NOT re-arm a slot whose peer auto-times-out, and must
 /// halt into [`SessionState::Synchronizing`] instead.
