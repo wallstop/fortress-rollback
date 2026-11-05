@@ -28,7 +28,7 @@ progress during a partition is not evidence of confirmed availability. See the
 
 ## Measured baseline
 
-The rows below use schema v3. At commit `c1cf617`, all ten PR-gate cells matched
+The rows below use schema v3. At commit `8c8660b`, all ten PR-gate cells matched
 `tests/simulation/baselines/sweep-v3.json` bit-for-bit (1,000 steps, seed 1), and the release-mode
 full matrix passed all 136 cells (5,000 steps, seed 1) with zero desyncs and no oracle failures. The 16-player row comes
 from that current full matrix. Sessions are configured for 60 FPS; the harness advances once every
@@ -60,7 +60,7 @@ permits.
 
 ## Partition consistency evidence
 
-Commit `c1cf617` adds a separate, expectation-aware partition ledger. Its 24 fixed-budget rows use
+At commit `8c8660b`, a separate, expectation-aware partition ledger records 24 fixed-budget rows using
 900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 20 uninjected
 rows contain five short-heal bounded recoveries and 15 safe failures: long-heal terminal `Halt`,
 permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended directed link dropped
@@ -75,7 +75,7 @@ needs the component-scoped state oracle tracked in `PLAN.md`.
 Reproduce the partition artifact with:
 
 ```bash
-FORTRESS_SWEEP_GIT_SHA=c1cf6170d683559eabb36b343aa207a807df3d1a \
+FORTRESS_SWEEP_GIT_SHA=8c8660bf37341eff246bf85d7913d2e2c6ce0c18 \
 FORTRESS_PARTITION_SWEEP_OUT=/tmp/partition-matrix.jsonl \
 cargo nextest run --profile ci-network-nightly --release \
   --run-ignored ignored-only -E 'test(partition_sweep_full)' \
