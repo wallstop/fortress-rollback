@@ -12121,7 +12121,6 @@ impl<T: Config> P2PSession<T> {
                                 self.enter_fail_closed_disconnect_state_at(
                                     confirmed_before_disconnect,
                                 );
-                                self.enqueue_event(FortressEvent::Disconnected { addr });
                                 return;
                             }
                             if let Err(error) = self.begin_coordinated_drop(target_handle) {

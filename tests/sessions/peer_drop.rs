@@ -930,8 +930,8 @@ fn p2p_continue_without_witnessless_timeout_fails_closed() -> Result<(), Fortres
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, FortressEvent::Disconnected { .. })),
-        "the terminal timeout must still surface Disconnected: {events:?}"
+            .all(|event| !matches!(event, FortressEvent::Disconnected { .. })),
+        "an uncertified timeout must not surface Disconnected: {events:?}"
     );
     assert_eq!(sess1.current_state(), SessionState::Synchronizing);
 
@@ -1793,8 +1793,8 @@ fn p2p_continue_without_multi_handle_witnessless_timeout_fails_closed() -> Resul
         .filter(|event| matches!(event, FortressEvent::Disconnected { addr } if *addr == addr_b))
         .count();
     assert_eq!(
-        disconnected_count, 1,
-        "expected exactly one Disconnected event for the multi-handle endpoint; got {events:?}"
+        disconnected_count, 0,
+        "an uncertified multi-handle timeout must not emit Disconnected; got {events:?}"
     );
     assert_eq!(sess_a.current_state(), SessionState::Synchronizing);
 
