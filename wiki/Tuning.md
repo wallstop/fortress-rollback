@@ -28,20 +28,20 @@ progress during a partition is not evidence of confirmed availability. See the
 
 ## Measured baseline
 
-The rows below use schema v3. At commit `c143e16`, all ten PR-gate cells matched
+The rows below use schema v3. At commit `c1cf617`, all ten PR-gate cells matched
 `tests/simulation/baselines/sweep-v3.json` bit-for-bit (1,000 steps, seed 1), and the release-mode
-full matrix passed all 136 cells (5,000 steps, seed 1) with zero desyncs. The 16-player row comes
+full matrix passed all 136 cells (5,000 steps, seed 1) with zero desyncs and no oracle failures. The 16-player row comes
 from that current full matrix. Sessions are configured for 60 FPS; the harness advances once every
-16 ms, providing 62.5 update opportunities per virtual second. Runs use input delay 0, max prediction
+16 ms, providing 62.5 update opportunities per virtual second. Runs use input delay 1, max prediction
 8, and deterministic virtual time. Encoded payload demand is measured when Fortress enqueues
 messages and excludes IP/UDP headers; it is not observed transport throughput. Schema v3 also records
 protocol messages enqueued for eventual socket submission per player per second. The clean
 two-player row is 135.8125, including one-time synchronization traffic.
 
 The checked-in gate covers constant loss, RTT, and jitter for the listed two- and four-player cells;
-the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. Neither run covers reordering,
-duplication, bursts, partitions, or poll stalls. Measure each axis with reproducible rows and
-nonzero injection counters before extending the consistency claim.
+the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition evidence below is
+separate. Reordering, duplication, bursts, asymmetry, repeated flaps, and poll stalls still need
+reproducible rows with nonzero injection counters before their consistency claims can expand.
 
 | Players / path | Loss / RTT / jitter | Input | Rollbacks / 100 frames | Rollback p99 | Encoded KiB/s/player | Mean / max confirmation lag | Stalls/min |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -57,6 +57,35 @@ The 32-byte input rows preserve the same rollback and lag results but cost 8.05,
 confirmed through frame 3,292, but its stalls and encoded demand are a capacity warning, not a general
 endorsement of 16-player full mesh. Keep network inputs fixed-width and as small as the game
 permits.
+
+## Partition consistency evidence
+
+Commit `c1cf617` adds a separate, expectation-aware partition ledger. Its 24 fixed-budget rows use
+900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 20 uninjected
+rows contain five short-heal bounded recoveries and 15 safe failures: long-heal terminal `Halt`,
+permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended directed link dropped
+traffic. All 24 rows match their complete replay evidence, not only their trace hashes.
+
+Four matched corruption controls classify as defects with typed state/checksum, peer, and frame
+evidence. The 15 safe-failure rows each retain a 64-step (1.024-second) terminal plateau after a
+useful pre-partition confirmed prefix. This finite observation is not a proof of permanent liveness.
+Odd permanent-`ContinueWithout` rows isolate every peer; two-component majority/minority progress
+needs the component-scoped state oracle tracked in `PLAN.md`.
+
+Reproduce the partition artifact with:
+
+```bash
+FORTRESS_SWEEP_GIT_SHA=c1cf6170d683559eabb36b343aa207a807df3d1a \
+FORTRESS_PARTITION_SWEEP_OUT=/tmp/partition-matrix.jsonl \
+cargo nextest run --profile ci-network-nightly --release \
+  --run-ignored ignored-only -E 'test(partition_sweep_full)' \
+  --test simulation --no-capture
+```
+
+The nightly `deterministic-sweep-nightly-results` artifact includes this ledger as
+`partition-matrix.jsonl`. It records sync steps, recovery anchors, confirmation and rollback metrics,
+wire totals, queue high-water marks, and per-link injection evidence. Host resource use and exact
+recovery/stall durations remain unmeasured rather than zero-filled.
 
 ## Starting configurations
 
