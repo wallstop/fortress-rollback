@@ -29,7 +29,10 @@ leave, kick, or surrender. The legacy `disconnect_player(handle)` always uses ha
 choosing `ContinueWithout` does not make that call graceful.
 
 Every peer should use the same policy and lifecycle entry point. A partition that cannot produce
-the required certificate fails closed instead of inventing a new confirmed history.
+the required certificate fails closed instead of inventing a new confirmed history. Automatic
+timeout requires another live remote endpoint as an independent witness; a two-endpoint partition
+therefore stops both sides rather than committing opposite one-member certificates. Explicit
+`remove_player(handle)` retains its one-survivor path for an application-directed match decision.
 
 ## Timeout presets
 

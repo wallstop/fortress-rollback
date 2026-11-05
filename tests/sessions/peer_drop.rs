@@ -880,9 +880,10 @@ fn p2p_continue_without_late_packets_after_freeze_do_not_mutate_input() -> Resul
 }
 
 #[test]
-fn p2p_continue_without_auto_removes_on_disconnect_timeout() -> Result<(), FortressError> {
-    // Drives the disconnect timeout by stopping one peer's polls while
-    // advancing the test clock past the configured 200ms timeout.
+fn p2p_continue_without_witnessless_timeout_fails_closed() -> Result<(), FortressError> {
+    // A two-endpoint automatic timeout has no independent survivor witness.
+    // Unlike an explicit remove_player request, it must not create a one-member
+    // certificate that lets both isolated endpoints invent different histories.
     let clock = TestClock::new();
     let (s1, s2, a1, a2) = create_channel_pair();
 
@@ -917,29 +918,30 @@ fn p2p_continue_without_auto_removes_on_disconnect_timeout() -> Result<(), Fortr
         clock.advance(Duration::from_millis(20));
     }
 
-    // sess1 should have emitted PeerDropped because the auto-removal path
-    // for ContinueWithout fired.
+    let current_after_timeout = sess1.current_frame();
+    let confirmed_after_timeout = sess1.confirmed_frame();
     let events: Vec<_> = sess1.events().collect();
-    let dropped_count = events
-        .iter()
-        .filter(|e| matches!(e, FortressEvent::PeerDropped { .. }))
-        .count();
     assert!(
-        dropped_count >= 1,
-        "expected at least one PeerDropped event after timeout; got {:?}",
         events
+            .iter()
+            .all(|event| !matches!(event, FortressEvent::PeerDropped { .. })),
+        "a witnessless automatic timeout must not commit a drop: {events:?}"
     );
-
-    // We also expect Disconnected to coexist with PeerDropped in the event
-    // stream (we kept the legacy emission for back-compat).
-    let disconnected_count = events
-        .iter()
-        .filter(|e| matches!(e, FortressEvent::Disconnected { .. }))
-        .count();
     assert!(
-        disconnected_count >= 1,
-        "expected at least one Disconnected event after timeout"
+        events
+            .iter()
+            .any(|event| matches!(event, FortressEvent::Disconnected { .. })),
+        "the terminal timeout must still surface Disconnected: {events:?}"
     );
+    assert_eq!(sess1.current_state(), SessionState::Synchronizing);
+
+    sess1.add_local_input(PlayerHandle::new(0), StubInput { inp: 100 })?;
+    assert!(
+        matches!(sess1.advance_frame(), Err(FortressError::NotSynchronized)),
+        "a witnessless timeout must stop confirmed play"
+    );
+    assert_eq!(sess1.current_frame(), current_after_timeout);
+    assert_eq!(sess1.confirmed_frame(), confirmed_after_timeout);
 
     Ok(())
 }
@@ -1757,11 +1759,11 @@ fn p2p_remove_player_multi_handle_freezes_all_handles_at_address() -> Result<(),
     Ok(())
 }
 
-/// Same multi-handle setup, but trigger auto-disconnect via timeout under
-/// `ContinueWithout`. Both handles must end up frozen and surface
-/// `PeerDropped` events.
+/// Multiple handles at one silent endpoint still have no independent witness
+/// in a two-endpoint session, so automatic timeout must fail closed for both.
 #[test]
-fn p2p_continue_without_multi_handle_auto_drop() -> Result<(), FortressError> {
+fn p2p_continue_without_multi_handle_witnessless_timeout_fails_closed() -> Result<(), FortressError>
+{
     let short_timeout = Duration::from_millis(200);
     let MultiHandleSessions {
         mut sess_a,
@@ -1779,39 +1781,22 @@ fn p2p_continue_without_multi_handle_auto_drop() -> Result<(), FortressError> {
     }
 
     let events: Vec<_> = sess_a.events().collect();
-    let dropped_handles: Vec<PlayerHandle> = events
-        .iter()
-        .filter_map(|e| match e {
-            FortressEvent::PeerDropped { handle, addr } => {
-                assert_eq!(
-                    *addr, addr_b,
-                    "PeerDropped addr must match dropped endpoint"
-                );
-                Some(*handle)
-            },
-            _ => None,
-        })
-        .collect();
-
-    // Both handles share the same address; auto-drop must emit both.
     assert!(
-        dropped_handles.contains(&PlayerHandle::new(1))
-            && dropped_handles.contains(&PlayerHandle::new(2)),
-        "auto-drop on multi-handle endpoint must emit PeerDropped for both handle 1 and handle 2; \
-         got {:?}",
-        dropped_handles
+        events
+            .iter()
+            .all(|event| !matches!(event, FortressEvent::PeerDropped { .. })),
+        "neither handle may commit without an independent witness: {events:?}"
     );
 
-    // Exactly one address-level Disconnected event for the endpoint.
     let disconnected_count = events
         .iter()
-        .filter(|e| matches!(e, FortressEvent::Disconnected { .. }))
+        .filter(|event| matches!(event, FortressEvent::Disconnected { addr } if *addr == addr_b))
         .count();
     assert_eq!(
         disconnected_count, 1,
-        "expected exactly one Disconnected event for the multi-handle endpoint; got {:?}",
-        events
+        "expected exactly one Disconnected event for the multi-handle endpoint; got {events:?}"
     );
+    assert_eq!(sess_a.current_state(), SessionState::Synchronizing);
 
     Ok(())
 }

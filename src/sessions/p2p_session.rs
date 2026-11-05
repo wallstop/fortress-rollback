@@ -1202,6 +1202,19 @@ impl<T: Config> P2PSession<T> {
         })
     }
 
+    /// Whether another live endpoint can independently witness an automatic
+    /// graceful-drop certificate for `target_addr`.
+    ///
+    /// Explicit application removal deliberately supports a one-member survivor
+    /// certificate. An automatic timeout does not: without another witness,
+    /// isolated endpoints could each certify a different successor history.
+    fn coordinated_drop_has_independent_witness(&self, target_addr: &T::Address) -> bool {
+        self.player_reg
+            .remotes
+            .iter()
+            .any(|(addr, endpoint)| addr != target_addr && endpoint.is_running())
+    }
+
     fn begin_coordinated_drop(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         if let Some(active) = self.coordinated_drop.active.as_ref() {
             if active
@@ -12104,6 +12117,13 @@ impl<T: Config> P2PSession<T> {
                 match self.player_reg.handles.get(&target_handle) {
                     Some(PlayerType::Remote(_)) => {
                         if self.disconnect_behavior == DisconnectBehavior::ContinueWithout {
+                            if !self.coordinated_drop_has_independent_witness(&addr) {
+                                self.enter_fail_closed_disconnect_state_at(
+                                    confirmed_before_disconnect,
+                                );
+                                self.enqueue_event(FortressEvent::Disconnected { addr });
+                                return;
+                            }
                             if let Err(error) = self.begin_coordinated_drop(target_handle) {
                                 report_violation!(
                                     ViolationSeverity::Error,

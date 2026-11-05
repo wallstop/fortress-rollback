@@ -1527,6 +1527,12 @@ pub enum DisconnectBehavior {
     /// frozen input — the game layer decides how to handle the gameplay
     /// impact (AI takeover, pause, end the match, etc.).
     ///
+    /// An automatic timeout requires another live remote endpoint as an
+    /// independent certificate witness. Without one (including a two-endpoint
+    /// session's last remote), the session fails closed in
+    /// [`crate::SessionState::Synchronizing`] and emits no `PeerDropped` event;
+    /// isolated endpoints must not certify different successor histories.
+    ///
     /// **Note:** this setting governs only the **automatic** disconnect-timeout
     /// path. The legacy [`P2PSession::disconnect_player`] retains its original
     /// non-graceful semantics regardless of this setting; for an explicit
