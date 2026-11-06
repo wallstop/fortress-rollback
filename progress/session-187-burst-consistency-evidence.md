@@ -70,4 +70,10 @@ Exact-SHA release evidence at `6bef90ae9b6b5165f9a1808bf38be6459886912b`:
 
 ## Delivery
 
-Final PR and hosted-check results are recorded before session closeout.
+Pushed `agent/session-187-burst-consistency` and opened the sole aggregate PR #369. Implementation
+head `914ca785e25385b481197e3e882abc305f9715cd` is cleanly mergeable and fully green: all 96 checks
+completed, with 93 successes, three accepted skips, zero pending, and zero failures. No reviews,
+requested changes, or inline review threads exist. The non-blocking changelog reminder is covered by
+the test/tooling/docs/development-dependency rationale in the PR; Cursor's billing notice requires no
+repository or org-policy change. The paginated issue inventory still contains only the intentionally
+queued P2 Lean experiment #365, with no further page.
