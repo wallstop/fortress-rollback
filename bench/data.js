@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793928444862,
+  "lastUpdate": 1793940858511,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "c371e28b33284f74aedd450e9a3f5e7946283d9d",
-          "message": "Model clock-skewed frame production (#223)\n\n## Summary\n\n- add schema-v15 deterministic 60 Hz frame gating driven by each peer's\nskewed clock\n- execute and nightly-gate a matched one-hour H-SKEW experiment with\nbounded lag, correction duty, and work-amplification evidence\n- preserve schema <=14 lockstep behavior while bounding gated schedules\nto one opportunity per peer per outer step\n- carry progress/cost evidence through trace identity, failure\nartifacts, replay validation, and shrinking\n\n## Findings\n\nAt +0.1% skew, the fast peer receives exactly 216 extra opportunities\nper virtual hour and obeys 213 correction frames with zero stalls.\nConfirmation lag stays flat at 4–5 frames. The experiment also exposes a\nstill-open cost issue: aggregate simulation work rises 13.3% and\nresimulation rises 28.3% versus the exact-clock control. Nightly\nceilings prevent this from worsening while W-TIME follow-up investigates\nit.\n\n## Validation\n\n- `cargo nextest run --features tokio,json --no-capture` — 2,760 passed,\n72 skipped\n- `cargo nextest run --test simulation --no-capture` — 287 passed, 25\nskipped\n- release hour-equivalent H-SKEW control + skew + replay — passed\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` — passed\n- `actionlint .github/workflows/ci-simulation-nightly.yml` — passed\n- agent preflight — passed earlier; final rerun reached a pre-existing\nlong-running doc-claims sort and was stopped after all preceding checks\npassed\n- local adversarial review loop — final verdict: zero issues\n- Cursor round 1 finding fixed in `e74baa2`; exact-head re-review\nrequested\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes the deterministic harness frame loop and trace/artifact\nidentity (schema bumps), but production rollback paths are untouched and\nlegacy lockstep schedules stay default-compatible.\n> \n> **Overview**\n> Adds **schema v15** simulation support so each peer can accrue **60 Hz\nframe opportunities from its own skewed clock**\n(`FrameModel::SkewGated60Hz`), while **lockstep remains the default**\nfor older schedules. The harness now tracks **frame opportunities**,\n**obeyed wait frames**, and up to **12 progress samples**, folds them\ninto trace identity for schema ≥15, and bumps **failure artifacts to\nschema v3** with the same fields plus stricter replay checks.\n> \n> **H-SKEW** is exercised with new fleet tests: a short deterministic\nskew-gated probe and an **ignored hour-equivalent** run (+0.1% → 216\nextra opportunities/hour) that asserts bounded lag, correction duty, and\nwork/resimulation ceilings. **Nightly CI** now runs that experiment\nalongside the sharded fleet. Schedule limits rise (**250k steps**,\nskew-gated cadence validation); shrink can collapse `SkewGated60Hz` when\nunnecessary.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ne2c53ff7fd531a506a708c983e8e47f8a8f97f38. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-11T15:16:33-07:00",
-          "tree_id": "0204b4d3b29b088d3234092e2b82ddab6ae6879e",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/c371e28b33284f74aedd450e9a3f5e7946283d9d"
-        },
-        "date": 1783808466348,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 114,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 164,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 446,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 716,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1035,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 133172,
-            "range": "± 2112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46207,
-            "range": "± 835",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 94",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3179,6 +3053,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5491,
             "range": "± 700",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cab3078685cb9f237a4229512c99aa27f47416f5",
+          "message": "test: add deterministic reorder consistency evidence (#368)\n\n## Description\n\nAdvances the active P0 consistency-evidence matrix with deterministic\nsame-link reorder coverage and refreshes the browser-test dependency\nclosure.\n\n- Add per-directed-link and mesh-global reordered-delivery counters,\nincluding saturating merge and complete replay evidence.\n- Add directed jitter/reorder windows at N=2/3/4/8/16, with exact\ntarget-only injection premises and matched N=2/N=16 in-window\nstate-corruption controls.\n- Independently validate reorder telemetry against actual receiver\npayload order.\n- Bump the partition ledger to schema v3 and document exact-SHA results\nfor the 38-row matrix.\n- Update `wasm-bindgen-test` to 0.3.80 and the matching wasm-bindgen\nCLI/lock closure to 0.2.130.\n\n`PLAN.md` remains active locally with only reordering removed from the\noutstanding axes. No public API, wire format, production Rust behavior,\nor changelog-visible behavior changes.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change\n- [x] 📚 Documentation\n- [ ] ♻️ Refactor\n- [x] 🧪 Test\n- [x] 🔧 CI/Build (test dependency and runner refresh)\n\n## Checklist\n\n### Required\n\n- [x] I have read the contributing guide and repository engineering\npolicy.\n- [x] I followed the zero-panic policy; no production Rust behavior\nchanged.\n- [x] I added regression and matrix coverage for the changed behavior.\n- [x] `cargo fmt && cargo clippy --workspace --all-targets --features\ntokio,json` passed.\n- [x] `cargo nextest run --no-capture` passed: **2,991 passed, 73\nskipped**.\n\n### If Applicable\n\n- [x] Documentation and synchronized wiki pages updated.\n- [x] CHANGELOG reviewed: no entry needed for\ntest/tooling/docs/development-dependency changes.\n- [x] No new compiler warnings.\n\n## Testing\n\n**Tests added/modified:**\n\n- Directed SimNet reorder instrumentation and independent receiver-order\nvalidation.\n- Declared schedule/injection premises and complete replay checks for 38\npartition/duplication/reorder rows.\n- Five reorder recovery bases and two matched in-window state-corruption\ncontrols.\n- Workflow contract coverage for the lock-derived wasm-bindgen CLI\nversion.\n\n**Validation performed:**\n\n- Exact-SHA full release matrix at\n`2da22dc560429c45b6bfdbd9ca0d5652d23dfdbe`: **38 rows**, comprising **15\nbounded recoveries, 15 safe failures, and eight intentional defect\ncontrols**. Every row SHA matched; replay mismatches and premise\nviolations were both zero.\n- Reorder bases at N=2/3/4/8/16 each observed **105 reordered\ndeliveries**, exclusively on 0→1, with per-link sums equal to the global\ncounter. Both in-window controls produced typed peer/frame evidence.\n- `cargo nextest run --no-capture`: **2,991 passed, 73 skipped**.\n- `pytest scripts/tests -q`: **2,191 passed**.\n- `cargo test --doc -- --nocapture`: **160 passed, 50 ignored**.\n- Rustdoc with `-D warnings`, Actionlint, workspace locks, Cargo MSRV\ncheck, compatible-update dry run, links (1,445), wiki consistency,\nMarkdownlint, plan hygiene, and version sync passed locally.\n\n## Related Issues\n\n- Advances the active P0 consistency-evidence matrix; bursts, asymmetry,\nrepeated flaps, poll stalls, exact timing, and host resource evidence\nremain tracked there.\n- #365 remains the separately queued P2 source-linked Lean experiment.",
+          "timestamp": "2026-11-05T20:46:11-08:00",
+          "tree_id": "43d00fac19c83c18575321a0c553cdebf012bbd6",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/cab3078685cb9f237a4229512c99aa27f47416f5"
+        },
+        "date": 1793940857167,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 61118,
+            "range": "± 553",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 30796,
+            "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1695,
+            "range": "± 114",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 118",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3001,
+            "range": "± 184",
             "unit": "ns/iter"
           }
         ]
