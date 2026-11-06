@@ -29,12 +29,11 @@
 //! - `InputQueueConfig::high_latency()` - 256 frames
 //! - `InputQueueConfig::minimal()` - 32 frames
 //!
-//! Z3 proofs use `INPUT_QUEUE_LENGTH = 128` (the default). The proofs verify
-//! properties that are **size-independent** - they hold for any valid queue length.
-//! Specifically:
-//! - Circular buffer arithmetic uses `frame % queue_length` which works for any size
-//! - Index bounds are proven relative to `queue_length`, not a fixed value
-//! - The frame delay constraint (`delay < queue_length`) scales with queue size
+//! Z3 proofs instantiate `INPUT_QUEUE_LENGTH = 128` (the default). They check
+//! mathematical models at that fixed size; they do not directly verify the Rust
+//! implementation or prove properties for every configurable queue length.
+//! Generalizing a property requires a separate symbolic-size proof with explicit
+//! positive-size assumptions.
 //!
 //! ## Running Z3 Tests
 //!
@@ -61,8 +60,8 @@ use z3::{with_z3_config, Config, SatResult, Solver};
 
 /// Constants matching the Fortress Rollback default implementation.
 ///
-/// These use the default `InputQueueConfig::standard()` values.
-/// The proofs are size-independent and hold for any `queue_length >= 2`.
+/// These use the default `InputQueueConfig::standard()` values. Each proof is
+/// instantiated at these constants rather than quantifying over queue sizes.
 const INPUT_QUEUE_LENGTH: i64 = 128;
 const MAX_FRAME_DELAY: i64 = INPUT_QUEUE_LENGTH - 1;
 const NULL_FRAME: i64 = -1;
@@ -463,7 +462,7 @@ fn z3_proof_frame_comparison_transitive() {
 /// - `frame`: A non-negative frame number
 ///
 /// # Preconditions (Assumptions)
-/// - frame >= 0 (Frame type invariant, enforced by Frame::new())
+/// - frame >= 0 (a model assumption, not a `Frame::new()` validation guarantee)
 ///
 /// # Property
 /// 0 <= (frame % INPUT_QUEUE_LENGTH) < INPUT_QUEUE_LENGTH
@@ -475,8 +474,8 @@ fn z3_proof_frame_comparison_transitive() {
 ///
 /// # Limitations
 /// - Z3 modulo semantics: This proof requires frame >= 0 because Z3's modulo
-///   with negative numbers may differ from Rust's behavior. Production code
-///   uses Frame type which enforces non-negative values.
+///   with negative numbers may differ from Rust's behavior. `Frame` permits
+///   negative values; production indexing APIs reject them separately.
 #[test]
 fn z3_proof_circular_buffer_index_valid() {
     let cfg = Config::new();
