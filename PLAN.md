@@ -10,7 +10,7 @@
    [consistency and availability contract](docs/tuning.md#consistency-and-availability-contract),
    [investigation](.agents/skills/investigation/SKILL.md), and
    [network chaos](.agents/skills/network-chaos-testing/SKILL.md). Extend the expectation-aware partition ledger to
-   cover asymmetry, repeated flap, and poll stalls at N=2/3/4/8/16, using fixed seed
+   cover repeated flap and poll stalls at N=2/3/4/8/16, using fixed seed
    and compute budgets. **Exit:** a reproducible ledger records first divergence, sync/recovery time, confirmation
    lag, stall duration, rollback work, bytes/packets, and resource use; replay evidence matches, injection counters
    are nonzero, negative controls fail, and every result is classified as safe failure, bounded recovery, or defect.

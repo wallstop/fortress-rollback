@@ -40,7 +40,7 @@ two-player row is 135.8125, including one-time synchronization traffic.
 
 The checked-in gate covers constant loss, RTT, and jitter for the listed two- and four-player cells;
 the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition, duplication,
-reordering, and burst-loss evidence below is separate. Asymmetry, repeated flaps, and poll stalls
+reordering, burst-loss, and asymmetry evidence below is separate. Repeated flaps and poll stalls
 still need reproducible rows with nonzero injection counters before their consistency claims can expand.
 
 | Players / path | Loss / RTT / jitter | Input | Rollbacks / 100 frames | Rollback p99 | Encoded KiB/s/player | Mean / max confirmation lag | Stalls/min |
@@ -58,33 +58,37 @@ confirmed through frame 3,292, but its stalls and encoded demand are a capacity 
 endorsement of 16-player full mesh. Keep network inputs fixed-width and as small as the game
 permits.
 
-## Partition, duplication, reordering, and burst-loss consistency evidence
+## Partition and directed-fault consistency evidence
 
-At commit `6bef90a`, a separate, expectation-aware schema-v4 ledger records 45 fixed-budget rows using
-900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 35 rows without
-state/checksum corruption contain 20 bounded recoveries—five short-heal partitions, five directed
-duplication windows, five directed reordering windows, and five directed burst-loss windows—and 15
-safe failures: long-heal terminal `Halt`, permanent `Halt`, and permanent uncertified
-`ContinueWithout`. Every intended partition link dropped traffic. Each directed fault window affected
-only link 0→1, with nonzero per-link counters matching the mesh-global total. Reordering uses
-deterministic jitter and counts a copy only when it arrives after a later-scheduled copy on the same
-link. Burst loss uses a seeded 0.05 per-send start probability and length three; every row observed
-eight starts and an actual three-input loss run. Independent receiver-order and payload-loss tests
-validate both instruments. All 45 rows match their complete replay evidence, not only their trace
-hashes.
+At commit `726b25f`, a separate, expectation-aware schema-v5 ledger records 52 fixed-budget rows using
+900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 40 rows without
+state/checksum corruption contain 25 bounded recoveries—five each for short-heal partitions, directed
+duplication, reordering, burst loss, and asymmetric delay—and 15 safe failures: long-heal terminal
+`Halt`, permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended partition link
+dropped traffic. Each directed fault window affected only link 0→1, with nonzero per-link counters
+matching the mesh-global total. Reordering uses deterministic jitter and counts a copy only when it
+arrives after a later-scheduled copy on the same link. Burst loss uses a seeded 0.05 per-send start
+probability and length three; every row observed eight starts and an actual three-input loss run.
 
-Ten matched corruption controls classify as defects with typed state/checksum, peer, and frame
-evidence. The duplication, reordering, and burst-loss controls at N=2 and N=16 inject state corruption
-at frame 120, inside the fault window, and bound detection by the confirmed prefix at healing. The 15
-safe-failure rows each retain a 64-step (1.024-second) terminal plateau after a useful pre-partition
-confirmed prefix. This finite observation is not a proof of permanent liveness. Odd
-permanent-`ContinueWithout` rows isolate every peer; two-component majority/minority progress needs
-the component-scoped state oracle tracked in `PLAN.md`.
+Asymmetric delay applies 200 ms only to 0→1 from step 100 through step 180; the reverse direction stays
+clean. The matrix counted 170 delayed copies at N=2 and 132 at each larger size. At healing, new clean
+sends legitimately overtake old delayed traffic, producing 26 directed reorder observations at N=2 and
+22 at each larger size. Independent timing, receiver-order, payload-loss, and delayed-duplication tests
+validate direction, virtual-time boundaries, and per-copy instrumentation. All 52 rows match their
+complete replay evidence, not only their trace hashes.
 
-Reproduce the partition, duplication, reordering, and burst-loss artifact with:
+Twelve matched corruption controls classify as defects with typed state/checksum, peer, and frame
+evidence. The directed-fault controls at N=2 and N=16 inject state corruption at frame 120, inside the
+fault window, and bound detection by the confirmed prefix at healing. The 15 safe-failure rows each
+retain a 64-step (1.024-second) terminal plateau after a useful pre-partition confirmed prefix. This
+finite observation is not a proof of permanent liveness. Odd permanent-`ContinueWithout` rows isolate
+every peer; two-component majority/minority progress needs the component-scoped state oracle tracked
+in `PLAN.md`.
+
+Reproduce the partition and directed-fault artifact with:
 
 ```bash
-FORTRESS_SWEEP_GIT_SHA=6bef90ae9b6b5165f9a1808bf38be6459886912b \
+FORTRESS_SWEEP_GIT_SHA=726b25f47fb51213c71a8ebcbb47b07dfa7757f1 \
 FORTRESS_PARTITION_SWEEP_OUT=/tmp/partition-matrix.jsonl \
 cargo nextest run --profile ci-network-nightly --release \
   --run-ignored ignored-only -E 'test(partition_sweep_full)' \
