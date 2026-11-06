@@ -607,7 +607,7 @@ jobs:
         if: matrix.target == 'wasm32-unknown-unknown'
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
-          tool: wasm-bindgen-cli@0.2.127
+          tool: wasm-bindgen-cli@0.2.130
 
       - name: Check WASM build (no default features)
         run: cargo check --target ${{ matrix.target }} --no-default-features
