@@ -39,8 +39,8 @@ protocol messages enqueued for eventual socket submission per player per second.
 two-player row is 135.8125, including one-time synchronization traffic.
 
 The checked-in gate covers constant loss, RTT, and jitter for the listed two- and four-player cells;
-the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition evidence below is
-separate. Reordering, duplication, bursts, asymmetry, repeated flaps, and poll stalls still need
+the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition and duplication
+evidence below is separate. Reordering, bursts, asymmetry, repeated flaps, and poll stalls still need
 reproducible rows with nonzero injection counters before their consistency claims can expand.
 
 | Players / path | Loss / RTT / jitter | Input | Rollbacks / 100 frames | Rollback p99 | Encoded KiB/s/player | Mean / max confirmation lag | Stalls/min |
@@ -58,24 +58,28 @@ confirmed through frame 3,292, but its stalls and encoded demand are a capacity 
 endorsement of 16-player full mesh. Keep network inputs fixed-width and as small as the game
 permits.
 
-## Partition consistency evidence
+## Partition and duplication consistency evidence
 
-At commit `8c8660b`, a separate, expectation-aware partition ledger records 24 fixed-budget rows using
-900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 20 uninjected
-rows contain five short-heal bounded recoveries and 15 safe failures: long-heal terminal `Halt`,
-permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended directed link dropped
-traffic. All 24 rows match their complete replay evidence, not only their trace hashes.
+At commit `fbbe1d5`, a separate, expectation-aware ledger records 31 fixed-budget rows using 900
+virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 25 rows without
+state/checksum corruption contain ten bounded recoveries—five short-heal partitions and five directed
+duplication windows—and 15 safe failures: long-heal terminal `Halt`, permanent `Halt`, and permanent
+uncertified `ContinueWithout`. Every intended partition link dropped traffic. Each duplication window
+affected only directed link 0→1, with nonzero per-link counters matching the mesh-global total. All
+31 rows match their complete replay evidence, not only their trace hashes.
 
-Four matched corruption controls classify as defects with typed state/checksum, peer, and frame
-evidence. The 15 safe-failure rows each retain a 64-step (1.024-second) terminal plateau after a
-useful pre-partition confirmed prefix. This finite observation is not a proof of permanent liveness.
-Odd permanent-`ContinueWithout` rows isolate every peer; two-component majority/minority progress
-needs the component-scoped state oracle tracked in `PLAN.md`.
+Six matched corruption controls classify as defects with typed state/checksum, peer, and frame
+evidence. The duplication controls at N=2 and N=16 inject state corruption at frame 120, inside the
+fault window, and bound detection by the confirmed prefix at healing. The 15 safe-failure rows each
+retain a 64-step (1.024-second) terminal plateau after a useful pre-partition confirmed prefix. This
+finite observation is not a proof of permanent liveness. Odd permanent-`ContinueWithout` rows isolate
+every peer; two-component majority/minority progress needs the component-scoped state oracle tracked
+in `PLAN.md`.
 
-Reproduce the partition artifact with:
+Reproduce the partition and duplication artifact with:
 
 ```bash
-FORTRESS_SWEEP_GIT_SHA=8c8660bf37341eff246bf85d7913d2e2c6ce0c18 \
+FORTRESS_SWEEP_GIT_SHA=fbbe1d5b3d097623cbdff3a454a0f6b33c93ee1d \
 FORTRESS_PARTITION_SWEEP_OUT=/tmp/partition-matrix.jsonl \
 cargo nextest run --profile ci-network-nightly --release \
   --run-ignored ignored-only -E 'test(partition_sweep_full)' \
