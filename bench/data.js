@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793904785912,
+  "lastUpdate": 1793928444862,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "69f5c51cf3ab7e5559ac91fbaaed31df809f7a46",
-          "message": "Model bounded bandwidth queueing (#222)\n\n## What changed\n\n- add schema-v14 deterministic per-directed-link token-bucket bandwidth\nand bounded tail-drop queueing to `SimNet`\n- bound queued metadata by bytes, per-link reservations, and\nwhole-fabric reservations\n- preserve backlog ordering across policy replacement, `HealAll`, and\nNAT rebind\n- add global/directional trace telemetry, schema validation, serde\ncoverage, and shrinker support\n- add a matched two-peer census row proving queue growth, bounded tail\ndrop, asymmetric wait recommendations, deterministic replay, and bounded\nrecovery\n\n## Why\n\nThe hardening plan could model delay, loss, fragmentation, and reliable\nHOL stalls, but not constrained uplinks or bufferbloat. That left\nH-BLOAT and the bandwidth/fragmentation interaction structurally\nuntestable.\n\nThis PR establishes the bounded deterministic primitive and first\npremise-asserted data without claiming the still-open H-BLOAT\nfeedback-loop verdict.\n\n## Validation\n\n- `cargo nextest run --features tokio,json,hot-join --no-capture` —\n3,003 passed, 71 intentionally skipped\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- two independent adversarial review loops, both final zero-issue\nverdicts\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Large new shaper state machine in shared test infrastructure affects\ndeterministic replay and trace hashes, but changes stay in\nsimulation/test code rather than production rollback paths.\n> \n> **Overview**\n> Adds optional **token-bucket bandwidth** with **bounded tail-drop\nqueueing** on directed links in the test `SimNet`, bumping simulation\nschedules to **schema v14**.\n> \n> `LinkPolicy` gains `BandwidthPolicy` (rate, burst, queue capacity)\nwith caps on burst/queue bytes and reservation counts. Sends run through\nuplink shaping **before** loss, fragmentation, and duplication; delivery\ntime is `shaped_departure + delay`. Oversize payloads, full queues,\nreservation caps, and unrepresentable deadlines fail closed with\ndedicated stats. **Policy swap**, **`HealAll`**, and **NAT rebind** keep\nor move backlog so new traffic cannot jump ahead of admitted shaping.\n> \n> Telemetry is wired through `SimLinkStats`, `SimNetStats`, harness\n`TraceNetStats`, schedule validation, and the failure shrinker\n(bandwidth stripped as its own axis). Extensive unit tests cover queue\ndelay, fractional refill, horizon drain after disabling shaping, and\nrebind behavior; a **census** row asserts queue growth, tail drops,\nasymmetric wait recommendations, replay identity, and recovery on a\nconstrained 0→1 link.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n6015b9568508007f9bf61880b5ca6856bcc9f386. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-11T11:53:53-07:00",
-          "tree_id": "3a554db434118dbaed75f2c118c821c4d6122003",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/69f5c51cf3ab7e5559ac91fbaaed31df809f7a46"
-        },
-        "date": 1783796317146,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 113,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 165,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 471,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 754,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1089,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 139306,
-            "range": "± 5439",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 44766,
-            "range": "± 383",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 86",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3251,6 +3125,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2995,
             "range": "± 230",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1e2d8e2825c733a8fe1b2fe48076193621e4a0ce",
+          "message": "test: add duplication evidence and repair verification driver (#367)\n\n## Description\n\nAdvances the active consistency-evidence P0 with deterministic\ndirected-duplication rows and closes verification-tooling gaps found\nduring the issue/dependency review.\n\n- Add per-directed-link duplication counters and exact target-only\ninjection premises.\n- Add duplication recovery rows at N=2/3/4/8/16 plus matched in-window\nN=2/N=16 state-corruption controls.\n- Include the new counters in complete replay comparison and document\nexact-SHA results for the 31-row matrix.\n- Make `verify-all.sh` run the implemented Z3 suite in default and\nparallel modes, propagate Z3 failures, and restore parallel TLA+/Kani\nresults from background subshells.\n- Correct verification documentation about Z3 model scope, fixed\nqueue-size assumptions, negative frames, and the existing\nruntime-to-TLA+ handshake trace refinement.\n- Refresh compatible Cargo lockfiles in all four workspaces; remaining\ndirect upgrades are intentionally MSRV-held.\n\n`PLAN.md` remains active locally with only duplication removed from the\noutstanding axes. No public API, wire format, production Rust behavior,\nor changelog-visible behavior changes.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change\n- [x] 📚 Documentation\n- [ ] ♻️ Refactor\n- [x] 🧪 Test\n- [x] 🔧 CI/Build (verification tooling and dependency locks)\n\n## Checklist\n\n### Required\n\n- [x] I have read the contributing guide and repository engineering\npolicy.\n- [x] I followed the zero-panic policy; no production Rust behavior\nchanged.\n- [x] I added regression and matrix coverage for the changed behavior.\n- [x] `cargo fmt && cargo clippy --workspace --all-targets --features\ntokio,json` passed.\n- [x] `cargo nextest run --no-capture` passed: **2,986 passed, 73\nskipped**.\n\n### If Applicable\n\n- [x] Documentation and synchronized wiki pages updated.\n- [x] CHANGELOG reviewed: no entry needed for\ntest/tooling/docs/compatible-lock changes.\n- [x] No new compiler warnings.\n\n## Testing\n\n**Tests added/modified:**\n\n- Directed SimNet duplication and saturating counter-merge tests.\n- Declared schedule/injection premises and complete replay checks for 31\npartition/duplication rows.\n- Five fake-tool regressions for default/parallel Z3 execution, Z3\nfailure propagation, and parallel TLA+/Kani failure propagation.\n- Z3 documentation/comment alignment; no proof expectations weakened.\n\n**Validation performed:**\n\n- Exact-SHA full release matrix at\n`fbbe1d5b3d097623cbdff3a454a0f6b33c93ee1d`: **31 rows**, comprising **10\nbounded recoveries, 15 safe failures, and six intentional defect\ncontrols**. Every row SHA matched; replay mismatches and premise\nviolations were both zero.\n- Five duplication bases injected 174 duplicate sends each, only on 0→1,\nwith per-link sums equal to the global counter. N=2/N=16 in-window state\ncontrols produced typed peer/frame evidence.\n- `cargo test --test verification --features z3-verification-bundled --\nz3 --nocapture`: **65 passed**.\n- `pytest scripts/tests -q`: **2,191 passed**.\n- `cargo test --doc -- --nocapture`: **160 passed, 50 ignored**.\n- Rustdoc with `-D warnings`, Ruff, shell portability, workspace-lock\nchecks, Cargo MSRV check, links (1,444), doc claims, wiki consistency,\nMarkdownlint, plan hygiene, and branch-explicit agent preflight:\n**passed**.\n- `cargo update --dry-run`: zero remaining compatible updates. Latest\n`main` at `ab451d2`: **all 15 push workflows succeeded**.\n\n## Related Issues\n\n- #365 was investigated and closed separately with its bounded\nLean/Aeneas feasibility result.\n- Advances the active P0 consistency-evidence matrix; reorder, bursts,\nasymmetry, repeated flaps, poll stalls, exact timing, and host resource\nevidence remain tracked there.",
+          "timestamp": "2026-11-05T17:19:02-08:00",
+          "tree_id": "6875ac9f4756ffd772b51399b24841761da34f1a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/1e2d8e2825c733a8fe1b2fe48076193621e4a0ce"
+        },
+        "date": 1793928444012,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 25457,
+            "range": "± 624",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 15228,
+            "range": "± 320",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 455,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 562,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5491,
+            "range": "± 700",
             "unit": "ns/iter"
           }
         ]
