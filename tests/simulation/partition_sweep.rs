@@ -855,8 +855,20 @@ fn common_premise_violations(
             .map_or(0, |entry| entry.count);
         if max_targeted_run < 3 {
             violations.push(format!(
-                "directed burst premise lacks an actual 0->1 input-loss run of length 3 (maximum {max_targeted_run})"
+                "directed burst premise requires a maximum actual 0->1 input-loss run of at least length 3 (maximum {max_targeted_run}); back-to-back bursts may coalesce"
             ));
+        }
+        let burst_events = evidence.net.burst_loss_events;
+        if burst_events > 0 {
+            let completed_bursts = burst_events.saturating_sub(1);
+            let drop_floor_exclusive = 3_u64.saturating_mul(completed_bursts);
+            let drop_ceiling_inclusive = 3_u64.saturating_mul(burst_events);
+            let policy_drops = evidence.net.dropped_by_policy;
+            if policy_drops <= drop_floor_exclusive || policy_drops > drop_ceiling_inclusive {
+                violations.push(format!(
+                    "global policy drops {policy_drops} are inconsistent with {burst_events} burst-loss events: expected {drop_floor_exclusive} < drops <= {drop_ceiling_inclusive}; HealAll may truncate only the final burst"
+                ));
+            }
         }
     }
     violations

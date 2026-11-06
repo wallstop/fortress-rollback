@@ -2642,27 +2642,44 @@ mod tests {
             *slot = true;
         }
         let independently_dropped = delivered.iter().filter(|delivered| !**delivered).count();
-        let mut current_loss_run = 0_usize;
-        let mut max_loss_run = 0_usize;
-        for was_delivered in delivered {
-            if was_delivered {
-                current_loss_run = 0;
-            } else {
-                current_loss_run += 1;
-                max_loss_run = max_loss_run.max(current_loss_run);
-            }
+        let mut loss_runs = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = delivered[cursor..]
+            .iter()
+            .position(|was_delivered| !was_delivered)
+        {
+            let start = cursor + relative_start;
+            let end = delivered[start..]
+                .iter()
+                .position(|was_delivered| *was_delivered)
+                .map_or(delivered.len(), |relative_end| start + relative_end);
+            loss_runs.push(start..end);
+            cursor = end;
         }
         assert!(
-            max_loss_run >= 3,
-            "the deterministic partial-burst stream must contain an actual loss run of at least three"
+            !loss_runs.is_empty(),
+            "the deterministic partial-burst stream must contain actual loss runs"
         );
+        let mut expected_burst_starts = 0_u64;
+        for run in &loss_runs {
+            let run_len = run.end - run.start;
+            assert!(
+                run_len % 3 == 0 || run.end == delivered.len(),
+                "missing payloads must form exact three-packet bursts, except a possibly truncated final burst; got {run_len} at {}..{}",
+                run.start,
+                run.end
+            );
+            expected_burst_starts =
+                expected_burst_starts.saturating_add(u64::try_from(run_len.div_ceil(3)).unwrap());
+        }
+        let independently_dropped = u64::try_from(independently_dropped).unwrap();
 
         let stats = net.stats();
         let link_stats = net.link_stats();
         let targeted = link_stats[&(addr(1), addr(2))];
-        assert_eq!(stats.dropped_by_policy, independently_dropped as u64);
-        assert!(targeted.burst_loss_events > 0);
-        assert_eq!(stats.burst_loss_events, targeted.burst_loss_events);
+        assert_eq!(stats.dropped_by_policy, independently_dropped);
+        assert_eq!(stats.burst_loss_events, expected_burst_starts);
+        assert_eq!(targeted.burst_loss_events, expected_burst_starts);
         assert_eq!(
             link_stats[&(addr(2), addr(1))].burst_loss_events,
             0,
