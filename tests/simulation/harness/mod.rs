@@ -721,6 +721,8 @@ pub struct TraceNetStats {
     pub duplicated: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub reordered_deliveries: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub base_delay_applications: u64,
     pub held: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub gilbert_elliott_good_to_bad: u64,
@@ -792,6 +794,7 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             dropped_unattached: stats.dropped_unattached,
             duplicated: stats.duplicated,
             reordered_deliveries: stats.reordered_deliveries,
+            base_delay_applications: stats.base_delay_applications,
             held: stats.held,
             gilbert_elliott_good_to_bad: stats.gilbert_elliott_good_to_bad,
             gilbert_elliott_bad_to_good: stats.gilbert_elliott_bad_to_good,
@@ -4037,6 +4040,7 @@ mod tests {
         assert!(!object.keys().any(|key| key.starts_with("fragmentation")));
         assert!(!object.keys().any(|key| key.starts_with("bandwidth")));
         assert!(!object.contains_key("burst_loss_events"));
+        assert!(!object.contains_key("base_delay_applications"));
         let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
         assert_eq!(legacy_back, TraceNetStats::default());
 
@@ -4084,6 +4088,18 @@ mod tests {
             burst_stats
         );
         changed.net = burst_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+
+        let delay_stats = TraceNetStats {
+            base_delay_applications: 2,
+            ..TraceNetStats::default()
+        };
+        let delay_json = serde_json::to_vec(&delay_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&delay_json).unwrap(),
+            delay_stats
+        );
+        changed.net = delay_stats;
         assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
 
         let fragmentation_stats = TraceNetStats {

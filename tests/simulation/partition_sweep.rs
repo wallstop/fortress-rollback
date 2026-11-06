@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-const PARTITION_LEDGER_SCHEMA: u32 = 4;
+const PARTITION_LEDGER_SCHEMA: u32 = 5;
 const SEED: u64 = 0x5041_5254_4954_494F;
 const STEPS: u32 = 900;
 const CUT_STEP: u32 = 100;
@@ -48,10 +48,11 @@ enum ScenarioKind {
     Duplication,
     Reorder,
     BurstLoss,
+    AsymmetricDelay,
 }
 
 impl ScenarioKind {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::ShortHealContinue,
         Self::LongHealHalt,
         Self::PermanentHalt,
@@ -59,6 +60,7 @@ impl ScenarioKind {
         Self::Duplication,
         Self::Reorder,
         Self::BurstLoss,
+        Self::AsymmetricDelay,
     ];
 
     const fn label(self) -> &'static str {
@@ -70,14 +72,17 @@ impl ScenarioKind {
             Self::Duplication => "duplication",
             Self::Reorder => "reorder",
             Self::BurstLoss => "burst-loss",
+            Self::AsymmetricDelay => "asymmetric-delay",
         }
     }
 
     const fn heal_step(self) -> Option<u32> {
         match self {
-            Self::ShortHealContinue | Self::Duplication | Self::Reorder | Self::BurstLoss => {
-                Some(SHORT_HEAL_STEP)
-            },
+            Self::ShortHealContinue
+            | Self::Duplication
+            | Self::Reorder
+            | Self::BurstLoss
+            | Self::AsymmetricDelay => Some(SHORT_HEAL_STEP),
             Self::LongHealHalt => Some(LONG_HEAL_STEP),
             Self::PermanentHalt | Self::PermanentContinue => None,
         }
@@ -89,16 +94,19 @@ impl ScenarioKind {
             | Self::PermanentContinue
             | Self::Duplication
             | Self::Reorder
-            | Self::BurstLoss => DropPolicy::ContinueWithout,
+            | Self::BurstLoss
+            | Self::AsymmetricDelay => DropPolicy::ContinueWithout,
             Self::LongHealHalt | Self::PermanentHalt => DropPolicy::Halt,
         }
     }
 
     const fn base_expectation(self) -> Expectation {
         match self {
-            Self::ShortHealContinue | Self::Duplication | Self::Reorder | Self::BurstLoss => {
-                Expectation::BoundedRecovery
-            },
+            Self::ShortHealContinue
+            | Self::Duplication
+            | Self::Reorder
+            | Self::BurstLoss
+            | Self::AsymmetricDelay => Expectation::BoundedRecovery,
             Self::LongHealHalt | Self::PermanentHalt | Self::PermanentContinue => {
                 Expectation::SafeFailure
             },
@@ -208,12 +216,14 @@ fn controls(n_players: usize) -> Vec<SweepCase> {
             state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::AsymmetricDelay, IN_WINDOW_CORRUPTION_FRAME),
         ],
         16 => vec![
             state(ScenarioKind::PermanentHalt, CORRUPTION_FRAME),
             state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::AsymmetricDelay, IN_WINDOW_CORRUPTION_FRAME),
         ],
         _ => Vec::new(),
     }
@@ -238,11 +248,14 @@ fn full_cases() -> Vec<SweepCase> {
 /// partition rows use a two-component bisection. Odd permanent-ContinueWithout
 /// rows use singleton isolation: a bisection would let a majority commit and
 /// continue, which needs the component-scoped oracle left to the CAP/membership
-/// plan. Directed duplication, reordering, and burst loss have no blocked-link premise.
+/// plan. Directed duplication, reordering, burst loss, and delay have no blocked-link premise.
 fn intended_blocked_links(n_players: usize, scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
     if matches!(
         scenario,
-        ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
+        ScenarioKind::Duplication
+            | ScenarioKind::Reorder
+            | ScenarioKind::BurstLoss
+            | ScenarioKind::AsymmetricDelay
     ) {
         return BTreeSet::new();
     }
@@ -275,8 +288,38 @@ fn intended_reorder_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
     }
 }
 
+fn intended_reorder_delivery_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if matches!(
+        scenario,
+        ScenarioKind::Reorder | ScenarioKind::AsymmetricDelay
+    ) {
+        BTreeSet::from([(0, 1)])
+    } else {
+        BTreeSet::new()
+    }
+}
+
 fn intended_burst_loss_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
     if scenario == ScenarioKind::BurstLoss {
+        BTreeSet::from([(0, 1)])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn intended_asymmetric_delay_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if scenario == ScenarioKind::AsymmetricDelay {
+        BTreeSet::from([(0, 1)])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn intended_base_delay_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if matches!(
+        scenario,
+        ScenarioKind::Reorder | ScenarioKind::AsymmetricDelay
+    ) {
         BTreeSet::from([(0, 1)])
     } else {
         BTreeSet::new()
@@ -295,6 +338,13 @@ fn burst_loss_policy() -> LinkPolicy {
     LinkPolicy {
         burst_rate: 0.05,
         burst_len: 3,
+        ..LinkPolicy::clean()
+    }
+}
+
+fn asymmetric_delay_policy() -> LinkPolicy {
+    LinkPolicy {
+        base_delay: Duration::from_millis(200),
         ..LinkPolicy::clean()
     }
 }
@@ -370,6 +420,20 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
                         from,
                         to,
                         policy: burst_loss_policy(),
+                    },
+                )
+            }),
+    );
+    events.extend(
+        intended_asymmetric_delay_links(case.scenario)
+            .into_iter()
+            .map(|(from, to)| {
+                (
+                    CUT_STEP,
+                    ScheduleEvent::SetLink {
+                        from,
+                        to,
+                        policy: asymmetric_delay_policy(),
                     },
                 )
             }),
@@ -540,6 +604,7 @@ struct RunEvidence {
     blocked_drops_by_link: Vec<DirectedCount>,
     duplicated_sends_by_link: Vec<DirectedCount>,
     reordered_deliveries_by_link: Vec<DirectedCount>,
+    base_delay_applications_by_link: Vec<DirectedCount>,
     burst_loss_events_by_link: Vec<DirectedCount>,
     max_consecutive_input_policy_loss_run_by_link: Vec<DirectedCount>,
     peer_event_counts: Vec<EventCount>,
@@ -584,6 +649,15 @@ impl RunEvidence {
                     from,
                     to,
                     count: stats.reordered_deliveries,
+                })
+                .collect(),
+            base_delay_applications_by_link: report
+                .link_stats_by_link
+                .iter()
+                .map(|(&(from, to), stats)| DirectedCount {
+                    from,
+                    to,
+                    count: stats.base_delay_applications,
                 })
                 .collect(),
             burst_loss_events_by_link: report
@@ -798,7 +872,7 @@ fn common_premise_violations(
         .filter(|entry| entry.count > 0)
         .map(|entry| (entry.from, entry.to))
         .collect();
-    let intended_reordered = intended_reorder_links(case.scenario);
+    let intended_reordered = intended_reorder_delivery_links(case.scenario);
     if observed_reordered != intended_reordered {
         violations.push(format!(
             "nonzero reordered-delivery links {observed_reordered:?} do not equal intended links {intended_reordered:?}"
@@ -812,6 +886,28 @@ fn common_premise_violations(
         violations.push(format!(
             "global reordered deliveries {} do not equal per-link sum {reordered_sum}",
             evidence.net.reordered_deliveries
+        ));
+    }
+    let observed_base_delay: BTreeSet<(usize, usize)> = evidence
+        .base_delay_applications_by_link
+        .iter()
+        .filter(|entry| entry.count > 0)
+        .map(|entry| (entry.from, entry.to))
+        .collect();
+    let intended_base_delay = intended_base_delay_links(case.scenario);
+    if observed_base_delay != intended_base_delay {
+        violations.push(format!(
+            "nonzero base-delay links {observed_base_delay:?} do not equal intended links {intended_base_delay:?}"
+        ));
+    }
+    let base_delay_sum = evidence
+        .base_delay_applications_by_link
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.count));
+    if evidence.net.base_delay_applications != base_delay_sum {
+        violations.push(format!(
+            "global base-delay applications {} do not equal per-link sum {base_delay_sum}",
+            evidence.net.base_delay_applications
         ));
     }
     let observed_burst_loss: BTreeSet<(usize, usize)> = evidence
@@ -1105,7 +1201,10 @@ fn negative_control_match(
 ) -> Option<NegativeControlMatch> {
     let shared_confirmed_prefix_floor = if matches!(
         case.scenario,
-        ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
+        ScenarioKind::Duplication
+            | ScenarioKind::Reorder
+            | ScenarioKind::BurstLoss
+            | ScenarioKind::AsymmetricDelay
     ) {
         evidence.confirmed_at_heal.iter().copied().min()?
     } else {
@@ -1407,10 +1506,10 @@ fn sweep_schedules_materialize_declared_fault_premises() {
     let cases = full_cases();
     assert_eq!(
         pr_cases().len(),
-        13,
-        "seven N=2 base rows plus six matched controls"
+        15,
+        "eight N=2 base rows plus seven matched controls"
     );
-    assert_eq!(cases.len(), 45, "35 base rows plus ten matched controls");
+    assert_eq!(cases.len(), 52, "40 base rows plus 12 matched controls");
     for case in cases {
         let (schedule, options) = materialize(case);
         assert_eq!(schedule.seed, SEED);
@@ -1426,6 +1525,7 @@ fn sweep_schedules_materialize_declared_fault_premises() {
         let duplicated_links = intended_duplication_links(case.scenario);
         let reordered_links = intended_reorder_links(case.scenario);
         let burst_loss_links = intended_burst_loss_links(case.scenario);
+        let asymmetric_delay_links = intended_asymmetric_delay_links(case.scenario);
         for &(from, to) in &blocked_links {
             assert!(
                 blocked_links.contains(&(to, from)),
@@ -1471,9 +1571,22 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                         && policy == &burst_loss_policy()
             )));
         }
+        for &(from, to) in &asymmetric_delay_links {
+            assert!(schedule.events.iter().any(|(step, event)| matches!(
+                event,
+                ScheduleEvent::SetLink { from: event_from, to: event_to, policy }
+                    if *step == CUT_STEP
+                        && *event_from == from
+                        && *event_to == to
+                        && policy == &asymmetric_delay_policy()
+            )));
+        }
         if matches!(
             case.scenario,
-            ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
+            ScenarioKind::Duplication
+                | ScenarioKind::Reorder
+                | ScenarioKind::BurstLoss
+                | ScenarioKind::AsymmetricDelay
         ) {
             assert!(blocked_links.is_empty());
             assert_eq!(
@@ -1499,16 +1612,25 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                     assert_eq!(duplicated_links, BTreeSet::from([(0, 1)]));
                     assert!(reordered_links.is_empty());
                     assert!(burst_loss_links.is_empty());
+                    assert!(asymmetric_delay_links.is_empty());
                 },
                 ScenarioKind::Reorder => {
                     assert!(duplicated_links.is_empty());
                     assert_eq!(reordered_links, BTreeSet::from([(0, 1)]));
                     assert!(burst_loss_links.is_empty());
+                    assert!(asymmetric_delay_links.is_empty());
                 },
                 ScenarioKind::BurstLoss => {
                     assert_eq!(burst_loss_links, BTreeSet::from([(0, 1)]));
                     assert!(duplicated_links.is_empty());
                     assert!(reordered_links.is_empty());
+                    assert!(asymmetric_delay_links.is_empty());
+                },
+                ScenarioKind::AsymmetricDelay => {
+                    assert_eq!(asymmetric_delay_links, BTreeSet::from([(0, 1)]));
+                    assert!(duplicated_links.is_empty());
+                    assert!(reordered_links.is_empty());
+                    assert!(burst_loss_links.is_empty());
                 },
                 ScenarioKind::ShortHealContinue
                 | ScenarioKind::LongHealHalt
@@ -1520,6 +1642,7 @@ fn sweep_schedules_materialize_declared_fault_premises() {
             assert!(duplicated_links.is_empty());
             assert!(reordered_links.is_empty());
             assert!(burst_loss_links.is_empty());
+            assert!(asymmetric_delay_links.is_empty());
         }
         let expected_heals: Vec<u32> = case.scenario.heal_step().into_iter().collect();
         assert_eq!(actual_heal_steps(&schedule), expected_heals);
@@ -1529,7 +1652,8 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                 ScenarioKind::ShortHealContinue
                 | ScenarioKind::Duplication
                 | ScenarioKind::Reorder
-                | ScenarioKind::BurstLoss => {
+                | ScenarioKind::BurstLoss
+                | ScenarioKind::AsymmetricDelay => {
                     assert!(fault_ms < DISCONNECT_TIMEOUT.as_millis() as u64);
                     assert!(STEPS - heal >= schedule.config.recovery_window_steps());
                 },

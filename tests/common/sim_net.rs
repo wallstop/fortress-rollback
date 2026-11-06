@@ -150,6 +150,9 @@ pub struct SimLinkStats {
     /// Copies delivered after a later-scheduled copy on this link.
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub reordered_deliveries: u64,
+    /// Message copies scheduled with this link's nonzero base delay.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub base_delay_applications: u64,
     /// Fixed-burst loss runs started on this link.
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub burst_loss_events: u64,
@@ -206,6 +209,9 @@ impl SimLinkStats {
         self.reordered_deliveries = self
             .reordered_deliveries
             .saturating_add(other.reordered_deliveries);
+        self.base_delay_applications = self
+            .base_delay_applications
+            .saturating_add(other.base_delay_applications);
         self.burst_loss_events = self
             .burst_loss_events
             .saturating_add(other.burst_loss_events);
@@ -390,6 +396,8 @@ pub struct SimNetStats {
     pub duplicated: u64,
     /// Copies delivered after a later-scheduled copy on the same link.
     pub reordered_deliveries: u64,
+    /// Message copies scheduled with a nonzero directed-link base delay.
+    pub base_delay_applications: u64,
     /// Sends captured by a holding link (delivered later on release).
     pub held: u64,
     /// Good-to-bad state transitions made by Gilbert-Elliott links.
@@ -1275,6 +1283,20 @@ impl<M: Clone> SimNetState<M> {
             self.stats.duplicated += 1;
             if let Some(link) = self.links.get_mut(&key) {
                 link.stats.duplicated_sends = link.stats.duplicated_sends.saturating_add(1);
+            }
+        }
+
+        if !policy.base_delay.is_zero() {
+            let applications = u64::try_from(copies).unwrap_or(u64::MAX);
+            self.stats.base_delay_applications = self
+                .stats
+                .base_delay_applications
+                .saturating_add(applications);
+            if let Some(link) = self.links.get_mut(&key) {
+                link.stats.base_delay_applications = link
+                    .stats
+                    .base_delay_applications
+                    .saturating_add(applications);
             }
         }
 
@@ -2178,24 +2200,36 @@ mod tests {
     }
 
     #[test]
-    fn delayed_message_arrives_only_after_clock_advance() {
+    fn asymmetric_delay_arrives_at_boundary_only_on_targeted_direction() {
         let (clock, offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
-        net.set_default_policy(LinkPolicy {
-            base_delay: Duration::from_millis(100),
-            ..LinkPolicy::clean()
-        });
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                base_delay: Duration::from_millis(100),
+                ..LinkPolicy::clean()
+            },
+        );
         let a = net.attach(addr(1));
         let b = net.attach(addr(2));
 
         a.send_payload(addr(2), 1);
+        b.send_payload(addr(1), 2);
         assert!(b.recv_payloads().is_empty(), "not due yet");
+        assert_eq!(a.recv_payloads().len(), 1, "reverse link stays clean");
 
         offset.fetch_add(99, AtomicOrdering::Relaxed);
         assert!(b.recv_payloads().is_empty(), "still 1ms early");
 
         offset.fetch_add(1, AtomicOrdering::Relaxed);
         assert_eq!(b.recv_payloads().len(), 1, "due exactly at base_delay");
+
+        let stats = net.stats();
+        let link_stats = net.link_stats();
+        assert_eq!(stats.base_delay_applications, 1);
+        assert_eq!(link_stats[&(addr(1), addr(2))].base_delay_applications, 1);
+        assert_eq!(link_stats[&(addr(2), addr(1))].base_delay_applications, 0);
     }
 
     #[test]
@@ -2248,7 +2282,7 @@ mod tests {
     }
 
     #[test]
-    fn duplication_delivers_exactly_two_copies() {
+    fn delayed_duplication_delivers_and_counts_exactly_two_copies() {
         let (clock, offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
         net.set_link(
@@ -2256,6 +2290,7 @@ mod tests {
             addr(2),
             LinkPolicy {
                 dup_rate: 1.0,
+                base_delay: Duration::from_millis(100),
                 ..LinkPolicy::clean()
             },
         );
@@ -2263,7 +2298,7 @@ mod tests {
         let b = net.attach(addr(2));
 
         a.send_payload(addr(2), 9);
-        offset.fetch_add(1, AtomicOrdering::Relaxed);
+        offset.fetch_add(100, AtomicOrdering::Relaxed);
         let received = b.recv_payloads();
         assert_eq!(received.len(), 2, "dup_rate=1 must deliver two copies");
         assert!(received.iter().all(|(_, v)| *v == 9));
@@ -2277,9 +2312,12 @@ mod tests {
         );
         assert!(reverse_received.iter().all(|(_, v)| *v == 10));
         assert_eq!(net.stats().duplicated, 1);
+        assert_eq!(net.stats().base_delay_applications, 2);
         let link_stats = net.link_stats();
         assert_eq!(link_stats[&(addr(1), addr(2))].duplicated_sends, 1);
+        assert_eq!(link_stats[&(addr(1), addr(2))].base_delay_applications, 2);
         assert_eq!(link_stats[&(addr(2), addr(1))].duplicated_sends, 0);
+        assert_eq!(link_stats[&(addr(2), addr(1))].base_delay_applications, 0);
     }
 
     #[test]
@@ -2287,12 +2325,14 @@ mod tests {
         let mut total = SimLinkStats {
             duplicated_sends: u64::MAX - 1,
             reordered_deliveries: u64::MAX - 1,
+            base_delay_applications: u64::MAX - 1,
             burst_loss_events: u64::MAX - 1,
             ..SimLinkStats::default()
         };
         let other = SimLinkStats {
             duplicated_sends: 2,
             reordered_deliveries: 2,
+            base_delay_applications: 2,
             burst_loss_events: 2,
             ..SimLinkStats::default()
         };
@@ -2301,6 +2341,7 @@ mod tests {
 
         assert_eq!(total.duplicated_sends, u64::MAX);
         assert_eq!(total.reordered_deliveries, u64::MAX);
+        assert_eq!(total.base_delay_applications, u64::MAX);
         assert_eq!(total.burst_loss_events, u64::MAX);
     }
 
