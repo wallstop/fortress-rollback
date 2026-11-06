@@ -18,9 +18,12 @@ def verifier_workspace(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     """Install the real driver with fake sibling verifiers and Cargo."""
     script = tmp_path / "verify-all.sh"
     shutil.copyfile(VERIFY_ALL, script)
-    for name in ("verify-tla.sh", "verify-kani.sh"):
+    for name, variable in (
+        ("verify-tla.sh", "VERIFY_ALL_TLA_EXIT"),
+        ("verify-kani.sh", "VERIFY_ALL_KANI_EXIT"),
+    ):
         verifier = tmp_path / name
-        verifier.write_text("#!/bin/bash\nexit 0\n")
+        verifier.write_text(f'#!/bin/bash\nexit "${{{variable}:-0}}"\n')
         verifier.chmod(0o755)
 
     bin_dir = tmp_path / "bin"
@@ -56,6 +59,24 @@ def test_default_and_parallel_run_z3(args: list[str], tmp_path: Path) -> None:
     assert "Z3 SMT Verification" in result.stdout
     assert "not yet implemented" not in result.stdout
     assert calls.read_text().splitlines() == [Z3_COMMAND]
+
+
+@pytest.mark.parametrize("variable", ["VERIFY_ALL_TLA_EXIT", "VERIFY_ALL_KANI_EXIT"])
+def test_parallel_failure_fails_unified_driver(variable: str, tmp_path: Path) -> None:
+    """Background verifier statuses must reach the parent summary."""
+    script, env, _ = verifier_workspace(tmp_path)
+    env[variable] = "1"
+
+    result = subprocess.run(
+        ["bash", str(script), "--parallel"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Some Verification Failed" in result.stdout
 
 
 def test_z3_failure_fails_unified_driver(tmp_path: Path) -> None:

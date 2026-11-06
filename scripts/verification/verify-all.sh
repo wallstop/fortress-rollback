@@ -288,16 +288,27 @@ main() {
         tla_log=$(mktemp)
         kani_log=$(mktemp)
 
-        # Start both processes
-        (run_tla > "$tla_log" 2>&1; echo "TLA_EXIT=$?" >> "$tla_log") &
+        # Start both processes. Export each function's explicit result because
+        # background subshells cannot mutate the parent's result variables.
+        (run_tla > "$tla_log" 2>&1; echo "TLA_RESULT=$TLA_RESULT" >> "$tla_log") &
         local tla_pid=$!
 
-        (run_kani > "$kani_log" 2>&1; echo "KANI_EXIT=$?" >> "$kani_log") &
+        (run_kani > "$kani_log" 2>&1; echo "KANI_RESULT=$KANI_RESULT" >> "$kani_log") &
         local kani_pid=$!
 
-        # Wait for both
         wait $tla_pid || true
         wait $kani_pid || true
+
+        if grep -q '^TLA_RESULT=PASS$' "$tla_log"; then
+            TLA_RESULT="PASS"
+        else
+            TLA_RESULT="FAIL"
+        fi
+        if grep -q '^KANI_RESULT=PASS$' "$kani_log"; then
+            KANI_RESULT="PASS"
+        else
+            KANI_RESULT="FAIL"
+        fi
 
         # Show output
         echo "=== TLA+ Output ==="
