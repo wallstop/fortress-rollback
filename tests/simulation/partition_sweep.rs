@@ -1,4 +1,4 @@
-//! Expectation-aware evidence for symmetric partitions, directed duplication, and reordering.
+//! Expectation-aware evidence for symmetric partitions and directed fault injection.
 //!
 //! The ordinary oracle remains unchanged. This sweep interprets its verdict
 //! only after checking the declared fault premise, and distinguishes
@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-const PARTITION_LEDGER_SCHEMA: u32 = 3;
+const PARTITION_LEDGER_SCHEMA: u32 = 4;
 const SEED: u64 = 0x5041_5254_4954_494F;
 const STEPS: u32 = 900;
 const CUT_STEP: u32 = 100;
@@ -47,16 +47,18 @@ enum ScenarioKind {
     PermanentContinue,
     Duplication,
     Reorder,
+    BurstLoss,
 }
 
 impl ScenarioKind {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::ShortHealContinue,
         Self::LongHealHalt,
         Self::PermanentHalt,
         Self::PermanentContinue,
         Self::Duplication,
         Self::Reorder,
+        Self::BurstLoss,
     ];
 
     const fn label(self) -> &'static str {
@@ -67,12 +69,15 @@ impl ScenarioKind {
             Self::PermanentContinue => "permanent-continue",
             Self::Duplication => "duplication",
             Self::Reorder => "reorder",
+            Self::BurstLoss => "burst-loss",
         }
     }
 
     const fn heal_step(self) -> Option<u32> {
         match self {
-            Self::ShortHealContinue | Self::Duplication | Self::Reorder => Some(SHORT_HEAL_STEP),
+            Self::ShortHealContinue | Self::Duplication | Self::Reorder | Self::BurstLoss => {
+                Some(SHORT_HEAL_STEP)
+            },
             Self::LongHealHalt => Some(LONG_HEAL_STEP),
             Self::PermanentHalt | Self::PermanentContinue => None,
         }
@@ -83,14 +88,15 @@ impl ScenarioKind {
             Self::ShortHealContinue
             | Self::PermanentContinue
             | Self::Duplication
-            | Self::Reorder => DropPolicy::ContinueWithout,
+            | Self::Reorder
+            | Self::BurstLoss => DropPolicy::ContinueWithout,
             Self::LongHealHalt | Self::PermanentHalt => DropPolicy::Halt,
         }
     }
 
     const fn base_expectation(self) -> Expectation {
         match self {
-            Self::ShortHealContinue | Self::Duplication | Self::Reorder => {
+            Self::ShortHealContinue | Self::Duplication | Self::Reorder | Self::BurstLoss => {
                 Expectation::BoundedRecovery
             },
             Self::LongHealHalt | Self::PermanentHalt | Self::PermanentContinue => {
@@ -201,11 +207,13 @@ fn controls(n_players: usize) -> Vec<SweepCase> {
             },
             state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
         ],
         16 => vec![
             state(ScenarioKind::PermanentHalt, CORRUPTION_FRAME),
             state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
         ],
         _ => Vec::new(),
     }
@@ -230,9 +238,12 @@ fn full_cases() -> Vec<SweepCase> {
 /// partition rows use a two-component bisection. Odd permanent-ContinueWithout
 /// rows use singleton isolation: a bisection would let a majority commit and
 /// continue, which needs the component-scoped oracle left to the CAP/membership
-/// plan. Directed duplication and reordering have no blocked-link premise.
+/// plan. Directed duplication, reordering, and burst loss have no blocked-link premise.
 fn intended_blocked_links(n_players: usize, scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
-    if matches!(scenario, ScenarioKind::Duplication | ScenarioKind::Reorder) {
+    if matches!(
+        scenario,
+        ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
+    ) {
         return BTreeSet::new();
     }
     let split = n_players / 2;
@@ -264,10 +275,26 @@ fn intended_reorder_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
     }
 }
 
+fn intended_burst_loss_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if scenario == ScenarioKind::BurstLoss {
+        BTreeSet::from([(0, 1)])
+    } else {
+        BTreeSet::new()
+    }
+}
+
 fn reorder_policy() -> LinkPolicy {
     LinkPolicy {
         base_delay: Duration::from_millis(20),
         jitter: Duration::from_millis(80),
+        ..LinkPolicy::clean()
+    }
+}
+
+fn burst_loss_policy() -> LinkPolicy {
+    LinkPolicy {
+        burst_rate: 0.05,
+        burst_len: 3,
         ..LinkPolicy::clean()
     }
 }
@@ -329,6 +356,20 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
                         from,
                         to,
                         policy: reorder_policy(),
+                    },
+                )
+            }),
+    );
+    events.extend(
+        intended_burst_loss_links(case.scenario)
+            .into_iter()
+            .map(|(from, to)| {
+                (
+                    CUT_STEP,
+                    ScheduleEvent::SetLink {
+                        from,
+                        to,
+                        policy: burst_loss_policy(),
                     },
                 )
             }),
@@ -499,6 +540,8 @@ struct RunEvidence {
     blocked_drops_by_link: Vec<DirectedCount>,
     duplicated_sends_by_link: Vec<DirectedCount>,
     reordered_deliveries_by_link: Vec<DirectedCount>,
+    burst_loss_events_by_link: Vec<DirectedCount>,
+    max_consecutive_input_policy_loss_run_by_link: Vec<DirectedCount>,
     peer_event_counts: Vec<EventCount>,
     peer_event_counts_by_peer: Vec<PeerEventCounts>,
     metrics: Vec<SessionMetrics>,
@@ -541,6 +584,24 @@ impl RunEvidence {
                     from,
                     to,
                     count: stats.reordered_deliveries,
+                })
+                .collect(),
+            burst_loss_events_by_link: report
+                .link_stats_by_link
+                .iter()
+                .map(|(&(from, to), stats)| DirectedCount {
+                    from,
+                    to,
+                    count: stats.burst_loss_events,
+                })
+                .collect(),
+            max_consecutive_input_policy_loss_run_by_link: report
+                .link_stats_by_link
+                .iter()
+                .map(|(&(from, to), stats)| DirectedCount {
+                    from,
+                    to,
+                    count: stats.max_consecutive_input_policy_loss_run,
                 })
                 .collect(),
             peer_event_counts: event_counts(&report.peer_event_counts),
@@ -752,6 +813,63 @@ fn common_premise_violations(
             "global reordered deliveries {} do not equal per-link sum {reordered_sum}",
             evidence.net.reordered_deliveries
         ));
+    }
+    let observed_burst_loss: BTreeSet<(usize, usize)> = evidence
+        .burst_loss_events_by_link
+        .iter()
+        .filter(|entry| entry.count > 0)
+        .map(|entry| (entry.from, entry.to))
+        .collect();
+    let intended_burst_loss = intended_burst_loss_links(case.scenario);
+    if observed_burst_loss != intended_burst_loss {
+        violations.push(format!(
+            "nonzero burst-loss-event links {observed_burst_loss:?} do not equal intended links {intended_burst_loss:?}"
+        ));
+    }
+    let burst_loss_sum = evidence
+        .burst_loss_events_by_link
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.count));
+    if evidence.net.burst_loss_events != burst_loss_sum {
+        violations.push(format!(
+            "global burst-loss events {} do not equal per-link sum {burst_loss_sum}",
+            evidence.net.burst_loss_events
+        ));
+    }
+    let observed_input_loss_runs: BTreeSet<(usize, usize)> = evidence
+        .max_consecutive_input_policy_loss_run_by_link
+        .iter()
+        .filter(|entry| entry.count > 0)
+        .map(|entry| (entry.from, entry.to))
+        .collect();
+    if observed_input_loss_runs != intended_burst_loss {
+        violations.push(format!(
+            "input-policy loss runs {observed_input_loss_runs:?} do not equal intended burst links {intended_burst_loss:?}"
+        ));
+    }
+    if case.scenario == ScenarioKind::BurstLoss {
+        let max_targeted_run = evidence
+            .max_consecutive_input_policy_loss_run_by_link
+            .iter()
+            .find(|entry| (entry.from, entry.to) == (0, 1))
+            .map_or(0, |entry| entry.count);
+        if max_targeted_run < 3 {
+            violations.push(format!(
+                "directed burst premise requires a maximum actual 0->1 input-loss run of at least length 3 (maximum {max_targeted_run}); back-to-back bursts may coalesce"
+            ));
+        }
+        let burst_events = evidence.net.burst_loss_events;
+        if burst_events > 0 {
+            let completed_bursts = burst_events.saturating_sub(1);
+            let drop_floor_exclusive = 3_u64.saturating_mul(completed_bursts);
+            let drop_ceiling_inclusive = 3_u64.saturating_mul(burst_events);
+            let policy_drops = evidence.net.dropped_by_policy;
+            if policy_drops <= drop_floor_exclusive || policy_drops > drop_ceiling_inclusive {
+                violations.push(format!(
+                    "global policy drops {policy_drops} are inconsistent with {burst_events} burst-loss events: expected {drop_floor_exclusive} < drops <= {drop_ceiling_inclusive}; HealAll may truncate only the final burst"
+                ));
+            }
+        }
     }
     violations
 }
@@ -987,7 +1105,7 @@ fn negative_control_match(
 ) -> Option<NegativeControlMatch> {
     let shared_confirmed_prefix_floor = if matches!(
         case.scenario,
-        ScenarioKind::Duplication | ScenarioKind::Reorder
+        ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
     ) {
         evidence.confirmed_at_heal.iter().copied().min()?
     } else {
@@ -1289,10 +1407,10 @@ fn sweep_schedules_materialize_declared_fault_premises() {
     let cases = full_cases();
     assert_eq!(
         pr_cases().len(),
-        11,
-        "six N=2 base rows plus five matched controls"
+        13,
+        "seven N=2 base rows plus six matched controls"
     );
-    assert_eq!(cases.len(), 38, "30 base rows plus eight matched controls");
+    assert_eq!(cases.len(), 45, "35 base rows plus ten matched controls");
     for case in cases {
         let (schedule, options) = materialize(case);
         assert_eq!(schedule.seed, SEED);
@@ -1307,6 +1425,7 @@ fn sweep_schedules_materialize_declared_fault_premises() {
         let blocked_links = intended_blocked_links(case.n_players, case.scenario);
         let duplicated_links = intended_duplication_links(case.scenario);
         let reordered_links = intended_reorder_links(case.scenario);
+        let burst_loss_links = intended_burst_loss_links(case.scenario);
         for &(from, to) in &blocked_links {
             assert!(
                 blocked_links.contains(&(to, from)),
@@ -1342,9 +1461,19 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                         && policy == &reorder_policy()
             )));
         }
+        for &(from, to) in &burst_loss_links {
+            assert!(schedule.events.iter().any(|(step, event)| matches!(
+                event,
+                ScheduleEvent::SetLink { from: event_from, to: event_to, policy }
+                    if *step == CUT_STEP
+                        && *event_from == from
+                        && *event_to == to
+                        && policy == &burst_loss_policy()
+            )));
+        }
         if matches!(
             case.scenario,
-            ScenarioKind::Duplication | ScenarioKind::Reorder
+            ScenarioKind::Duplication | ScenarioKind::Reorder | ScenarioKind::BurstLoss
         ) {
             assert!(blocked_links.is_empty());
             assert_eq!(
@@ -1369,10 +1498,17 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                 ScenarioKind::Duplication => {
                     assert_eq!(duplicated_links, BTreeSet::from([(0, 1)]));
                     assert!(reordered_links.is_empty());
+                    assert!(burst_loss_links.is_empty());
                 },
                 ScenarioKind::Reorder => {
                     assert!(duplicated_links.is_empty());
                     assert_eq!(reordered_links, BTreeSet::from([(0, 1)]));
+                    assert!(burst_loss_links.is_empty());
+                },
+                ScenarioKind::BurstLoss => {
+                    assert_eq!(burst_loss_links, BTreeSet::from([(0, 1)]));
+                    assert!(duplicated_links.is_empty());
+                    assert!(reordered_links.is_empty());
                 },
                 ScenarioKind::ShortHealContinue
                 | ScenarioKind::LongHealHalt
@@ -1383,6 +1519,7 @@ fn sweep_schedules_materialize_declared_fault_premises() {
             assert!(!blocked_links.is_empty());
             assert!(duplicated_links.is_empty());
             assert!(reordered_links.is_empty());
+            assert!(burst_loss_links.is_empty());
         }
         let expected_heals: Vec<u32> = case.scenario.heal_step().into_iter().collect();
         assert_eq!(actual_heal_steps(&schedule), expected_heals);
@@ -1391,7 +1528,8 @@ fn sweep_schedules_materialize_declared_fault_premises() {
             match case.scenario {
                 ScenarioKind::ShortHealContinue
                 | ScenarioKind::Duplication
-                | ScenarioKind::Reorder => {
+                | ScenarioKind::Reorder
+                | ScenarioKind::BurstLoss => {
                     assert!(fault_ms < DISCONNECT_TIMEOUT.as_millis() as u64);
                     assert!(STEPS - heal >= schedule.config.recovery_window_steps());
                 },
