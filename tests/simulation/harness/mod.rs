@@ -717,6 +717,8 @@ pub struct TraceNetStats {
     pub dropped_blocked: u64,
     pub dropped_unattached: u64,
     pub duplicated: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub reordered_deliveries: u64,
     pub held: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub gilbert_elliott_good_to_bad: u64,
@@ -786,6 +788,7 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             dropped_blocked: stats.dropped_blocked,
             dropped_unattached: stats.dropped_unattached,
             duplicated: stats.duplicated,
+            reordered_deliveries: stats.reordered_deliveries,
             held: stats.held,
             gilbert_elliott_good_to_bad: stats.gilbert_elliott_good_to_bad,
             gilbert_elliott_bad_to_good: stats.gilbert_elliott_bad_to_good,

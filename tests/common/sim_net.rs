@@ -147,6 +147,9 @@ pub struct SimLinkStats {
     pub input_delivered_copies: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub duplicated_sends: u64,
+    /// Copies delivered after a later-scheduled copy on this link.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub reordered_deliveries: u64,
     pub input_policy_loss_decisions: u64,
     pub input_policy_drops: u64,
     pub max_encoded_input_bytes: u64,
@@ -197,6 +200,9 @@ impl SimLinkStats {
             .input_delivered_copies
             .saturating_add(other.input_delivered_copies);
         self.duplicated_sends = self.duplicated_sends.saturating_add(other.duplicated_sends);
+        self.reordered_deliveries = self
+            .reordered_deliveries
+            .saturating_add(other.reordered_deliveries);
         self.input_policy_loss_decisions = self
             .input_policy_loss_decisions
             .saturating_add(other.input_policy_loss_decisions);
@@ -374,6 +380,8 @@ pub struct SimNetStats {
     pub dropped_unattached: u64,
     /// Sends that produced a second copy.
     pub duplicated: u64,
+    /// Copies delivered after a later-scheduled copy on the same link.
+    pub reordered_deliveries: u64,
     /// Sends captured by a holding link (delivered later on release).
     pub held: u64,
     /// Good-to-bad state transitions made by Gilbert-Elliott links.
@@ -467,6 +475,8 @@ struct LinkState {
     bandwidth_drain_policy: Option<BandwidthPolicy>,
     /// Future shaped departures used only to retire queued-byte accounting.
     bandwidth_reservations: VecDeque<(Instant, u64)>,
+    /// Highest scheduled copy sequence already delivered on this link.
+    last_delivered_seq: Option<u64>,
     stats: SimLinkStats,
 }
 
@@ -489,6 +499,7 @@ impl LinkState {
             bandwidth_refill_remainder: 0,
             bandwidth_drain_policy: None,
             bandwidth_reservations: VecDeque::new(),
+            last_delivered_seq: None,
             stats: SimLinkStats::default(),
         }
     }
@@ -1271,6 +1282,19 @@ impl<M: Clone> SimNetState<M> {
         self.record_input_policy_outcome(key, is_input, input_policy_lost, false);
     }
 
+    fn record_delivery_order(&mut self, from: SocketAddr, to: SocketAddr, seq: u64) {
+        let link = self.links.entry((from, to)).or_default();
+        let reordered = link.last_delivered_seq.is_some_and(|latest| seq < latest);
+        link.last_delivered_seq = Some(
+            link.last_delivered_seq
+                .map_or(seq, |latest| latest.max(seq)),
+        );
+        if reordered {
+            self.stats.reordered_deliveries = self.stats.reordered_deliveries.saturating_add(1);
+            link.stats.reordered_deliveries = link.stats.reordered_deliveries.saturating_add(1);
+        }
+    }
+
     /// Moves every due in-flight copy into its destination inbox.
     fn pump(&mut self) {
         let now = self.now();
@@ -1288,6 +1312,7 @@ impl<M: Clone> SimNetState<M> {
                 Some(queue) => {
                     queue.push_back((msg.from, msg.payload));
                     self.stats.delivered += 1;
+                    self.record_delivery_order(msg.from, msg.to, msg.seq);
                     if is_input {
                         if let Some(link) = self.links.get_mut(&(msg.from, msg.to)) {
                             link.stats.input_delivered_copies =
@@ -1303,6 +1328,7 @@ impl<M: Clone> SimNetState<M> {
                             .or_default()
                             .push_back((msg.from, msg.payload));
                         self.stats.delivered += 1;
+                        self.record_delivery_order(msg.from, msg.to, msg.seq);
                         if is_input {
                             if let Some(link) = self.links.get_mut(&(msg.from, msg.to)) {
                                 link.stats.input_delivered_copies =
@@ -2039,6 +2065,61 @@ mod tests {
     }
 
     #[test]
+    fn jitter_reorders_only_the_targeted_directed_link() {
+        let (clock, offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                base_delay: Duration::from_millis(20),
+                jitter: Duration::from_millis(80),
+                ..LinkPolicy::clean()
+            },
+        );
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+
+        let mut received = Vec::new();
+        for step in 0..32 {
+            a.send_payload(addr(2), step);
+            b.send_payload(addr(1), 100 + step);
+            let _ = a.recv_payloads();
+            received.extend(b.recv_payloads().into_iter().map(|(_, value)| value));
+            offset.fetch_add(16, AtomicOrdering::Relaxed);
+        }
+        offset.fetch_add(1_000, AtomicOrdering::Relaxed);
+        let _ = a.recv_payloads();
+        received.extend(b.recv_payloads().into_iter().map(|(_, value)| value));
+
+        let mut sorted = received.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..32).collect::<Vec<_>>());
+        let mut latest = None;
+        let mut independently_counted = 0_u64;
+        for value in received {
+            if latest.is_some_and(|latest| value < latest) {
+                independently_counted += 1;
+            }
+            latest = Some(latest.map_or(value, |latest: u32| latest.max(value)));
+        }
+
+        let stats = net.stats();
+        let link_stats = net.link_stats();
+        assert!(independently_counted > 0);
+        assert_eq!(stats.reordered_deliveries, independently_counted);
+        assert_eq!(
+            stats.reordered_deliveries,
+            link_stats[&(addr(1), addr(2))].reordered_deliveries
+        );
+        assert_eq!(
+            link_stats[&(addr(2), addr(1))].reordered_deliveries,
+            0,
+            "the clean reverse link must preserve FIFO delivery"
+        );
+    }
+
+    #[test]
     fn link_faults_are_isolated_per_direction() {
         let (clock, _offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
@@ -2192,19 +2273,22 @@ mod tests {
     }
 
     #[test]
-    fn link_stats_merge_saturates_duplicated_sends() {
+    fn link_stats_merge_saturates_injection_counters() {
         let mut total = SimLinkStats {
             duplicated_sends: u64::MAX - 1,
+            reordered_deliveries: u64::MAX - 1,
             ..SimLinkStats::default()
         };
         let other = SimLinkStats {
             duplicated_sends: 2,
+            reordered_deliveries: 2,
             ..SimLinkStats::default()
         };
 
         total.merge(other);
 
         assert_eq!(total.duplicated_sends, u64::MAX);
+        assert_eq!(total.reordered_deliveries, u64::MAX);
     }
 
     #[test]
