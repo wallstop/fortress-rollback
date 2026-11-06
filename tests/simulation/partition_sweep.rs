@@ -1,7 +1,7 @@
-//! Expectation-aware evidence for symmetric network partitions.
+//! Expectation-aware evidence for symmetric partitions and directed duplication.
 //!
 //! The ordinary oracle remains unchanged. This sweep interprets its verdict
-//! only after checking the declared partition premise, and distinguishes
+//! only after checking the declared fault premise, and distinguishes
 //! bounded recovery, expected finite safe failure, defects, and invalid
 //! evidence. Every treatment is replayed with the same materialized inputs;
 //! equality of the trace hash alone is never treated as replay equality.
@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-const PARTITION_LEDGER_SCHEMA: u32 = 1;
+const PARTITION_LEDGER_SCHEMA: u32 = 2;
 const SEED: u64 = 0x5041_5254_4954_494F;
 const STEPS: u32 = 900;
 const CUT_STEP: u32 = 100;
@@ -35,6 +35,7 @@ const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RECEIVE_MESSAGE_LIMIT: usize = 256;
 const MIN_TERMINAL_PLATEAU_STEPS: u32 = 32;
 const CORRUPTION_FRAME: i32 = 20;
+const IN_WINDOW_CORRUPTION_FRAME: i32 = 120;
 const CORRUPTED_PEER: usize = 1;
 const ALL_SIZES: [usize; 5] = [2, 3, 4, 8, 16];
 
@@ -44,14 +45,16 @@ enum ScenarioKind {
     LongHealHalt,
     PermanentHalt,
     PermanentContinue,
+    Duplication,
 }
 
 impl ScenarioKind {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::ShortHealContinue,
         Self::LongHealHalt,
         Self::PermanentHalt,
         Self::PermanentContinue,
+        Self::Duplication,
     ];
 
     const fn label(self) -> &'static str {
@@ -60,12 +63,13 @@ impl ScenarioKind {
             Self::LongHealHalt => "long-heal-halt",
             Self::PermanentHalt => "permanent-halt",
             Self::PermanentContinue => "permanent-continue",
+            Self::Duplication => "duplication",
         }
     }
 
     const fn heal_step(self) -> Option<u32> {
         match self {
-            Self::ShortHealContinue => Some(SHORT_HEAL_STEP),
+            Self::ShortHealContinue | Self::Duplication => Some(SHORT_HEAL_STEP),
             Self::LongHealHalt => Some(LONG_HEAL_STEP),
             Self::PermanentHalt | Self::PermanentContinue => None,
         }
@@ -73,14 +77,16 @@ impl ScenarioKind {
 
     const fn drop_policy(self) -> DropPolicy {
         match self {
-            Self::ShortHealContinue | Self::PermanentContinue => DropPolicy::ContinueWithout,
+            Self::ShortHealContinue | Self::PermanentContinue | Self::Duplication => {
+                DropPolicy::ContinueWithout
+            },
             Self::LongHealHalt | Self::PermanentHalt => DropPolicy::Halt,
         }
     }
 
     const fn base_expectation(self) -> Expectation {
         match self {
-            Self::ShortHealContinue => Expectation::BoundedRecovery,
+            Self::ShortHealContinue | Self::Duplication => Expectation::BoundedRecovery,
             Self::LongHealHalt | Self::PermanentHalt | Self::PermanentContinue => {
                 Expectation::SafeFailure
             },
@@ -167,18 +173,18 @@ fn base_cases(n_players: usize) -> Vec<SweepCase> {
 }
 
 fn controls(n_players: usize) -> Vec<SweepCase> {
-    let state = |scenario| SweepCase {
+    let state = |scenario, from_frame| SweepCase {
         n_players,
         scenario,
         expectation: Expectation::StateCorruption {
             peer: CORRUPTED_PEER,
-            from_frame: CORRUPTION_FRAME,
+            from_frame,
         },
     };
     match n_players {
         2 => vec![
-            state(ScenarioKind::PermanentHalt),
-            state(ScenarioKind::LongHealHalt),
+            state(ScenarioKind::PermanentHalt, CORRUPTION_FRAME),
+            state(ScenarioKind::LongHealHalt, CORRUPTION_FRAME),
             SweepCase {
                 n_players,
                 scenario: ScenarioKind::ShortHealContinue,
@@ -187,8 +193,12 @@ fn controls(n_players: usize) -> Vec<SweepCase> {
                     from_frame: CORRUPTION_FRAME,
                 },
             },
+            state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
         ],
-        16 => vec![state(ScenarioKind::PermanentHalt)],
+        16 => vec![
+            state(ScenarioKind::PermanentHalt, CORRUPTION_FRAME),
+            state(ScenarioKind::Duplication, IN_WINDOW_CORRUPTION_FRAME),
+        ],
         _ => Vec::new(),
     }
 }
@@ -209,10 +219,14 @@ fn full_cases() -> Vec<SweepCase> {
 }
 
 /// Directed links crossing the declared symmetric component boundary. Even
-/// rows use a two-component bisection. Odd permanent-ContinueWithout rows use
-/// singleton isolation: a bisection would let a majority commit and continue,
-/// which needs the component-scoped oracle left to the CAP/membership plan.
-fn intended_partition_links(n_players: usize, scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+/// partition rows use a two-component bisection. Odd permanent-ContinueWithout
+/// rows use singleton isolation: a bisection would let a majority commit and
+/// continue, which needs the component-scoped oracle left to the CAP/membership
+/// plan. Directed duplication has no blocked-link premise.
+fn intended_blocked_links(n_players: usize, scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if scenario == ScenarioKind::Duplication {
+        return BTreeSet::new();
+    }
     let split = n_players / 2;
     let isolate_each = scenario == ScenarioKind::PermanentContinue && n_players % 2 == 1;
     let mut links = BTreeSet::new();
@@ -224,6 +238,14 @@ fn intended_partition_links(n_players: usize, scenario: ScenarioKind) -> BTreeSe
         }
     }
     links
+}
+
+fn intended_duplication_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)> {
+    if scenario == ScenarioKind::Duplication {
+        BTreeSet::from([(0, 1)])
+    } else {
+        BTreeSet::new()
+    }
 }
 
 fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
@@ -243,7 +265,7 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
             }
         }
     }
-    let mut events: Vec<(u32, ScheduleEvent)> = intended_partition_links(n, case.scenario)
+    let mut events: Vec<(u32, ScheduleEvent)> = intended_blocked_links(n, case.scenario)
         .into_iter()
         .map(|(from, to)| {
             (
@@ -256,6 +278,23 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
             )
         })
         .collect();
+    events.extend(
+        intended_duplication_links(case.scenario)
+            .into_iter()
+            .map(|(from, to)| {
+                (
+                    CUT_STEP,
+                    ScheduleEvent::SetLink {
+                        from,
+                        to,
+                        policy: LinkPolicy {
+                            dup_rate: 1.0,
+                            ..LinkPolicy::clean()
+                        },
+                    },
+                )
+            }),
+    );
     if let Some(heal) = case.scenario.heal_step() {
         events.push((heal, ScheduleEvent::HealAll));
     }
@@ -420,6 +459,7 @@ struct RunEvidence {
     confirmed_after_recovery: Vec<i32>,
     recovered_within_b: Option<bool>,
     blocked_drops_by_link: Vec<DirectedCount>,
+    duplicated_sends_by_link: Vec<DirectedCount>,
     peer_event_counts: Vec<EventCount>,
     peer_event_counts_by_peer: Vec<PeerEventCounts>,
     metrics: Vec<SessionMetrics>,
@@ -446,6 +486,15 @@ impl RunEvidence {
             confirmed_after_recovery: report.confirmed_after_recovery.clone(),
             recovered_within_b: report.recovered_within_b,
             blocked_drops_by_link: directed_counts(&report.blocked_drops_by_link),
+            duplicated_sends_by_link: report
+                .link_stats_by_link
+                .iter()
+                .map(|(&(from, to), stats)| DirectedCount {
+                    from,
+                    to,
+                    count: stats.duplicated_sends,
+                })
+                .collect(),
             peer_event_counts: event_counts(&report.peer_event_counts),
             peer_event_counts_by_peer: report
                 .peer_event_counts_by_peer
@@ -606,10 +655,32 @@ fn common_premise_violations(
         .filter(|entry| entry.count > 0)
         .map(|entry| (entry.from, entry.to))
         .collect();
-    let intended = intended_partition_links(n, case.scenario);
-    if observed_blocked != intended {
+    let intended_blocked = intended_blocked_links(n, case.scenario);
+    if observed_blocked != intended_blocked {
         violations.push(format!(
-            "nonzero blocked-drop links {observed_blocked:?} do not equal intended links {intended:?}"
+            "nonzero blocked-drop links {observed_blocked:?} do not equal intended links {intended_blocked:?}"
+        ));
+    }
+    let observed_duplicated: BTreeSet<(usize, usize)> = evidence
+        .duplicated_sends_by_link
+        .iter()
+        .filter(|entry| entry.count > 0)
+        .map(|entry| (entry.from, entry.to))
+        .collect();
+    let intended_duplicated = intended_duplication_links(case.scenario);
+    if observed_duplicated != intended_duplicated {
+        violations.push(format!(
+            "nonzero duplicated-send links {observed_duplicated:?} do not equal intended links {intended_duplicated:?}"
+        ));
+    }
+    let duplicated_sum = evidence
+        .duplicated_sends_by_link
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.count));
+    if evidence.net.duplicated != duplicated_sum {
+        violations.push(format!(
+            "global duplicated sends {} do not equal per-link sum {duplicated_sum}",
+            evidence.net.duplicated
         ));
     }
     violations
@@ -840,14 +911,18 @@ fn classify_safe_failure(
 }
 
 fn negative_control_match(
-    expectation: Expectation,
+    case: SweepCase,
     report: &RunReport,
     evidence: &RunEvidence,
 ) -> Option<NegativeControlMatch> {
-    let shared_confirmed_prefix_floor = evidence.probe_confirmed.iter().copied().min()?;
+    let shared_confirmed_prefix_floor = if case.scenario == ScenarioKind::Duplication {
+        evidence.confirmed_at_heal.iter().copied().min()?
+    } else {
+        evidence.probe_confirmed.iter().copied().min()?
+    };
     let plausible =
         |frame: i32, from_frame: i32| frame >= from_frame && frame <= shared_confirmed_prefix_floor;
-    match expectation {
+    match case.expectation {
         Expectation::StateCorruption { peer, from_frame } => {
             if from_frame > shared_confirmed_prefix_floor || evidence.peer_dropped_count() != 0 {
                 return None;
@@ -923,7 +998,7 @@ fn observe(case: SweepCase, schedule: &Schedule, options: &RunOptions) -> Observ
     let evidence = RunEvidence::from_report(&report, case.expectation.is_checksum_only());
     let premise_violations = common_premise_violations(case, schedule, options, &evidence);
     let plateau = terminal_plateau(&evidence.trace_tail);
-    let control_match = negative_control_match(case.expectation, &report, &evidence);
+    let control_match = negative_control_match(case, &report, &evidence);
     let classification = match case.expectation {
         Expectation::BoundedRecovery => classify_bounded_recovery(&evidence, &premise_violations),
         Expectation::SafeFailure => classify_safe_failure(
@@ -1137,9 +1212,14 @@ fn partition_sweep_full() {
 }
 
 #[test]
-fn partition_schedules_materialize_declared_symmetric_premises() {
+fn sweep_schedules_materialize_declared_fault_premises() {
     let cases = full_cases();
-    assert_eq!(cases.len(), 24, "20 base rows plus four matched controls");
+    assert_eq!(
+        pr_cases().len(),
+        9,
+        "five N=2 base rows plus four matched controls"
+    );
+    assert_eq!(cases.len(), 31, "25 base rows plus six matched controls");
     for case in cases {
         let (schedule, options) = materialize(case);
         assert_eq!(schedule.seed, SEED);
@@ -1151,27 +1231,69 @@ fn partition_schedules_materialize_declared_symmetric_premises() {
         );
         assert_eq!(options.disconnect_timeout, Some(DISCONNECT_TIMEOUT));
         assert_eq!(options.probe_confirmed_at, Some(PRE_CUT_PROBE_STEP));
-        let links = intended_partition_links(case.n_players, case.scenario);
-        assert!(!links.is_empty());
-        for &(from, to) in &links {
-            assert!(links.contains(&(to, from)), "partition must be symmetric");
+        let blocked_links = intended_blocked_links(case.n_players, case.scenario);
+        let duplicated_links = intended_duplication_links(case.scenario);
+        for &(from, to) in &blocked_links {
+            assert!(
+                blocked_links.contains(&(to, from)),
+                "partition must be symmetric"
+            );
             assert!(schedule.events.iter().any(|(step, event)| matches!(
                 event,
                 ScheduleEvent::Block { from: event_from, to: event_to, blocked: true }
                     if *step == CUT_STEP && *event_from == from && *event_to == to
             )));
         }
+        let duplication_policy = LinkPolicy {
+            dup_rate: 1.0,
+            ..LinkPolicy::clean()
+        };
+        for &(from, to) in &duplicated_links {
+            assert!(schedule.events.iter().any(|(step, event)| matches!(
+                event,
+                ScheduleEvent::SetLink { from: event_from, to: event_to, policy }
+                    if *step == CUT_STEP
+                        && *event_from == from
+                        && *event_to == to
+                        && policy == &duplication_policy
+            )));
+        }
+        if case.scenario == ScenarioKind::Duplication {
+            assert!(blocked_links.is_empty());
+            assert_eq!(duplicated_links, BTreeSet::from([(0, 1)]));
+            assert_eq!(
+                schedule.events.len(),
+                2,
+                "duplication must contain only SetLink and HealAll"
+            );
+            assert_eq!(
+                schedule
+                    .events
+                    .iter()
+                    .filter(|(step, _)| *step == CUT_STEP)
+                    .count(),
+                1,
+                "duplication must inject exactly one directed link"
+            );
+            assert!(schedule
+                .events
+                .iter()
+                .all(|(_, event)| !matches!(event, ScheduleEvent::Block { .. })));
+        } else {
+            assert!(!blocked_links.is_empty());
+            assert!(duplicated_links.is_empty());
+        }
         let expected_heals: Vec<u32> = case.scenario.heal_step().into_iter().collect();
         assert_eq!(actual_heal_steps(&schedule), expected_heals);
         if let Some(heal) = case.scenario.heal_step() {
-            let partition_ms = u64::from(heal - CUT_STEP) * schedule.config.step_dt_ms;
+            let fault_ms = u64::from(heal - CUT_STEP) * schedule.config.step_dt_ms;
             match case.scenario {
-                ScenarioKind::ShortHealContinue => {
-                    assert!(partition_ms < DISCONNECT_TIMEOUT.as_millis() as u64);
+                ScenarioKind::ShortHealContinue | ScenarioKind::Duplication => {
+                    assert!(fault_ms < DISCONNECT_TIMEOUT.as_millis() as u64);
                     assert!(STEPS - heal >= schedule.config.recovery_window_steps());
                 },
                 ScenarioKind::LongHealHalt => {
-                    assert!(partition_ms > DISCONNECT_TIMEOUT.as_millis() as u64);
+                    assert!(fault_ms > DISCONNECT_TIMEOUT.as_millis() as u64);
                     assert!(STEPS - heal >= schedule.config.recovery_window_steps());
                 },
                 ScenarioKind::PermanentHalt | ScenarioKind::PermanentContinue => unreachable!(),

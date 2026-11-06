@@ -145,6 +145,8 @@ pub struct SimPayloadMetadata {
 pub struct SimLinkStats {
     pub input_sends: u64,
     pub input_delivered_copies: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub duplicated_sends: u64,
     pub input_policy_loss_decisions: u64,
     pub input_policy_drops: u64,
     pub max_encoded_input_bytes: u64,
@@ -194,6 +196,7 @@ impl SimLinkStats {
         self.input_delivered_copies = self
             .input_delivered_copies
             .saturating_add(other.input_delivered_copies);
+        self.duplicated_sends = self.duplicated_sends.saturating_add(other.duplicated_sends);
         self.input_policy_loss_decisions = self
             .input_policy_loss_decisions
             .saturating_add(other.input_policy_loss_decisions);
@@ -1249,6 +1252,9 @@ impl<M: Clone> SimNetState<M> {
 
         if duplicated {
             self.stats.duplicated += 1;
+            if let Some(link) = self.links.get_mut(&key) {
+                link.stats.duplicated_sends = link.stats.duplicated_sends.saturating_add(1);
+            }
         }
 
         let blocked_until = self
@@ -2154,10 +2160,14 @@ mod tests {
     fn duplication_delivers_exactly_two_copies() {
         let (clock, offset) = manual_clock();
         let net: SimNet<u32> = SimNet::new(7, clock);
-        net.set_default_policy(LinkPolicy {
-            dup_rate: 1.0,
-            ..LinkPolicy::clean()
-        });
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                dup_rate: 1.0,
+                ..LinkPolicy::clean()
+            },
+        );
         let a = net.attach(addr(1));
         let b = net.attach(addr(2));
 
@@ -2166,7 +2176,35 @@ mod tests {
         let received = b.recv_payloads();
         assert_eq!(received.len(), 2, "dup_rate=1 must deliver two copies");
         assert!(received.iter().all(|(_, v)| *v == 9));
+
+        b.send_payload(addr(1), 10);
+        let reverse_received = a.recv_payloads();
+        assert_eq!(
+            reverse_received.len(),
+            1,
+            "the clean reverse link must not inherit duplication"
+        );
+        assert!(reverse_received.iter().all(|(_, v)| *v == 10));
         assert_eq!(net.stats().duplicated, 1);
+        let link_stats = net.link_stats();
+        assert_eq!(link_stats[&(addr(1), addr(2))].duplicated_sends, 1);
+        assert_eq!(link_stats[&(addr(2), addr(1))].duplicated_sends, 0);
+    }
+
+    #[test]
+    fn link_stats_merge_saturates_duplicated_sends() {
+        let mut total = SimLinkStats {
+            duplicated_sends: u64::MAX - 1,
+            ..SimLinkStats::default()
+        };
+        let other = SimLinkStats {
+            duplicated_sends: 2,
+            ..SimLinkStats::default()
+        };
+
+        total.merge(other);
+
+        assert_eq!(total.duplicated_sends, u64::MAX);
     }
 
     #[test]

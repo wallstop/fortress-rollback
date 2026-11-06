@@ -38,7 +38,7 @@ THIRD_PARTY_ACTION_PINS = {
     "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89",
     "benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc",
     "codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5",
-    "crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b",
+    "crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85",
     "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
     "docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6",
     "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",

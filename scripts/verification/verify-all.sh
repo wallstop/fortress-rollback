@@ -6,17 +6,17 @@
 #   ./scripts/verification/verify-all.sh --tla        # TLA+ only
 #   ./scripts/verification/verify-all.sh --kani       # Kani only
 #   ./scripts/verification/verify-all.sh --quick      # Fast subset for dev iteration
-#   ./scripts/verification/verify-all.sh --parallel   # Run TLA+ and Kani in parallel
+#   ./scripts/verification/verify-all.sh --parallel   # Run TLA+ and Kani in parallel, then Z3
 #
 # This script orchestrates all formal verification tools:
 #   - TLA+ model checking (specs/tla/*.tla)
 #   - Kani bounded model checking (Rust proofs)
-#   - Z3 SMT solving (future)
+#   - Z3 SMT solving (mathematical algorithm models)
 #
 # Prerequisites:
 #   - Java 11+ (for TLA+)
 #   - Kani (cargo install kani-verifier)
-#   - Z3 (future, for SMT proofs)
+#   - Z3 (for the z3-verification feature)
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ NC='\033[0m' # No Color
 # Tool flags
 RUN_TLA=true
 RUN_KANI=true
-RUN_Z3=false  # Not yet implemented
+RUN_Z3=true
 QUICK_MODE=false
 PARALLEL=false
 VERBOSE=false
@@ -51,7 +51,7 @@ print_usage() {
     echo "Options:"
     echo "  --tla       Run TLA+ verification only"
     echo "  --kani      Run Kani verification only"
-    echo "  --z3        Run Z3 verification only (not yet implemented)"
+    echo "  --z3        Run Z3 verification only"
     echo "  --quick     Use reduced bounds for faster verification"
     echo "  --parallel  Run verifiers in parallel (faster but more output)"
     echo "  --fail-fast Stop immediately when any verification fails"
@@ -128,9 +128,18 @@ run_z3() {
     echo -e "${BLUE}│  Z3 SMT Verification                                           │${NC}"
     echo -e "${BLUE}└────────────────────────────────────────────────────────────────┘${NC}"
 
-    echo -e "${YELLOW}Z3 verification not yet implemented.${NC}"
-    echo "See .agents/skills/verification/SKILL.md for Z3 guidance."
-    Z3_RESULT="SKIP"
+    local start_time
+    start_time=$(date +%s)
+
+    if cargo test --test verification --features z3-verification -- z3 --nocapture; then
+        Z3_RESULT="PASS"
+    else
+        Z3_RESULT="FAIL"
+    fi
+
+    local end_time
+    end_time=$(date +%s)
+    echo "Z3 verification completed in $((end_time - start_time))s"
     echo ""
 }
 
@@ -255,10 +264,9 @@ main() {
 
     # If multiple explicit tools specified, enable all mentioned
     if [[ "$explicit_tool" == "false" ]]; then
-        # Default: run TLA+ and Kani (not Z3 until implemented)
         RUN_TLA=true
         RUN_KANI=true
-        RUN_Z3=false
+        RUN_Z3=true
     fi
 
     print_header
@@ -280,16 +288,27 @@ main() {
         tla_log=$(mktemp)
         kani_log=$(mktemp)
 
-        # Start both processes
-        (run_tla > "$tla_log" 2>&1; echo "TLA_EXIT=$?" >> "$tla_log") &
+        # Start both processes. Export each function's explicit result because
+        # background subshells cannot mutate the parent's result variables.
+        (run_tla > "$tla_log" 2>&1; echo "TLA_RESULT=$TLA_RESULT" >> "$tla_log") &
         local tla_pid=$!
 
-        (run_kani > "$kani_log" 2>&1; echo "KANI_EXIT=$?" >> "$kani_log") &
+        (run_kani > "$kani_log" 2>&1; echo "KANI_RESULT=$KANI_RESULT" >> "$kani_log") &
         local kani_pid=$!
 
-        # Wait for both
         wait $tla_pid || true
         wait $kani_pid || true
+
+        if grep -q '^TLA_RESULT=PASS$' "$tla_log"; then
+            TLA_RESULT="PASS"
+        else
+            TLA_RESULT="FAIL"
+        fi
+        if grep -q '^KANI_RESULT=PASS$' "$kani_log"; then
+            KANI_RESULT="PASS"
+        else
+            KANI_RESULT="FAIL"
+        fi
 
         # Show output
         echo "=== TLA+ Output ==="
@@ -299,6 +318,14 @@ main() {
         cat "$kani_log"
 
         rm -f "$tla_log" "$kani_log"
+
+        if [[ "$RUN_Z3" == "true" ]]; then
+            if [[ "$FAIL_FAST" == "true" ]] && { [[ "$TLA_RESULT" == "FAIL" ]] || [[ "$KANI_RESULT" == "FAIL" ]]; }; then
+                Z3_RESULT="SKIP"
+            else
+                run_z3
+            fi
+        fi
     else
         # Run sequentially
         if [[ "$RUN_TLA" == "true" ]]; then

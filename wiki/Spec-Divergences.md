@@ -38,7 +38,7 @@ This document lists intentional divergences between formal specifications and pr
 
 ### 3. Z3 SMT Constants
 
-Z3 proofs use production values (128, -1, 8) where possible, providing direct verification of production behavior.
+Z3 proofs use production constants (128, -1, 8) where possible to check mathematical algorithm models. They do not execute production Rust; Kani provides bounded source-level verification.
 
 ---
 
@@ -53,8 +53,8 @@ runtime refinement link:
 | --------- | --------------------- | --------------- | ------ |
 | `ProtocolState` enum representation | Kani enum proofs | `src/network/protocol/state.rs` | ✅ Bounded enum checks |
 | Production state transitions | Rust protocol tests | `src/network/protocol/mod.rs` | ⚠️ Implementation tests; no model refinement |
-| Two-peer, two-field config handshake | `SyncHandshakeV1.tla`, `SyncHandshakeV1Fair.tla`, and `SyncHandshakeV1Mismatch.tla` plus Rust protocol/session tests | `src/network/protocol/mod.rs` | ⚠️ Bounded model and implementation tests; no trace refinement |
-| Hand-authored handshake traces | `specs/tla/SyncHandshakeV1Trace.tla` and NDJSON fixtures | No runtime producer yet | ⚠️ Mutation-sensitive contract only; instrumentation/refinement pending |
+| Two-peer, two-field config handshake | `SyncHandshakeV1.tla`, `SyncHandshakeV1Fair.tla`, and `SyncHandshakeV1Mismatch.tla` plus Rust protocol/session tests | `src/network/protocol/mod.rs` | ⚠️ Bounded model and implementation tests |
+| Hand-authored and runtime handshake traces | `specs/tla/SyncHandshakeV1Trace.tla` and NDJSON fixtures | Opt-in protocol recorder and two-peer SimNet driver | ✅ Narrow runtime-to-model refinement with mutation controls; documented fields excluded |
 | `SyncLayer` fields | `specs/tla/Rollback.tla` | `src/sync_layer/mod.rs` | ✅ Aligned |
 | `InputQueue` fields | `specs/tla/InputQueue.tla` | `src/input_queue/mod.rs` | ✅ Aligned |
 
