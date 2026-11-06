@@ -14,8 +14,8 @@ use super::harness::schedule::{
     BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    run_with_input, PeerWireTotals, RunOptions, RunReport, SimInput, TraceNetStats,
-    TraceSessionState, TraceSnapshot,
+    run_with_input, HealRecoveryObservation, PeerStallObservation, PeerWireTotals, RunOptions,
+    RunReport, SimInput, TraceNetStats, TraceSessionState, TraceSnapshot,
 };
 use crate::common::sim_net::{LinkPolicy, SimReceiveStats};
 use crate::common::stubs::StubInput;
@@ -24,13 +24,19 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-const PARTITION_LEDGER_SCHEMA: u32 = 5;
+const PARTITION_LEDGER_SCHEMA: u32 = 6;
 const SEED: u64 = 0x5041_5254_4954_494F;
 const STEPS: u32 = 900;
 const CUT_STEP: u32 = 100;
 const PRE_CUT_PROBE_STEP: u32 = CUT_STEP - 1;
 const SHORT_HEAL_STEP: u32 = 180;
 const LONG_HEAL_STEP: u32 = 450;
+const REPEATED_CYCLE_STEPS: u32 = 20;
+const POLL_FINAL_HEAL_STEP: u32 = 200;
+const POLL_STALL_STEPS: [u32; 3] = [CUT_STEP, 140, 180];
+const FLAP_FINAL_HEAL_STEP: u32 = 320;
+const FLAP_CUT_STEPS: [u32; 3] = [CUT_STEP, 200, 300];
+const FLAP_HEAL_STEPS: [u32; 3] = [120, 220, FLAP_FINAL_HEAL_STEP];
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RECEIVE_MESSAGE_LIMIT: usize = 256;
 const MIN_TERMINAL_PLATEAU_STEPS: u32 = 32;
@@ -49,10 +55,12 @@ enum ScenarioKind {
     Reorder,
     BurstLoss,
     AsymmetricDelay,
+    RepeatedFlap,
+    PollStall,
 }
 
 impl ScenarioKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::ShortHealContinue,
         Self::LongHealHalt,
         Self::PermanentHalt,
@@ -61,6 +69,8 @@ impl ScenarioKind {
         Self::Reorder,
         Self::BurstLoss,
         Self::AsymmetricDelay,
+        Self::RepeatedFlap,
+        Self::PollStall,
     ];
 
     const fn label(self) -> &'static str {
@@ -73,6 +83,8 @@ impl ScenarioKind {
             Self::Reorder => "reorder",
             Self::BurstLoss => "burst-loss",
             Self::AsymmetricDelay => "asymmetric-delay",
+            Self::RepeatedFlap => "repeated-flap",
+            Self::PollStall => "poll-stall",
         }
     }
 
@@ -84,7 +96,16 @@ impl ScenarioKind {
             | Self::BurstLoss
             | Self::AsymmetricDelay => Some(SHORT_HEAL_STEP),
             Self::LongHealHalt => Some(LONG_HEAL_STEP),
+            Self::RepeatedFlap => Some(FLAP_FINAL_HEAL_STEP),
+            Self::PollStall => Some(POLL_FINAL_HEAL_STEP),
             Self::PermanentHalt | Self::PermanentContinue => None,
+        }
+    }
+
+    fn heal_steps(self) -> Vec<u32> {
+        match self {
+            Self::RepeatedFlap => FLAP_HEAL_STEPS.to_vec(),
+            _ => self.heal_step().into_iter().collect(),
         }
     }
 
@@ -95,7 +116,9 @@ impl ScenarioKind {
             | Self::Duplication
             | Self::Reorder
             | Self::BurstLoss
-            | Self::AsymmetricDelay => DropPolicy::ContinueWithout,
+            | Self::AsymmetricDelay
+            | Self::RepeatedFlap
+            | Self::PollStall => DropPolicy::ContinueWithout,
             Self::LongHealHalt | Self::PermanentHalt => DropPolicy::Halt,
         }
     }
@@ -106,7 +129,9 @@ impl ScenarioKind {
             | Self::Duplication
             | Self::Reorder
             | Self::BurstLoss
-            | Self::AsymmetricDelay => Expectation::BoundedRecovery,
+            | Self::AsymmetricDelay
+            | Self::RepeatedFlap
+            | Self::PollStall => Expectation::BoundedRecovery,
             Self::LongHealHalt | Self::PermanentHalt | Self::PermanentContinue => {
                 Expectation::SafeFailure
             },
@@ -217,6 +242,15 @@ fn controls(n_players: usize) -> Vec<SweepCase> {
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::AsymmetricDelay, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::RepeatedFlap, IN_WINDOW_CORRUPTION_FRAME),
+            SweepCase {
+                n_players,
+                scenario: ScenarioKind::PollStall,
+                expectation: Expectation::StateCorruption {
+                    peer: CORRUPTED_PEER,
+                    from_frame: IN_WINDOW_CORRUPTION_FRAME,
+                },
+            },
         ],
         16 => vec![
             state(ScenarioKind::PermanentHalt, CORRUPTION_FRAME),
@@ -224,6 +258,15 @@ fn controls(n_players: usize) -> Vec<SweepCase> {
             state(ScenarioKind::Reorder, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::BurstLoss, IN_WINDOW_CORRUPTION_FRAME),
             state(ScenarioKind::AsymmetricDelay, IN_WINDOW_CORRUPTION_FRAME),
+            state(ScenarioKind::RepeatedFlap, IN_WINDOW_CORRUPTION_FRAME),
+            SweepCase {
+                n_players,
+                scenario: ScenarioKind::PollStall,
+                expectation: Expectation::StateCorruption {
+                    peer: CORRUPTED_PEER,
+                    from_frame: IN_WINDOW_CORRUPTION_FRAME,
+                },
+            },
         ],
         _ => Vec::new(),
     }
@@ -256,6 +299,7 @@ fn intended_blocked_links(n_players: usize, scenario: ScenarioKind) -> BTreeSet<
             | ScenarioKind::Reorder
             | ScenarioKind::BurstLoss
             | ScenarioKind::AsymmetricDelay
+            | ScenarioKind::PollStall
     ) {
         return BTreeSet::new();
     }
@@ -326,6 +370,17 @@ fn intended_base_delay_links(scenario: ScenarioKind) -> BTreeSet<(usize, usize)>
     }
 }
 
+fn intended_peer_stalls(scenario: ScenarioKind) -> Vec<(u32, usize, u32)> {
+    if scenario == ScenarioKind::PollStall {
+        POLL_STALL_STEPS
+            .into_iter()
+            .map(|step| (step, 1, REPEATED_CYCLE_STEPS))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn reorder_policy() -> LinkPolicy {
     LinkPolicy {
         base_delay: Duration::from_millis(20),
@@ -379,6 +434,22 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
             )
         })
         .collect();
+    if case.scenario == ScenarioKind::RepeatedFlap {
+        events.extend(FLAP_CUT_STEPS.into_iter().skip(1).flat_map(|step| {
+            intended_blocked_links(n, case.scenario)
+                .into_iter()
+                .map(move |(from, to)| {
+                    (
+                        step,
+                        ScheduleEvent::Block {
+                            from,
+                            to,
+                            blocked: true,
+                        },
+                    )
+                })
+        }));
+    }
     events.extend(
         intended_duplication_links(case.scenario)
             .into_iter()
@@ -438,7 +509,12 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
                 )
             }),
     );
-    if let Some(heal) = case.scenario.heal_step() {
+    events.extend(
+        intended_peer_stalls(case.scenario)
+            .into_iter()
+            .map(|(step, peer, steps)| (step, ScheduleEvent::PeerStall { peer, steps })),
+    );
+    for heal in case.scenario.heal_steps() {
         events.push((heal, ScheduleEvent::HealAll));
     }
     events.sort_by_key(|(step, _)| *step);
@@ -461,7 +537,14 @@ fn materialize(case: SweepCase) -> (Schedule, RunOptions) {
     match case.expectation {
         Expectation::BoundedRecovery | Expectation::SafeFailure => {},
         Expectation::StateCorruption { peer, from_frame } => {
-            options.corrupt_state_from = Some((peer, from_frame));
+            // The oracle's peer is the observer. For poll stalls, corrupt the
+            // surviving peer so injection does not wait for peer 1 to resume.
+            let injected_peer = if case.scenario == ScenarioKind::PollStall {
+                0
+            } else {
+                peer
+            };
+            options.corrupt_state_from = Some((injected_peer, from_frame));
         },
         Expectation::ChecksumCorruption { peer, from_frame } => {
             options.corrupt_checksum_from = Some((peer, from_frame));
@@ -609,11 +692,14 @@ struct RunEvidence {
     max_consecutive_input_policy_loss_run_by_link: Vec<DirectedCount>,
     peer_event_counts: Vec<EventCount>,
     peer_event_counts_by_peer: Vec<PeerEventCounts>,
+    max_confirmation_stall_steps_by_peer: Vec<u64>,
     metrics: Vec<SessionMetrics>,
     peer_wire: Vec<PeerWireTotals>,
     receive_stats_by_peer: Vec<SimReceiveStats>,
     first_running_step: Vec<Option<u32>>,
     first_synchronized_step: Vec<Vec<Option<u32>>>,
+    peer_stalls: Vec<PeerStallObservation>,
+    heal_recoveries: Vec<HealRecoveryObservation>,
     net: TraceNetStats,
     first_observed_divergence: Option<i32>,
 }
@@ -688,11 +774,16 @@ impl RunEvidence {
                     counts: event_counts(counts),
                 })
                 .collect(),
+            max_confirmation_stall_steps_by_peer: report
+                .max_confirmation_stall_steps_by_peer
+                .clone(),
             metrics: report.metrics.clone(),
             peer_wire: report.peer_wire.clone(),
             receive_stats_by_peer: report.receive_stats_by_peer.clone(),
             first_running_step: report.first_running_step.clone(),
             first_synchronized_step: report.first_synchronized_step.clone(),
+            peer_stalls: report.peer_stalls.clone(),
+            heal_recoveries: report.heal_recoveries.clone(),
             net: TraceNetStats::from(report.net_stats),
             first_observed_divergence: first_observed_divergence(
                 &report.verdict.failures,
@@ -765,6 +856,94 @@ struct Observation {
     classification: Classification,
 }
 
+fn stall_premise_violations(case: SweepCase, evidence: &RunEvidence) -> Vec<String> {
+    let expected = intended_peer_stalls(case.scenario);
+    let mut violations = Vec::new();
+    if evidence.peer_stalls.len() != expected.len() {
+        violations.push(format!(
+            "actual stalls {} do not match declared stalls {}",
+            evidence.peer_stalls.len(),
+            expected.len()
+        ));
+    }
+    for (index, (stall, (start_step, expected_peer, expected_steps))) in
+        evidence.peer_stalls.iter().zip(expected).enumerate()
+    {
+        let end_step = start_step.saturating_add(expected_steps);
+        if stall.peer != expected_peer
+            || stall.start_step != start_step
+            || stall.end_step != end_step
+            || stall.observed_frozen_steps != expected_steps
+            || stall.confirmed_at_freeze_end != stall.confirmed_at_start
+            || stall.current_frame_at_freeze_end != stall.current_frame_at_start
+            || stall.resume_step != Some(end_step)
+            || stall.confirmed_at_resume.is_none()
+        {
+            violations.push(format!(
+                "stall {index} did not preserve the declared half-open freeze/resume window: {stall:?}"
+            ));
+        }
+    }
+    violations
+}
+
+fn recovery_premise_violations(case: SweepCase, evidence: &RunEvidence) -> Vec<String> {
+    let expected_heals = case.scenario.heal_steps();
+    let mut violations = Vec::new();
+    let actual_heals: Vec<u32> = evidence
+        .heal_recoveries
+        .iter()
+        .map(|recovery| recovery.heal_step)
+        .collect();
+    if actual_heals != expected_heals {
+        violations.push(format!(
+            "recovery anchors {actual_heals:?} do not match declared heals {expected_heals:?}"
+        ));
+    }
+    for (index, recovery) in evidence.heal_recoveries.iter().enumerate() {
+        if recovery.confirmed_at_heal.len() != case.n_players {
+            violations.push(format!(
+                "heal {} lacks a complete confirmed baseline",
+                recovery.heal_step
+            ));
+        }
+        if recovery
+            .first_all_running_step
+            .is_some_and(|step| step < recovery.heal_step)
+            || recovery
+                .first_all_confirmed_advance_step
+                .is_some_and(|step| step <= recovery.heal_step)
+        {
+            violations.push(format!(
+                "heal {} has a recovery timestamp outside its causal window: {recovery:?}",
+                recovery.heal_step
+            ));
+        }
+        if case.scenario.base_expectation() == Expectation::BoundedRecovery
+            && (recovery.first_all_running_step.is_none()
+                || recovery.first_all_confirmed_advance_step.is_none())
+        {
+            violations.push(format!(
+                "bounded-recovery heal {} never reached all-running/all-confirmed progress: {recovery:?}",
+                recovery.heal_step
+            ));
+        }
+        if case.scenario == ScenarioKind::RepeatedFlap {
+            let next_cut = FLAP_CUT_STEPS.get(index + 1).copied().unwrap_or(STEPS);
+            if recovery
+                .first_all_confirmed_advance_step
+                .is_none_or(|step| step >= next_cut)
+            {
+                violations.push(format!(
+                    "flap heal {} did not confirm progress before step {next_cut}: {recovery:?}",
+                    recovery.heal_step
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn common_premise_violations(
     case: SweepCase,
     schedule: &Schedule,
@@ -782,9 +961,18 @@ fn common_premise_violations(
             evidence.replay_input_width_bytes
         ));
     }
-    let expected_heals: Vec<u32> = case.scenario.heal_step().into_iter().collect();
+    let expected_heals = case.scenario.heal_steps();
     if actual_heal_steps(schedule) != expected_heals {
         violations.push("actual HealAll events differ from the declared scenario".to_owned());
+    }
+    if evidence.max_confirmation_stall_steps_by_peer.len() != n {
+        violations.push("confirmation-stall duration evidence is missing peers".to_owned());
+    } else if case.scenario == ScenarioKind::PollStall
+        && evidence.max_confirmation_stall_steps_by_peer[1] < u64::from(REPEATED_CYCLE_STEPS)
+    {
+        violations.push(
+            "poll stalls did not produce the declared confirmation-stall duration".to_owned(),
+        );
     }
     if evidence.first_running_step.len() != n {
         violations.push("pre-cut Running evidence is missing peer entries".to_owned());
@@ -967,6 +1155,8 @@ fn common_premise_violations(
             }
         }
     }
+    violations.extend(stall_premise_violations(case, evidence));
+    violations.extend(recovery_premise_violations(case, evidence));
     violations
 }
 
@@ -1205,6 +1395,8 @@ fn negative_control_match(
             | ScenarioKind::Reorder
             | ScenarioKind::BurstLoss
             | ScenarioKind::AsymmetricDelay
+            | ScenarioKind::RepeatedFlap
+            | ScenarioKind::PollStall
     ) {
         evidence.confirmed_at_heal.iter().copied().min()?
     } else {
@@ -1325,6 +1517,39 @@ struct ComputeIdentity {
     input_width_bytes: u32,
 }
 
+#[cfg(target_os = "linux")]
+fn process_memory_bytes(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with(field) && line.as_bytes().get(field.len()) == Some(&b':'))?;
+    let kib = line
+        .split_once(':')?
+        .1
+        .trim()
+        .strip_suffix(" kB")?
+        .parse::<u64>()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_memory_bytes(_field: &str) -> Option<u64> {
+    None
+}
+
+/// Nondeterministic host measurements live outside replayed `RunEvidence`.
+/// RSS/peak RSS are process-wide because nextest runs each matrix in one process.
+#[derive(Debug, Serialize)]
+struct HostResourceEvidence {
+    observed_elapsed_ns: u64,
+    replay_elapsed_ns: u64,
+    rss_before_bytes: Option<u64>,
+    rss_after_observed_bytes: Option<u64>,
+    rss_after_replay_bytes: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ScenarioRow {
     row_id: String,
@@ -1338,6 +1563,7 @@ struct ScenarioRow {
     observed: Observation,
     replay: Observation,
     replay_mismatches: Vec<String>,
+    host_resources: HostResourceEvidence,
     classification: Classification,
 }
 
@@ -1383,9 +1609,18 @@ fn compute_identity() -> ComputeIdentity {
 
 fn run_case(case: SweepCase, identity: &ComputeIdentity) -> ScenarioRow {
     let (schedule, options) = materialize(case);
+    let rss_before_bytes = process_memory_bytes("VmRSS");
+    let observed_started = std::time::Instant::now();
     let observed = observe(case, &schedule, &options);
+    let observed_elapsed_ns =
+        u64::try_from(observed_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let rss_after_observed_bytes = process_memory_bytes("VmRSS");
     // The same materialized values and input type drive every replay.
+    let replay_started = std::time::Instant::now();
     let replay = observe(case, &schedule, &options);
+    let replay_elapsed_ns = u64::try_from(replay_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let rss_after_replay_bytes = process_memory_bytes("VmRSS");
+    let peak_rss_bytes = process_memory_bytes("VmHWM");
     let replay_mismatches = compare_replays(&observed, &replay);
     let classification = if replay_mismatches.is_empty() {
         observed.classification
@@ -1404,6 +1639,14 @@ fn run_case(case: SweepCase, identity: &ComputeIdentity) -> ScenarioRow {
         observed,
         replay,
         replay_mismatches,
+        host_resources: HostResourceEvidence {
+            observed_elapsed_ns,
+            replay_elapsed_ns,
+            rss_before_bytes,
+            rss_after_observed_bytes,
+            rss_after_replay_bytes,
+            peak_rss_bytes,
+        },
         classification,
     }
 }
@@ -1506,10 +1749,10 @@ fn sweep_schedules_materialize_declared_fault_premises() {
     let cases = full_cases();
     assert_eq!(
         pr_cases().len(),
-        15,
-        "eight N=2 base rows plus seven matched controls"
+        19,
+        "ten N=2 base rows plus nine matched controls"
     );
-    assert_eq!(cases.len(), 52, "40 base rows plus 12 matched controls");
+    assert_eq!(cases.len(), 66, "50 base rows plus 16 matched controls");
     for case in cases {
         let (schedule, options) = materialize(case);
         assert_eq!(schedule.seed, SEED);
@@ -1526,6 +1769,7 @@ fn sweep_schedules_materialize_declared_fault_premises() {
         let reordered_links = intended_reorder_links(case.scenario);
         let burst_loss_links = intended_burst_loss_links(case.scenario);
         let asymmetric_delay_links = intended_asymmetric_delay_links(case.scenario);
+        let peer_stalls = intended_peer_stalls(case.scenario);
         for &(from, to) in &blocked_links {
             assert!(
                 blocked_links.contains(&(to, from)),
@@ -1581,7 +1825,17 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                         && policy == &asymmetric_delay_policy()
             )));
         }
-        if matches!(
+        if case.scenario == ScenarioKind::PollStall {
+            assert!(blocked_links.is_empty());
+            assert_eq!(schedule.events.len(), 4, "three stalls plus one heal");
+            for &(start, peer, steps) in &peer_stalls {
+                assert!(schedule.events.iter().any(|(step, event)| matches!(
+                    event,
+                    ScheduleEvent::PeerStall { peer: event_peer, steps: event_steps }
+                        if *step == start && *event_peer == peer && *event_steps == steps
+                )));
+            }
+        } else if matches!(
             case.scenario,
             ScenarioKind::Duplication
                 | ScenarioKind::Reorder
@@ -1635,7 +1889,9 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                 ScenarioKind::ShortHealContinue
                 | ScenarioKind::LongHealHalt
                 | ScenarioKind::PermanentHalt
-                | ScenarioKind::PermanentContinue => unreachable!(),
+                | ScenarioKind::PermanentContinue
+                | ScenarioKind::RepeatedFlap
+                | ScenarioKind::PollStall => unreachable!(),
             }
         } else {
             assert!(!blocked_links.is_empty());
@@ -1644,7 +1900,39 @@ fn sweep_schedules_materialize_declared_fault_premises() {
             assert!(burst_loss_links.is_empty());
             assert!(asymmetric_delay_links.is_empty());
         }
-        let expected_heals: Vec<u32> = case.scenario.heal_step().into_iter().collect();
+        if case.scenario == ScenarioKind::RepeatedFlap {
+            assert_eq!(
+                schedule.events.len(),
+                blocked_links.len() * 3 + 3,
+                "three cuts for every cross-component link plus three heals"
+            );
+            for cut in FLAP_CUT_STEPS {
+                for &(from, to) in &blocked_links {
+                    assert!(schedule.events.iter().any(|(step, event)| matches!(
+                        event,
+                        ScheduleEvent::Block { from: event_from, to: event_to, blocked: true }
+                            if *step == cut && *event_from == from && *event_to == to
+                    )));
+                }
+            }
+            for (cut, heal) in FLAP_CUT_STEPS.into_iter().zip(FLAP_HEAL_STEPS) {
+                assert_eq!(heal - cut, REPEATED_CYCLE_STEPS);
+                assert!(
+                    u64::from(heal - cut) * schedule.config.step_dt_ms
+                        < DISCONNECT_TIMEOUT.as_millis() as u64
+                );
+            }
+        } else if case.scenario != ScenarioKind::PollStall {
+            assert_eq!(peer_stalls, Vec::new());
+        }
+        for &(_, _, steps) in &peer_stalls {
+            assert_eq!(steps, REPEATED_CYCLE_STEPS);
+            assert!(
+                u64::from(steps) * schedule.config.step_dt_ms
+                    < DISCONNECT_TIMEOUT.as_millis() as u64
+            );
+        }
+        let expected_heals = case.scenario.heal_steps();
         assert_eq!(actual_heal_steps(&schedule), expected_heals);
         if let Some(heal) = case.scenario.heal_step() {
             let fault_ms = u64::from(heal - CUT_STEP) * schedule.config.step_dt_ms;
@@ -1653,8 +1941,12 @@ fn sweep_schedules_materialize_declared_fault_premises() {
                 | ScenarioKind::Duplication
                 | ScenarioKind::Reorder
                 | ScenarioKind::BurstLoss
-                | ScenarioKind::AsymmetricDelay => {
+                | ScenarioKind::AsymmetricDelay
+                | ScenarioKind::PollStall => {
                     assert!(fault_ms < DISCONNECT_TIMEOUT.as_millis() as u64);
+                    assert!(STEPS - heal >= schedule.config.recovery_window_steps());
+                },
+                ScenarioKind::RepeatedFlap => {
                     assert!(STEPS - heal >= schedule.config.recovery_window_steps());
                 },
                 ScenarioKind::LongHealHalt => {
