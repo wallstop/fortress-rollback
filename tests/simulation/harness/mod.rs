@@ -713,6 +713,8 @@ pub struct TraceNetStats {
     pub sent: u64,
     pub delivered: u64,
     pub dropped_by_policy: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub burst_loss_events: u64,
     pub retransmit_delayed: u64,
     pub dropped_blocked: u64,
     pub dropped_unattached: u64,
@@ -784,6 +786,7 @@ impl From<crate::common::sim_net::SimNetStats> for TraceNetStats {
             sent: stats.sent,
             delivered: stats.delivered,
             dropped_by_policy: stats.dropped_by_policy,
+            burst_loss_events: stats.burst_loss_events,
             retransmit_delayed: stats.retransmit_delayed,
             dropped_blocked: stats.dropped_blocked,
             dropped_unattached: stats.dropped_unattached,
@@ -4033,6 +4036,7 @@ mod tests {
         assert!(!object.keys().any(|key| key.starts_with("gilbert_elliott")));
         assert!(!object.keys().any(|key| key.starts_with("fragmentation")));
         assert!(!object.keys().any(|key| key.starts_with("bandwidth")));
+        assert!(!object.contains_key("burst_loss_events"));
         let legacy_back: TraceNetStats = serde_json::from_value(legacy_json).unwrap();
         assert_eq!(legacy_back, TraceNetStats::default());
 
@@ -4068,6 +4072,18 @@ mod tests {
         };
         let mut changed = snapshot.clone();
         changed.net = ge_stats;
+        assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
+
+        let burst_stats = TraceNetStats {
+            burst_loss_events: 3,
+            ..TraceNetStats::default()
+        };
+        let burst_json = serde_json::to_vec(&burst_stats).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<TraceNetStats>(&burst_json).unwrap(),
+            burst_stats
+        );
+        changed.net = burst_stats;
         assert_ne!(snapshot_hash(&snapshot), snapshot_hash(&changed));
 
         let fragmentation_stats = TraceNetStats {

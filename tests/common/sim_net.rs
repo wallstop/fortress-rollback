@@ -150,6 +150,9 @@ pub struct SimLinkStats {
     /// Copies delivered after a later-scheduled copy on this link.
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub reordered_deliveries: u64,
+    /// Fixed-burst loss runs started on this link.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub burst_loss_events: u64,
     pub input_policy_loss_decisions: u64,
     pub input_policy_drops: u64,
     pub max_encoded_input_bytes: u64,
@@ -203,6 +206,9 @@ impl SimLinkStats {
         self.reordered_deliveries = self
             .reordered_deliveries
             .saturating_add(other.reordered_deliveries);
+        self.burst_loss_events = self
+            .burst_loss_events
+            .saturating_add(other.burst_loss_events);
         self.input_policy_loss_decisions = self
             .input_policy_loss_decisions
             .saturating_add(other.input_policy_loss_decisions);
@@ -371,6 +377,8 @@ pub struct SimNetStats {
     pub delivered: u64,
     /// Copies dropped by independent, fixed-burst, or Gilbert-Elliott loss.
     pub dropped_by_policy: u64,
+    /// Fixed-burst loss runs started across all directed links.
+    pub burst_loss_events: u64,
     /// Would-be policy drops converted into reliable retransmission delays.
     pub retransmit_delayed: u64,
     /// Copies dropped because the link was blocked.
@@ -1219,8 +1227,10 @@ impl<M: Clone> SimNetState<M> {
             && policy.burst_rate > 0.0
             && self.roll_unit() < policy.burst_rate;
         if burst_roll_hit {
+            self.stats.burst_loss_events = self.stats.burst_loss_events.saturating_add(1);
             if let Some(link) = self.links.get_mut(&key) {
                 link.burst_remaining = policy.burst_len.saturating_sub(1);
+                link.stats.burst_loss_events = link.stats.burst_loss_events.saturating_add(1);
             }
             input_policy_lost = true;
             if !self.handle_policy_loss(key, policy.retransmit_delay) {
@@ -2277,11 +2287,13 @@ mod tests {
         let mut total = SimLinkStats {
             duplicated_sends: u64::MAX - 1,
             reordered_deliveries: u64::MAX - 1,
+            burst_loss_events: u64::MAX - 1,
             ..SimLinkStats::default()
         };
         let other = SimLinkStats {
             duplicated_sends: 2,
             reordered_deliveries: 2,
+            burst_loss_events: 2,
             ..SimLinkStats::default()
         };
 
@@ -2289,6 +2301,7 @@ mod tests {
 
         assert_eq!(total.duplicated_sends, u64::MAX);
         assert_eq!(total.reordered_deliveries, u64::MAX);
+        assert_eq!(total.burst_loss_events, u64::MAX);
     }
 
     #[test]
@@ -2582,7 +2595,79 @@ mod tests {
             b.recv_payloads().is_empty(),
             "burst_rate=1 with burst_len=3 drops every send (back-to-back bursts)"
         );
-        assert_eq!(net.stats().dropped_by_policy, 9);
+        let stats = net.stats();
+        assert_eq!(stats.dropped_by_policy, 9);
+        assert_eq!(stats.burst_loss_events, 3);
+        assert_eq!(net.link_stats()[&(addr(1), addr(2))].burst_loss_events, 3);
+    }
+
+    #[test]
+    fn partial_bursts_drop_consecutive_runs_only_on_targeted_link() {
+        let (clock, _offset) = manual_clock();
+        let net: SimNet<u32> = SimNet::new(7, clock);
+        net.set_link(
+            addr(1),
+            addr(2),
+            LinkPolicy {
+                burst_rate: 0.05,
+                burst_len: 3,
+                ..LinkPolicy::clean()
+            },
+        );
+        let a = net.attach(addr(1));
+        let b = net.attach(addr(2));
+
+        const SENDS: u32 = 256;
+        for value in 0..SENDS {
+            a.send_payload(addr(2), value);
+            b.send_payload(addr(1), 1_000 + value);
+        }
+        let forward = b.recv_payloads();
+        let reverse = a.recv_payloads();
+        assert_eq!(
+            reverse
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+            (0..SENDS).map(|value| 1_000 + value).collect::<Vec<_>>(),
+            "the reverse link must deliver every payload in order"
+        );
+
+        let mut delivered = vec![false; SENDS as usize];
+        for (_, value) in forward {
+            let slot = delivered
+                .get_mut(value as usize)
+                .expect("targeted link delivers only declared payload IDs");
+            assert!(!*slot, "burst-only loss must not duplicate payloads");
+            *slot = true;
+        }
+        let independently_dropped = delivered.iter().filter(|delivered| !**delivered).count();
+        let mut current_loss_run = 0_usize;
+        let mut max_loss_run = 0_usize;
+        for was_delivered in delivered {
+            if was_delivered {
+                current_loss_run = 0;
+            } else {
+                current_loss_run += 1;
+                max_loss_run = max_loss_run.max(current_loss_run);
+            }
+        }
+        assert!(
+            max_loss_run >= 3,
+            "the deterministic partial-burst stream must contain an actual loss run of at least three"
+        );
+
+        let stats = net.stats();
+        let link_stats = net.link_stats();
+        let targeted = link_stats[&(addr(1), addr(2))];
+        assert_eq!(stats.dropped_by_policy, independently_dropped as u64);
+        assert!(targeted.burst_loss_events > 0);
+        assert_eq!(stats.burst_loss_events, targeted.burst_loss_events);
+        assert_eq!(
+            link_stats[&(addr(2), addr(1))].burst_loss_events,
+            0,
+            "the clean reverse link must not inherit burst events"
+        );
     }
 
     #[test]
