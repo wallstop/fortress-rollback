@@ -1,134 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793940858511,
+  "lastUpdate": 1793994651753,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "5ebb23a7b97c142e8fc89281af56f87d58f4ee8e",
-          "message": "Add bounded control-loop simulation evidence (#224)\n\n## What\n\n- quantify H-SKEW rollback cost across mirrored peer orientation and\nfour scheduler cadences\n- add schema-v16 bounded endpoint RTT/advantage/backlog and live\nbandwidth queue/drain samples\n- preserve schema-v15 serialized trace identity and artifact replay\ncompatibility\n- execute matched H-OSC, H-BLOAT, and H-ASYM experiments with direct\nevidence\n\n## Why\n\nSeveral open PLAN hypotheses could only be discussed through aggregate\ncounters. This adds at most 12 deterministic directed-link samples per\nrun, allowing matched causal experiments without unbounded traces.\n\nThe resulting evidence:\n\n- perfectly symmetric 100 ms H-OSC controls are inert (zero\nrecommendations/skips), so perturbation-driven A10 remains\n- the N=2/4-byte H-BLOAT row shows identical bounded queue\nsamples/cumulative maxima while obedience cuts work 42.7%; scale and\nbetween-cut behavior remain open\n- 10/200 ms H-ASYM confirms a seven-frame throughput and 18-vs-11 stall\nsplit, but falsifies the predicted wait-recommendation mechanism at this\nbound\n\n## Impact\n\nTest/simulation infrastructure only. No production API, wire format,\nchangelog-relevant behavior, or runtime behavior changes.\n\n## Validation\n\n- agent preflight: PASS\n- strict workspace clippy with tokio,json: PASS\n- full nextest: 2,743 passed, 73 skipped\n- focused schema compatibility, artifact validation, H-OSC, H-BLOAT,\nH-ASYM, SimNet drain tests: PASS\n- ignored release H-SKEW hour and cadence/orientation probes: PASS\n- adversarial sub-agent review: zero issues\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to test/simulation harness and SimNet telemetry;\nno production runtime or wire-format behavior is modified.\n> \n> **Overview**\n> Adds **schema v16** simulation harness support: up to ~12\ndeterministic `ProgressSample` rows per run now optionally carry\nper-directed **endpoint** gauges (RTT, remote frame advantage, pending\noutput) and **live bandwidth queue** snapshots (queued bytes/datagrams,\ndrain delay). **Schema 15** keeps empty gauge vectors and unchanged\nserialized trace shape; artifact validation enforces directed-link\nordering and counts only for v16+.\n> \n> `SimNet` exposes read-only `SimBandwidthState` via\n`bandwidth_states()` without advancing virtual time or mutating queues.\n> \n> Matched census/fleet tests use the new series for causal evidence:\n**H-BLOAT** (obey vs ignore wait recommendations with identical queue\nsamples), **H-OSC** (symmetric delay does not trigger mutual sleep),\n**H-ASYM** (throughput bias without wait recommendations), tighter\n**bandwidth-queue** census assertions, and additional **H-SKEW** cost\nobservability (lower-bound assertions on hour test; ignored cadence\nmatrix probe).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ndf35e189e982aa28d0981e917519afa6f9ace358. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-11T16:41:52-07:00",
-          "tree_id": "d96e8274539cb56e6e445fbf9719eaf48ce82888",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/5ebb23a7b97c142e8fc89281af56f87d58f4ee8e"
-        },
-        "date": 1783813588865,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 132,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 181,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 448,
-            "range": "± 15",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 705,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1016,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 132960,
-            "range": "± 3338",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46217,
-            "range": "± 280",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 102",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3107,6 +2981,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3001,
             "range": "± 184",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b960525f4c687de7522b10835f45567f95d0eb94",
+          "message": "test: add deterministic burst consistency evidence (#369)\n\n## Summary\n\n- Extend the expectation-aware consistency ledger to deterministic\ndirected burst loss at N=2/3/4/8/16.\n- Add saturating per-link/global burst-start evidence,\nbackward-compatible trace identity, exact independent payload-loss span\nchecks, replay comparison, and matched N=2/N=16 corruption controls.\n- Record the schema-v4 matrix in the tuning guide/wiki and remove only\nthe completed burst axis from `PLAN.md`.\n- Upgrade the exactly pinned Playwright browser probe from 1.64.1 to\n1.65.0.\n\n## Evidence\n\nFinal code SHA `6bef90ae9b6b5165f9a1808bf38be6459886912b` passed the\nrelease-mode full matrix:\n\n- 45 rows: 35 uninjected bases and ten matched controls.\n- 20 bounded recoveries, 15 safe failures, and ten intentional defect\ncontrols.\n- Every burst row observed eight starts and 24 policy drops only on\ndirected link 0→1, with a real three-input loss run.\n- Both in-window burst controls produced typed state divergence at peer\n1/frame 120.\n- Zero replay mismatches and zero premise violations; every row carries\nthe exact code SHA.\n\nThe independent SimNet oracle reconstructs missing payload spans,\naccepts only three-packet bursts or a truncated terminal burst, and\nderives exact event counts. The matrix also permits valid coalesced runs\nand one heal-truncated final burst. Three adversarial review rounds\nclosed the initial oracle and boundary findings; the final aggregate\nreview reported zero findings.\n\n## Validation\n\n- Focused SimNet/trace/schedule tests and 13-row PR gate: passed.\n- Exact-SHA `partition_sweep_full`: 45 rows passed in release mode.\n- `cargo clippy --workspace --all-targets --features tokio,json`:\npassed.\n- `cargo nextest run --no-capture`: 2,996 passed, 73 skipped.\n- `.venv/bin/pytest scripts/tests -q`: 2,191 passed.\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps`: passed; doc tests\n160 passed, 50 ignored.\n- Link check: 1,445 links, zero errors/warnings; doc claims, wiki\nconsistency, Markdownlint, plan hygiene, typos, and four workspace-lock\nchecks passed.\n- Explicit changed-file agent preflight: all selected checks passed\nwithout fallback.\n- Playwright 1.65.0: clean `npm ci`, zero audit vulnerabilities, and all\nthree browser tests discovered.\n- Latest `main` (`cab3078`): 90 successful checks, five accepted skips,\nzero pending/failures.\n\n## Scope\n\nNo production API or wire behavior changes are included, so no changelog\nentry is needed. Asymmetry, repeated flaps, poll stalls, exact timing,\nand host resource evidence remain in the active P0 plan. The only open\nissue, #365, remains the intentionally queued P2 Lean experiment.",
+          "timestamp": "2026-11-06T11:42:18-08:00",
+          "tree_id": "657597e6e6e75040625f7c32b47ee79c78e5beb9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b960525f4c687de7522b10835f45567f95d0eb94"
+        },
+        "date": 1793994650744,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39546,
+            "range": "± 550",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24244,
+            "range": "± 672",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1090,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2772,
+            "range": "± 178",
             "unit": "ns/iter"
           }
         ]
