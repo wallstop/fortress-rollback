@@ -1,146 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793994651753,
+  "lastUpdate": 1794000429778,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "0b70f028557f9df15a57565345b0aa5773b8489d",
-          "message": "Add protocol v1 verification and scale hardening evidence (#225)\n\n## Summary\n\n- add a TLC-enforced protocol-v1 handshake model covering safety, fair\nmatching, mismatch rejection, and a required non-vacuity counterexample\n- complete the missing `P2PSession::metrics` and `Message::encoded_len`\nCriterion baselines\n- add data-backed H-BLOAT, H-META-RB, and H-POLLCAP simulation rows,\nexact replay evidence, receive-cap diagnostics, and nightly coverage\n- document the preferred VS Code Git/GitHub integration order for agent\nworkflows\n\n## Why\n\nThe hardening plan requires measurement and formal entrance gates before\nthe protocol-v1 wire break. These changes close several open evidence\ngaps without changing production protocol behavior:\n\n- protocol-v1 handshake assumptions are model-checked before\nimplementation\n- N=16 bandwidth/fragmentation behavior is measured rather than inferred\n- rollback-storm persistence is bounded under fixed cadence without\noverstating CPU-feedback coverage\n- the per-socket 256-message cap is shown to defer, not drop or starve,\na planted 270-message typed receive storm\n\n## Results\n\n- H-BLOAT N=16/32-byte treatment reduces tail drops and maximum queue\ndelay, while exposing higher simulation work/resimulation cost\n- H-META-RB returns to the matched fixed-cadence control within the\nrecovery window\n- H-POLLCAP returns 256 messages, retains 14, drains subsequently, and\nadds at most one synchronization step versus cap 512\n- benchmark upper bounds: `P2PSession::metrics` 11.255 ns;\n`Message::encoded_len` 0.845 ns\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `cargo nextest run --no-capture`: 2,760 passed\n- `cargo nextest run --features hot-join --no-capture`: 3,012 passed\n- `bash scripts/verification/verify-tla.sh`: 19/19 gates passed,\nincluding the expected counterexample\n- `python3 scripts/ci/agent-preflight.py --all --auto-fix`\n- focused nightly H-BLOAT and H-POLLCAP release rows and H-META-RB\nregression\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to specs, verification scripts, benchmarks, test\nharness, and agent docs; production `src/` protocol behavior is not\nmodified in this diff.\n> \n> **Overview**\n> Adds **formal and simulation evidence** ahead of protocol-v1 wire\nwork, without changing production session/protocol behavior.\n> \n> **TLA+:** New `SyncHandshakeV1` module with safety (arbitrary loss),\nfair matching liveness, mismatch liveness, and an CI-enforced\n**handlers-disabled** mutation that must violate `EventuallyBothSynced`.\n`verify-tla.sh` registers the new specs, runs TLC from `specs/tla`, and\ntreats the mutation as a distinct expected-failure gate (not a generic\nTLC error).\n> \n> **Benchmarks:** Criterion coverage for allocation-free\n`P2PSession::metrics()` and `Message` wire-length via\n`__internal::message_metadata`.\n> \n> **Simulation harness:** `SimNet` gains configurable per-poll receive\nlimits and `SimReceiveStats`; `RunOptions::receive_message_limit` drives\ncaps and records **first Running / first Synchronized** timing. New\nignored-nightly probes: **H-POLLCAP** (270-message storm defers at 256,\ndrains without starvation), **H-BLOAT** (N=16 bandwidth/fragmentation vs\n`AppModel::Obey`), and **H-META-RB-OPENLOOP** (rollback work after RTT\nspike decays under fixed cadence). Nightly workflow filter includes the\ncensus H-* tests.\n> \n> **Docs:** `AGENTS.md` / `.llm/context.md` prefer callable VS Code Git\nand GitHub PR extensions over `gh` when available.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ndc2993b63564e14e907d444b7373a5027ec903d4. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-11T21:03:28-07:00",
-          "tree_id": "871f2705757b883c52f7554eb0e23ed79a5f4d93",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0b70f028557f9df15a57565345b0aa5773b8489d"
-        },
-        "date": 1783829306440,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 165,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 444,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 705,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1023,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 124640,
-            "range": "± 404",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46162,
-            "range": "± 857",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 103",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "P2PSession/metrics",
-            "value": 16,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message/encoded_len",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -3035,6 +2897,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2772,
             "range": "± 178",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4757214205cb8b8f685df777b9c3be49993b0b85",
+          "message": "test: add deterministic asymmetry consistency evidence (#370)\n\n## Summary\n\n- Extend the expectation-aware consistency ledger to a deterministic 200\nms one-way delay on link 0→1 at N=2/3/4/8/16.\n- Add saturating per-link/global per-copy delay evidence,\nbackward-compatible trace identity, exact replay comparison, and matched\nN=2/N=16 corruption controls.\n- Handle valid post-heal overtaking explicitly: clean sends may pass old\ndelayed packets, so directed reorder evidence is required rather than\nrejected.\n- Record the schema-v5 matrix in the tuning guide/wiki and remove only\nthe completed asymmetry axis from `PLAN.md`.\n\n## Evidence\n\nImplementation SHA `726b25f47fb51213c71a8ebcbb47b07dfa7757f1` passed the\nrelease-mode full matrix:\n\n- 52 rows: 40 uninjected bases and 12 matched controls.\n- 25 bounded recoveries, 15 safe failures, and 12 intentional defect\ncontrols.\n- Asymmetric delay observed 170 delayed copies and 26 post-heal reorder\ndeliveries at N=2; every larger size observed 132 delayed copies and 22\nreorder deliveries.\n- Every delay/reorder injection occurred only on 0→1, and per-link sums\nmatched global counters.\n- Both controls produced typed state divergence at peer 1/frame 120,\nbounded by the confirmed prefix at healing.\n- Zero replay mismatches and zero premise violations; every row carries\nthe exact implementation SHA.\n\nIndependent SimNet tests validate direction, exact virtual-time delivery\nboundaries, per-copy delayed duplication, and counter saturation. Four\nadversarial review rounds closed the initial oracle boundary,\ninstrumentation coverage, documentation, and progress-record findings;\nthe final aggregate review reported zero findings.\n\n## Validation\n\n- Focused SimNet/trace/schedule tests and 15-row PR gate: passed.\n- Exact-SHA `partition_sweep_full`: 52 rows passed in release mode.\n- `cargo clippy --workspace --all-targets --features tokio,json`:\npassed.\n- `cargo nextest run --no-capture`: 2,996 passed, 73 skipped.\n- `.venv/bin/pytest scripts/tests -q`: 2,191 passed.\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps`: passed; doc tests\n160 passed, 50 ignored.\n- Link check: 1,445 links, zero errors/warnings; doc claims, wiki\nconsistency, Markdownlint, plan hygiene, typos, and four workspace-lock\nchecks passed.\n- Agent preflight: all selected checks passed without fallback.\n- Latest `main` (`b960525`): all 14 push workflows successful, zero\npending/failures.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production code changed)\n- Determinism: PASS (fixed seed/virtual time; complete replay equality)\n- Error handling: PASS (test-only instrumentation)\n- Test breadth: PASS (direction, timing, duplication, saturation,\nmatrix, replay, and negative controls)\n- Design log: N/A (no architecture decision)\n- CHANGELOG: N/A (no public API, production behavior, or wire change)\n\n## Scope\n\nNo production API or wire behavior changes are included, so no changelog\nentry is needed. Repeated flaps, poll stalls, exact timing, and host\nresource evidence remain in the active P0 plan. The only open issue,\n#365, remains the intentionally queued P2 Lean experiment. All\ncompatible Cargo workspace dependencies are current; remaining direct\nupgrades are held by the Rust 1.86 MSRV.",
+          "timestamp": "2026-11-06T13:19:32-08:00",
+          "tree_id": "40f1edc91709000424c90a38bc8d45154f049771",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/4757214205cb8b8f685df777b9c3be49993b0b85"
+        },
+        "date": 1794000428414,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39694,
+            "range": "± 232",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 23084,
+            "range": "± 195",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1090,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1243,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2760,
+            "range": "± 156",
             "unit": "ns/iter"
           }
         ]
