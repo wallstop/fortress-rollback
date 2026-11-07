@@ -69,6 +69,28 @@ pub enum ViolationSource {
 /// One concrete invariant violation, with enough context to debug.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleFailure {
+    /// Differential mode: typed confirmed inputs differ from the independent
+    /// nominal fixed-history reference, even when every peer agrees.
+    ReferenceInput {
+        peer: usize,
+        frame: i32,
+        expected: String,
+        actual: String,
+    },
+    /// Differential mode: a recorded post-state differs from the exact
+    /// `StateStub` produced by nominal inputs.
+    ReferenceState {
+        peer: usize,
+        frame: i32,
+        expected: StateStub,
+        actual: StateStub,
+    },
+    /// Differential mode: a required confirmed post-state was never recorded.
+    ReferenceStateMissing {
+        peer: usize,
+        frame: i32,
+        confirmed: i32,
+    },
     /// (a): a peer's confirmed inputs for `frame` differ from the canonical
     /// stream first observed from `first_author`.
     ConfirmedInputDivergence {
@@ -207,6 +229,9 @@ impl OracleFailure {
     #[must_use]
     pub const fn class(&self) -> &'static str {
         match self {
+            Self::ReferenceInput { .. } => "ReferenceInput",
+            Self::ReferenceState { .. } => "ReferenceState",
+            Self::ReferenceStateMissing { .. } => "ReferenceStateMissing",
             Self::ConfirmedInputDivergence { .. } => "ConfirmedInputDivergence",
             Self::StateDivergence { .. } => "StateDivergence",
             Self::InbandDesyncDetected { .. } => "InbandDesyncDetected",
@@ -584,6 +609,53 @@ impl Oracle {
         if self.failures.len() < self.failure_cap {
             self.failures.push(failure);
         }
+    }
+
+    /// Differential mode: compare typed values before formatting diagnostics.
+    /// The legacy peer-agreement fingerprint check is deliberately separate.
+    pub fn observe_reference_inputs<I: std::fmt::Debug + PartialEq>(
+        &mut self,
+        peer: usize,
+        frame: i32,
+        expected: &[I],
+        actual: &[I],
+    ) {
+        if expected != actual {
+            self.push_failure(OracleFailure::ReferenceInput {
+                peer,
+                frame,
+                expected: format!("{expected:?}"),
+                actual: format!("{actual:?}"),
+            });
+        }
+    }
+
+    /// Differential mode: exact `StateStub` parity-transition comparison.
+    pub fn observe_reference_state(
+        &mut self,
+        peer: usize,
+        frame: i32,
+        expected: StateStub,
+        actual: StateStub,
+    ) {
+        if expected != actual {
+            self.push_failure(OracleFailure::ReferenceState {
+                peer,
+                frame,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    /// Differential mode: every post-state through `confirmed` is required;
+    /// only the optional `confirmed + 1` state may be absent.
+    pub fn observe_reference_state_missing(&mut self, peer: usize, frame: i32, confirmed: i32) {
+        self.push_failure(OracleFailure::ReferenceStateMissing {
+            peer,
+            frame,
+            confirmed,
+        });
     }
 
     /// (a): feed one peer's confirmed inputs for one frame, in ascending

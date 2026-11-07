@@ -50,6 +50,7 @@ pub struct ShrinkResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FinalSummary {
+    differential_trajectory: Option<super::DifferentialTrajectory>,
     final_confirmed: Vec<i32>,
     probe_confirmed: Vec<i32>,
     probe_peer_wire_by_link: BTreeMap<(usize, usize), super::PeerWireTotals>,
@@ -81,6 +82,7 @@ struct FinalSummary {
 impl From<&RunReport> for FinalSummary {
     fn from(report: &RunReport) -> Self {
         Self {
+            differential_trajectory: report.differential_trajectory.clone(),
             final_confirmed: report.final_confirmed.clone(),
             probe_confirmed: report.probe_confirmed.clone(),
             probe_peer_wire_by_link: report.probe_peer_wire_by_link.clone(),
@@ -185,6 +187,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
+        differential: options.differential,
     }
 }
 
@@ -872,6 +875,31 @@ where
         }
     }
 
+    // Differential failures retain their nominal mutation while irrelevant
+    // checkpointing and peer-visit axes collapse to the canonical green shape.
+    if current_options.differential.is_some()
+        && current.config.save_mode == super::schedule::SavePolicy::Sparse
+    {
+        let mut candidate = current.clone();
+        candidate.config.save_mode = super::schedule::SavePolicy::EveryFrame;
+        if evaluator.confirm(&candidate, &current_options).is_some() {
+            current = candidate;
+        }
+    }
+    if current_options
+        .differential
+        .as_ref()
+        .is_some_and(|options| options.drive_order != super::PeerDriveOrder::Forward)
+    {
+        let mut candidate_options = current_options.clone();
+        if let Some(differential) = candidate_options.differential.as_mut() {
+            differential.drive_order = super::PeerDriveOrder::Forward;
+        }
+        if evaluator.confirm(&current, &candidate_options).is_some() {
+            current_options = candidate_options;
+        }
+    }
+
     Ok(ShrinkResult {
         schedule: current,
         options: current_options,
@@ -952,6 +980,7 @@ mod tests {
         RunReport {
             replay_options: RunOptions::default(),
             replay_input_width_bytes: 4,
+            differential_trajectory: None,
             verdict: Verdict {
                 failures,
                 recovered_within_b: None,
@@ -1154,6 +1183,7 @@ mod tests {
             phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
+            differential: None,
         };
         let (candidate, mapped) = remove_peer(&schedule, &options, 1).expect("can remove peer");
 

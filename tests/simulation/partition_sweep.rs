@@ -647,7 +647,10 @@ fn first_observed_divergence(failures: &[OracleFailure], checksum_only: bool) ->
     failures
         .iter()
         .filter_map(|failure| match failure {
-            OracleFailure::ConfirmedInputDivergence { frame, .. }
+            OracleFailure::ReferenceInput { frame, .. }
+            | OracleFailure::ReferenceState { frame, .. }
+            | OracleFailure::ReferenceStateMissing { frame, .. }
+            | OracleFailure::ConfirmedInputDivergence { frame, .. }
             | OracleFailure::StateDivergence { frame, .. }
             | OracleFailure::SpectatorInputDivergence { frame, .. } => Some(*frame),
             OracleFailure::InbandDesyncDetected { frame, .. }
@@ -1303,7 +1306,10 @@ fn typed_safe_failure_diagnostics_hold(
                 }
             },
             OracleFailure::PostHealLiveness { .. } => return false,
-            OracleFailure::ConfirmedInputDivergence { .. }
+            OracleFailure::ReferenceInput { .. }
+            | OracleFailure::ReferenceState { .. }
+            | OracleFailure::ReferenceStateMissing { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
             | OracleFailure::StateDivergence { .. }
             | OracleFailure::InbandDesyncDetected { .. }
             | OracleFailure::ChecksumMismatchMetric { .. }

@@ -56,7 +56,17 @@ use std::time::Duration;
 /// types; this trait keeps the harness's game/oracle semantics stable while the
 /// M2 sweep varies only serialized input width.
 pub trait SimInput:
-    Copy + Clone + PartialEq + Eq + Default + Serialize + DeserializeOwned + Send + Sync + 'static
+    Copy
+    + Clone
+    + std::fmt::Debug
+    + PartialEq
+    + Eq
+    + Default
+    + Serialize
+    + DeserializeOwned
+    + Send
+    + Sync
+    + 'static
 {
     type SessionConfig: Config<Input = Self, State = StateStub, Address = SocketAddr>
         + std::fmt::Debug;
@@ -75,6 +85,14 @@ pub trait SimInput:
 
     /// Full serialized input identity observed by the oracle.
     fn fingerprint(self) -> InputFingerprint;
+
+    /// A same-width logical-lane mutation for differential negative controls.
+    fn flip_logical_bit(self) -> Self;
+
+    /// A padding-only mutation, when this input representation has padding.
+    fn flip_padding_bit(self) -> Option<Self> {
+        None
+    }
 }
 
 impl SimInput for StubInput {
@@ -93,6 +111,10 @@ impl SimInput for StubInput {
     fn fingerprint(self) -> InputFingerprint {
         InputFingerprint::from_bytes(self.inp, &self.inp.to_le_bytes())
     }
+
+    fn flip_logical_bit(self) -> Self {
+        Self { inp: self.inp ^ 1 }
+    }
 }
 
 /// A 32-byte fixed-width input for the M2 sweep width axis.
@@ -100,7 +122,7 @@ impl SimInput for StubInput {
 /// The first word drives the same game-state transition as [`StubInput`]; the
 /// seven padding words are deterministic, varying payload so the bandwidth
 /// counters measure a real wide input stream rather than a zero-filled artifact.
-#[derive(Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WideStubInput {
     pub inp: u32,
     pub padding: [u32; 7],
@@ -154,6 +176,18 @@ impl SimInput for WideStubInput {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         InputFingerprint::from_bytes(self.inp, &bytes)
+    }
+
+    fn flip_logical_bit(self) -> Self {
+        Self {
+            inp: self.inp ^ 1,
+            padding: self.padding,
+        }
+    }
+
+    fn flip_padding_bit(mut self) -> Option<Self> {
+        self.padding[0] ^= 1;
+        Some(self)
     }
 }
 
@@ -225,6 +259,48 @@ pub struct HostileGossipProbeEvidence {
     pub target_confirmed_bound: Option<i32>,
 }
 
+/// Deterministic order in which the outer loop visits peers. Storage and every
+/// report vector remain indexed by logical peer, independently of this order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum PeerDriveOrder {
+    #[default]
+    Forward,
+    Reverse,
+    /// Rotate the starting peer by the outer step: `[0, 1]`, `[1, 0]`, ...
+    Rotating,
+}
+
+/// Test-only mutations that distinguish the nominal fixed-history reference
+/// from the legacy peer-agreement oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum DifferentialMutation {
+    /// Flip each peer's actual local input at and after this current-frame
+    /// ordinal. The reference keeps the nominal input stream.
+    SharedInput { ordinal: u32 },
+    /// Add a state-only error on every peer at and after this post-state frame.
+    SharedState { frame: i32 },
+    /// Lie about peer 1's checksums without changing any actual state.
+    ChecksumLie { frame: i32 },
+    /// Flip only `WideStubInput` padding in each peer's actual local input.
+    WidePadding { ordinal: u32 },
+    /// Omit one post-state from a peer's recording without changing the state.
+    MissingState { peer: usize, frame: i32 },
+    /// Omit a peer's entire post-state recording without changing the state.
+    MissingStateHistory { peer: usize },
+}
+
+/// Opt-in fixed-history differential rollback checking. `None` in
+/// [`RunOptions::differential`] preserves the historical runner exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DifferentialOptions {
+    pub drive_order: PeerDriveOrder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<DifferentialMutation>,
+}
+
 /// Options for fault-injection *inside the harness itself* — used by the
 /// oracle's negative controls and focused hostile-message census rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +363,9 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+    /// Opt into the bounded two-peer fixed-history differential oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub differential: Option<DifferentialOptions>,
 }
 
 /// Inclusive input-history interval retained by one observer at the receipt
@@ -992,6 +1071,16 @@ pub struct HealRecoveryObservation {
     pub first_all_confirmed_advance_step: Option<u32>,
 }
 
+/// Normalized, peer-indexed confirmed history for differential cross-order
+/// comparison. Visit-order trace events and network counters are deliberately
+/// excluded. The typed values have already been checked against the nominal
+/// reference before their compact identity is retained here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DifferentialTrajectory {
+    pub confirmed_inputs: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
+    pub confirmed_states: Vec<BTreeMap<i32, StateStub>>,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
@@ -999,6 +1088,8 @@ pub struct RunReport {
     pub replay_options: RunOptions,
     /// Serialized input width selecting the deterministic harness input type.
     pub replay_input_width_bytes: u32,
+    /// Full normalized confirmed history in differential mode; `None` otherwise.
+    pub differential_trajectory: Option<DifferentialTrajectory>,
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
@@ -1428,6 +1519,9 @@ struct SimGameStub<I: SimInput> {
     applied_inputs: BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>,
     corrupt_state_from: Option<i32>,
     corrupt_checksum_from: Option<i32>,
+    differential_state_from: Option<i32>,
+    differential_missing_state: Option<i32>,
+    differential_missing_history: bool,
     input_marker: PhantomData<I>,
 }
 
@@ -1439,6 +1533,9 @@ impl<I: SimInput> SimGameStub<I> {
             applied_inputs: BTreeMap::new(),
             corrupt_state_from: None,
             corrupt_checksum_from: None,
+            differential_state_from: None,
+            differential_missing_state: None,
+            differential_missing_history: false,
             input_marker: PhantomData,
         }
     }
@@ -1520,7 +1617,18 @@ impl<I: SimInput> SimGameStub<I> {
                 self.gs.state ^= 1;
             }
         }
-        self.recorded.insert(self.gs.frame, self.gs);
+        if let Some(from) = self.differential_state_from {
+            if self.gs.frame >= from {
+                // Shared by every peer: peer agreement stays clean while the
+                // independent nominal-history reference must reject the state.
+                self.gs.state = self.gs.state.wrapping_add(2);
+            }
+        }
+        if !self.differential_missing_history
+            && self.differential_missing_state != Some(self.gs.frame)
+        {
+            self.recorded.insert(self.gs.frame, self.gs);
+        }
     }
 }
 
@@ -1941,6 +2049,77 @@ fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
     I::from_word(word, step, peer)
 }
 
+/// Nominal committed input at `frame` under a static local input delay. Delay
+/// fills the initial frames with `Default`; every later value is derived from
+/// the pre-delay ordinal. This function never observes a mutation or peer state.
+fn reference_input<I: SimInput>(frame: i32, input_delay: usize, peer: usize) -> I {
+    let delay = i32::try_from(input_delay).unwrap_or(i32::MAX);
+    if frame < delay {
+        I::default()
+    } else {
+        let ordinal = u32::try_from(frame.saturating_sub(delay)).unwrap_or(0);
+        input_for::<I>(ordinal, peer)
+    }
+}
+
+fn reference_inputs<I: SimInput>(frame: i32, input_delay: usize, n: usize) -> Vec<I> {
+    (0..n)
+        .map(|peer| reference_input::<I>(frame, input_delay, peer))
+        .collect()
+}
+
+/// Independent fixed-history `StateStub` reference. This deliberately proves
+/// only the stub's parity/sum transition semantics, not arbitrary game logic.
+fn reference_states<I: SimInput>(
+    through_post_frame: i32,
+    input_delay: usize,
+    n: usize,
+) -> BTreeMap<i32, StateStub> {
+    let mut states = BTreeMap::new();
+    let mut state = StateStub::default();
+    for post_frame in 1..=through_post_frame.max(0) {
+        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n);
+        let total = inputs
+            .into_iter()
+            .fold(0_u32, |total, input| total.wrapping_add(input.value()));
+        state.state = if total % 2 == 0 {
+            state.state.wrapping_add(2)
+        } else {
+            state.state.wrapping_sub(1)
+        };
+        state.frame = post_frame;
+        states.insert(post_frame, state);
+    }
+    states
+}
+
+fn actual_differential_input<I: SimInput>(
+    nominal: I,
+    ordinal: u32,
+    mutation: Option<DifferentialMutation>,
+) -> I {
+    match mutation {
+        Some(DifferentialMutation::SharedInput { ordinal: from }) if ordinal >= from => {
+            nominal.flip_logical_bit()
+        },
+        Some(DifferentialMutation::WidePadding { ordinal: from }) if ordinal >= from => {
+            nominal.flip_padding_bit().unwrap_or(nominal)
+        },
+        _ => nominal,
+    }
+}
+
+fn peer_drive_indices(order: PeerDriveOrder, step: u32, n: usize) -> Vec<usize> {
+    match order {
+        PeerDriveOrder::Forward => (0..n).collect(),
+        PeerDriveOrder::Reverse => (0..n).rev().collect(),
+        PeerDriveOrder::Rotating => {
+            let start = usize::try_from(step % u32::try_from(n).unwrap_or(1)).unwrap_or(0);
+            (0..n).map(|offset| (start + offset) % n).collect()
+        },
+    }
+}
+
 /// Returns the cumulative 60 Hz frame opportunities visible at the beginning
 /// of `step` on a clock running at `ppm` relative to base virtual time.
 fn skew_gated_target(step: u32, step_dt_ms: u64, ppm: i32) -> u64 {
@@ -2192,11 +2371,78 @@ pub fn run_with_input<I: SimInput>(schedule: &Schedule, options: &RunOptions) ->
     run_inner::<I>(schedule, options, false)
 }
 
-pub(super) fn validate_run_options(
+pub(crate) fn validate_run_options(
     schedule: &Schedule,
     options: &RunOptions,
 ) -> Result<(), String> {
     let n = schedule.config.n_players;
+    if let Some(differential) = options.differential {
+        if n != 2 {
+            return Err("differential mode requires exactly two peers".to_owned());
+        }
+        if schedule.config.frame_model != FrameModel::Lockstep {
+            return Err("differential mode requires FrameModel::Lockstep".to_owned());
+        }
+        if !matches!(schedule.config.input_delay, 0 | 2) {
+            return Err("differential mode requires static input delay 0 or 2".to_owned());
+        }
+        if schedule.config.max_prediction == 0 {
+            return Err("differential mode requires max_prediction > 0".to_owned());
+        }
+        if !schedule.config.spectator_hosts.is_empty() {
+            return Err("differential mode does not support spectators".to_owned());
+        }
+        if schedule.events.iter().any(|(_, event)| {
+            matches!(
+                event,
+                ScheduleEvent::SetInputDelay { .. }
+                    | ScheduleEvent::GracefulRemove { .. }
+                    | ScheduleEvent::LegacyDisconnect { .. }
+                    | ScheduleEvent::PeerKill { .. }
+                    | ScheduleEvent::SpectatorHostKill { .. }
+                    | ScheduleEvent::HotJoin { .. }
+                    | ScheduleEvent::Rebind { .. }
+            )
+        }) {
+            return Err(
+                "differential mode forbids runtime delay, membership changes, disconnects, kills, hot-join, and rebind"
+                    .to_owned(),
+            );
+        }
+        let virtual_run = Duration::from_millis(
+            u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
+        );
+        if options
+            .disconnect_timeout
+            .is_none_or(|timeout| timeout <= virtual_run)
+        {
+            return Err(format!(
+                "differential mode requires disconnect_timeout greater than the virtual run ({virtual_run:?})"
+            ));
+        }
+        let signed_mutation_frame = match differential.mutation {
+            Some(DifferentialMutation::SharedState { frame })
+            | Some(DifferentialMutation::ChecksumLie { frame }) => Some(frame),
+            _ => None,
+        };
+        if signed_mutation_frame.is_some_and(|frame| frame < 0) {
+            return Err(
+                "differential state/checksum mutation frames must be non-negative".to_owned(),
+            );
+        }
+        match differential.mutation {
+            Some(DifferentialMutation::MissingState { peer, frame }) if peer >= n || frame < 1 => {
+                return Err(
+                    "differential MissingState requires an in-range peer and post-state frame >= 1"
+                        .to_owned(),
+                );
+            },
+            Some(DifferentialMutation::MissingStateHistory { peer }) if peer >= n => {
+                return Err("differential MissingStateHistory requires an in-range peer".to_owned());
+            },
+            _ => {},
+        }
+    }
     if options.receive_message_limit.is_some_and(|limit| {
         !(1..=crate::common::sim_net::MAX_CONFIGURABLE_RECEIVE_MESSAGES_PER_POLL).contains(&limit)
     }) {
@@ -2350,6 +2596,16 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 
     validate_run_options(schedule, options)
         .unwrap_or_else(|error| panic!("invalid run options: {error}"));
+    if I::WIDTH_BYTES != WideStubInput::WIDTH_BYTES
+        && options.differential.is_some_and(|differential| {
+            matches!(
+                differential.mutation,
+                Some(DifferentialMutation::WidePadding { .. })
+            )
+        })
+    {
+        panic!("invalid run options: WidePadding requires 32-byte WideStubInput");
+    }
     let n = schedule.config.n_players;
 
     let clock = TestClock::new();
@@ -2478,6 +2734,24 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     game.corrupt_checksum_from = Some(from);
                 }
             }
+            match options
+                .differential
+                .and_then(|differential| differential.mutation)
+            {
+                Some(DifferentialMutation::SharedState { frame }) => {
+                    game.differential_state_from = Some(frame);
+                },
+                Some(DifferentialMutation::ChecksumLie { frame }) if i == 1 => {
+                    game.corrupt_checksum_from = Some(frame);
+                },
+                Some(DifferentialMutation::MissingState { peer, frame }) if i == peer => {
+                    game.differential_missing_state = Some(frame);
+                },
+                Some(DifferentialMutation::MissingStateHistory { peer }) if i == peer => {
+                    game.differential_missing_history = true;
+                },
+                _ => {},
+            }
             PeerSlot {
                 session,
                 binding,
@@ -2532,6 +2806,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         });
 
+    let differential = options.differential;
+    let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
@@ -2656,7 +2932,9 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         starves[peer] = true;
     }
     // Confirmed-frame snapshot taken at `options.probe_confirmed_at`, if any.
-    let mut probe_confirmed: Vec<i32> = Vec::new();
+    let mut probe_confirmed: Vec<i32> = options
+        .probe_confirmed_at
+        .map_or_else(Vec::new, |_| vec![Frame::NULL.as_i32(); n]);
     let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
     let mut hostile_gossip_probe = None;
     let mut pending_output_probe =
@@ -2719,8 +2997,12 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         },
         _ => (false, 0, 0),
     };
-    let mut confirmed_at_heal: Vec<i32> = Vec::new();
-    let mut confirmed_after_recovery: Vec<i32> = Vec::new();
+    let mut confirmed_at_heal: Vec<i32> = if run_c {
+        vec![Frame::NULL.as_i32(); n]
+    } else {
+        Vec::new()
+    };
+    let mut confirmed_after_recovery: Vec<i32> = confirmed_at_heal.clone();
     // A spectator floor is in displayed game-frame space, not schedule-step
     // space. Capture it only when a lifecycle event actually retires a peer,
     // using the slowest live survivor's current frame so stalled/waiting app
@@ -2730,7 +3012,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 
     for step in 0..schedule.config.steps {
         hostile_current_step.store(step, Ordering::Relaxed);
-        let mut step_confirmed = Vec::with_capacity(n);
+        let mut step_confirmed = vec![Frame::NULL.as_i32(); n];
         let mut scheduled_events = Vec::new();
         let mut scheduled_events_truncated = 0u32;
         let mut observed_events = Vec::new();
@@ -2917,13 +3199,13 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             next_event += 1;
         }
 
-        // Drive every peer in fixed order. A peer that is stalled (a local hang:
-        // frozen for its stall window) or dead (crashed by `PeerKill`) is not
-        // driven — it does not poll, drain events, add input, or advance, and
-        // puts nothing on the wire. A stalled peer resumes when its window ends;
-        // a dead peer never does. Either way its state is still folded into the
-        // trace below so the digest stays uniform and reproduces bit-for-bit.
-        for (i, slot) in peers.iter_mut().enumerate() {
+        // Differential mode varies the complete peer visit order by index;
+        // logical peer storage and every report vector remain peer-indexed.
+        // The legacy default is the historical forward order.
+        let drive_order =
+            differential.map_or(PeerDriveOrder::Forward, |options| options.drive_order);
+        for i in peer_drive_indices(drive_order, step, n) {
+            let slot = &mut peers[i];
             // Clock-gated opportunities are consumed even while a peer is
             // stalled, dead, or synchronizing. A resumed application must not
             // burst through a wall-clock backlog that it never simulated.
@@ -3029,19 +3311,31 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                         // would stop obeying once it resumes.
                         wait_frames_obeyed[i] = wait_frames_obeyed[i].saturating_add(1);
                     } else {
-                        let input_ordinal = match frame_model {
-                            FrameModel::Lockstep => step,
-                            FrameModel::SkewGated60Hz => {
-                                let ordinal = local_input_ordinals[i];
-                                local_input_ordinals[i] = ordinal.saturating_add(1);
-                                ordinal
-                            },
+                        let input_ordinal = if differential.is_some() {
+                            // add_local_input stamps the session's current frame;
+                            // use that exact ordinal rather than the outer step.
+                            u32::try_from(slot.session.current_frame().as_i32())
+                                .expect("running differential sessions have non-negative frames")
+                        } else {
+                            match frame_model {
+                                FrameModel::Lockstep => step,
+                                FrameModel::SkewGated60Hz => {
+                                    let ordinal = local_input_ordinals[i];
+                                    local_input_ordinals[i] = ordinal.saturating_add(1);
+                                    ordinal
+                                },
+                            }
                         };
                         for handle in slot.session.local_player_handles() {
-                            if let Err(error) = slot
-                                .session
-                                .add_local_input(handle, input_for::<I>(input_ordinal, i))
-                            {
+                            let nominal = input_for::<I>(input_ordinal, i);
+                            let actual = differential.map_or(nominal, |differential| {
+                                actual_differential_input(
+                                    nominal,
+                                    input_ordinal,
+                                    differential.mutation,
+                                )
+                            });
+                            if let Err(error) = slot.session.add_local_input(handle, actual) {
                                 oracle.observe_session_error("add_local_input", i, step, &error);
                             }
                         }
@@ -3142,6 +3436,24 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     for frame in (slot.sampled_confirmed + 1)..=confirmed.as_i32() {
                         match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
                             Ok(inputs) => {
+                                if differential.is_some() {
+                                    let expected = reference_inputs::<I>(
+                                        frame,
+                                        schedule.config.input_delay,
+                                        n,
+                                    );
+                                    oracle.observe_reference_inputs(i, frame, &expected, &inputs);
+                                    if let Some(histories) = differential_confirmed_inputs.as_mut()
+                                    {
+                                        histories[i].insert(
+                                            frame,
+                                            inputs
+                                                .iter()
+                                                .map(|input| input.fingerprint())
+                                                .collect(),
+                                        );
+                                    }
+                                }
                                 let values: Vec<InputFingerprint> =
                                     inputs.iter().map(|input| input.fingerprint()).collect();
                                 oracle.observe_confirmed_inputs(i, frame, values);
@@ -3164,25 +3476,23 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 slot.session.confirmed_frame()
             };
 
-            step_confirmed.push(confirmed.as_i32());
+            step_confirmed[i] = confirmed.as_i32();
 
             // Optional mid-run confirmation snapshot for recovery-dynamics
             // tests, reusing the value already read for this peer above.
             if options.probe_confirmed_at == Some(step) {
-                probe_confirmed.push(confirmed.as_i32());
+                probe_confirmed[i] = confirmed.as_i32();
             }
 
-            // (c) heal-anchored snapshots, reusing the same confirmed value. The
-            // peer loop runs in fixed order, so each vector ends up indexed by
-            // peer. Only populated when (c) runs (a heal fired with a full
-            // recovery window). Captured for every peer — a stalled/dead peer
-            // falls through to here with its frozen confirmed frame, so the
-            // vectors stay length-n and correctly peer-indexed.
+            // (c) heal-anchored snapshots, reusing the same confirmed value.
+            // Pre-sized vectors are assigned by logical peer, independently of
+            // differential visit order. Captured for every peer — a stalled/dead
+            // peer falls through with its frozen confirmed frame.
             if run_c && step == heal_anchor_at {
-                confirmed_at_heal.push(confirmed.as_i32());
+                confirmed_at_heal[i] = confirmed.as_i32();
             }
             if run_c && step == recovery_anchor_at {
-                confirmed_after_recovery.push(confirmed.as_i32());
+                confirmed_after_recovery[i] = confirmed.as_i32();
             }
         }
 
@@ -3539,6 +3849,47 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .collect();
     let final_confirmed: Vec<i32> = end_confirmed.iter().map(|frame| frame.as_i32()).collect();
 
+    let differential_trajectory = differential.map(|_| {
+        let maximum_required = final_confirmed.iter().copied().max().unwrap_or(0);
+        let maximum_reference_frame = maximum_required.saturating_add(1).max(0);
+        let expected_states =
+            reference_states::<I>(maximum_reference_frame, schedule.config.input_delay, n);
+        let mut confirmed_states = Vec::with_capacity(n);
+        for (peer, states) in recorded.iter().enumerate() {
+            let confirmed = final_confirmed[peer];
+            let mut retained = BTreeMap::new();
+            for frame in 1..=confirmed.max(0) {
+                let Some(&actual) = states.get(&frame) else {
+                    oracle.observe_reference_state_missing(peer, frame, confirmed);
+                    continue;
+                };
+                if let Some(&expected) = expected_states.get(&frame) {
+                    oracle.observe_reference_state(peer, frame, expected, actual);
+                }
+                retained.insert(frame, actual);
+            }
+            if confirmed >= 0 {
+                // Delay can confirm an input before its post-state is simulated.
+                // That confirmed+1 state is optional, but must match if recorded.
+                let optional_frame = confirmed.saturating_add(1);
+                if let Some(&actual) = states.get(&optional_frame) {
+                    if let Some(&expected) = expected_states.get(&optional_frame) {
+                        oracle.observe_reference_state(peer, optional_frame, expected, actual);
+                    }
+                }
+            }
+            // Cross-order identity deliberately excludes every speculative tail,
+            // including the optional confirmed+1 observation.
+            confirmed_states.push(retained);
+        }
+        DifferentialTrajectory {
+            confirmed_inputs: differential_confirmed_inputs
+                .take()
+                .expect("differential input histories were initialized"),
+            confirmed_states,
+        }
+    });
+
     // Aggregate each peer's per-remote protocol metrics into one per-player total.
     // Peer `i` holds a remote handle `PlayerHandle::new(j)` for every `j != i`
     // (see the builder loop above); `peer_metrics` succeeds for any remote
@@ -3749,6 +4100,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     RunReport {
         replay_options: options.clone(),
         replay_input_width_bytes: I::WIDTH_BYTES,
+        differential_trajectory,
         verdict,
         trace_hash,
         sometimes_state_by_peer,
