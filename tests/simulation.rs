@@ -27,6 +27,7 @@ mod simulation {
     pub mod baseline_sweep;
     pub mod census;
     pub mod corpus_replay;
+    pub mod differential;
     pub mod fleet;
     pub mod harness;
     pub mod partition_sweep;

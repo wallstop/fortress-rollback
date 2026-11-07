@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 7 preserves hostile-gossip mutation and receiver-side diagnostic
-// evidence. Older artifacts cannot reproduce that evidence and are rejected
-// explicitly.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 7;
+// Version 8 preserves opt-in differential drive/mutation options and the
+// ReferenceInput/ReferenceState/ReferenceStateMissing failure vocabulary. Older artifacts are
+// rejected explicitly rather than silently dropping that replay surface.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 8;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -283,6 +283,9 @@ fn validate_hostile_gossip_evidence(
 /// Stable serialization identity for every oracle failure variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureClass {
+    ReferenceInput,
+    ReferenceState,
+    ReferenceStateMissing,
     ConfirmedInputDivergence,
     StateDivergence,
     InbandDesyncDetected,
@@ -307,6 +310,9 @@ impl FailureClass {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ReferenceInput => "ReferenceInput",
+            Self::ReferenceState => "ReferenceState",
+            Self::ReferenceStateMissing => "ReferenceStateMissing",
             Self::ConfirmedInputDivergence => "ConfirmedInputDivergence",
             Self::StateDivergence => "StateDivergence",
             Self::InbandDesyncDetected => "InbandDesyncDetected",
@@ -332,6 +338,9 @@ impl FailureClass {
 impl From<&OracleFailure> for FailureClass {
     fn from(failure: &OracleFailure) -> Self {
         match failure {
+            OracleFailure::ReferenceInput { .. } => Self::ReferenceInput,
+            OracleFailure::ReferenceState { .. } => Self::ReferenceState,
+            OracleFailure::ReferenceStateMissing { .. } => Self::ReferenceStateMissing,
             OracleFailure::ConfirmedInputDivergence { .. } => Self::ConfirmedInputDivergence,
             OracleFailure::StateDivergence { .. } => Self::StateDivergence,
             OracleFailure::InbandDesyncDetected { .. } => Self::InbandDesyncDetected,
@@ -488,6 +497,22 @@ impl FailureArtifact {
             .map_err(|error| format!("invalid embedded materialized schedule: {error}"))?;
         super::validate_run_options(&self.schedule, &self.replay_options)
             .map_err(|error| format!("invalid replay options: {error}"))?;
+        if self.replay_input_width_bytes != 32
+            && self
+                .replay_options
+                .differential
+                .is_some_and(|differential| {
+                    matches!(
+                        differential.mutation,
+                        Some(super::DifferentialMutation::WidePadding { .. })
+                    )
+                })
+        {
+            return Err(
+                "WidePadding replay requires replay_input_width_bytes 32 (WideStubInput)"
+                    .to_owned(),
+            );
+        }
         let n = self.schedule.config.n_players;
         for (name, value) in [
             ("corrupt_state_from", self.replay_options.corrupt_state_from),
@@ -1276,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_failure_builds_a_valid_v7_artifact() {
+    fn legacy_schedule_failure_builds_a_valid_v8_artifact() {
         let mut config = SimConfig::smoke(2);
         config.steps = 60;
         config.noise = BackgroundNoise::Clean;
@@ -1310,29 +1335,33 @@ mod tests {
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
             .validate()
-            .expect("legacy schedule report produces a valid v7 artifact");
+            .expect("legacy schedule report produces a valid v8 artifact");
     }
 
     #[test]
-    fn artifact_v6_without_hostile_gossip_evidence_reaches_explicit_schema_rejection() {
+    fn artifact_v7_without_differential_options_reaches_explicit_schema_rejection() {
         let mut value = serde_json::to_value(sample_artifact()).expect("artifact serializes");
         let object = value
             .as_object_mut()
             .expect("failure artifact serializes as an object");
         object.insert(
             "artifact_schema_version".to_owned(),
-            serde_json::Value::from(6),
+            serde_json::Value::from(7),
         );
+        let replay_options = object
+            .get_mut("replay_options")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("artifact contains replay options");
         assert!(
-            object.remove("hostile_gossip").is_some(),
-            "fixture contains hostile_gossip"
+            replay_options.remove("differential").is_none(),
+            "default replay options omit the differential field"
         );
 
         let artifact: FailureArtifact =
-            serde_json::from_value(value).expect("v6 envelope reaches validation");
-        let error = artifact.validate().expect_err("v6 schema is unsupported");
+            serde_json::from_value(value).expect("v7 envelope reaches validation");
+        let error = artifact.validate().expect_err("v7 schema is unsupported");
         assert!(
-            error.contains("unsupported failure artifact schema 6"),
+            error.contains("unsupported failure artifact schema 7"),
             "wrong diagnostic: {error}"
         );
     }
