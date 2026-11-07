@@ -1,22 +1,25 @@
 //! Bounded two-peer differential rollback oracle.
 //!
-//! The independent reference covers the fixed nominal input stream and the
-//! exact `StateStub` parity/sum transition. It does not claim equivalence for
-//! arbitrary game state semantics, runtime membership changes, or spectators.
+//! The independent reference covers the nominal input stream, one strict
+//! post-synchronization input-delay increase, and the exact `StateStub`
+//! parity/sum transition. It does not claim equivalence for arbitrary game
+//! state semantics, runtime membership changes, or spectators.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
-use super::harness::oracle::OracleFailure;
+use super::harness::oracle::{InputFingerprint, OracleFailure};
 use super::harness::schedule::{
     BackgroundNoise, FrameModel, SavePolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::shrink::{shrink_failure, ShrinkConfig};
 use super::harness::{
-    actual_differential_input, run, run_with_input, validate_run_options, DifferentialMutation,
-    DifferentialOptions, DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport,
+    actual_differential_input, reference_inputs, run, run_with_final_game_frame_offset,
+    run_with_input, validate_run_options, DifferentialInputDelayControl, DifferentialMutation,
+    DifferentialOptions, DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport, SimInput,
     WideStubInput,
 };
 use crate::common::sim_net::LinkPolicy;
+use crate::common::stubs::StubInput;
 use fortress_rollback::hash::fnv1a_hash;
 use std::time::Duration;
 
@@ -87,6 +90,24 @@ fn schedule(save_mode: SavePolicy, input_delay: usize, delivery: Delivery) -> Sc
     }
 }
 
+fn runtime_delay_schedule(
+    save_mode: SavePolicy,
+    old_delay: usize,
+    new_delay: usize,
+    delivery: Delivery,
+) -> Schedule {
+    let mut schedule = schedule(save_mode, old_delay, delivery);
+    schedule.events.push((
+        120,
+        ScheduleEvent::SetInputDelay {
+            peer: 1,
+            delay: new_delay,
+        },
+    ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
 fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
     RunOptions {
         disconnect_timeout: Some(TIMEOUT),
@@ -107,6 +128,172 @@ fn total_metric(
         .iter()
         .map(metric)
         .fold(0_u64, u64::saturating_add)
+}
+
+fn stub_input(ordinal: u32, peer: usize) -> StubInput {
+    let peer = u32::try_from(peer).expect("peer index fits in u32");
+    StubInput {
+        inp: ordinal
+            .wrapping_mul(31)
+            .wrapping_add(peer.wrapping_mul(7))
+            .wrapping_add(1),
+    }
+}
+
+fn stub_fingerprint(ordinal: u32, peer: usize) -> InputFingerprint {
+    stub_input(ordinal, peer).fingerprint()
+}
+
+fn input_delay_control(report: &RunReport) -> DifferentialInputDelayControl {
+    report
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.input_delay_control)
+        .expect("successful runtime delay change is anchored")
+}
+
+fn assert_dynamic_confirmed_boundaries(report: &RunReport) {
+    let control = input_delay_control(report);
+    assert!(control.current_frame > 0);
+    assert!(control.new_delay > control.old_delay);
+    let old_delay = i32::try_from(control.old_delay).expect("old delay fits in i32");
+    let new_delay = i32::try_from(control.new_delay).expect("new delay fits in i32");
+    let gap_start = control.current_frame + old_delay;
+    let resume = control.current_frame + new_delay;
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+
+    for observer in 0..2 {
+        let history = &trajectory.confirmed_inputs[observer];
+        for frame in 0..=resume {
+            let inputs = history.get(&frame).unwrap_or_else(|| {
+                panic!("observer {observer} never confirmed boundary-prefix frame {frame}")
+            });
+            assert_eq!(inputs.len(), 2);
+            for player in 0..2 {
+                let ordinal = if player == control.peer {
+                    if frame < old_delay {
+                        None
+                    } else if frame < gap_start {
+                        Some(frame - old_delay)
+                    } else if frame < resume {
+                        Some(control.current_frame - 1)
+                    } else {
+                        Some(frame - new_delay)
+                    }
+                } else if frame < old_delay {
+                    None
+                } else {
+                    Some(frame - old_delay)
+                };
+                let expected = ordinal.map_or_else(
+                    || StubInput::default().fingerprint(),
+                    |ordinal| {
+                        stub_fingerprint(
+                            u32::try_from(ordinal).expect("ordinal non-negative"),
+                            player,
+                        )
+                    },
+                );
+                assert_eq!(
+                    inputs.get(player),
+                    Some(&expected),
+                    "observer {observer}, player {player}, frame {frame}, control {control:?}"
+                );
+            }
+        }
+    }
+}
+
+fn assert_post_control_rollback_evidence(report: &RunReport, event_step: u32) {
+    let at_control = report
+        .differential_input_delay_metrics_at_control
+        .as_ref()
+        .expect("successful control captures rollback baselines");
+    assert_eq!(at_control.len(), report.metrics.len());
+    assert!(
+        report
+            .metrics
+            .iter()
+            .zip(at_control)
+            .any(|(after, before)| after.rollback_count > before.rollback_count),
+        "no post-control rollback: before={at_control:?}, after={:?}",
+        report.metrics
+    );
+    assert!(
+        report
+            .metrics
+            .iter()
+            .zip(at_control)
+            .any(|(after, before)| after.resimulated_frames > before.resimulated_frames),
+        "no post-control resimulation: before={at_control:?}, after={:?}",
+        report.metrics
+    );
+    assert!(
+        report
+            .load_game_state_observations
+            .iter()
+            .any(|observation| observation.step >= event_step),
+        "no post-control LoadGameState: {:?}",
+        report.load_game_state_observations
+    );
+}
+
+fn check_runtime_delay_order(
+    schedule: &Schedule,
+    order: PeerDriveOrder,
+    delivery: Delivery,
+) -> DifferentialTrajectory {
+    const EVENT_STEP: u32 = 120;
+
+    let options = options(order, None);
+    let report = run(schedule, &options);
+    report.expect_pass(schedule);
+    assert_green_non_vacuous(&report, delivery);
+    assert_dynamic_confirmed_boundaries(&report);
+    assert_post_control_rollback_evidence(&report, EVENT_STEP);
+
+    let replay = run(schedule, &options);
+    replay.expect_pass(schedule);
+    assert_eq!(
+        input_delay_control(&report),
+        input_delay_control(&replay),
+        "replay changed the successful control anchor"
+    );
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(
+        report.differential_trajectory,
+        replay.differential_trajectory
+    );
+
+    let mut no_change = schedule.clone();
+    no_change
+        .events
+        .retain(|(_, event)| !matches!(event, ScheduleEvent::SetInputDelay { .. }));
+    let baseline = run(&no_change, &options);
+    baseline.expect_pass(&no_change);
+    assert_green_non_vacuous(&baseline, delivery);
+    assert_eq!(
+        baseline
+            .differential_trajectory
+            .as_ref()
+            .and_then(|trajectory| trajectory.input_delay_control),
+        None
+    );
+    assert_ne!(
+        report.trace_hash, baseline.trace_hash,
+        "matched no-change schedule has an identical trace"
+    );
+    assert_ne!(
+        report.differential_trajectory, baseline.differential_trajectory,
+        "matched no-change schedule has an identical confirmed trajectory"
+    );
+
+    report
+        .differential_trajectory
+        .expect("differential trajectory retained")
 }
 
 fn assert_green_non_vacuous(report: &RunReport, delivery: Delivery) {
@@ -217,6 +404,296 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
             }
         }
     }
+}
+
+#[test]
+fn zero_to_three_at_frame_five_has_hard_coded_gap_boundaries() {
+    let control = DifferentialInputDelayControl {
+        peer: 1,
+        current_frame: 5,
+        old_delay: 0,
+        new_delay: 3,
+    };
+    let at = |frame| reference_inputs::<StubInput>(frame, 0, 2, Some(control));
+
+    assert_eq!(at(0), vec![stub_input(0, 0), stub_input(0, 1)]);
+    assert_eq!(at(4), vec![stub_input(4, 0), stub_input(4, 1)]);
+    for frame in 5..=7 {
+        assert_eq!(
+            at(frame),
+            vec![
+                stub_input(u32::try_from(frame).expect("gap frame non-negative"), 0),
+                stub_input(4, 1),
+            ],
+            "gap frame {frame}"
+        );
+    }
+    assert_eq!(at(8), vec![stub_input(8, 0), stub_input(5, 1)]);
+}
+
+#[test]
+fn two_to_four_at_frame_eight_has_hard_coded_gap_boundaries() {
+    let control = DifferentialInputDelayControl {
+        peer: 1,
+        current_frame: 8,
+        old_delay: 2,
+        new_delay: 4,
+    };
+    let at = |frame| {
+        reference_inputs::<StubInput>(frame, 2, 2, Some(control))
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect::<Vec<_>>()
+    };
+
+    for frame in 0..=1 {
+        assert_eq!(
+            at(frame),
+            vec![StubInput::default().fingerprint(); 2],
+            "initial default frame {frame}"
+        );
+    }
+    assert_eq!(at(9), vec![stub_fingerprint(7, 0), stub_fingerprint(7, 1)]);
+    for frame in 10..=11 {
+        assert_eq!(
+            at(frame),
+            vec![
+                stub_fingerprint(
+                    u32::try_from(frame - 2).expect("static ordinal non-negative"),
+                    0,
+                ),
+                stub_fingerprint(7, 1),
+            ],
+            "gap frame {frame}"
+        );
+    }
+    assert_eq!(
+        at(12),
+        vec![stub_fingerprint(10, 0), stub_fingerprint(8, 1)]
+    );
+}
+
+#[test]
+fn runtime_delay_increase_matrix_matches_controls_and_nominal_history() {
+    for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
+        for delivery in [Delivery::Delayed, Delivery::Held, Delivery::Reordered] {
+            let schedule = runtime_delay_schedule(save_mode, 0, 2, delivery);
+            let mut canonical: Option<DifferentialTrajectory> = None;
+            for order in [
+                PeerDriveOrder::Forward,
+                PeerDriveOrder::Reverse,
+                PeerDriveOrder::Rotating,
+            ] {
+                let trajectory = check_runtime_delay_order(&schedule, order, delivery);
+                if let Some(expected) = &canonical {
+                    assert_eq!(
+                        trajectory.input_delay_control, expected.input_delay_control,
+                        "control anchor changed for {save_mode:?}, {delivery:?}, {order:?}"
+                    );
+                    assert_eq!(
+                        trajectory, *expected,
+                        "trajectory changed for {save_mode:?}, {delivery:?}, {order:?}"
+                    );
+                } else {
+                    canonical = Some(trajectory);
+                }
+            }
+        }
+    }
+
+    let nonzero = runtime_delay_schedule(SavePolicy::Sparse, 2, 4, Delivery::Reordered);
+    let mut canonical: Option<DifferentialTrajectory> = None;
+    for order in [
+        PeerDriveOrder::Forward,
+        PeerDriveOrder::Reverse,
+        PeerDriveOrder::Rotating,
+    ] {
+        let trajectory = check_runtime_delay_order(&nonzero, order, Delivery::Reordered);
+        if let Some(expected) = &canonical {
+            assert_eq!(trajectory.input_delay_control, expected.input_delay_control);
+            assert_eq!(trajectory, *expected);
+        } else {
+            canonical = Some(trajectory);
+        }
+    }
+}
+
+#[test]
+fn runtime_delay_increase_matches_nominal_gap_and_resume() {
+    let schedule = runtime_delay_schedule(SavePolicy::EveryFrame, 0, 3, Delivery::Delayed);
+    let trajectory =
+        check_runtime_delay_order(&schedule, PeerDriveOrder::Forward, Delivery::Delayed);
+
+    let control = trajectory
+        .input_delay_control
+        .expect("successful runtime delay change is anchored");
+    assert!(control.current_frame > 0);
+    assert_eq!(control.peer, 1);
+    assert_eq!(control.old_delay, 0);
+    assert_eq!(control.new_delay, 3);
+}
+
+#[test]
+fn shared_input_mutation_covers_dynamic_gap_and_resume_boundaries() {
+    let schedule = runtime_delay_schedule(SavePolicy::Sparse, 2, 4, Delivery::Delayed);
+    let nominal = run(&schedule, &options(PeerDriveOrder::Rotating, None));
+    nominal.expect_pass(&schedule);
+    let control = input_delay_control(&nominal);
+    let mutation = DifferentialMutation::SharedInput {
+        ordinal: u32::try_from(control.current_frame - 1).expect("control frame is positive"),
+    };
+    let report = run(
+        &schedule,
+        &options(PeerDriveOrder::Rotating, Some(mutation)),
+    );
+    assert_eq!(input_delay_control(&report), control);
+
+    let gap_start = control.current_frame + 2;
+    let resume = control.current_frame + 4;
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("failed differential run retains actual history");
+    for frame in gap_start..=resume {
+        let ordinal = if frame < resume {
+            control.current_frame - 1
+        } else {
+            control.current_frame
+        };
+        let ordinal = u32::try_from(ordinal).expect("boundary ordinal non-negative");
+        let expected = actual_differential_input(stub_input(ordinal, 1), ordinal, Some(mutation))
+            .fingerprint();
+        for observer in 0..2 {
+            let inputs = trajectory.confirmed_inputs[observer]
+                .get(&frame)
+                .unwrap_or_else(|| panic!("observer {observer} did not confirm frame {frame}"));
+            assert_eq!(
+                inputs.get(1),
+                Some(&expected),
+                "changed player boundary frame {frame}"
+            );
+        }
+        assert!(
+            report.verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ReferenceInput { frame: failed, .. } if *failed == frame
+            )),
+            "no typed reference failure at changed-player boundary {frame}"
+        );
+    }
+    assert!(!report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
+            | OracleFailure::StateDivergence { .. }
+    )));
+}
+
+#[test]
+fn shared_state_mutation_stays_live_after_dynamic_resume() {
+    let schedule = runtime_delay_schedule(SavePolicy::EveryFrame, 0, 2, Delivery::Delayed);
+    let report = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::SharedState { frame: 100 }),
+        ),
+    );
+
+    let control = input_delay_control(&report);
+    assert!(100 > control.current_frame + 2);
+    assert!(report
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(failure, OracleFailure::ReferenceState { frame: 100, .. })));
+    assert!(!report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
+            | OracleFailure::StateDivergence { .. }
+    )));
+}
+
+#[test]
+fn checksum_lie_stays_live_on_dynamic_delay_schedule() {
+    let schedule = runtime_delay_schedule(SavePolicy::EveryFrame, 2, 4, Delivery::Reordered);
+    let report = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Rotating,
+            Some(DifferentialMutation::ChecksumLie { frame: 100 }),
+        ),
+    );
+
+    let control = input_delay_control(&report);
+    assert!(100 > control.current_frame + 4);
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ChecksumMismatchMetric { mismatches, .. } if *mismatches > 0
+    )));
+    assert!(!report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { .. }
+            | OracleFailure::ReferenceState { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
+            | OracleFailure::StateDivergence { .. }
+    )));
+}
+
+#[test]
+fn dynamic_delay_final_game_session_frame_mismatch_fails_reference() {
+    let schedule = runtime_delay_schedule(SavePolicy::Sparse, 2, 4, Delivery::Reordered);
+    let report =
+        run_with_final_game_frame_offset(&schedule, &options(PeerDriveOrder::Forward, None), 0, -1);
+
+    let control = input_delay_control(&report);
+    assert_eq!(control.old_delay, 2);
+    assert_eq!(control.new_delay, 4);
+    let (frame, expected, actual) = report
+        .verdict
+        .failures
+        .iter()
+        .find_map(|failure| match failure {
+            OracleFailure::ReferenceState {
+                peer: 0,
+                frame,
+                expected,
+                actual,
+            } if actual.frame != *frame => Some((*frame, *expected, *actual)),
+            _ => None,
+        })
+        .expect("final game/session frame mismatch reaches the typed reference");
+    assert_eq!(expected.frame, frame);
+    assert_eq!(actual.frame, frame - 1);
+}
+
+#[test]
+fn runtime_delay_requires_running_at_a_positive_current_frame() {
+    let mut schedule = runtime_delay_schedule(SavePolicy::EveryFrame, 0, 2, Delivery::Delayed);
+    let event = schedule
+        .events
+        .iter_mut()
+        .find(|(_, event)| matches!(event, ScheduleEvent::SetInputDelay { .. }))
+        .expect("delay event exists");
+    event.0 = 0;
+
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::SessionError {
+            operation: "set_input_delay",
+            ..
+        }
+    )));
+    assert_eq!(
+        report
+            .differential_trajectory
+            .as_ref()
+            .and_then(|trajectory| trajectory.input_delay_control),
+        None
+    );
+    assert!(report.differential_input_delay_metrics_at_control.is_none());
 }
 
 #[test]
@@ -528,7 +1005,6 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     assert!(validate_run_options(&spectator, &valid_options).is_err());
 
     let forbidden_events = [
-        ScheduleEvent::SetInputDelay { peer: 0, delay: 2 },
         ScheduleEvent::GracefulRemove { by: 0, target: 1 },
         ScheduleEvent::LegacyDisconnect { by: 0, target: 1 },
         ScheduleEvent::PeerKill { peer: 1 },
@@ -541,6 +1017,46 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         invalid.events = vec![(1, event)];
         assert!(validate_run_options(&invalid, &valid_options).is_err());
     }
+
+    for (old_delay, new_delay) in [(0, 2), (2, 4)] {
+        let dynamic = runtime_delay_schedule(
+            SavePolicy::Sparse,
+            old_delay,
+            new_delay,
+            Delivery::Reordered,
+        );
+        validate_run_options(&dynamic, &valid_options)
+            .expect("one strict in-range runtime increase is supported");
+    }
+    let mut two_changes = runtime_delay_schedule(SavePolicy::Sparse, 0, 2, Delivery::Delayed);
+    two_changes
+        .events
+        .push((121, ScheduleEvent::SetInputDelay { peer: 0, delay: 3 }));
+    assert!(validate_run_options(&two_changes, &valid_options).is_err());
+    for delay in [0, 2] {
+        let mut not_an_increase =
+            runtime_delay_schedule(SavePolicy::Sparse, 2, delay, Delivery::Delayed);
+        assert!(validate_run_options(&not_an_increase, &valid_options).is_err());
+        not_an_increase.events.clear();
+        validate_run_options(&not_an_increase, &valid_options)
+            .expect("the matched static schedule remains valid");
+    }
+    let mut wrong_peer = runtime_delay_schedule(SavePolicy::Sparse, 0, 2, Delivery::Delayed);
+    wrong_peer.events = vec![(120, ScheduleEvent::SetInputDelay { peer: 2, delay: 2 })];
+    assert!(validate_run_options(&wrong_peer, &valid_options).is_err());
+    let mut excessive = runtime_delay_schedule(SavePolicy::Sparse, 0, 2, Delivery::Delayed);
+    excessive.events = vec![(
+        120,
+        ScheduleEvent::SetInputDelay {
+            peer: 1,
+            delay: fortress_rollback::__internal::MAX_FRAME_DELAY + 1,
+        },
+    )];
+    assert!(validate_run_options(&excessive, &valid_options).is_err());
+    let mut excessive_storage = runtime_delay_schedule(SavePolicy::Sparse, 0, 2, Delivery::Delayed);
+    excessive_storage.config.max_prediction = fortress_rollback::__internal::MAX_FRAME_DELAY;
+    excessive_storage.events = vec![(120, ScheduleEvent::SetInputDelay { peer: 1, delay: 2 })];
+    assert!(validate_run_options(&excessive_storage, &valid_options).is_err());
 
     let virtual_run = Duration::from_millis(u64::from(STEPS) * 16);
     let mut timeout = valid_options.clone();
@@ -624,6 +1140,49 @@ fn rotating_sparse_delay_two_artifacts_roundtrip_and_reproduce_reference_failure
             Some(expected_class)
         );
     }
+}
+
+#[test]
+fn dynamic_delay_artifact_roundtrip_replays_failure_trace_trajectory_and_control() {
+    let schedule = runtime_delay_schedule(SavePolicy::Sparse, 2, 4, Delivery::Reordered);
+    let options = options(
+        PeerDriveOrder::Rotating,
+        Some(DifferentialMutation::SharedState { frame: 100 }),
+    );
+    let report = run(&schedule, &options);
+    assert_eq!(
+        report.verdict.failures.first().map(OracleFailure::class),
+        Some("ReferenceState")
+    );
+    let control = input_delay_control(&report);
+    assert!(100 > control.current_frame + 4);
+
+    let artifact = FailureArtifact::from_report(&schedule, &report);
+    artifact.validate().expect("dynamic artifact validates");
+    assert_eq!(
+        artifact.artifact_schema_version,
+        FAILURE_ARTIFACT_SCHEMA_VERSION
+    );
+    let encoded = serde_json::to_vec(&artifact).expect("dynamic artifact serializes");
+    let decoded: FailureArtifact =
+        serde_json::from_slice(&encoded).expect("dynamic artifact deserializes");
+    decoded
+        .validate()
+        .expect("decoded dynamic artifact validates");
+    assert_eq!(decoded.schedule, schedule);
+    assert_eq!(decoded.replay_options, options);
+
+    let replay = run(&decoded.schedule, &decoded.replay_options);
+    assert_eq!(
+        replay.verdict.failures.first().map(OracleFailure::class),
+        Some("ReferenceState")
+    );
+    assert_eq!(input_delay_control(&replay), control);
+    assert_eq!(replay.trace_hash, report.trace_hash);
+    assert_eq!(
+        replay.differential_trajectory,
+        report.differential_trajectory
+    );
 }
 
 #[test]

@@ -648,8 +648,9 @@ impl Oracle {
         }
     }
 
-    /// Differential mode: every post-state through `confirmed` is required;
-    /// only the optional `confirmed + 1` state may be absent.
+    /// Differential mode: every post-state through the confirmed, session-current
+    /// ceiling is required. Confirmation may legally include an unsimulated tail;
+    /// that tail and the optional `confirmed + 1` state may be absent.
     pub fn observe_reference_state_missing(&mut self, peer: usize, frame: i32, confirmed: i32) {
         self.push_failure(OracleFailure::ReferenceStateMissing {
             peer,
