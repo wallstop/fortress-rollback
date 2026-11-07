@@ -1071,6 +1071,16 @@ pub struct HealRecoveryObservation {
     pub first_all_confirmed_advance_step: Option<u32>,
 }
 
+/// Successful runtime-delay control applied to the nominal differential model.
+/// `current_frame` is the session's actual `C` captured at event application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DifferentialInputDelayControl {
+    pub peer: usize,
+    pub current_frame: i32,
+    pub old_delay: usize,
+    pub new_delay: usize,
+}
+
 /// Normalized, peer-indexed confirmed history for differential cross-order
 /// comparison. Visit-order trace events and network counters are deliberately
 /// excluded. The typed values have already been checked against the nominal
@@ -1079,6 +1089,7 @@ pub struct HealRecoveryObservation {
 pub struct DifferentialTrajectory {
     pub confirmed_inputs: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
     pub confirmed_states: Vec<BTreeMap<i32, StateStub>>,
+    pub input_delay_control: Option<DifferentialInputDelayControl>,
 }
 
 /// Outcome of one simulation run.
@@ -1090,6 +1101,10 @@ pub struct RunReport {
     pub replay_input_width_bytes: u32,
     /// Full normalized confirmed history in differential mode; `None` otherwise.
     pub differential_trajectory: Option<DifferentialTrajectory>,
+    /// Cumulative peer metrics captured immediately after a successful
+    /// differential runtime-delay change. Tests subtract these from final metrics
+    /// to prove that rollback work occurred after the control boundary.
+    pub differential_input_delay_metrics_at_control: Option<Vec<fortress_rollback::SessionMetrics>>,
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
@@ -2049,10 +2064,33 @@ fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
     I::from_word(word, step, peer)
 }
 
-/// Nominal committed input at `frame` under a static local input delay. Delay
-/// fills the initial frames with `Default`; every later value is derived from
-/// the pre-delay ordinal. This function never observes a mutation or peer state.
-fn reference_input<I: SimInput>(frame: i32, input_delay: usize, peer: usize) -> I {
+/// Nominal committed input at `frame`. Delay fills the initial frames with
+/// `Default`; every later value is derived from the pre-delay ordinal. After a
+/// successful increase at `C`, the changed peer repeats its last old-delay input
+/// throughout the gap and resumes from the new delay at `C + new`. This function
+/// never observes a mutation or peer state.
+fn reference_input<I: SimInput>(
+    frame: i32,
+    input_delay: usize,
+    peer: usize,
+    control: Option<DifferentialInputDelayControl>,
+) -> I {
+    if let Some(control) = control.filter(|control| control.peer == peer) {
+        let old_delay = i32::try_from(control.old_delay).unwrap_or(i32::MAX);
+        let new_delay = i32::try_from(control.new_delay).unwrap_or(i32::MAX);
+        let old_end = control.current_frame.saturating_add(old_delay);
+        let new_end = control.current_frame.saturating_add(new_delay);
+        if frame < old_end {
+            return reference_input::<I>(frame, control.old_delay, peer, None);
+        }
+        if frame < new_end {
+            let ordinal = u32::try_from(control.current_frame - 1).unwrap_or(0);
+            return input_for::<I>(ordinal, peer);
+        }
+        let ordinal = u32::try_from(frame.saturating_sub(new_delay)).unwrap_or(0);
+        return input_for::<I>(ordinal, peer);
+    }
+
     let delay = i32::try_from(input_delay).unwrap_or(i32::MAX);
     if frame < delay {
         I::default()
@@ -2062,9 +2100,14 @@ fn reference_input<I: SimInput>(frame: i32, input_delay: usize, peer: usize) -> 
     }
 }
 
-fn reference_inputs<I: SimInput>(frame: i32, input_delay: usize, n: usize) -> Vec<I> {
+pub(super) fn reference_inputs<I: SimInput>(
+    frame: i32,
+    input_delay: usize,
+    n: usize,
+    control: Option<DifferentialInputDelayControl>,
+) -> Vec<I> {
     (0..n)
-        .map(|peer| reference_input::<I>(frame, input_delay, peer))
+        .map(|peer| reference_input::<I>(frame, input_delay, peer, control))
         .collect()
 }
 
@@ -2074,11 +2117,12 @@ fn reference_states<I: SimInput>(
     through_post_frame: i32,
     input_delay: usize,
     n: usize,
+    control: Option<DifferentialInputDelayControl>,
 ) -> BTreeMap<i32, StateStub> {
     let mut states = BTreeMap::new();
     let mut state = StateStub::default();
     for post_frame in 1..=through_post_frame.max(0) {
-        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n);
+        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n, control);
         let total = inputs
             .into_iter()
             .fold(0_u32, |total, input| total.wrapping_add(input.value()));
@@ -2392,11 +2436,43 @@ pub(crate) fn validate_run_options(
         if !schedule.config.spectator_hosts.is_empty() {
             return Err("differential mode does not support spectators".to_owned());
         }
+        let delay_events: Vec<_> = schedule
+            .events
+            .iter()
+            .filter_map(|(step, event)| match event {
+                ScheduleEvent::SetInputDelay { peer, delay } => Some((*step, *peer, *delay)),
+                _ => None,
+            })
+            .collect();
+        if delay_events.len() > 1 {
+            return Err(
+                "differential mode supports at most one runtime SetInputDelay event".to_owned(),
+            );
+        }
+        if let Some((_, peer, delay)) = delay_events.first() {
+            if *peer >= n {
+                return Err("differential SetInputDelay peer must be in range".to_owned());
+            }
+            if *delay <= schedule.config.input_delay {
+                return Err(
+                    "differential SetInputDelay must strictly increase the scheduled initial delay"
+                        .to_owned(),
+                );
+            }
+            if *delay > fortress_rollback::__internal::MAX_FRAME_DELAY
+                || schedule.config.max_prediction.saturating_add(*delay)
+                    > fortress_rollback::__internal::MAX_FRAME_DELAY
+            {
+                return Err(
+                    "differential SetInputDelay and max_prediction must fit the input queue"
+                        .to_owned(),
+                );
+            }
+        }
         if schedule.events.iter().any(|(_, event)| {
             matches!(
                 event,
-                ScheduleEvent::SetInputDelay { .. }
-                    | ScheduleEvent::GracefulRemove { .. }
+                ScheduleEvent::GracefulRemove { .. }
                     | ScheduleEvent::LegacyDisconnect { .. }
                     | ScheduleEvent::PeerKill { .. }
                     | ScheduleEvent::SpectatorHostKill { .. }
@@ -2405,7 +2481,7 @@ pub(crate) fn validate_run_options(
             )
         }) {
             return Err(
-                "differential mode forbids runtime delay, membership changes, disconnects, kills, hot-join, and rebind"
+                "differential mode forbids membership changes, disconnects, kills, hot-join, and rebind"
                     .to_owned(),
             );
         }
@@ -2587,6 +2663,31 @@ fn message_payload_metadata(message: &Message) -> SimPayloadMetadata {
 }
 
 fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: bool) -> RunReport {
+    run_inner_with_final_game_frame_offset::<I>(schedule, options, diagnose, None)
+}
+
+/// Test-only negative control for the final game/session frame consistency check.
+/// The offset is deliberately not part of replay options or an artifact schema.
+pub(super) fn run_with_final_game_frame_offset(
+    schedule: &Schedule,
+    options: &RunOptions,
+    peer: usize,
+    offset: i32,
+) -> RunReport {
+    run_inner_with_final_game_frame_offset::<StubInput>(
+        schedule,
+        options,
+        false,
+        Some((peer, offset)),
+    )
+}
+
+fn run_inner_with_final_game_frame_offset<I: SimInput>(
+    schedule: &Schedule,
+    options: &RunOptions,
+    diagnose: bool,
+    final_game_frame_offset: Option<(usize, i32)>,
+) -> RunReport {
     validate_schedule(schedule).unwrap_or_else(|error| {
         panic!(
             "invalid materialized schedule seed={} schema_version={}: {error}",
@@ -2808,6 +2909,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
 
     let differential = options.differential;
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
+    let mut differential_input_delay_control = None;
+    let mut differential_input_delay_metrics_at_control = None;
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
@@ -3065,8 +3168,52 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     // failure (e.g. pending-output full) is a real error the
                     // oracle must surface, not swallow.
                     let handle = PlayerHandle::new(*peer);
-                    if let Err(error) = peers[*peer].session.set_input_delay(handle, *delay) {
-                        oracle.observe_session_error("set_input_delay", *peer, step, &error);
+                    let session = &mut peers[*peer].session;
+                    if differential.is_some()
+                        && (session.current_state() != SessionState::Running
+                            || session.current_frame().as_i32() <= 0)
+                    {
+                        oracle.observe_runner_error(
+                            "set_input_delay",
+                            *peer,
+                            step,
+                            format!(
+                                "differential delay change requires Running at current_frame > 0; state={:?}, current_frame={}",
+                                session.current_state(),
+                                session.current_frame().as_i32()
+                            ),
+                        );
+                    } else {
+                        let current_frame = session.current_frame().as_i32();
+                        match session.set_input_delay(handle, *delay) {
+                            Ok(()) => {
+                                if differential.is_some() {
+                                    let previous = differential_input_delay_control.replace(
+                                        DifferentialInputDelayControl {
+                                            peer: *peer,
+                                            current_frame,
+                                            old_delay: schedule.config.input_delay,
+                                            new_delay: *delay,
+                                        },
+                                    );
+                                    assert!(
+                                        previous.is_none(),
+                                        "validated differential schedule has one delay event"
+                                    );
+                                    differential_input_delay_metrics_at_control = Some(
+                                        peers.iter().map(|slot| slot.session.metrics()).collect(),
+                                    );
+                                }
+                            },
+                            Err(error) => {
+                                oracle.observe_session_error(
+                                    "set_input_delay",
+                                    *peer,
+                                    step,
+                                    &error,
+                                );
+                            },
+                        }
                     }
                 },
                 ScheduleEvent::GracefulRemove { by, target } => {
@@ -3441,6 +3588,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                                         frame,
                                         schedule.config.input_delay,
                                         n,
+                                        differential_input_delay_control,
                                     );
                                     oracle.observe_reference_inputs(i, frame, &expected, &inputs);
                                     if let Some(histories) = differential_confirmed_inputs.as_mut()
@@ -3807,6 +3955,11 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         clock.advance(schedule.config.step_dt());
     }
 
+    if let Some((peer, offset)) = final_game_frame_offset {
+        let session_frame = peers[peer].session.current_frame().as_i32();
+        peers[peer].game.gs.frame = session_frame.saturating_add(offset);
+    }
+
     let metrics: Vec<fortress_rollback::SessionMetrics> =
         peers.iter().map(|slot| slot.session.metrics()).collect();
 
@@ -3848,17 +4001,35 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         .map(|slot| slot.session.current_state())
         .collect();
     let final_confirmed: Vec<i32> = end_confirmed.iter().map(|frame| frame.as_i32()).collect();
+    let session_current_frames: Vec<i32> = peers
+        .iter()
+        .map(|slot| slot.session.current_frame().as_i32())
+        .collect();
 
     let differential_trajectory = differential.map(|_| {
-        let maximum_required = final_confirmed.iter().copied().max().unwrap_or(0);
+        let maximum_required = final_confirmed
+            .iter()
+            .copied()
+            .chain(session_current_frames.iter().copied())
+            .max()
+            .unwrap_or(0);
         let maximum_reference_frame = maximum_required.saturating_add(1).max(0);
-        let expected_states =
-            reference_states::<I>(maximum_reference_frame, schedule.config.input_delay, n);
+        let expected_states = reference_states::<I>(
+            maximum_reference_frame,
+            schedule.config.input_delay,
+            n,
+            differential_input_delay_control,
+        );
         let mut confirmed_states = Vec::with_capacity(n);
         for (peer, states) in recorded.iter().enumerate() {
             let confirmed = final_confirmed[peer];
+            let current_frame = session_current_frames[peer];
+            // Confirmation can legally outrun the session's last local advance.
+            // Derive the required recording ceiling from the independent session
+            // frame, never from the game value being validated.
+            let simulated_confirmed = confirmed.min(current_frame);
             let mut retained = BTreeMap::new();
-            for frame in 1..=confirmed.max(0) {
+            for frame in 1..=simulated_confirmed.max(0) {
                 let Some(&actual) = states.get(&frame) else {
                     oracle.observe_reference_state_missing(peer, frame, confirmed);
                     continue;
@@ -3867,6 +4038,14 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                     oracle.observe_reference_state(peer, frame, expected, actual);
                 }
                 retained.insert(frame, actual);
+            }
+            let actual_final = peers[peer].game.gs;
+            if actual_final.frame != current_frame {
+                if let Some(&expected) = expected_states.get(&current_frame) {
+                    oracle.observe_reference_state(peer, current_frame, expected, actual_final);
+                } else {
+                    oracle.observe_reference_state_missing(peer, current_frame, confirmed);
+                }
             }
             if confirmed >= 0 {
                 // Delay can confirm an input before its post-state is simulated.
@@ -3887,6 +4066,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 .take()
                 .expect("differential input histories were initialized"),
             confirmed_states,
+            input_delay_control: differential_input_delay_control,
         }
     });
 
@@ -4101,6 +4281,7 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         replay_options: options.clone(),
         replay_input_width_bytes: I::WIDTH_BYTES,
         differential_trajectory,
+        differential_input_delay_metrics_at_control,
         verdict,
         trace_hash,
         sometimes_state_by_peer,

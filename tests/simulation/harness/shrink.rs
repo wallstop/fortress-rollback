@@ -834,9 +834,23 @@ where
             break;
         }
         let mut candidate = current.clone();
+        let minimum_delay = if current_options.differential.is_some() {
+            candidate
+                .config
+                .input_delay
+                .checked_add(1)
+                .filter(|delay| *delay <= fortress_rollback::__internal::MAX_FRAME_DELAY)
+        } else {
+            Some(0)
+        };
         match candidate.events.get_mut(index).map(|(_, event)| event) {
             Some(ScheduleEvent::PeerStall { steps, .. }) => *steps = 1,
-            Some(ScheduleEvent::SetInputDelay { delay, .. }) => *delay = 0,
+            Some(ScheduleEvent::SetInputDelay { delay, .. }) => {
+                let Some(minimum_delay) = minimum_delay else {
+                    continue;
+                };
+                *delay = minimum_delay;
+            },
             _ => continue,
         }
         if candidate != current && evaluator.confirm(&candidate, &current_options).is_some() {
@@ -981,6 +995,7 @@ mod tests {
             replay_options: RunOptions::default(),
             replay_input_width_bytes: 4,
             differential_trajectory: None,
+            differential_input_delay_metrics_at_control: None,
             verdict: Verdict {
                 failures,
                 recovered_within_b: None,
@@ -2019,6 +2034,109 @@ mod tests {
         .expect("an irrelevant high CPU cap must not block prefix shrinking");
         assert_eq!(prefix.schedule.config.steps, 2);
         assert_eq!(prefix.schedule.config.cpu_feedback_policy, None);
+    }
+
+    #[test]
+    fn runtime_delay_shrinking_uses_strict_increase_floor() {
+        let mut schedule = clean_schedule(2, 2);
+        schedule.config.input_delay = 2;
+        schedule.events = vec![(1, ScheduleEvent::SetInputDelay { peer: 1, delay: 4 })];
+        let options = RunOptions {
+            disconnect_timeout: Some(Duration::from_secs(30)),
+            differential: Some(super::super::DifferentialOptions {
+                drive_order: super::super::PeerDriveOrder::Forward,
+                mutation: None,
+            }),
+            ..RunOptions::default()
+        };
+
+        let result = shrink_failure(
+            &schedule,
+            &options,
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| {
+                let retains_increase = candidate.events.iter().any(|(_, event)| {
+                    matches!(
+                        event,
+                        ScheduleEvent::SetInputDelay { delay, .. }
+                            if *delay > candidate.config.input_delay
+                    )
+                });
+                let failures = if retains_increase {
+                    vec![state_failure(1)]
+                } else {
+                    Vec::new()
+                };
+                synthetic_report(candidate, failures, 0xDE1A_7EED)
+            },
+            |_, _, _| {},
+        )
+        .expect("runtime-delay-dependent failure shrinks");
+
+        let delay = result
+            .schedule
+            .events
+            .iter()
+            .find_map(|(_, event)| match event {
+                ScheduleEvent::SetInputDelay { delay, .. } => Some(*delay),
+                _ => None,
+            })
+            .expect("causal delay event remains");
+        assert_eq!(delay, result.schedule.config.input_delay + 1);
+        assert!(delay > 0);
+    }
+
+    #[test]
+    fn legacy_delay_shrinking_to_zero_survives_maximum_initial_delay() {
+        let mut schedule = clean_schedule(2, 2);
+        schedule.config.input_delay = fortress_rollback::__internal::MAX_FRAME_DELAY;
+        schedule.events = vec![(
+            1,
+            ScheduleEvent::SetInputDelay {
+                peer: 1,
+                delay: fortress_rollback::__internal::MAX_FRAME_DELAY,
+            },
+        )];
+
+        let result = shrink_failure(
+            &schedule,
+            &RunOptions::default(),
+            "StateDivergence",
+            ShrinkConfig {
+                max_runs: 40,
+                max_duration: Duration::from_secs(10),
+            },
+            |candidate, _| {
+                let retains_case = candidate.config.input_delay
+                    == fortress_rollback::__internal::MAX_FRAME_DELAY
+                    && candidate
+                        .events
+                        .iter()
+                        .any(|(_, event)| matches!(event, ScheduleEvent::SetInputDelay { .. }));
+                let failures = if retains_case {
+                    vec![state_failure(1)]
+                } else {
+                    Vec::new()
+                };
+                synthetic_report(candidate, failures, 0x1E6A_C000)
+            },
+            |_, _, _| {},
+        )
+        .expect("legacy runtime-delay failure shrinks");
+
+        assert_eq!(
+            result.schedule.config.input_delay,
+            fortress_rollback::__internal::MAX_FRAME_DELAY
+        );
+        assert!(result
+            .schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::SetInputDelay { delay: 0, .. })));
     }
 
     #[test]
