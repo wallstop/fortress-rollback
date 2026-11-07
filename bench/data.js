@@ -1,146 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794024727276,
+  "lastUpdate": 1794081671704,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "991559cca913b7f7b0495d444e1224f28bdca423",
-          "message": "Complete protocol v1 wire compatibility gates (#229)\n\n## Summary\n\n- add immutable exact-byte fixtures for every protocol-v1 message tag\nand recorded v0.9 compatibility fixtures\n- prove legacy rejection in both directions, including a real UDP\nlegacy-handshake timeout regression\n- enforce released wire-golden immutability in worktree, staged, and\ncommitted PR diffs, including version-successor registration and\nadversarial bypass coverage\n- wire the policy into pre-commit, agent preflight, and PR CI\n\n## Why\n\nProtocol v1 was implemented through the final coordinated-drop tags, but\nM5 still lacked its complete immutable golden suite and enforcement.\nWithout a committed-diff gate, historical fixtures could also be\nrewritten in a clean PR checkout without a protocol-version increase.\n\n## Impact\n\nThis is test and CI hardening only; it does not change production wire\nbytes. Future wire changes must increase `PROTOCOL_VERSION` and add a\nload-bearing successor golden suite.\n\n## Validation\n\n- `cargo nextest run --no-capture`: 2,833 passed, 73 skipped\n- `cargo nextest run --features hot-join --no-capture`: 3,087 passed, 73\nskipped\n- `cargo clippy --workspace --all-targets --features\ntokio,json,hot-join`\n- `cargo doc --no-deps`\n- `python3 -m pytest scripts/tests --no-header -q`: 1,627 passed\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `actionlint .github/workflows/ci-version-sync.yml`\n- repeated adversarial review passes; final pass reported zero issues\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test and CI/policy hardening only; production wire encoding is\nunchanged, though the immutability hook is security-relevant for\nprotocol compatibility.\n> \n> **Overview**\n> Adds **immutable protocol-v1 exact-byte fixtures** for every message\nvariant, **recorded v0.9 legacy packets**, and a shared\n`assert_wire_golden_suite` harness in `codec.rs`, plus tests that legacy\nbytes are classified/rejected and that a real UDP legacy handshake times\nout without synchronizing.\n> \n> Introduces **`check-wire-golden-immutable.py`**, which blocks edits to\nreleased `wire_golden_*` files unless `PROTOCOL_VERSION` increases and a\nproperly wired successor suite is the sole active registration in\n`codec.rs` (with Rust-aware checks to resist comment/cfg/macro\nbypasses). The hook runs on **every pre-commit** (`--cached`), in\n**agent preflight** (`--local`), and in **PR CI** (`--base-ref` against\nthe merge base with full git history).\n> \n> Wires the hook into workflow path filters and adds broad **pytest**\ncoverage for the checker and hook policy.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfcb91710e27d46e973b461755408093e31a1c3ea. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-12T15:06:23-07:00",
-          "tree_id": "7d047c618f00648b25cef4df2c8e0cd8e6d3167a",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/991559cca913b7f7b0495d444e1224f28bdca423"
-        },
-        "date": 1783894283423,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 114,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 165,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 438,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 700,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1018,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 140048,
-            "range": "± 374",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46758,
-            "range": "± 873",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "P2PSession/metrics",
-            "value": 18,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message/encoded_len",
-            "value": 2,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2867,6 +2729,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6839,
             "range": "± 306",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a6615805df71fb845de580e55a30a1b19ea10c08",
+          "message": "test(simulation): add differential rollback reference (#372)\n\n## Description\n\nAdvances the active P0 rollback-equivalence work with an independent\nfixed-history oracle and refreshes all compatible Cargo lockfile\npatches.\n\nThe simulation harness previously proved that peers agreed with one\nanother, which could not detect a shared wrong input or state.\nDifferential mode now compares typed confirmed inputs and exact\n`StateStub` trajectories against a nominal non-networked reference. The\nbounded matrix covers EveryFrame/Sparse, static input delay 0/2,\ndelayed/held/reordered delivery, and forward/reverse/rotating peer drive\norder.\n\nThe change also adds replayable mutation controls for shared input\nerrors, common-mode state errors, missing confirmed states, padding-only\ntyped input changes, and checksum-only detector lies. Legacy runs retain\ntheir pre-change trace identity, pinned against base SHA\n`6fb81cb421c3016f73289838b983688598180700`.\n\nNo production or public API code changes. Runtime membership/delay\nchanges, spectators, hot-join, rebinding, near-overflow frames, and\narbitrary game-state semantics remain explicitly bounded in the active\nP0 plan item.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (dependency lockfile refresh)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove the new reference and mutation\ncontrols work\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the progress documentation accordingly\n- [x] My changes generate no new compiler warnings\n\nCHANGELOG and examples are not applicable because this is test\ninfrastructure and compatible lockfile maintenance only.\n\n## Testing\n\n**Tests added/modified:**\n\n- Added 13 differential-oracle tests covering the green matrix, exact\nreplay, cross-order confirmed equivalence, mutation controls, option\nvalidation, artifact round trips, legacy trace preservation, and\nshrinking.\n- Extended artifact schema v8 and corpus validation for differential\noptions and reference failures.\n- Added explicit missing-state and invalid wide-input artifact rejection\ncoverage.\n\n**Verification performed:**\n\n- Full Nextest: 3,009 passed, 73 skipped.\n- Full simulation target: 379 passed, 26 skipped.\n- Strict all-workspace/all-target Clippy with `tokio,json`: passed\nwithout warnings.\n- Agent preflight: all selected checks passed without fallback.\n- Link checking: 1,442 links, zero errors or warnings; semantic\ndocumentation and typo checks passed.\n- Independent adversarial design and implementation reviews completed;\nfinal re-review reported zero remaining issues.\n- `cargo audit`, `cargo deny check`, all four workspace lock checks, npm\naudit/outdated checks, strict latest-docs build, and 200\nrelease-automation tests passed.\n- Latest `main` SHA `6fb81cb421c3016f73289838b983688598180700`: 90\nsuccessful checks, five intentional skips, zero failures or pending\nchecks.\n\n## Related Issues\n\nLeaves the P2 Lean pilot #365 in its existing priority order. No other\nopen issues or PRs existed at reconciliation.",
+          "timestamp": "2026-11-07T11:52:57-08:00",
+          "tree_id": "29d4c82d2abe48ce706fc5875af34a2ef02dc8cd",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/a6615805df71fb845de580e55a30a1b19ea10c08"
+        },
+        "date": 1794081670574,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60384,
+            "range": "± 676",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 29974,
+            "range": "± 480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1861,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1554,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3133,
+            "range": "± 179",
             "unit": "ns/iter"
           }
         ]
