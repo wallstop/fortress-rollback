@@ -65,5 +65,7 @@ plan item therefore remains active rather than being presented as complete.
 - PR #372 initially completed 93 successful checks with three intentional skips and a clean merge state.
   Cursor found no critical issue and suggested three stronger test premises: a live drive-order axis,
   padding-only mutation identity, and exact repeated mismatch boundaries. All were implemented, and the
-  adversarial re-review reported zero issues. Final exact-head hosted evidence is recorded after the
-  updated commit completes CI.
+  adversarial re-review reported zero issues. Final head
+  `f5d38f89302d8e7a57d58db5cef1d6b196f8a367` then completed 93 successful checks with three
+  intentional skips, no pending or failed checks, and a clean merge state. Cursor's exact-head re-review
+  reported no actionable issues or suggestions; no review threads remained.
