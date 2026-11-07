@@ -1,146 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794000429778,
+  "lastUpdate": 1794024727276,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b535d3b53fa2b7c44a5074565321aced172bfd75",
-          "message": "Land protocol v1 and coordinated graceful drop (#226)\n\n## Summary\n\n- retain the session-109 20-second default sync timeout and negative\nwire-frame validation\n- add the protocol-v1 12-byte prelude, feature-independent tags,\nvalidated 32-bit connection IDs, and tag-17 explicit-disconnect\n`Goodbye`\n- add the fixed-width v1 session-config handshake and canonical digest\n- fail closed with durable `IncompatibleSession` events on every\ndeterministic configuration mismatch\n- add bounded `codec::{encode_framed, FrameDecoder}` helpers for TCP and\nother raw byte streams\n- add inclusive 1,200-byte portability and 1,472-byte IPv4/UDP\nfragmentation diagnostics with distinct saturating `PeerMetrics`\ncounters\n- add tags 18–22 and a coordinated\nprepare/inventory/backfill/ready/commit graceful-drop barrier that never\nretracts exposed confirmed history\n- add bounded retained-history backfill, atomic freeze-at-cut,\ngeneration fencing, fail-closed timeout handling, and deterministic\nconcurrent-drop rebasing\n- add the `CoordinatedPeerDrop` TLA+ family with fair/fault models and\nan expected ImmediateMin counterexample\n- document best-effort local send/drop semantics, TCP latency/HOL\nbehavior, WebRTC/QUIC/WebTransport guidance, and the transport security\nboundary\n- correct built-in UDP/Tokio oversized-send warnings to report required\nencoded bytes rather than buffer capacity\n\n## Compatibility\n\nThis is the coordinated 0.10.0 breaking wire/API transition. Protocol v1\nrejects legacy 0.9 packets in both directions, and exhaustive matches\nmust handle the new `FortressEvent::IncompatibleSession` and\n`EventKind::IncompatibleSession` variants. Existing event discriminants\nare preserved by appending the new variant. The stream length prefix is\ntransport-local and does not change datagram bytes or deterministic\nstate. `PeerMetrics` is non-exhaustive, so its new counters are\nadditive.\n\n## Validation\n\n- default nextest: 2,827 passed, 73 skipped\n- hot-join nextest: 3,082 passed, 73 skipped\n- default and hot-join/tokio/json all-target clippy with `-D warnings`\n- focused framing split/concatenation/poison/property tests and exact\n1,199/1,200/1,471/1,472 boundary tests\n- 35-test peer-drop slice, D14 lossy/minority-partition simulations, and\nall five new tag byte goldens\n- coordinated-drop TLC suite: base, fair, faults, and expected\nImmediateMin counterexample\n- sweep PR gate\n- semver checks against 0.9.0\n- rustdoc, 223 doc tests (169 passed, 54 ignored), and examples\n- agent preflight, links, semantic doc claims, markdownlint, version\nsync, and changelog policy\n- two-pass adversarial review: all five first-pass findings fixed by a\nseparate pass; fresh re-review reported zero issues\n- Miri budget follow-up: expensive new property probes remain in\nordinary nextest but are skipped under Miri; deterministic framing\ncoverage remains on every Miri shard\n\nExact head: `86e8cd67aa3c7f7ede6c6e401c518826fe875daf`.\n\nRemaining planned wire work: complete the immutable protocol-v1/legacy\ngolden suite beyond the five pinned D14 variants.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Breaking wire protocol and session handshake require fleet-wide\nupgrades; coordinated graceful drop and incompatible-session handling\nchange core disconnect and sync failure semantics.\n> \n> **Overview**\n> **0.10.0** is a coordinated breaking release: all peers must upgrade\ntogether for **protocol-v1** on the wire and for new session/API\nbehavior.\n> \n> **Wire and sync:** Packets gain a versioned prelude (`F5 52`, version\n1, flags, 32-bit connection ID) and reject legacy 0.9 traffic. Sync\nrequest/reply now carry a fixed session-config block and canonical\ndigest; mismatches emit a sticky\n**`FortressEvent::IncompatibleSession`** (new exhaustive match arms on\n`FortressEvent` / `EventKind`). Default **`SyncConfig::sync_timeout`**\nbecomes **20s** (`None` restores unlimited retries). Tag 17\n**`Goodbye`** replaces the old input disconnect byte; graceful-drop tags\n**18–22** support a multi-phase barrier. Datagram bytes are unchanged\nfor UDP; **`codec::encode_framed`** and **`FrameDecoder`** add a\ntransport-local u32-LE envelope for TCP/raw streams.\n> \n> **Graceful drop:** **`remove_player`** and **`ContinueWithout`**\nauto-removal no longer freeze locally on gossip; survivors run a\n**prepare → inventory → backfill → ready → commit** certificate, hold\nconfirmation until a non-retracting cut, then emit **`PeerDropped`**\nonly on commit (failure returns to **`Synchronizing`** without the\nevent). **`CoordinatedPeerDrop`** TLA+ models this with fair/fault\ncompanions and an **ImmediateMin** mutation counterexample.\n> \n> **Observability and docs:** **`PeerMetrics`** adds saturating\n**1,200-byte** portability and **1,472-byte** fragmentation-risk\ncounters (diagnostics only). New **threat model**, migration\n**0.9→0.10** wire section, and transport guidance (best-effort send, TCP\nHOL, prefer datagram rollback paths).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n86e8cd67aa3c7f7ede6c6e401c518826fe875daf. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-12T09:31:44-07:00",
-          "tree_id": "77898bbfd2001bdc6f458cb794764a7b6aa3566d",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b535d3b53fa2b7c44a5074565321aced172bfd75"
-        },
-        "date": 1783874236438,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 115,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 167,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 469,
-            "range": "± 7",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 700,
-            "range": "± 14",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1024,
-            "range": "± 33",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 129206,
-            "range": "± 1595",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46933,
-            "range": "± 119",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 19",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 100",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "P2PSession/metrics",
-            "value": 19,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message/encoded_len",
-            "value": 2,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2951,6 +2813,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2760,
             "range": "± 156",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6fb81cb421c3016f73289838b983688598180700",
+          "message": "test: complete consistency evidence matrix (#371)\n\n## Description\n\nCompletes the active P0 consistency evidence matrix and advances\n`PLAN.md` to differential rollback equivalence.\n\n- Adds repeated symmetric partition flaps and repeated local poll stalls\nat N=2/3/4/8/16.\n- Adds matched N=2/N=16 corruption controls and validates every fault\npremise.\n- Records per-heal recovery, exact stall freeze/resume windows,\ncontiguous confirmation-stall durations, and host elapsed/RSS evidence.\n- Publishes the schema-v6 results in the tuning guide/wiki and records\nthe session evidence.\n\nNo production or public API code changes.\n\n## Type of Change\n\n- [x] 📚 Documentation (changes to documentation only)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove the new evidence and controls work\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] My changes generate no new compiler warnings\n\nCHANGELOG and examples are not applicable because this is test\ninstrumentation and documentation only.\n\n## Testing\n\n**Tests added/modified:**\n\n- Expanded `partition_sweep_pr_gate` from 15 to 19 rows.\n- Expanded `partition_sweep_full` from 52 to 66 rows, each with a\ncomplete deterministic replay.\n- Added actual per-stall and per-heal observations to the simulation\nharness.\n\n**Verification performed:**\n\n- Exact-SHA (`ba287019533c01734b8f3a96430812db918a633a`) release full\nmatrix: 66 rows passed; 35 bounded recoveries, 15 safe failures, 16\nintentional defect controls; zero replay mismatches and zero premise\nviolations.\n- Full `cargo nextest run --no-capture`: 2,996 passed, 73 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json`: passed\nwith no warnings.\n- Doc tests: 160 passed, 50 ignored; rustdoc with warnings denied\npassed.\n- Link, semantic-doc, wiki, Markdown, plan-hygiene, typos,\nworkspace-lock, security, and agent-preflight checks passed.\n- Latest `main` SHA `4757214205cb8b8f685df777b9c3be49993b0b85`: all 14\npush workflows successful.\n\n## Related Issues\n\nLeaves the P2 Lean pilot #365 in its existing priority order.",
+          "timestamp": "2026-11-06T20:03:55-08:00",
+          "tree_id": "2a5ef287bf4f3995be2b8da5b37b646b7b2200b9",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/6fb81cb421c3016f73289838b983688598180700"
+        },
+        "date": 1794024726408,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 43928,
+            "range": "± 448",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25798,
+            "range": "± 390",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 678,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 871,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6839,
+            "range": "± 306",
             "unit": "ns/iter"
           }
         ]
