@@ -1,146 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794081671704,
+  "lastUpdate": 1794088171808,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bb7122b59d9311090065c5bb4ea266bb0bc001fd",
-          "message": "Publish M6 operations guides and reference metrics (#231)\n\n## What changed\n\n- add production readiness, desync response, disconnect/rejoin, and\nmeasured network-tuning guides\n- synchronize every new page into MkDocs and the generated GitHub wiki\n- document pull-based metrics, wire accounting, MTU risk, and\nquality-report cadence\n- update the graphical P2P example to obey WaitRecommendation while\npolling and render live session/peer health\n- fix the example's previously unchecked fallible builder calls\n\n## Why\n\nM6 requires operational guidance and a reference client that\ndemonstrates the behavior applications must ship. The tuning guide\npublishes schema-v2 sweep evidence, including release-mode N=16 4-byte\nand 32-byte rows, instead of relying on qualitative presets alone.\n\n## Impact\n\nNo wire or library API behavior changes. Users gain deployable\noperations guidance; the graphical example now demonstrates time-sync\nbackpressure and metrics monitoring.\n\n## Validation\n\n- cargo clippy --workspace --all-targets --features tokio,json\n- cargo nextest run --no-capture (2,834 passed; 73 skipped)\n- cargo test --doc --features json -- --nocapture (161 passed; 50\nignored)\n- cargo check --example ex_game_p2p --features graphical-examples,json\n- release-mode full_matrix_sweep (1 passed; N=16 rows zero desync)\n- markdownlint, local link check (1,431 links), strict wiki validation,\ndoc-claims, typos, and agent preflight\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Documentation, wiki sync, doc comments, and example-only loop changes;\nno library runtime or protocol logic modified.\n> \n> **Overview**\n> Adds **four new operational guides** (production checklist, desync\nincident playbook, disconnect/rejoin playbook, network tuning with\nchecked-in sweep baselines) and wires them into **MkDocs**, **wiki\nsync**, and **sidebar** navigation.\n> \n> **Telemetry** gains a **Pull-Based Metrics** section documenting\n`metrics()` / `peer_metrics()`, wire-byte accounting, MTU risk counters,\nand quality-report cadence; **See Also** links cross-reference the new\nguides. **`NetworkStats::ping`** doc comments now state updates happen\non the quality-report interval, not per packet.\n> \n> The **`ex_game_p2p`** example propagates fallible `SessionBuilder`\ncalls with `?`, handles **`WaitRecommendation`** by skipping simulation\nticks while still polling, and draws live rollback/lag/stall and\nper-peer ping/kbps/**`sync_health`** overlays.\n> \n> No rollback protocol or wire-format behavior changes beyond\ndocumentation clarity.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n556d6c6381bc9413afcb375a65f2f4a7a2273fad. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-07-12T16:29:47-07:00",
-          "tree_id": "3617d49e6bc2121f1810b50dd9587d8091baa03b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bb7122b59d9311090065c5bb4ea266bb0bc001fd"
-        },
-        "date": 1783899288361,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Frame/new",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_null",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame/is_valid",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/10",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/100",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Frame arithmetic/add/1000",
-            "value": 1,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/2",
-            "value": 122,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_no_rollback/4",
-            "value": 169,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/2",
-            "value": 469,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/4",
-            "value": 747,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncTestSession/advance_frame_with_rollback/7",
-            "value": 1103,
-            "range": "± 13",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 134342,
-            "range": "± 193",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 50853,
-            "range": "± 3703",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "P2PSession/metrics",
-            "value": 21,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message/encoded_len",
-            "value": 2,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "sync_layer_noop",
-            "value": 0,
-            "range": "± 0",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2783,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3133,
             "range": "± 179",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b799615d3008e55a901ad288a183cdf9b616b705",
+          "message": "test(simulation): prove runtime delay equivalence (#373)\n\n## Description\n\nAdvances the active P0 rollback-equivalence work by extending the\nindependent differential reference to one successful, strict,\npost-synchronization runtime input-delay increase.\n\nThe oracle now records the actual `(peer, current frame, old delay, new\ndelay)` control boundary and independently models replicated gap inputs\nand resumed ordinals. The bounded matrix covers EveryFrame/Sparse,\ndelayed/held/reordered delivery, and forward/reverse/rotating peer drive\norder, with additional nonzero initial-delay coverage.\n\nThe change also hardens final-state validation so a bad game-state frame\ncannot lower its own validation ceiling, preserves legacy shrinker\nbehavior, and records the work in\n`progress/session-191-runtime-delay-equivalence.md`.\n\nNo production or public API code changes. Membership changes,\nspectators, hot-join, broader operation interleavings, and arbitrary\ngame-state semantics remain explicitly bounded in the active P0 plan\nitem.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the contributing guide and repository development\npolicy\n- [x] I have followed the zero-panic policy (no production code changed)\n- [x] I have added tests that prove the new reference and mutation\ncontrols work\n- [x] I have run strict workspace Clippy with no warnings\n- [x] I have run the full Nextest suite and all tests pass\n\n### If Applicable\n\n- [x] I have updated the progress documentation accordingly\n- [x] My changes generate no new compiler warnings\n\nCHANGELOG and examples are not applicable because this is test\ninfrastructure only.\n\n## Testing\n\n**Tests added/modified:**\n\n- Hard-coded 0→3 and 2→4 gap/resume known-answer vectors.\n- Full save/delivery/drive-order runtime-delay matrix with exact replay\nand matched no-change controls.\n- Changed-player input mutation, shared-state, checksum-lie, final-frame\nmismatch, artifact replay, validation, and shrinker controls.\n- Independent final-state ceilings and legacy non-differential delay\nshrinking regressions.\n\n**Red-green evidence:**\n\n- Before the nominal gap model,\n`runtime_delay_increase_matches_nominal_gap_and_resume` failed at frame\n80 because the actual stream repeated ordinal 79 while the static\nreference advanced.\n- Final focused differential/shrinker gate: 25 passed.\n- Full simulation target: 391 passed, 26 ignored.\n- Full Nextest: 3,021 passed, 73 skipped.\n- Strict all-workspace/all-target Clippy with `tokio,json`: passed\nwithout warnings.\n- Rustdoc with warnings denied, plan hygiene, diff checks, and agent\npreflight passed; link checking covered 1,442 links with zero errors or\nwarnings.\n- Independent adversarial review found two issues; both were fixed with\nregressions, and final re-review reported zero remaining issues.\n\n**External reconciliation:**\n\n- Latest `main` SHA `a6615805df71fb845de580e55a30a1b19ea10c08`: 89\nsuccessful checks, five intentional skips, zero pending or failed\nchecks.\n- No compatible Cargo or npm updates remained. Cargo audit/deny and all\nfour workspace lock checks passed.\n\n## Related Issues\n\nLeaves the P2 Lean pilot #365 in its existing priority order. No other\nopen issues or PRs existed at reconciliation.",
+          "timestamp": "2026-11-07T13:41:40-08:00",
+          "tree_id": "7b688bdfe96a57e7468f74e88be112b06a6a40e2",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b799615d3008e55a901ad288a183cdf9b616b705"
+        },
+        "date": 1794088170618,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39018,
+            "range": "± 514",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24848,
+            "range": "± 87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1245,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2765,
+            "range": "± 180",
             "unit": "ns/iter"
           }
         ]
