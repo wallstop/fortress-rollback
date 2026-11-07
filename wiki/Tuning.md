@@ -39,9 +39,8 @@ protocol messages enqueued for eventual socket submission per player per second.
 two-player row is 135.8125, including one-time synchronization traffic.
 
 The checked-in gate covers constant loss, RTT, and jitter for the listed two- and four-player cells;
-the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition, duplication,
-reordering, burst-loss, and asymmetry evidence below is separate. Repeated flaps and poll stalls
-still need reproducible rows with nonzero injection counters before their consistency claims can expand.
+the full matrix adds the 3-, 8-, 12-, and 16-player regional rows. The partition, directed-fault,
+repeated-flap, and poll-stall evidence below is separate.
 
 | Players / path | Loss / RTT / jitter | Input | Rollbacks / 100 frames | Rollback p99 | Encoded KiB/s/player | Mean / max confirmation lag | Stalls/min |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -60,35 +59,42 @@ permits.
 
 ## Partition and directed-fault consistency evidence
 
-At commit `726b25f`, a separate, expectation-aware schema-v5 ledger records 52 fixed-budget rows using
-900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 40 rows without
-state/checksum corruption contain 25 bounded recoveries—five each for short-heal partitions, directed
-duplication, reordering, burst loss, and asymmetric delay—and 15 safe failures: long-heal terminal
-`Halt`, permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended partition link
-dropped traffic. Each directed fault window affected only link 0→1, with nonzero per-link counters
-matching the mesh-global total. Reordering uses deterministic jitter and counts a copy only when it
-arrives after a later-scheduled copy on the same link. Burst loss uses a seeded 0.05 per-send start
-probability and length three; every row observed eight starts and an actual three-input loss run.
+At commit `ba28701`, a separate, expectation-aware schema-v6 ledger records 66 fixed-budget rows using
+900 virtual steps, 4-byte inputs, and a materialized schedule at N=2/3/4/8/16. The 50 rows without
+state/checksum corruption contain 35 bounded recoveries and 15 safe failures: long-heal terminal `Halt`,
+permanent `Halt`, and permanent uncertified `ContinueWithout`. Every intended partition link dropped
+traffic. Each directed fault window affected only link 0→1, with nonzero per-link counters matching the
+mesh-global total. Reordering uses deterministic jitter and counts a copy only when it arrives after a
+later-scheduled copy on the same link. Burst loss uses a seeded 0.05 per-send start probability and
+length three; every row observed eight starts and an actual three-input loss run.
 
 Asymmetric delay applies 200 ms only to 0→1 from step 100 through step 180; the reverse direction stays
 clean. The matrix counted 170 delayed copies at N=2 and 132 at each larger size. At healing, new clean
 sends legitimately overtake old delayed traffic, producing 26 directed reorder observations at N=2 and
 22 at each larger size. Independent timing, receiver-order, payload-loss, and delayed-duplication tests
-validate direction, virtual-time boundaries, and per-copy instrumentation. All 52 rows match their
-complete replay evidence, not only their trace hashes.
+validate direction, virtual-time boundaries, and per-copy instrumentation.
 
-Twelve matched corruption controls classify as defects with typed state/checksum, peer, and frame
-evidence. The directed-fault controls at N=2 and N=16 inject state corruption at frame 120, inside the
-fault window, and bound detection by the confirmed prefix at healing. The 15 safe-failure rows each
-retain a 64-step (1.024-second) terminal plateau after a useful pre-partition confirmed prefix. This
-finite observation is not a proof of permanent liveness. Odd permanent-`ContinueWithout` rows isolate
-every peer; two-component majority/minority progress needs the component-scoped state oracle tracked
-in `PLAN.md`.
+Repeated flaps block every cross-component link for 20 steps (320 ms) at steps 100, 200, and 300, with
+heals at 120, 220, and 320. Each heal has its own all-running and all-confirmed-progress observation.
+Confirmed progress occurred seven steps after every heal except the latter two N=4 heals, which took 21
+steps; every recovery preceded the next cut. Poll stalls freeze peer 1 over the half-open windows
+100..120, 140..160, and 180..200. Each row observed all three 20-step freezes with unchanged current and
+confirmed frames, followed by resume at the exact exclusive boundary. Longest contiguous confirmation
+stalls were 20 or 21 steps (320 or 336 ms).
 
-Reproduce the partition and directed-fault artifact with:
+Sixteen matched corruption controls classify as defects with typed state/checksum, peer, and frame
+evidence. Controls at N=2 and N=16 inject state corruption at frame 120 and bound detection by the
+confirmed prefix at healing. Poll-stall controls corrupt a surviving peer while the oracle names the
+observing peer. The 15 safe-failure rows each retain a 64-step (1.024-second) terminal plateau after a
+useful pre-partition confirmed prefix. This finite observation is not a proof of permanent liveness. Odd
+permanent-`ContinueWithout` rows isolate every peer; two-component majority/minority progress needs the
+component-scoped state oracle tracked in `PLAN.md`.
+
+All 66 rows match their complete deterministic replay evidence, not only their trace hashes. Reproduce
+the artifact with:
 
 ```bash
-FORTRESS_SWEEP_GIT_SHA=726b25f47fb51213c71a8ebcbb47b07dfa7757f1 \
+FORTRESS_SWEEP_GIT_SHA=ba287019533c01734b8f3a96430812db918a633a \
 FORTRESS_PARTITION_SWEEP_OUT=/tmp/partition-matrix.jsonl \
 cargo nextest run --profile ci-network-nightly --release \
   --run-ignored ignored-only -E 'test(partition_sweep_full)' \
@@ -96,9 +102,12 @@ cargo nextest run --profile ci-network-nightly --release \
 ```
 
 The nightly `deterministic-sweep-nightly-results` artifact includes this ledger as
-`partition-matrix.jsonl`. It records sync steps, recovery anchors, confirmation and rollback metrics,
-wire totals, queue high-water marks, and per-link injection evidence. Host resource use and exact
-recovery/stall durations remain unmeasured rather than zero-filled.
+`partition-matrix.jsonl`. It records first divergence, sync steps, per-heal recovery timestamps,
+confirmation lag, longest contiguous confirmation-stall steps, rollback work, wire bytes/packets, queue
+high-water marks, and per-link injection evidence. Nondeterministic host measurements are separate from
+replay identity. The exact-SHA Linux run recorded elapsed time and current/peak RSS for every row;
+observed executions took 2.16–1,105.74 ms and process-wide peak RSS reached 39,542,784 bytes. These
+resource figures are host-specific measurements, not portable budgets.
 
 ## Starting configurations
 

@@ -967,6 +967,31 @@ struct TraceFinalSummary {
     net: TraceNetStats,
 }
 
+/// Deterministic evidence for one actual peer-stall window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PeerStallObservation {
+    pub peer: usize,
+    pub start_step: u32,
+    /// Exclusive resume boundary; the frozen window is `start_step..end_step`.
+    pub end_step: u32,
+    pub observed_frozen_steps: u32,
+    pub confirmed_at_start: i32,
+    pub confirmed_at_freeze_end: i32,
+    pub current_frame_at_start: i32,
+    pub current_frame_at_freeze_end: i32,
+    pub resume_step: Option<u32>,
+    pub confirmed_at_resume: Option<i32>,
+}
+
+/// Deterministic recovery observations anchored to one actual `HealAll`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HealRecoveryObservation {
+    pub heal_step: u32,
+    pub confirmed_at_heal: Vec<i32>,
+    pub first_all_running_step: Option<u32>,
+    pub first_all_confirmed_advance_step: Option<u32>,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
@@ -1015,8 +1040,15 @@ pub struct RunReport {
     pub first_running_step: Vec<Option<u32>>,
     /// First observed `Synchronized` event by local and remote peer index.
     pub first_synchronized_step: Vec<Vec<Option<u32>>>,
+    /// Every actual stall, including its observed freeze and resume boundary.
+    pub peer_stalls: Vec<PeerStallObservation>,
+    /// Recovery observations for every actual heal, in schedule order.
+    pub heal_recoveries: Vec<HealRecoveryObservation>,
     /// `LoadGameState` requests observed while driving peers.
     pub load_game_state_observations: Vec<LoadGameStateObservation>,
+    /// Longest contiguous post-sync confirmation stall per peer, in virtual
+    /// steps. Empty unless receive timing collection is enabled.
+    pub max_confirmation_stall_steps_by_peer: Vec<u64>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
     /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
@@ -2515,6 +2547,8 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     // `step < stalled_until[i]`. `0` means never stalled; a `PeerStall` event
     // sets it to `step + steps`.
     let mut stalled_until: Vec<u32> = vec![0; n];
+    let mut peer_stalls = Vec::new();
+    let mut heal_recoveries = Vec::new();
     // Peers retired by lifecycle events (`PeerKill`, `GracefulRemove`, or
     // `LegacyDisconnect`): no longer driven, detached from the fabric, and
     // excluded from the oracle's liveness checks (their pre-retirement
@@ -2586,6 +2620,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
     };
     let mut first_synchronized_step = if collect_receive_timing {
         vec![vec![None; n]; n]
+    } else {
+        Vec::new()
+    };
+    let mut previous_confirmed = if collect_receive_timing {
+        vec![None; n]
+    } else {
+        Vec::new()
+    };
+    let mut confirmation_stall_steps = if collect_receive_timing {
+        vec![0_u64; n]
+    } else {
+        Vec::new()
+    };
+    let mut max_confirmation_stall_steps_by_peer = if collect_receive_timing {
+        vec![0_u64; n]
     } else {
         Vec::new()
     };
@@ -2712,7 +2761,21 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
-                    stalled_until[*peer] = stalled_until[*peer].max(step.saturating_add(*steps));
+                    let end_step = step.saturating_add(*steps);
+                    stalled_until[*peer] = stalled_until[*peer].max(end_step);
+                    let session = &peers[*peer].session;
+                    peer_stalls.push(PeerStallObservation {
+                        peer: *peer,
+                        start_step: step,
+                        end_step,
+                        observed_frozen_steps: 0,
+                        confirmed_at_start: session.confirmed_frame().as_i32(),
+                        confirmed_at_freeze_end: session.confirmed_frame().as_i32(),
+                        current_frame_at_start: session.current_frame().as_i32(),
+                        current_frame_at_freeze_end: session.current_frame().as_i32(),
+                        resume_step: None,
+                        confirmed_at_resume: None,
+                    });
                 },
                 ScheduleEvent::SetInputDelay { peer, delay } => {
                     // Reconfigure the peer's own local input delay mid-run. A
@@ -2841,7 +2904,15 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
                 ScheduleEvent::HotJoin { .. } => {
                     unreachable!("HotJoin schedules are rejected before sessions are built")
                 },
-                ScheduleEvent::HealAll => net.heal_all(),
+                ScheduleEvent::HealAll => {
+                    net.heal_all();
+                    heal_recoveries.push(HealRecoveryObservation {
+                        heal_step: step,
+                        confirmed_at_heal: Vec::new(),
+                        first_all_running_step: None,
+                        first_all_confirmed_advance_step: None,
+                    });
+                },
             }
             next_event += 1;
         }
@@ -3115,12 +3186,66 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
             }
         }
 
+        for stall in &mut peer_stalls {
+            let session = &peers[stall.peer].session;
+            if (stall.start_step..stall.end_step).contains(&step) {
+                stall.observed_frozen_steps = stall.observed_frozen_steps.saturating_add(1);
+                stall.confirmed_at_freeze_end = session.confirmed_frame().as_i32();
+                stall.current_frame_at_freeze_end = session.current_frame().as_i32();
+            }
+            if step == stall.end_step {
+                stall.resume_step = Some(step);
+                stall.confirmed_at_resume = Some(session.confirmed_frame().as_i32());
+            }
+        }
+        let has_live_peers = dead.iter().any(|dead| !*dead);
+        for recovery in &mut heal_recoveries {
+            if step == recovery.heal_step {
+                recovery.confirmed_at_heal.clone_from(&step_confirmed);
+            }
+            if step < recovery.heal_step || recovery.confirmed_at_heal.len() != n {
+                continue;
+            }
+            if recovery.first_all_running_step.is_none()
+                && has_live_peers
+                && peers.iter().enumerate().all(|(peer, slot)| {
+                    dead[peer] || slot.session.current_state() == SessionState::Running
+                })
+            {
+                recovery.first_all_running_step = Some(step);
+            }
+            if recovery.first_all_confirmed_advance_step.is_none()
+                && step > recovery.heal_step
+                && has_live_peers
+                && step_confirmed
+                    .iter()
+                    .zip(&recovery.confirmed_at_heal)
+                    .enumerate()
+                    .all(|(peer, (after, at_heal))| dead[peer] || after > at_heal)
+            {
+                recovery.first_all_confirmed_advance_step = Some(step);
+            }
+        }
+
         if collect_receive_timing {
             for (peer, slot) in peers.iter().enumerate() {
                 if first_running_step[peer].is_none()
                     && slot.session.current_state() == SessionState::Running
                 {
                     first_running_step[peer] = Some(step);
+                }
+                if first_running_step[peer].is_some() {
+                    let confirmed = step_confirmed[peer];
+                    if previous_confirmed[peer] == Some(confirmed) {
+                        confirmation_stall_steps[peer] =
+                            confirmation_stall_steps[peer].saturating_add(1);
+                    } else {
+                        confirmation_stall_steps[peer] = 0;
+                    }
+                    max_confirmation_stall_steps_by_peer[peer] =
+                        max_confirmation_stall_steps_by_peer[peer]
+                            .max(confirmation_stall_steps[peer]);
+                    previous_confirmed[peer] = Some(confirmed);
                 }
             }
         }
@@ -3642,7 +3767,10 @@ fn run_inner<I: SimInput>(schedule: &Schedule, options: &RunOptions, diagnose: b
         receive_stats_by_peer,
         first_running_step: reported_first_running_step,
         first_synchronized_step: reported_first_synchronized_step,
+        peer_stalls,
+        heal_recoveries,
         load_game_state_observations,
+        max_confirmation_stall_steps_by_peer,
         metrics,
         progress_samples,
         frame_opportunities,
