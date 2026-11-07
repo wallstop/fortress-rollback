@@ -12,8 +12,9 @@ use super::harness::schedule::{
 };
 use super::harness::shrink::{shrink_failure, ShrinkConfig};
 use super::harness::{
-    run, run_with_input, validate_run_options, DifferentialMutation, DifferentialOptions,
-    DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport, WideStubInput,
+    actual_differential_input, run, run_with_input, validate_run_options, DifferentialMutation,
+    DifferentialOptions, DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport,
+    WideStubInput,
 };
 use crate::common::sim_net::LinkPolicy;
 use fortress_rollback::hash::fnv1a_hash;
@@ -164,6 +165,7 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
             };
             let schedule = schedule(save_mode, input_delay, delivery);
             let mut canonical: Option<DifferentialTrajectory> = None;
+            let mut forward_trace_hash = None;
             for order in [
                 PeerDriveOrder::Forward,
                 PeerDriveOrder::Reverse,
@@ -184,8 +186,25 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
                     replay.differential_trajectory
                 );
 
+                // Prove the order axis is live with the fixed EveryFrame/delay-0
+                // schedule. Other cells need not retain visit-order-distinct
+                // trace hashes once their observable event sequences coincide.
+                match order {
+                    PeerDriveOrder::Forward => forward_trace_hash = Some(report.trace_hash),
+                    PeerDriveOrder::Reverse => {
+                        if (save_mode, input_delay) == (SavePolicy::EveryFrame, 0) {
+                            let forward = forward_trace_hash.expect("forward row runs first");
+                            assert_ne!(
+                                forward, report.trace_hash,
+                                "forward/reverse traces must observe peer visit order"
+                            );
+                        }
+                    },
+                    PeerDriveOrder::Rotating => {},
+                }
+
                 // Across peer orders compare only normalized confirmed history;
-                // visit-order events and trace hashes are intentionally excluded.
+                // visit-order trace contents are not part of that equality claim.
                 if let Some(expected) = &canonical {
                     assert_eq!(
                         report.differential_trajectory.as_ref(),
@@ -223,7 +242,15 @@ fn shared_wrong_committed_inputs_fail_reference_without_legacy_divergence() {
             _ => None,
         })
         .collect();
-    assert!(!mismatches.is_empty(), "typed reference never fired");
+    assert!(
+        mismatches.len() > 1,
+        "shared input mutation must produce repeated typed mismatches: {mismatches:?}"
+    );
+    assert_eq!(
+        mismatches.first().map(|(frame, _, _)| *frame),
+        Some(6),
+        "delay 2 plus mutated ordinal 4 must first mismatch committed frame 6"
+    );
     assert!(mismatches.iter().all(|(frame, _, _)| *frame >= 6));
     assert!(mismatches
         .iter()
@@ -256,7 +283,15 @@ fn shared_wrong_states_fail_reference_without_legacy_state_divergence() {
             _ => None,
         })
         .collect();
-    assert!(!mismatches.is_empty(), "state reference never fired");
+    assert!(
+        mismatches.len() > 1,
+        "shared state mutation must produce repeated exact-state mismatches: {mismatches:?}"
+    );
+    assert_eq!(
+        mismatches.first().map(|(frame, _, _)| *frame),
+        Some(8),
+        "state mutation must first mismatch its exact configured frame"
+    );
     assert!(mismatches.iter().all(|(frame, _, _)| *frame >= 8));
     assert!(mismatches
         .iter()
@@ -363,30 +398,47 @@ fn checksum_lie_fires_actual_detector_while_reference_stays_clean() {
 fn wide_input_padding_difference_is_detected_by_typed_reference() {
     let schedule = schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
     let mutation = DifferentialMutation::WidePadding { ordinal: 4 };
+    let nominal = WideStubInput {
+        inp: 0x1234_5678,
+        padding: [11, 22, 33, 44, 55, 66, 77],
+    };
+    let before = actual_differential_input(nominal, 3, Some(mutation));
+    assert_eq!(
+        before, nominal,
+        "mutation must respect its ordinal threshold"
+    );
+    let mutated = actual_differential_input(nominal, 4, Some(mutation));
+    assert_eq!(mutated.inp, nominal.inp, "padding control changed inp");
+    assert_ne!(
+        mutated.padding[0], nominal.padding[0],
+        "padding control did not change padding[0]"
+    );
+    assert_eq!(
+        mutated.padding[1..],
+        nominal.padding[1..],
+        "padding control must leave all other padding words unchanged"
+    );
+
     let report = run_with_input::<WideStubInput>(
         &schedule,
         &options(PeerDriveOrder::Rotating, Some(mutation)),
     );
-
-    let mismatch = report
+    assert!(report
         .verdict
         .failures
         .iter()
-        .find_map(|failure| match failure {
-            OracleFailure::ReferenceInput {
-                expected, actual, ..
-            } => Some((expected, actual)),
-            _ => None,
-        })
-        .expect("padding-only typed mismatch must fire");
-    assert_ne!(mismatch.0, mismatch.1);
-    assert!(mismatch.0.contains("padding") && mismatch.1.contains("padding"));
+        .any(|failure| matches!(failure, OracleFailure::ReferenceInput { .. })));
     assert!(!report.verdict.failures.iter().any(|failure| matches!(
         failure,
         OracleFailure::ReferenceState { .. }
             | OracleFailure::ConfirmedInputDivergence { .. }
             | OracleFailure::StateDivergence { .. }
     )));
+
+    let clean =
+        run_with_input::<WideStubInput>(&schedule, &options(PeerDriveOrder::Rotating, None));
+    clean.expect_pass(&schedule);
+    assert_green_non_vacuous(&clean, Delivery::Delayed);
 }
 
 #[test]

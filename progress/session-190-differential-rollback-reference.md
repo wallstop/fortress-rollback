@@ -62,3 +62,8 @@ plan item therefore remains active rather than being presented as complete.
   `tokio,json` passed without warnings. Formatting, diff checks, plan hygiene, typos, and 1,442
   documentation links passed.
 - No production or public API code changed, so no changelog or design-decision entry is required.
+- PR #372 initially completed 93 successful checks with three intentional skips and a clean merge state.
+  Cursor found no critical issue and suggested three stronger test premises: a live drive-order axis,
+  padding-only mutation identity, and exact repeated mismatch boundaries. All were implemented, and the
+  adversarial re-review reported zero issues. Final exact-head hosted evidence is recorded after the
+  updated commit completes CI.

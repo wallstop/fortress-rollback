@@ -2093,7 +2093,7 @@ fn reference_states<I: SimInput>(
     states
 }
 
-fn actual_differential_input<I: SimInput>(
+pub(super) fn actual_differential_input<I: SimInput>(
     nominal: I,
     ordinal: u32,
     mutation: Option<DifferentialMutation>,
