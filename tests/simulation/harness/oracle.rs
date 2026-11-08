@@ -69,8 +69,9 @@ pub enum ViolationSource {
 /// One concrete invariant violation, with enough context to debug.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleFailure {
-    /// Differential mode: typed confirmed inputs differ from the independent
-    /// nominal fixed-history reference, even when every peer agrees.
+    /// Differential mode: confirmed or spectator inputs differ from the
+    /// independent nominal fixed-history reference, even when every endpoint
+    /// agrees. `peer == n_players` identifies the spectator observer.
     ReferenceInput {
         peer: usize,
         frame: i32,
@@ -623,6 +624,32 @@ impl Oracle {
         if expected != actual {
             self.push_failure(OracleFailure::ReferenceInput {
                 peer,
+                frame,
+                expected: format!("{expected:?}"),
+                actual: format!("{actual:?}"),
+            });
+        }
+    }
+
+    /// Differential mode: compare the spectator's displayed values and statuses
+    /// after harness-only corruption controls have been applied.
+    pub fn observe_reference_spectator_inputs(
+        &mut self,
+        observer: usize,
+        frame: i32,
+        expected: &[InputFingerprint],
+        actual: &[(InputFingerprint, InputStatus)],
+    ) {
+        let matches = expected.len() == actual.len()
+            && expected
+                .iter()
+                .zip(actual)
+                .all(|(expected, (actual, status))| {
+                    expected == actual && *status == InputStatus::Confirmed
+                });
+        if !matches {
+            self.push_failure(OracleFailure::ReferenceInput {
+                peer: observer,
                 frame,
                 expected: format!("{expected:?}"),
                 actual: format!("{actual:?}"),

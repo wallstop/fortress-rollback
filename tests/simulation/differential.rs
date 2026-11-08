@@ -2,8 +2,9 @@
 //!
 //! The independent reference covers the nominal input stream, one strict
 //! post-synchronization input-delay increase, and the exact `StateStub`
-//! parity/sum transition. It does not claim equivalence for arbitrary game
-//! state semantics, runtime membership changes, or spectators.
+//! parity/sum transition, plus spectator display of that fixed history. It does
+//! not claim equivalence for arbitrary game state semantics or runtime
+//! membership changes.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
@@ -21,6 +22,8 @@ use super::harness::{
 use crate::common::sim_net::LinkPolicy;
 use crate::common::stubs::StubInput;
 use fortress_rollback::hash::fnv1a_hash;
+use fortress_rollback::InputStatus;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 const STEPS: u32 = 240;
@@ -296,6 +299,32 @@ fn check_runtime_delay_order(
         .expect("differential trajectory retained")
 }
 
+fn spectator_inputs(report: &RunReport) -> &BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>> {
+    report
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.spectator_inputs.as_ref())
+        .expect("spectator differential trajectory retained")
+}
+
+fn assert_spectator_non_vacuous(report: &RunReport) {
+    let history = spectator_inputs(report);
+    assert!(
+        history.len() >= 30,
+        "spectator reference coverage was vacuous: {} frames",
+        history.len()
+    );
+    for (frame, inputs) in history {
+        assert_eq!(inputs.len(), 2, "spectator frame {frame} player count");
+        assert!(
+            inputs
+                .iter()
+                .all(|(_, status)| *status == InputStatus::Confirmed),
+            "nominal spectator frame {frame} has a non-confirmed input: {inputs:?}"
+        );
+    }
+}
+
 fn assert_green_non_vacuous(report: &RunReport, delivery: Delivery) {
     assert!(
         total_metric(report, |metrics| metrics.rollback_count) > 0,
@@ -404,6 +433,114 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
             }
         }
     }
+}
+
+#[test]
+fn spectator_matrix_matches_nominal_history_across_delivery_and_drive_order() {
+    for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
+        for delivery in [Delivery::Delayed, Delivery::Held, Delivery::Reordered] {
+            let mut schedule = schedule(save_mode, 0, delivery);
+            schedule.config.spectator_hosts = vec![0, 1];
+            let mut canonical: Option<DifferentialTrajectory> = None;
+            for order in [
+                PeerDriveOrder::Forward,
+                PeerDriveOrder::Reverse,
+                PeerDriveOrder::Rotating,
+            ] {
+                let options = options(order, None);
+                let report = run(&schedule, &options);
+                report.expect_pass(&schedule);
+                assert_green_non_vacuous(&report, delivery);
+                assert_spectator_non_vacuous(&report);
+
+                let replay = run(&schedule, &options);
+                replay.expect_pass(&schedule);
+                assert_eq!(report.trace_hash, replay.trace_hash);
+                assert_eq!(
+                    report.differential_trajectory, replay.differential_trajectory,
+                    "spectator replay changed normalized history"
+                );
+
+                if let Some(expected) = &canonical {
+                    assert_eq!(
+                        report.differential_trajectory.as_ref(),
+                        Some(expected),
+                        "spectator trajectory changed for {save_mode:?}, {delivery:?}, {order:?}"
+                    );
+                } else {
+                    canonical = report.differential_trajectory.clone();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn spectator_runtime_delay_matches_independent_gap_and_resume() {
+    let mut schedule = runtime_delay_schedule(SavePolicy::Sparse, 2, 4, Delivery::Reordered);
+    schedule.config.spectator_hosts = vec![0];
+    let report = run(&schedule, &options(PeerDriveOrder::Rotating, None));
+    report.expect_pass(&schedule);
+    assert_green_non_vacuous(&report, Delivery::Reordered);
+    assert_spectator_non_vacuous(&report);
+    assert_dynamic_confirmed_boundaries(&report);
+    assert_post_control_rollback_evidence(&report, 120);
+
+    let control = input_delay_control(&report);
+    let resume = control.current_frame + 4;
+    let history = spectator_inputs(&report);
+    for frame in 0..=resume {
+        let expected = reference_inputs::<StubInput>(frame, 2, 2, Some(control))
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect::<Vec<_>>();
+        let actual = history
+            .get(&frame)
+            .unwrap_or_else(|| panic!("spectator never displayed boundary-prefix frame {frame}"));
+        assert_eq!(actual.len(), expected.len());
+        for (player, ((actual, status), expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual, &expected,
+                "spectator player {player}, frame {frame}"
+            );
+            assert_eq!(*status, InputStatus::Confirmed);
+        }
+    }
+}
+
+#[test]
+fn spectator_reference_rejects_shared_and_spectator_only_input_lies() {
+    let mut schedule = schedule(SavePolicy::EveryFrame, 0, Delivery::Delayed);
+    schedule.config.spectator_hosts = vec![0, 1];
+    let shared = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput { ordinal: 4 }),
+        ),
+    );
+    assert!(
+        shared
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::ReferenceInput { peer: 2, .. })),
+        "shared wrong inputs must fail the independent spectator reference: {:?}",
+        shared.verdict.failures
+    );
+
+    let mut spectator_only_options = options(PeerDriveOrder::Forward, None);
+    spectator_only_options.corrupt_spectator_input_from = Some(4);
+    let spectator_only = run(&schedule, &spectator_only_options);
+    assert!(
+        spectator_only
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::ReferenceInput { peer: 2, .. })),
+        "a spectator-only lie must fail the independent reference: {:?}",
+        spectator_only.verdict.failures
+    );
 }
 
 #[test]
@@ -1002,7 +1139,8 @@ fn differential_options_validate_the_bounded_scenario_contract() {
 
     let mut spectator = valid_schedule.clone();
     spectator.config.spectator_hosts = vec![0];
-    assert!(validate_run_options(&spectator, &valid_options).is_err());
+    validate_run_options(&spectator, &valid_options)
+        .expect("a preplanned spectator uses the same fixed input history");
 
     let forbidden_events = [
         ScheduleEvent::GracefulRemove { by: 0, target: 1 },
