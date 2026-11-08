@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794112408567,
+  "lastUpdate": 1794121402676,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "7b359e9c66d193081ea31a9c64305451a6ea73a6",
-          "message": "Add bounded long-run network soak (#234)\n\n## Summary\n\n- add a deterministic 4,000,000-confirmed-frame nightly soak for\n2-player periodic rejoin and 4-player mild-chaos endurance lanes, both\nwith spectators, replay validation, hard container bounds, high-water\nplateau checks, and Linux RSS gates\n- pre-prune local checksum history so its configured cap is also its\ntrue allocation high-water\n- make repeated hot-join activation loss-safe by deferring pre-commit\ninput processing, backfilling activation frame F, and retrying\nuncaptured N-player serves after honest rollback repair\n- wire the release-mode soak into nightly network CI\n\n## Root cause\n\nThe long-run runner exposed three boundary assumptions that shorter\ntests missed: checksum retention pruned after allocation, a rejoiner's\nactivation input could be consumed or omitted around snapshot commit,\nand an honest pre-capture rollback could move the saved frame while an\nN-player serve waited. The fixes preserve fail-closed behavior while\nmaking these normal loss/reorder cases recoverable.\n\nAn exploratory repeated N=4 generation run also exposed survivor epoch\ndivergence after 20 cycles. That separate D17 remains recorded in\nPLAN.md for a focused follow-up; the committed soak keeps periodic\ngeneration churn in the N=2 lane and runs N=4 as full-duration\nmild-chaos endurance.\n\n## Validation\n\n- full 4,000,000-frame release soak: passed in 203.47 s\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`\n- `cargo nextest run --workspace --features tokio,json,hot-join\n--no-capture`: 3,121 passed, 74 skipped\n- `cargo test --doc --features tokio,json,hot-join -- --nocapture`: 169\npassed, 54 ignored\n- `cargo doc --no-deps --features tokio,json,hot-join`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `actionlint .github/workflows/ci-network-nightly.yml`\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches P2P hot-join activation and checksum history in core session\npaths; behavior is narrowed to loss/reorder recovery and bounded\nretention, with a large new soak as regression coverage.\n> \n> **Overview**\n> Adds a **nightly-only** deterministic **4,000,000-frame** network soak\n(2-player periodic hot-join + 4-player mild chaos) that checks replay,\nbounded containers, high-water plateaus, and Linux RSS growth, plus\n**`__internal::p2p_container_lengths`** for those audits.\n> \n> **Hot-join under loss:** the serving host **defers joiner `Input`\nprocessing** until commit, **backfills activation frame F** on\nreactivation, and **aborts uncaptured N-player serves** when rollback\nmoves `last_saved` off the pinned snapshot (warning + retry instead of\nper-poll errors).\n> \n> **Checksum retention:** `check_checksum_send_interval` **prunes before\ninsert** so `max_checksum_history` is a true allocation cap (with unit\ncoverage).\n> \n> **CI:** `ci-network-nightly` runs the soak with `hot-join` and a\ndedicated **600s** nextest override.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n27281e0edae91dd12b90ecad439c048b2f5a7aec. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-07-12T20:45:25-07:00",
-          "tree_id": "bb314924974079c589aaf3756b9790beb290a00b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/7b359e9c66d193081ea31a9c64305451a6ea73a6"
-        },
-        "date": 1783914775449,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 132736,
-            "range": "± 2921",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46289,
-            "range": "± 1694",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 85",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3010,
-            "range": "± 256",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5393,
             "range": "± 186",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1af6062c20f76662830344655c12a8f714a6de84",
+          "message": "test(simulation): prove graceful removal equivalence (#375)\n\n## What\n\nExtends the bounded two-peer differential rollback oracle to one\nexplicit graceful removal. The independent reference now models the\ncertified freeze cut, including exact input and `StateStub` boundaries,\nrather than relying only on peer agreement.\n\nAlso keeps session evidence in the local, gitignored progress log and\nnarrows the active P0 item in `PLAN.md` to the remaining membership\nscenarios. Per review, all previously tracked progress logs are removed\nfrom git and canonical agent guidance now explicitly keeps them\nmachine-local.\n\n## Why\n\nA mesh can agree on the same wrong frozen input or state. This change\nadvances the active rollback-equivalence milestone by checking the\nsurviving fixed-membership trajectory against an independent nominal\nhistory and by proving that abandoned pre-removal observations cannot\ncreate false divergence.\n\n## Reference semantics\n\nFor certified cut `F`:\n\n- Input `F` remains nominal; frames after `F` repeat that value for the\nremoved target.\n- Post-state `F+1` consumes nominal input `F` and remains\nboundary-valid.\n- Post-state `F+2` is the first state that can observe frozen input.\n- The departed peer's required `F+1` state remains checked when\nconfirmed and simulated; its abandoned `F+2+` generation is excluded\nfrom reference and legacy cross-peer state comparisons.\n- Target-authored confirmed inputs above `F` cannot define the\nsurvivor's frozen continuation.\n\nThe two-peer commit guard requires synchronous disconnection, a Running\nsurvivor, a cut equal to the pre-call direct receipt, and pre-call\nsurvivor confirmed/sampled history bounded by the cut.\n\n## Coverage and controls\n\n- EveryFrame/delay-0/reordered and Sparse/delay-2/delayed schedules\n- Forward, reverse, and rotating drive orders\n- Exact trace, trajectory, control, and failure-vector artifact replay\n- Matched no-removal input/state controls and post-removal\nrollback/load/resimulation evidence\n- Frozen-input, wrong-state, missing-state, and final-frame mutation\ncontrols\n- Explicit non-vacuity evidence for target-authored inputs above `F` and\nabandoned target states at `F+2+`\n\nThe claim remains bounded to two peers and Lockstep cadence. Automatic\ndisconnects/timeouts, spectator membership changes, hot-join, and the\nother active P0 scenarios remain in `PLAN.md`.\n\n## External reconciliation\n\n- Only open issue: #365, intentionally P2 behind the active correctness\nwork\n- No pre-existing open, draft, or dependency PRs\n- No compatible Cargo or npm updates; fuzz, Loom, and Godot standalone\nworkspaces are current\n- Main CodeQL push cancellation was caused by replacement with the\nscheduled run at the same SHA; that scheduled run completed\nsuccessfully, so no source/workflow fix was needed\n\n## Validation\n\n- Focused differential selection: 32 passed\n- Full simulation target: 399 passed, 26 skipped\n- Full Nextest: 3,029 passed, 73 skipped\n- `cargo clippy --workspace --all-targets --features tokio,json`: passed\nwithout warnings\n- Rustdoc: passed; documentation tests: 160 passed, 50 ignored\n- Agent preflight, formatting, diff checks, plan hygiene, typos,\nsemantic doc claims, and 1,442 documentation links: passed\n- All four workspace lock checks, `cargo audit`, `cargo deny check`, and\n`npm audit`: passed\n- Independent adversarial review iterated through all findings; final\nre-review reported zero issues\n\nNo production or public API code changed, so no changelog entry is\nrequired.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS (seeded schedules and ordered histories)\n- Error handling: PASS (structured oracle failures and explicit commit\nguard)\n- Test breadth: PASS (nominal matrix, exact replay, boundaries, and\nnegative controls)\n- Agent preflight: PASS\n- Design log reviewed: N/A (test-only oracle extension)\n- Changelog reviewed: N/A (no user-observable/public change)",
+          "timestamp": "2026-11-07T22:55:19-08:00",
+          "tree_id": "1560cc841c7610a370172436b9a3217ba5c286c2",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/1af6062c20f76662830344655c12a8f714a6de84"
+        },
+        "date": 1794121401979,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60480,
+            "range": "± 1323",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 30940,
+            "range": "± 1068",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1863,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3141,
+            "range": "± 205",
             "unit": "ns/iter"
           }
         ]
