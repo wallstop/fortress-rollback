@@ -2,9 +2,10 @@
 //!
 //! The independent reference covers the nominal input stream, one strict
 //! post-synchronization input-delay increase, and the exact `StateStub`
-//! parity/sum transition, plus spectator display of that fixed history. It does
-//! not claim equivalence for arbitrary game state semantics or runtime
-//! membership changes.
+//! parity/sum transition, plus spectator display of that fixed history. One
+//! bounded two-peer graceful removal freezes the target at its certified cut.
+//! Other runtime membership changes and arbitrary game state semantics remain
+//! outside this oracle's claim.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
@@ -15,14 +16,14 @@ use super::harness::schedule::{
 use super::harness::shrink::{shrink_failure, ShrinkConfig};
 use super::harness::{
     actual_differential_input, reference_inputs, run, run_with_final_game_frame_offset,
-    run_with_input, validate_run_options, DifferentialInputDelayControl, DifferentialMutation,
-    DifferentialOptions, DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport, SimInput,
-    WideStubInput,
+    run_with_input, validate_run_options, DifferentialGracefulRemoveControl,
+    DifferentialInputDelayControl, DifferentialMutation, DifferentialOptions,
+    DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport, SimInput, WideStubInput,
 };
 use crate::common::sim_net::LinkPolicy;
 use crate::common::stubs::StubInput;
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::InputStatus;
+use fortress_rollback::{EventKind, InputStatus};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -111,6 +112,19 @@ fn runtime_delay_schedule(
     schedule
 }
 
+fn graceful_remove_schedule(
+    save_mode: SavePolicy,
+    input_delay: usize,
+    delivery: Delivery,
+) -> Schedule {
+    let mut schedule = schedule(save_mode, input_delay, delivery);
+    schedule
+        .events
+        .push((120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
 fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
     RunOptions {
         disconnect_timeout: Some(TIMEOUT),
@@ -153,6 +167,14 @@ fn input_delay_control(report: &RunReport) -> DifferentialInputDelayControl {
         .as_ref()
         .and_then(|trajectory| trajectory.input_delay_control)
         .expect("successful runtime delay change is anchored")
+}
+
+fn graceful_remove_control(report: &RunReport) -> DifferentialGracefulRemoveControl {
+    report
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.graceful_remove_control)
+        .expect("successful graceful removal is anchored")
 }
 
 fn assert_dynamic_confirmed_boundaries(report: &RunReport) {
@@ -242,6 +264,77 @@ fn assert_post_control_rollback_evidence(report: &RunReport, event_step: u32) {
         "no post-control LoadGameState: {:?}",
         report.load_game_state_observations
     );
+}
+
+fn assert_post_removal_rollback_evidence(report: &RunReport) {
+    let at_control = report
+        .differential_graceful_remove_metrics_at_control
+        .as_ref()
+        .expect("successful removal captures rollback baselines");
+    assert_eq!(at_control.len(), report.metrics.len());
+    assert!(
+        report
+            .metrics
+            .iter()
+            .zip(at_control)
+            .any(|(after, before)| after.rollback_count > before.rollback_count),
+        "no post-removal rollback: before={at_control:?}, after={:?}",
+        report.metrics
+    );
+    assert!(
+        report
+            .metrics
+            .iter()
+            .zip(at_control)
+            .any(|(after, before)| after.resimulated_frames > before.resimulated_frames),
+        "no post-removal resimulation: before={at_control:?}, after={:?}",
+        report.metrics
+    );
+    assert!(
+        report
+            .load_game_state_observations
+            .iter()
+            .any(|observation| observation.step >= 120),
+        "no post-removal LoadGameState: {:?}",
+        report.load_game_state_observations
+    );
+}
+
+fn assert_graceful_remove_boundaries(report: &RunReport, input_delay: usize) {
+    let control = graceful_remove_control(report);
+    assert_eq!((control.by, control.target), (0, 1));
+    assert!(control.current_frame > 0);
+    assert!(control.freeze_frame >= 0);
+    assert!(report.final_confirmed[0] > control.freeze_frame + 20);
+    assert!(report.final_confirmed[1] < report.final_confirmed[0]);
+    assert!(report
+        .peer_event_counts
+        .get(&EventKind::PeerDropped)
+        .is_some_and(|count| *count > 0));
+
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    let delay = i32::try_from(input_delay).expect("input delay fits in i32");
+    let frozen_ordinal = u32::try_from(control.freeze_frame - delay)
+        .expect("test premise places the certified cut beyond the initial delay prefix");
+    for frame in control.freeze_frame..=control.freeze_frame + 20 {
+        let actual = trajectory.confirmed_inputs[0]
+            .get(&frame)
+            .unwrap_or_else(|| panic!("survivor never confirmed boundary frame {frame}"));
+        let survivor_ordinal = u32::try_from(frame - delay).expect("boundary frame is post-delay");
+        let target_ordinal = if frame <= control.freeze_frame {
+            survivor_ordinal
+        } else {
+            frozen_ordinal
+        };
+        let expected = vec![
+            stub_fingerprint(survivor_ordinal, 0),
+            stub_fingerprint(target_ordinal, 1),
+        ];
+        assert_eq!(actual, &expected, "survivor input frame {frame}");
+    }
 }
 
 fn check_runtime_delay_order(
@@ -436,6 +529,263 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
 }
 
 #[test]
+fn graceful_remove_matrix_matches_independent_frozen_history() {
+    for (save_mode, input_delay, delivery) in [
+        (SavePolicy::EveryFrame, 0, Delivery::Reordered),
+        (SavePolicy::Sparse, 2, Delivery::Delayed),
+    ] {
+        let baseline_schedule = schedule(save_mode, input_delay, delivery);
+        let schedule = graceful_remove_schedule(save_mode, input_delay, delivery);
+        let baseline = run(&baseline_schedule, &options(PeerDriveOrder::Forward, None));
+        baseline.expect_pass(&baseline_schedule);
+        let mut canonical = None;
+
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert_green_non_vacuous(&report, delivery);
+            assert_graceful_remove_boundaries(&report, input_delay);
+            assert_post_removal_rollback_evidence(&report);
+            let control = graceful_remove_control(&report);
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+
+            let baseline_states = baseline
+                .differential_trajectory
+                .as_ref()
+                .expect("baseline differential trajectory retained");
+            let actual_cut_state = trajectory.confirmed_states[0]
+                .get(&(control.freeze_frame + 1))
+                .expect("survivor simulated the cut post-state F+1");
+            let baseline_cut_state = baseline_states.confirmed_states[0]
+                .get(&(control.freeze_frame + 1))
+                .expect("matched baseline simulated F+1");
+            assert_eq!(
+                actual_cut_state, baseline_cut_state,
+                "state at F+1 must still consume the nominal cut-frame input"
+            );
+            let actual_frozen_state = trajectory.confirmed_states[0]
+                .get(&(control.freeze_frame + 2))
+                .expect("survivor simulated the first frozen-input state F+2");
+            let baseline_frozen_state = baseline_states.confirmed_states[0]
+                .get(&(control.freeze_frame + 2))
+                .expect("matched baseline simulated F+2");
+            assert_ne!(
+                actual_frozen_state, baseline_frozen_state,
+                "state at F+2 must observe the first frozen input"
+            );
+            let actual_frozen_input = trajectory.confirmed_inputs[0]
+                .get(&(control.freeze_frame + 1))
+                .expect("survivor confirmed frozen input F+1");
+            let baseline_frozen_input = baseline
+                .differential_trajectory
+                .as_ref()
+                .and_then(|baseline| baseline.confirmed_inputs[0].get(&(control.freeze_frame + 1)))
+                .expect("matched baseline confirmed input F+1");
+            assert_ne!(
+                actual_frozen_input, baseline_frozen_input,
+                "input F+1 must differ from the matched no-removal control"
+            );
+
+            // Only the surviving fixed membership history is cross-order
+            // canonical. The departed peer can legally retain different amounts
+            // of its abandoned pre-removal trailing generation.
+            let projection = (
+                control,
+                trajectory.confirmed_inputs[0].clone(),
+                trajectory.confirmed_states[0].clone(),
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &projection, expected,
+                    "survivor history changed for {order:?}"
+                );
+            } else {
+                canonical = Some(projection);
+            }
+        }
+    }
+}
+
+#[test]
+fn graceful_remove_reordered_row_prunes_abandoned_target_authorship() {
+    let schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    report.expect_pass(&schedule);
+    let control = graceful_remove_control(&report);
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    assert!(
+        trajectory.confirmed_inputs[1]
+            .keys()
+            .any(|frame| *frame > control.freeze_frame),
+        "test premise requires target-authored confirmations above F={}: {:?}",
+        control.freeze_frame,
+        trajectory.confirmed_inputs[1].keys()
+    );
+    assert!(
+        report.trace_tail.iter().any(|snapshot| {
+            snapshot.dead[1] && snapshot.game_states[1].frame >= control.freeze_frame + 2
+        }),
+        "test premise requires an abandoned target state at F+2 or later"
+    );
+}
+
+#[test]
+fn graceful_remove_known_answer_preserves_cut_and_repeats_it_afterward() {
+    for (input_delay, freeze_frame) in [(0, 5), (2, 7)] {
+        let control = DifferentialGracefulRemoveControl {
+            by: 0,
+            target: 1,
+            current_frame: freeze_frame + 2,
+            freeze_frame,
+        };
+        let at = |frame| reference_inputs::<StubInput>(frame, input_delay, 2, None, Some(control));
+        let delay = i32::try_from(input_delay).expect("input delay fits in i32");
+        let cut_ordinal = u32::try_from(freeze_frame - delay).expect("cut is after delay prefix");
+        assert_eq!(
+            at(freeze_frame),
+            vec![stub_input(cut_ordinal, 0), stub_input(cut_ordinal, 1)]
+        );
+        for frame in freeze_frame + 1..=freeze_frame + 3 {
+            let survivor_ordinal = u32::try_from(frame - delay).expect("frame is after prefix");
+            assert_eq!(
+                at(frame),
+                vec![stub_input(survivor_ordinal, 0), stub_input(cut_ordinal, 1)],
+                "frozen frame {frame}"
+            );
+        }
+    }
+}
+
+#[test]
+fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
+    let schedule = graceful_remove_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = graceful_remove_control(&nominal);
+    let mutation = DifferentialMutation::SharedInput {
+        ordinal: u32::try_from(control.freeze_frame - 2).expect("cut ordinal is non-negative"),
+    };
+    let options = options(PeerDriveOrder::Forward, Some(mutation));
+    let report = run(&schedule, &options);
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0, frame, .. }
+            if *frame == control.freeze_frame + 1
+    )));
+    assert!(!report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { .. } | OracleFailure::ConfirmedInputDivergence { .. }
+    )));
+
+    let artifact = FailureArtifact::from_report(&schedule, &report);
+    artifact.validate().expect("removal artifact validates");
+    let encoded = serde_json::to_vec(&artifact).expect("removal artifact serializes");
+    let decoded: FailureArtifact =
+        serde_json::from_slice(&encoded).expect("removal artifact deserializes");
+    decoded
+        .validate()
+        .expect("decoded removal artifact validates");
+    let replay = run(&decoded.schedule, &decoded.replay_options);
+    assert_eq!(replay.trace_hash, report.trace_hash);
+    assert_eq!(
+        replay.differential_trajectory,
+        report.differential_trajectory
+    );
+    assert_eq!(replay.verdict.failures, report.verdict.failures);
+    assert_eq!(graceful_remove_control(&replay), control);
+}
+
+#[test]
+fn graceful_remove_post_freeze_state_and_missing_state_mutations_are_detected() {
+    let schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    let nominal = run(&schedule, &options(PeerDriveOrder::Reverse, None));
+    nominal.expect_pass(&schedule);
+    let control = graceful_remove_control(&nominal);
+    let frame = control.freeze_frame + 2;
+
+    let wrong_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::SharedState { frame }),
+        ),
+    );
+    assert!(wrong_state.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { peer: 0, frame: actual, .. } if *actual == frame
+    )));
+
+    let missing_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::MissingState { peer: 0, frame }),
+        ),
+    );
+    assert!(missing_state
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 0, frame: actual, .. } if *actual == frame
+        )));
+
+    let cut_post_state = control.freeze_frame + 1;
+    assert!(nominal.final_confirmed[1] >= cut_post_state);
+    let missing_cut_post_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::MissingState {
+                peer: 1,
+                frame: cut_post_state,
+            }),
+        ),
+    );
+    assert!(missing_cut_post_state
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 1, frame: actual, .. }
+                if *actual == cut_post_state
+        )));
+
+    let wrong_final_frame =
+        run_with_final_game_frame_offset(&schedule, &options(PeerDriveOrder::Reverse, None), 1, -1);
+    assert!(wrong_final_frame
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceState { peer: 1, expected, actual, .. }
+                if actual.frame != expected.frame
+        )));
+}
+
+#[test]
 fn spectator_matrix_matches_nominal_history_across_delivery_and_drive_order() {
     for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
         for delivery in [Delivery::Delayed, Delivery::Held, Delivery::Reordered] {
@@ -490,7 +840,7 @@ fn spectator_runtime_delay_matches_independent_gap_and_resume() {
     let resume = control.current_frame + 4;
     let history = spectator_inputs(&report);
     for frame in 0..=resume {
-        let expected = reference_inputs::<StubInput>(frame, 2, 2, Some(control))
+        let expected = reference_inputs::<StubInput>(frame, 2, 2, Some(control), None)
             .into_iter()
             .map(SimInput::fingerprint)
             .collect::<Vec<_>>();
@@ -551,7 +901,7 @@ fn zero_to_three_at_frame_five_has_hard_coded_gap_boundaries() {
         old_delay: 0,
         new_delay: 3,
     };
-    let at = |frame| reference_inputs::<StubInput>(frame, 0, 2, Some(control));
+    let at = |frame| reference_inputs::<StubInput>(frame, 0, 2, Some(control), None);
 
     assert_eq!(at(0), vec![stub_input(0, 0), stub_input(0, 1)]);
     assert_eq!(at(4), vec![stub_input(4, 0), stub_input(4, 1)]);
@@ -577,7 +927,7 @@ fn two_to_four_at_frame_eight_has_hard_coded_gap_boundaries() {
         new_delay: 4,
     };
     let at = |frame| {
-        reference_inputs::<StubInput>(frame, 2, 2, Some(control))
+        reference_inputs::<StubInput>(frame, 2, 2, Some(control), None)
             .into_iter()
             .map(SimInput::fingerprint)
             .collect::<Vec<_>>()
@@ -1143,7 +1493,6 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         .expect("a preplanned spectator uses the same fixed input history");
 
     let forbidden_events = [
-        ScheduleEvent::GracefulRemove { by: 0, target: 1 },
         ScheduleEvent::LegacyDisconnect { by: 0, target: 1 },
         ScheduleEvent::PeerKill { peer: 1 },
         ScheduleEvent::SpectatorHostKill { host: 0 },
@@ -1155,6 +1504,26 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         invalid.events = vec![(1, event)];
         assert!(validate_run_options(&invalid, &valid_options).is_err());
     }
+
+    let removal = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Delayed);
+    validate_run_options(&removal, &valid_options)
+        .expect("the bounded two-peer graceful removal is supported");
+    let mut duplicate = removal.clone();
+    duplicate
+        .events
+        .push((121, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+    assert!(validate_run_options(&duplicate, &valid_options).is_err());
+    let mut wrong_direction = removal.clone();
+    wrong_direction.events = vec![(120, ScheduleEvent::GracefulRemove { by: 1, target: 0 })];
+    assert!(validate_run_options(&wrong_direction, &valid_options).is_err());
+    let mut with_spectator = removal.clone();
+    with_spectator.config.spectator_hosts = vec![0];
+    assert!(validate_run_options(&with_spectator, &valid_options).is_err());
+    let mut with_delay_change = removal;
+    with_delay_change
+        .events
+        .push((121, ScheduleEvent::SetInputDelay { peer: 0, delay: 2 }));
+    assert!(validate_run_options(&with_delay_change, &valid_options).is_err());
 
     for (old_delay, new_delay) in [(0, 2), (2, 4)] {
         let dynamic = runtime_delay_schedule(

@@ -59,8 +59,8 @@ Structured workflow from planning through shipping for fortress-rollback. Each p
 ### Plan Lifecycle
 
 Use `PLAN.md` only to order active and approved future work. Keep detailed scope in its issue or PR.
-On completion, remove the task from the plan and write the outcome and evidence to a
-`progress/session-*.md` record. Follow the canonical
+On completion, remove the task from the plan and write the outcome and evidence to a local, gitignored
+`progress/session-*.md` record. Never stage, commit, or push progress logs. Follow the canonical
 [plan-hygiene policy](../fortress-development/SKILL.md#plan-hygiene).
 
 ---

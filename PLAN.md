@@ -1,14 +1,14 @@
 # Fortress Rollback Plan
 
 > Active and ordered future work only. Put scope and discussion in the linked issue or skill,
-> and put completed work and evidence in `progress/session-*.md`. See
+> and put completed work and evidence in local, gitignored `progress/session-*.md` files (never commit them). See
 > [Plan hygiene](.agents/skills/fortress-development/SKILL.md#plan-hygiene).
 
 ## In progress
 
 1. **P0 — Differentially prove rollback equivalence and oracle fidelity.** Hypothesis: for one fixed committed input/membership
    history, arbitrary legal delivery/session interleavings produce the same confirmed trajectory as a non-networked reference,
-   including EveryFrame/Sparse, runtime delay, disconnects, spectators, and hot-join. Explore queue/ring boundaries,
+   including automatic disconnects/timeouts, spectator membership changes, and hot-join. Explore queue/ring boundaries,
    repeated mispredictions, state-only divergence, and near-overflow frames; compare implementation traces with the
    relevant TLA+/Kani assumptions rather than treating a model pass as implementation proof. **Exit:** mutation controls
    demonstrate detection of input, state, freeze, false-positive, and silent-desync failures; every red case minimizes

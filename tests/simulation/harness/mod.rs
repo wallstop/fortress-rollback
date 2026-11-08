@@ -1081,6 +1081,17 @@ pub struct DifferentialInputDelayControl {
     pub new_delay: usize,
 }
 
+/// Successful two-peer graceful removal applied to the nominal differential
+/// model. `freeze_frame` is the certified cut `F`: input `F` remains nominal and
+/// later frames repeat that value for the removed target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DifferentialGracefulRemoveControl {
+    pub by: usize,
+    pub target: usize,
+    pub current_frame: i32,
+    pub freeze_frame: i32,
+}
+
 /// Normalized, peer-indexed confirmed history plus optional spectator display
 /// for differential cross-order comparison. Visit-order trace events and network
 /// counters are deliberately excluded. The values have already been checked
@@ -1091,6 +1102,7 @@ pub struct DifferentialTrajectory {
     pub confirmed_states: Vec<BTreeMap<i32, StateStub>>,
     pub spectator_inputs: Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
     pub input_delay_control: Option<DifferentialInputDelayControl>,
+    pub graceful_remove_control: Option<DifferentialGracefulRemoveControl>,
 }
 
 /// Outcome of one simulation run.
@@ -1106,6 +1118,10 @@ pub struct RunReport {
     /// differential runtime-delay change. Tests subtract these from final metrics
     /// to prove that rollback work occurred after the control boundary.
     pub differential_input_delay_metrics_at_control: Option<Vec<fortress_rollback::SessionMetrics>>,
+    /// Cumulative peer metrics captured immediately after a successful
+    /// differential graceful removal. Tests use these to prove post-freeze work.
+    pub differential_graceful_remove_metrics_at_control:
+        Option<Vec<fortress_rollback::SessionMetrics>>,
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
@@ -2075,14 +2091,22 @@ fn reference_input<I: SimInput>(
     input_delay: usize,
     peer: usize,
     control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialGracefulRemoveControl>,
 ) -> I {
+    if let Some(removal) = removal.filter(|removal| removal.target == peer) {
+        if frame > removal.freeze_frame {
+            // The certified cut itself still consumes the real nominal input.
+            // Only strictly later frames repeat it, matching InputQueue::freeze_at.
+            return reference_input::<I>(removal.freeze_frame, input_delay, peer, control, None);
+        }
+    }
     if let Some(control) = control.filter(|control| control.peer == peer) {
         let old_delay = i32::try_from(control.old_delay).unwrap_or(i32::MAX);
         let new_delay = i32::try_from(control.new_delay).unwrap_or(i32::MAX);
         let old_end = control.current_frame.saturating_add(old_delay);
         let new_end = control.current_frame.saturating_add(new_delay);
         if frame < old_end {
-            return reference_input::<I>(frame, control.old_delay, peer, None);
+            return reference_input::<I>(frame, control.old_delay, peer, None, removal);
         }
         if frame < new_end {
             let ordinal = u32::try_from(control.current_frame - 1).unwrap_or(0);
@@ -2106,9 +2130,10 @@ pub(super) fn reference_inputs<I: SimInput>(
     input_delay: usize,
     n: usize,
     control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialGracefulRemoveControl>,
 ) -> Vec<I> {
     (0..n)
-        .map(|peer| reference_input::<I>(frame, input_delay, peer, control))
+        .map(|peer| reference_input::<I>(frame, input_delay, peer, control, removal))
         .collect()
 }
 
@@ -2119,11 +2144,12 @@ fn reference_states<I: SimInput>(
     input_delay: usize,
     n: usize,
     control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialGracefulRemoveControl>,
 ) -> BTreeMap<i32, StateStub> {
     let mut states = BTreeMap::new();
     let mut state = StateStub::default();
     for post_frame in 1..=through_post_frame.max(0) {
-        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n, control);
+        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n, control, removal);
         let total = inputs
             .into_iter()
             .fold(0_u32, |total, input| total.wrapping_add(input.value()));
@@ -2399,6 +2425,7 @@ fn drive_spectator<I: SimInput>(
                 reference.input_delay,
                 reference.num_players,
                 reference.input_delay_control,
+                None,
             )
             .into_iter()
             .map(SimInput::fingerprint)
@@ -2501,11 +2528,40 @@ pub(crate) fn validate_run_options(
                 );
             }
         }
+        let removal_events: Vec<_> = schedule
+            .events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                ScheduleEvent::GracefulRemove { by, target } => Some((*by, *target)),
+                _ => None,
+            })
+            .collect();
+        if removal_events.len() > 1 {
+            return Err("differential mode supports at most one GracefulRemove event".to_owned());
+        }
+        if let Some(&(by, target)) = removal_events.first() {
+            if (by, target) != (0, 1) {
+                return Err(
+                    "differential GracefulRemove requires the bounded by=0, target=1 scenario"
+                        .to_owned(),
+                );
+            }
+            if !delay_events.is_empty() {
+                return Err(
+                    "differential GracefulRemove cannot be combined with SetInputDelay".to_owned(),
+                );
+            }
+            if !schedule.config.spectator_hosts.is_empty() {
+                return Err(
+                    "differential GracefulRemove spectator equivalence is not yet supported"
+                        .to_owned(),
+                );
+            }
+        }
         if schedule.events.iter().any(|(_, event)| {
             matches!(
                 event,
-                ScheduleEvent::GracefulRemove { .. }
-                    | ScheduleEvent::LegacyDisconnect { .. }
+                ScheduleEvent::LegacyDisconnect { .. }
                     | ScheduleEvent::PeerKill { .. }
                     | ScheduleEvent::SpectatorHostKill { .. }
                     | ScheduleEvent::HotJoin { .. }
@@ -2513,8 +2569,7 @@ pub(crate) fn validate_run_options(
             )
         }) {
             return Err(
-                "differential mode forbids membership changes, disconnects, kills, hot-join, and rebind"
-                    .to_owned(),
+                "differential mode forbids disconnects, kills, hot-join, and rebind".to_owned(),
             );
         }
         let virtual_run = Duration::from_millis(
@@ -2943,6 +2998,8 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
     let mut differential_input_delay_control = None;
     let mut differential_input_delay_metrics_at_control = None;
+    let mut differential_graceful_remove_control = None;
+    let mut differential_graceful_remove_metrics_at_control = None;
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
@@ -3255,9 +3312,76 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // keep a byte-consistent confirmed prefix.
                     if !dead[*by] && !dead[*target] {
                         let handle = PlayerHandle::new(*target);
+                        let receipt_before = differential.and_then(|_| {
+                            peers[*by].session.diagnostic_player_receipt_frame(handle)
+                        });
+                        let current_frame = peers[*by].session.current_frame().as_i32();
+                        let survivor_confirmed =
+                            differential.map(|_| peers[*by].session.confirmed_frame().as_i32());
                         if let Err(error) = peers[*by].session.remove_player(handle) {
                             oracle.observe_session_error("remove_player", *by, step, &error);
                         } else {
+                            if differential.is_some() {
+                                let freeze_frame = peers[*by]
+                                    .session
+                                    .diagnostic_player_receipt_frame(handle)
+                                    .map(Frame::as_i32);
+                                let connected =
+                                    peers[*by].session.diagnostic_player_connected(handle);
+                                let running =
+                                    peers[*by].session.current_state() == SessionState::Running;
+                                let survivor_sampled = differential_confirmed_inputs
+                                    .as_ref()
+                                    .and_then(|histories| histories[*by].keys().next_back())
+                                    .copied();
+                                let survivor_history_bounded = freeze_frame.is_some_and(|freeze| {
+                                    survivor_confirmed.is_some_and(|confirmed| confirmed <= freeze)
+                                        && survivor_sampled.is_none_or(|frame| frame <= freeze)
+                                });
+                                match (receipt_before, freeze_frame) {
+                                    (Some(before), Some(freeze))
+                                        if before.as_i32() == freeze
+                                            && freeze >= 0
+                                            && connected == Some(false)
+                                            && running
+                                            && survivor_history_bounded =>
+                                    {
+                                        let control = DifferentialGracefulRemoveControl {
+                                            by: *by,
+                                            target: *target,
+                                            current_frame,
+                                            freeze_frame: freeze,
+                                        };
+                                        // The removed session may already have authored
+                                        // confirmed samples beyond the certified cut. They
+                                        // remain checked against the live nominal reference,
+                                        // but cannot define the survivor's frozen continuation.
+                                        oracle.begin_replacement_generation(
+                                            *target,
+                                            freeze.saturating_add(1),
+                                        );
+                                        oracle.cap_retired_state_comparison(
+                                            *target,
+                                            freeze.saturating_add(1),
+                                        );
+                                        differential_graceful_remove_control = Some(control);
+                                        differential_graceful_remove_metrics_at_control = Some(
+                                            peers
+                                                .iter()
+                                                .map(|slot| slot.session.metrics())
+                                                .collect(),
+                                        );
+                                    },
+                                    _ => oracle.observe_runner_error(
+                                        "graceful_remove_commit",
+                                        *by,
+                                        step,
+                                        format!(
+                                            "two-peer removal did not synchronously commit at the prior receipt with a bounded survivor history: before={receipt_before:?}, freeze={freeze_frame:?}, connected={connected:?}, running={running}, survivor_confirmed={survivor_confirmed:?}, survivor_sampled={survivor_sampled:?}"
+                                        ),
+                                    ),
+                                }
+                            }
                             retire_peer_for_lifecycle(
                                 *target,
                                 &peers,
@@ -3621,6 +3745,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                         schedule.config.input_delay,
                                         n,
                                         differential_input_delay_control,
+                                        differential_graceful_remove_control,
                                     );
                                     oracle.observe_reference_inputs(i, frame, &expected, &inputs);
                                     if let Some(histories) = differential_confirmed_inputs.as_mut()
@@ -4056,11 +4181,21 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             schedule.config.input_delay,
             n,
             differential_input_delay_control,
+            differential_graceful_remove_control,
         );
         let mut confirmed_states = Vec::with_capacity(n);
         for (peer, states) in recorded.iter().enumerate() {
-            let confirmed = final_confirmed[peer];
-            let current_frame = session_current_frames[peer];
+            let retired_at = differential_graceful_remove_control
+                .filter(|control| control.target == peer)
+                .map(|control| control.freeze_frame);
+            let retired_state_boundary = retired_at.map(|freeze| freeze.saturating_add(1));
+            let confirmed = retired_state_boundary.map_or(final_confirmed[peer], |boundary| {
+                final_confirmed[peer].min(boundary)
+            });
+            let current_frame = retired_state_boundary
+                .map_or(session_current_frames[peer], |boundary| {
+                    session_current_frames[peer].min(boundary)
+                });
             // Confirmation can legally outrun the session's last local advance.
             // Derive the required recording ceiling from the independent session
             // frame, never from the game value being validated.
@@ -4077,20 +4212,32 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 retained.insert(frame, actual);
             }
             let actual_final = peers[peer].game.gs;
-            if actual_final.frame != current_frame {
-                if let Some(&expected) = expected_states.get(&current_frame) {
-                    oracle.observe_reference_state(peer, current_frame, expected, actual_final);
+            let actual_session_frame = session_current_frames[peer];
+            if actual_final.frame != actual_session_frame {
+                // A removed peer's trailing state values are outside the frozen
+                // reference, but its game/session frame identity is still required.
+                let diagnostic_frame = retired_state_boundary
+                    .map_or(actual_session_frame, |boundary| {
+                        boundary.min(actual_session_frame)
+                    });
+                if let Some(&expected) = expected_states.get(&diagnostic_frame) {
+                    oracle.observe_reference_state(peer, diagnostic_frame, expected, actual_final);
                 } else {
-                    oracle.observe_reference_state_missing(peer, current_frame, confirmed);
+                    oracle.observe_reference_state_missing(peer, diagnostic_frame, confirmed);
                 }
             }
             if confirmed >= 0 {
                 // Delay can confirm an input before its post-state is simulated.
                 // That confirmed+1 state is optional, but must match if recorded.
+                // For a removed peer, never extend this into abandoned F+2 states.
                 let optional_frame = confirmed.saturating_add(1);
-                if let Some(&actual) = states.get(&optional_frame) {
-                    if let Some(&expected) = expected_states.get(&optional_frame) {
-                        oracle.observe_reference_state(peer, optional_frame, expected, actual);
+                let within_retired_boundary =
+                    retired_state_boundary.is_none_or(|boundary| optional_frame <= boundary);
+                if within_retired_boundary {
+                    if let Some(&actual) = states.get(&optional_frame) {
+                        if let Some(&expected) = expected_states.get(&optional_frame) {
+                            oracle.observe_reference_state(peer, optional_frame, expected, actual);
+                        }
                     }
                 }
             }
@@ -4107,6 +4254,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .as_ref()
                 .map(|spectator| spectator.applied_inputs.clone()),
             input_delay_control: differential_input_delay_control,
+            graceful_remove_control: differential_graceful_remove_control,
         }
     });
 
@@ -4322,6 +4470,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         replay_input_width_bytes: I::WIDTH_BYTES,
         differential_trajectory,
         differential_input_delay_metrics_at_control,
+        differential_graceful_remove_metrics_at_control,
         verdict,
         trace_hash,
         sometimes_state_by_peer,
