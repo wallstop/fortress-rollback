@@ -519,6 +519,10 @@ pub struct Oracle {
     /// samples stand in (a) — so a peer that diverged before it left cannot
     /// escape detection by being retired.
     dead: Vec<bool>,
+    /// Certified removal cuts cap a retired generation's state comparisons.
+    /// Later observations belong to the abandoned pre-removal trajectory and
+    /// must not be compared with the survivor's frozen continuation.
+    retired_state_ceilings: Vec<Option<i32>>,
     /// (c) bounded post-heal liveness inputs. Inert by default; the runner sets
     /// it via [`Self::set_heal_liveness`] once it has the heal-anchored
     /// confirmed snapshots. Oracle unit tests never set it, so (c) stays inert
@@ -540,6 +544,7 @@ impl Oracle {
             failure_cap: 64,
             per_class_cap: 8,
             dead: vec![false; n_players],
+            retired_state_ceilings: vec![None; n_players],
             heal: HealLiveness::default(),
             violation_allowlist: DEFAULT_VIOLATION_ALLOWLIST,
             violation_allowlist_hits: vec![0; DEFAULT_VIOLATION_ALLOWLIST.len()],
@@ -574,6 +579,19 @@ impl Oracle {
             self.dead.len()
         );
         self.dead[peer] = true;
+    }
+
+    /// Caps a retired peer's state comparisons at the first post-cut state.
+    /// Post-state `F+1` still consumes the nominal input at cut `F`; only the
+    /// abandoned generation from `F+2` onward is excluded. Input authorship
+    /// above the cut is pruned separately by [`Self::begin_replacement_generation`].
+    pub fn cap_retired_state_comparison(&mut self, peer: usize, freeze_frame: i32) {
+        assert!(
+            peer < self.retired_state_ceilings.len(),
+            "cap_retired_state_comparison: peer {peer} out of range (len {})",
+            self.retired_state_ceilings.len()
+        );
+        self.retired_state_ceilings[peer] = Some(freeze_frame);
     }
 
     /// Starts a new live generation for `peer` without marking it dead. A
@@ -945,7 +963,14 @@ impl Oracle {
                 .copied()
                 .unwrap_or(Frame::NULL)
                 .as_i32();
-            let comparison_ceiling = global_confirmed.min(peer_confirmed);
+            let comparison_ceiling = self
+                .retired_state_ceilings
+                .get(peer)
+                .copied()
+                .flatten()
+                .map_or(global_confirmed.min(peer_confirmed), |ceiling| {
+                    global_confirmed.min(peer_confirmed).min(ceiling)
+                });
             for (&frame, &state) in states.range(..=comparison_ceiling) {
                 match canonical_states.get(&frame) {
                     None => {
