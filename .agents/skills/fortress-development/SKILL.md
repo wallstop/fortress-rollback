@@ -216,7 +216,8 @@ the next task, and a falsifiable exit criterion. Link to the canonical issue or 
 scope and technical context.
 
 When work finishes, remove it from `PLAN.md` in the same change and record its result, red/green
-evidence, decisions, and verification under `progress/session-*.md`. Put reusable engineering rules
+evidence, decisions, and verification in a **local, gitignored** `progress/session-*.md` file. Progress
+logs are machine-local: never stage, commit, or push them. Put reusable engineering rules
 in the relevant Agent Skill, user-facing behavior in `docs/`, architecture decisions in the design
 decision log, and detailed tracked scope in an issue. Do not put completed milestones, session/PR/CI
 narration, research digests, bibliographies, reusable policy, or speculative parking lots in the
