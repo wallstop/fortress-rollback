@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794088171808,
+  "lastUpdate": 1794112408567,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "5de83bea40e3a8b32e1d7875d7b3ce997eec6bf7",
-          "message": "Harden frame boundaries and benchmark gating (#232)\n\n## What changed\n\n- pin i32 frame saturation and saved-state integrity at the terminal\nframe\n- document checksum-history size-cap retention and cover\nmissing-checksum pruning\n- saturate extreme checksum cadences and retention arithmetic without\nsigned narrowing overflow\n- hard-gate stable microsecond Criterion benchmarks at a 150% threshold\n- keep nanosecond session, input, compression, metrics, and wire-length\ncases informational\n- replace the SyncLayer no-op benchmark with representative save/advance\nwork\n\n## Why\n\nM6 requires deterministic boundary coverage and a performance gate\nstrict enough to catch material regressions without treating\nshared-runner timer noise as a merge blocker.\n\n## Validation\n\n- cargo fmt --all -- --check\n- cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings\n- cargo nextest run --workspace --features tokio,json --no-capture:\n2,866 passed; 73 skipped\n- cargo nextest list --workspace --all-targets --features tokio,json\n- actionlint .github/workflows/ci-benchmarks.yml\n- agent preflight: all checks passed\n- targeted frame, checksum-retention, and extreme-config tests\n- Cursor and Copilot exact-head reviews: zero remaining issues\n\n## Benchmark gate acceptance drill\n\nDraft PR #233 deliberately added 1 ms to Message\nserialization/round_trip_input_msg. Actions run 29214858594 measured\n1,230,741 ns versus the 134,342 ns baseline (9.16x), emitted the\n1.50-threshold performance alert, and failed Run Benchmarks while the\nsmoke job passed. The drill PR was closed without merge and its branch\ndeleted.\n\n---------\n\nCo-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
-          "timestamp": "2026-07-12T17:27:42-07:00",
-          "tree_id": "2109d507ac79456aaaceee75a8390b7e67afa110",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/5de83bea40e3a8b32e1d7875d7b3ce997eec6bf7"
-        },
-        "date": 1783902902030,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 129235,
-            "range": "± 5200",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46979,
-            "range": "± 247",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 106",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3146,
-            "range": "± 214",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2765,
             "range": "± 180",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4c102a9aacb16dfe98175fd675f41012ac56b23d",
+          "message": "test(simulation): prove spectator reference equivalence (#374)\n\n## What\n\nExtends the bounded two-peer differential rollback oracle to spectator\nsessions. Every displayed spectator frame is now checked against the\nindependent fixed-history input model, including input fingerprints,\n`Confirmed` statuses, and missing-frame detection. Normalized spectator\nhistory participates in exact replay and cross-drive-order comparisons.\n\n## Why\n\nPeer/spectator agreement alone cannot detect a shared wrong input\nstream. This change advances the active P0 rollback-equivalence work in\n`PLAN.md` by giving the spectator path an independent oracle and\nexplicit mutation controls.\n\n## Coverage\n\n- EveryFrame and Sparse saves\n- Delayed, held, and reordered delivery\n- Forward, reverse, and rotating peer drive orders\n- Single and redundant spectator hosts\n- Runtime input-delay increase from 2 to 4, including the complete\ngap/resume boundary prefix\n- Shared wrong-input and spectator-only corruption negative controls\n- Exact trace and normalized-trajectory replay\n\nThe claim remains bounded to the existing two-peer Lockstep scenarios.\nRuntime membership changes, hot-join, rebinding, near-overflow frames,\nand arbitrary game-state semantics remain active follow-up scope in\n`PLAN.md`.\n\n## Validation\n\n- Focused spectator tests: 3 passed\n- Full simulation target: 394 passed, 26 skipped\n- Full Nextest: 3,024 passed, 73 skipped\n- `cargo clippy --workspace --all-targets --features tokio,json`: passed\nwithout warnings\n- `cargo doc --no-deps`: passed\n- Rustdoc tests: 160 passed, 50 ignored\n- Agent preflight, formatting, plan hygiene, typos, semantic doc claims,\nand 1,442 documentation links: passed\n- `cargo audit`, `cargo deny check`, `npm audit`, and all four workspace\nlock checks: passed\n- Compatible dependency updates: none; all three standalone Cargo\nworkspaces and npm are current\n\nNo production or public API code changed, so no changelog entry is\nrequired.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS (seeded schedules and ordered `BTreeMap` histories)\n- Error handling: PASS (existing structured oracle failures)\n- Test breadth: PASS (nominal matrix, replay, boundaries, and negative\ncontrols)\n- Design log reviewed: N/A (test-only oracle extension)\n- Changelog reviewed: N/A (no user-observable/public change)",
+          "timestamp": "2026-11-07T20:26:33-08:00",
+          "tree_id": "f0dec225f030c4f991d4c8a50562bd75b8eb6035",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/4c102a9aacb16dfe98175fd675f41012ac56b23d"
+        },
+        "date": 1794112407679,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 25526,
+            "range": "± 2797",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 15511,
+            "range": "± 282",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 471,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 588,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5393,
+            "range": "± 186",
             "unit": "ns/iter"
           }
         ]
