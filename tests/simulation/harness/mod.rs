@@ -38,8 +38,8 @@ use oracle::{
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
 use schedule::{
-    hot_join_host_for_slot, validate_schedule, AppModel, CpuFeedbackPolicy, FrameModel, Schedule,
-    ScheduleEvent, WaitRecommendationPolicy,
+    hot_join_host_for_slot, validate_schedule, AppModel, CpuFeedbackPolicy, DropPolicy, FrameModel,
+    Schedule, ScheduleEvent, WaitRecommendationPolicy,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -1081,15 +1081,20 @@ pub struct DifferentialInputDelayControl {
     pub new_delay: usize,
 }
 
-/// Successful two-peer graceful removal applied to the nominal differential
+/// Successful explicit or automatic removal applied to the nominal differential
 /// model. `freeze_frame` is the certified cut `F`: input `F` remains nominal and
-/// later frames repeat that value for the removed target.
+/// later frames repeat that value for the removed target. For an automatic drop,
+/// `by`, `current_frame`, and `commit_step` describe the first committing survivor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DifferentialGracefulRemoveControl {
+pub struct DifferentialRemovalControl {
     pub by: usize,
     pub target: usize,
     pub current_frame: i32,
     pub freeze_frame: i32,
+    pub commit_step: u32,
+    /// Length of the load-observation log at the first commit. Later entries
+    /// prove post-commit repair without ambiguous same-step comparisons.
+    pub load_count_at_commit: usize,
 }
 
 /// Normalized, peer-indexed confirmed history plus optional spectator display
@@ -1102,7 +1107,7 @@ pub struct DifferentialTrajectory {
     pub confirmed_states: Vec<BTreeMap<i32, StateStub>>,
     pub spectator_inputs: Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
     pub input_delay_control: Option<DifferentialInputDelayControl>,
-    pub graceful_remove_control: Option<DifferentialGracefulRemoveControl>,
+    pub removal_control: Option<DifferentialRemovalControl>,
 }
 
 /// Outcome of one simulation run.
@@ -1118,10 +1123,9 @@ pub struct RunReport {
     /// differential runtime-delay change. Tests subtract these from final metrics
     /// to prove that rollback work occurred after the control boundary.
     pub differential_input_delay_metrics_at_control: Option<Vec<fortress_rollback::SessionMetrics>>,
-    /// Cumulative peer metrics captured immediately after a successful
-    /// differential graceful removal. Tests use these to prove post-freeze work.
-    pub differential_graceful_remove_metrics_at_control:
-        Option<Vec<fortress_rollback::SessionMetrics>>,
+    /// Cumulative peer metrics captured immediately after the first successful
+    /// differential removal commit. Tests use these to prove post-freeze work.
+    pub differential_removal_metrics_at_control: Option<Vec<fortress_rollback::SessionMetrics>>,
     pub verdict: Verdict,
     /// Deterministic digest of the run's observable trace.
     pub trace_hash: u64,
@@ -1937,6 +1941,80 @@ fn retire_peer_for_lifecycle<I: SimInput>(
 /// TEST-NET-2 is disjoint from the harness's loopback canonical/spectator
 /// addresses. Validation permits one rebind per peer, so the peer byte is a
 /// complete collision-free generation identifier for the supported mesh cap.
+#[allow(clippy::too_many_arguments)]
+fn observe_automatic_removal_commit<I: SimInput>(
+    peers: &[PeerSlot<I>],
+    observer: usize,
+    target: usize,
+    step: u32,
+    confirmed_before_poll: i32,
+    sampled_before_poll: i32,
+    load_count_at_commit: usize,
+    committed_observers: &mut [bool],
+    control: &mut Option<DifferentialRemovalControl>,
+    metrics_at_control: &mut Option<Vec<fortress_rollback::SessionMetrics>>,
+    oracle: &mut Oracle,
+) {
+    if committed_observers[observer] {
+        return;
+    }
+    let session = &peers[observer].session;
+    let handle = PlayerHandle::new(target);
+    if session.diagnostic_player_connected(handle) != Some(false) {
+        return;
+    }
+    committed_observers[observer] = true;
+
+    let current_frame = session.current_frame().as_i32();
+    let freeze_frame = session
+        .diagnostic_player_receipt_frame(handle)
+        .map(Frame::as_i32);
+    let valid = session.current_state() == SessionState::Running
+        && current_frame > 0
+        && freeze_frame.is_some_and(|freeze| {
+            freeze >= 0 && confirmed_before_poll <= freeze && sampled_before_poll <= freeze
+        });
+    let Some(freeze) = freeze_frame.filter(|_| valid) else {
+        oracle.observe_runner_error(
+            "automatic_remove_commit",
+            observer,
+            step,
+            format!(
+                "automatic removal did not commit at a certified cut with bounded pre-poll history: state={:?}, current_frame={current_frame}, freeze={freeze_frame:?}, confirmed_before={confirmed_before_poll}, sampled_before={sampled_before_poll}",
+                session.current_state()
+            ),
+        );
+        return;
+    };
+
+    if let Some(existing) = control {
+        if existing.target != target || existing.freeze_frame != freeze {
+            oracle.observe_runner_error(
+                "automatic_remove_commit",
+                observer,
+                step,
+                format!(
+                    "survivor certified a different removal: first={existing:?}, observer_target={target}, observer_freeze={freeze}"
+                ),
+            );
+        }
+        return;
+    }
+
+    let committed = DifferentialRemovalControl {
+        by: observer,
+        target,
+        current_frame,
+        freeze_frame: freeze,
+        commit_step: step,
+        load_count_at_commit,
+    };
+    oracle.begin_replacement_generation(target, freeze.saturating_add(1));
+    oracle.cap_retired_state_comparison(target, freeze.saturating_add(1));
+    *control = Some(committed);
+    *metrics_at_control = Some(peers.iter().map(|slot| slot.session.metrics()).collect());
+}
+
 fn rebound_peer_addr(peer: usize) -> SocketAddr {
     let host = u8::try_from(peer.saturating_add(1)).unwrap_or(u8::MAX);
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, host)), 35_000)
@@ -2091,7 +2169,7 @@ fn reference_input<I: SimInput>(
     input_delay: usize,
     peer: usize,
     control: Option<DifferentialInputDelayControl>,
-    removal: Option<DifferentialGracefulRemoveControl>,
+    removal: Option<DifferentialRemovalControl>,
 ) -> I {
     if let Some(removal) = removal.filter(|removal| removal.target == peer) {
         if frame > removal.freeze_frame {
@@ -2130,7 +2208,7 @@ pub(super) fn reference_inputs<I: SimInput>(
     input_delay: usize,
     n: usize,
     control: Option<DifferentialInputDelayControl>,
-    removal: Option<DifferentialGracefulRemoveControl>,
+    removal: Option<DifferentialRemovalControl>,
 ) -> Vec<I> {
     (0..n)
         .map(|peer| reference_input::<I>(frame, input_delay, peer, control, removal))
@@ -2144,7 +2222,7 @@ fn reference_states<I: SimInput>(
     input_delay: usize,
     n: usize,
     control: Option<DifferentialInputDelayControl>,
-    removal: Option<DifferentialGracefulRemoveControl>,
+    removal: Option<DifferentialRemovalControl>,
 ) -> BTreeMap<i32, StateStub> {
     let mut states = BTreeMap::new();
     let mut state = StateStub::default();
@@ -2483,8 +2561,22 @@ pub(crate) fn validate_run_options(
 ) -> Result<(), String> {
     let n = schedule.config.n_players;
     if let Some(differential) = options.differential {
-        if n != 2 {
-            return Err("differential mode requires exactly two peers".to_owned());
+        let peer_kills: Vec<_> = schedule
+            .events
+            .iter()
+            .filter_map(|(step, event)| match event {
+                ScheduleEvent::PeerKill { peer } => Some((*step, *peer)),
+                _ => None,
+            })
+            .collect();
+        let automatic_disconnect = !peer_kills.is_empty();
+        let valid_peer_count = if automatic_disconnect { n == 3 } else { n == 2 };
+        if !valid_peer_count {
+            return Err(if automatic_disconnect {
+                "differential automatic disconnect requires exactly three peers".to_owned()
+            } else {
+                "differential mode requires exactly two peers without PeerKill".to_owned()
+            });
         }
         if schedule.config.frame_model != FrameModel::Lockstep {
             return Err("differential mode requires FrameModel::Lockstep".to_owned());
@@ -2558,30 +2650,66 @@ pub(crate) fn validate_run_options(
                 );
             }
         }
+        if automatic_disconnect {
+            if peer_kills.len() != 1 || peer_kills.first().map(|(_, peer)| *peer) != Some(2) {
+                return Err(
+                    "differential automatic disconnect requires exactly one PeerKill { peer: 2 }"
+                        .to_owned(),
+                );
+            }
+            if schedule.config.disconnect_behavior != DropPolicy::ContinueWithout {
+                return Err("differential automatic disconnect requires ContinueWithout".to_owned());
+            }
+            if !removal_events.is_empty() || !delay_events.is_empty() {
+                return Err(
+                    "differential automatic disconnect cannot be combined with another removal or SetInputDelay"
+                        .to_owned(),
+                );
+            }
+            if !schedule.config.spectator_hosts.is_empty() {
+                return Err(
+                    "differential automatic disconnect spectator equivalence is not yet supported"
+                        .to_owned(),
+                );
+            }
+        }
         if schedule.events.iter().any(|(_, event)| {
             matches!(
                 event,
                 ScheduleEvent::LegacyDisconnect { .. }
-                    | ScheduleEvent::PeerKill { .. }
                     | ScheduleEvent::SpectatorHostKill { .. }
                     | ScheduleEvent::HotJoin { .. }
                     | ScheduleEvent::Rebind { .. }
             )
         }) {
             return Err(
-                "differential mode forbids disconnects, kills, hot-join, and rebind".to_owned(),
+                "differential mode forbids legacy disconnects, spectator kills, hot-join, and rebind"
+                    .to_owned(),
             );
         }
         let virtual_run = Duration::from_millis(
             u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
         );
-        if options
+        let timeout_outlives_run = options
             .disconnect_timeout
-            .is_none_or(|timeout| timeout <= virtual_run)
-        {
-            return Err(format!(
-                "differential mode requires disconnect_timeout greater than the virtual run ({virtual_run:?})"
-            ));
+            .is_some_and(|timeout| timeout > virtual_run);
+        let valid_timeout = if automatic_disconnect {
+            options
+                .disconnect_timeout
+                .is_some_and(|timeout| timeout < virtual_run)
+        } else {
+            timeout_outlives_run
+        };
+        if !valid_timeout {
+            return Err(if automatic_disconnect {
+                format!(
+                    "differential automatic disconnect requires disconnect_timeout shorter than the virtual run ({virtual_run:?})"
+                )
+            } else {
+                format!(
+                    "differential mode requires disconnect_timeout greater than the virtual run ({virtual_run:?})"
+                )
+            });
         }
         let signed_mutation_frame = match differential.mutation {
             Some(DifferentialMutation::SharedState { frame })
@@ -2998,8 +3126,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
     let mut differential_input_delay_control = None;
     let mut differential_input_delay_metrics_at_control = None;
-    let mut differential_graceful_remove_control = None;
-    let mut differential_graceful_remove_metrics_at_control = None;
+    let mut differential_removal_control = None;
+    let mut differential_removal_metrics_at_control = None;
+    let differential_automatic_target = differential.and_then(|_| {
+        schedule.events.iter().find_map(|(_, event)| match event {
+            ScheduleEvent::PeerKill { peer } => Some(*peer),
+            _ => None,
+        })
+    });
+    let mut differential_automatic_committed = vec![false; n];
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
@@ -3346,11 +3481,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                             && running
                                             && survivor_history_bounded =>
                                     {
-                                        let control = DifferentialGracefulRemoveControl {
+                                        let control = DifferentialRemovalControl {
                                             by: *by,
                                             target: *target,
                                             current_frame,
                                             freeze_frame: freeze,
+                                            commit_step: step,
+                                            load_count_at_commit: load_game_state_observations.len(),
                                         };
                                         // The removed session may already have authored
                                         // confirmed samples beyond the certified cut. They
@@ -3364,8 +3501,8 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                             *target,
                                             freeze.saturating_add(1),
                                         );
-                                        differential_graceful_remove_control = Some(control);
-                                        differential_graceful_remove_metrics_at_control = Some(
+                                        differential_removal_control = Some(control);
+                                        differential_removal_metrics_at_control = Some(
                                             peers
                                                 .iter()
                                                 .map(|slot| slot.session.metrics())
@@ -3508,7 +3645,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         let drive_order =
             differential.map_or(PeerDriveOrder::Forward, |options| options.drive_order);
         for i in peer_drive_indices(drive_order, step, n) {
-            let slot = &mut peers[i];
             // Clock-gated opportunities are consumed even while a peer is
             // stalled, dead, or synchronizing. A resumed application must not
             // burst through a wall-clock backlog that it never simulated.
@@ -3532,7 +3668,33 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             // stalled/dead peer): read exactly once and reused for both the
             // trace fold and any probe snapshot.
             let confirmed = if !blocked_elsewhere && !cpu_delayed {
-                slot.session.poll_remote_clients();
+                let automatic_history_before_poll = differential_automatic_target.map(|_| {
+                    (
+                        peers[i].session.confirmed_frame().as_i32(),
+                        peers[i].sampled_confirmed,
+                    )
+                });
+                peers[i].session.poll_remote_clients();
+                if let (Some(target), Some((confirmed_before_poll, sampled_before_poll))) =
+                    (differential_automatic_target, automatic_history_before_poll)
+                {
+                    if dead[target] && target != i {
+                        observe_automatic_removal_commit(
+                            &peers,
+                            i,
+                            target,
+                            step,
+                            confirmed_before_poll,
+                            sampled_before_poll,
+                            load_game_state_observations.len(),
+                            &mut differential_automatic_committed,
+                            &mut differential_removal_control,
+                            &mut differential_removal_metrics_at_control,
+                            &mut oracle,
+                        );
+                    }
+                }
+                let slot = &mut peers[i];
 
                 // A starved peer never drains its event queue (models a wedged
                 // event consumer): the session's bounded queue fills and trims,
@@ -3745,7 +3907,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                         schedule.config.input_delay,
                                         n,
                                         differential_input_delay_control,
-                                        differential_graceful_remove_control,
+                                        differential_removal_control,
                                     );
                                     oracle.observe_reference_inputs(i, frame, &expected, &inputs);
                                     if let Some(histories) = differential_confirmed_inputs.as_mut()
@@ -3778,7 +3940,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             } else {
                 // Stalled (local hang) or dead (crashed): no poll/advance, no
                 // wire traffic — just its last confirmed frame, frozen.
-                slot.session.confirmed_frame()
+                peers[i].session.confirmed_frame()
             };
 
             step_confirmed[i] = confirmed.as_i32();
@@ -4181,11 +4343,11 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             schedule.config.input_delay,
             n,
             differential_input_delay_control,
-            differential_graceful_remove_control,
+            differential_removal_control,
         );
         let mut confirmed_states = Vec::with_capacity(n);
         for (peer, states) in recorded.iter().enumerate() {
-            let retired_at = differential_graceful_remove_control
+            let retired_at = differential_removal_control
                 .filter(|control| control.target == peer)
                 .map(|control| control.freeze_frame);
             let retired_state_boundary = retired_at.map(|freeze| freeze.saturating_add(1));
@@ -4254,7 +4416,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .as_ref()
                 .map(|spectator| spectator.applied_inputs.clone()),
             input_delay_control: differential_input_delay_control,
-            graceful_remove_control: differential_graceful_remove_control,
+            removal_control: differential_removal_control,
         }
     });
 
@@ -4470,7 +4632,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         replay_input_width_bytes: I::WIDTH_BYTES,
         differential_trajectory,
         differential_input_delay_metrics_at_control,
-        differential_graceful_remove_metrics_at_control,
+        differential_removal_metrics_at_control,
         verdict,
         trace_hash,
         sometimes_state_by_peer,
