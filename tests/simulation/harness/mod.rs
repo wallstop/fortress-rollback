@@ -1081,14 +1081,15 @@ pub struct DifferentialInputDelayControl {
     pub new_delay: usize,
 }
 
-/// Normalized, peer-indexed confirmed history for differential cross-order
-/// comparison. Visit-order trace events and network counters are deliberately
-/// excluded. The typed values have already been checked against the nominal
-/// reference before their compact identity is retained here.
+/// Normalized, peer-indexed confirmed history plus optional spectator display
+/// for differential cross-order comparison. Visit-order trace events and network
+/// counters are deliberately excluded. The values have already been checked
+/// against the nominal reference before their compact identity is retained here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DifferentialTrajectory {
     pub confirmed_inputs: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
     pub confirmed_states: Vec<BTreeMap<i32, StateStub>>,
+    pub spectator_inputs: Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
     pub input_delay_control: Option<DifferentialInputDelayControl>,
 }
 
@@ -2356,10 +2357,18 @@ fn print_step_summary<I: SimInput>(step: u32, peers: &[PeerSlot<I>], net: &SimNe
     }
 }
 
+#[derive(Clone, Copy)]
+struct SpectatorReference {
+    input_delay: usize,
+    num_players: usize,
+    input_delay_control: Option<DifferentialInputDelayControl>,
+}
+
 fn drive_spectator<I: SimInput>(
     spectator: &mut SpectatorSlot<I>,
     step: u32,
     options: &RunOptions,
+    reference: Option<SpectatorReference>,
     oracle: &mut Oracle,
     observed_events: &mut Vec<TraceObservedEvent>,
     observed_events_truncated: &mut u32,
@@ -2375,6 +2384,32 @@ fn drive_spectator<I: SimInput>(
         ),
         Err(FortressError::PredictionThreshold | FortressError::NotSynchronized) => {},
         Err(error) => oracle.observe_spectator_error("advance_frame", step, &error),
+    }
+    if let Some(reference) = reference {
+        let end_frame = spectator.session.current_frame().as_i32();
+        for frame in start_frame..=end_frame {
+            // A current-frame leap without the corresponding AdvanceFrame input
+            // is a mismatch too; checking only retained keys would hide holes.
+            let actual = spectator
+                .applied_inputs
+                .get(&frame)
+                .map_or(&[][..], Vec::as_slice);
+            let expected = reference_inputs::<I>(
+                frame,
+                reference.input_delay,
+                reference.num_players,
+                reference.input_delay_control,
+            )
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect::<Vec<_>>();
+            oracle.observe_reference_spectator_inputs(
+                reference.num_players,
+                frame,
+                &expected,
+                actual,
+            );
+        }
     }
 
     let events: Vec<FortressEvent<I::SessionConfig>> = spectator.session.events().collect();
@@ -2432,9 +2467,6 @@ pub(crate) fn validate_run_options(
         }
         if schedule.config.max_prediction == 0 {
             return Err("differential mode requires max_prediction > 0".to_owned());
-        }
-        if !schedule.config.spectator_hosts.is_empty() {
-            return Err("differential mode does not support spectators".to_owned());
         }
         let delay_events: Vec<_> = schedule
             .events
@@ -3903,6 +3935,11 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 spectator,
                 step,
                 options,
+                differential.map(|_| SpectatorReference {
+                    input_delay: schedule.config.input_delay,
+                    num_players: n,
+                    input_delay_control: differential_input_delay_control,
+                }),
                 &mut oracle,
                 &mut observed_events,
                 &mut observed_events_truncated,
@@ -4066,6 +4103,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .take()
                 .expect("differential input histories were initialized"),
             confirmed_states,
+            spectator_inputs: spectator
+                .as_ref()
+                .map(|spectator| spectator.applied_inputs.clone()),
             input_delay_control: differential_input_delay_control,
         }
     });
