@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794254244014,
+  "lastUpdate": 1794267136199,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "f8f0623acbbaab590244f8c913bf75e8665316b8",
-          "message": "Confirm H-SKEW phase mechanism (#236)\n\n## Summary\n\n- add an opt-in, bounded phase-resolved sampling mode for skew-gated\nsimulation runs\n- preserve the controller's `frames_ahead` signal in deterministic\nfailure artifacts without changing legacy trace identity\n- convert the one-hour H-SKEW cost inference into a phase-resolved\nverdict\n\n## Why\n\nThe existing one-hour experiment retained only 12 samples. Aggregate\nhistograms suggested that the fast peer paid deeper rollbacks while\ntraversing the 0→3-frame wait-recommendation dead band, but they could\nnot prove the temporal relationship.\n\nThe new 2,457-sample skew trace places all 71 recommendations and 213\nobeyed waits at phase 3. Mean fast-peer rollback depth rises\nmonotonically across phases 0→3 (approximately 1.43, 2.37, 3.33, and\n3.94 frames). This confirms the mechanism for the deliberately\nalways-changing stress input without changing production time-sync\npolicy.\n\n## Validation\n\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- default nextest suite: 2,842 passed, 73 skipped\n- hot-join nextest suite: 3,098 passed, 74 skipped\n- release one-hour H-SKEW probe with exact replay: passed\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation harness telemetry, artifact\nvalidation, and tests; production rollback/time-sync code is untouched\nand legacy 12-sample traces are unchanged by default.\n> \n> **Overview**\n> Adds an **opt-in** `RunOptions::phase_resolved_control_samples` mode\nfor schema-v16+ `SkewGated60Hz` runs. Default fleet behavior stays on\nthe compact ≤12-sample progress trace; when enabled, the harness records\na **bounded** time series (up to ~4k samples for two players, scaled by\npeer count) that includes **`frames_ahead`** on each sample and extra\nsamples on opportunity-lead / obeyed-wait transitions, without the\nschema-16 endpoint/link gauge payload.\n> \n> **Failure artifacts** validate the larger sample cap, require per-peer\n`frames_ahead` when the flag is set, and skip endpoint/link fields for\nphase-resolved replays. Shrinker remapping preserves the new option.\n> \n> **Tests:** a focused bounded/determinism probe; the hour-equivalent\nH-SKEW experiment now runs with phase sampling and asserts\nphase-bucketed lag stability, that waits/recommendations fire only at\nthe three-frame dead band, and monotonic rollback depth across\ncontroller phases 0→3.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nefd080badcacb616fabed2049c087a32c876667b. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-13T10:26:24-07:00",
-          "tree_id": "9febbf4482d925e5feb55202f195fc93c44691f5",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/f8f0623acbbaab590244f8c913bf75e8665316b8"
-        },
-        "date": 1783963997130,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 72561,
-            "range": "± 2571",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31420,
-            "range": "± 2610",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 535,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 799,
-            "range": "± 57",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 5918,
-            "range": "± 244",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5744,
             "range": "± 180",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ede612d6a1988fad6f60dedbbc633e4799e4251b",
+          "message": "test(simulation): extend differential oracle to N-peer membership (#378)\n\n## Description\n\nAdvances the active P0 differential rollback-equivalence milestone\n(#377) by widening the bounded fixed-history oracle to N-peer\nmembership, spectator host failover, and queue-capacity boundaries.\n\n### Changes\n\n- **N-peer hot-join (n = 2 and 3).** The harness now models production's\nasynchronous all-survivor removal certificate: the replacement stays\noffline, the old generation is frozen out of the drive loop, the\ncertified cut is anchored when the coordinator observes the commit, and\nreference sampling is suspended until the cut is known. The independent\nreference is width-aware: a two-peer reactivation rewrites snapshot `A`,\nwhile an N-peer serve keeps `A` as a frozen bridge and activates at `A +\n1`. Activation validation now covers every survivor, and exact\ncoordinator/survivor event payloads are pinned.\n- **Three-peer explicit removal + redundant spectators.**\n`GracefulRemove` now supports asynchronous certificates on three-peer\nmeshes. Spectator rows cover host sets `[0]`, `[2]`, `[0, 2]`, and `[2,\n0]`, validating exact frozen fingerprints/statuses, host survival, exact\nreplay, and the certified cross-order projection. The removed player's\nown endpoint is explicitly rejected as a spectator source because\nproduction does not withdraw it and its stale stream correctly fails\nclosed.\n- **Spectator host silence and failover.** Schedule `Block`/`Hold` may\ntarget the spectator endpoint, isolating one host's observer feed.\nPost-removal rows silence the canonical and lower-priority hosts with a\ntimeout above the notify delay and below the outage length, proving the\nsurviving host advances the display, the blocked endpoint is observed as\nfailed, and the exact frozen history resumes with replay identity.\n- **Input-queue capacity boundaries.** New rows fill the queue from the\ndelay side (`delay 120 + prediction 7`) and the prediction side (`delay\n2 + prediction 125`, `MAX_FRAME_DELAY = 127`) and retain the exact\nnominal confirmed history past the boundary.\n- **Cross-order identity.** The bounded hot-join row's activation frame\nis proven order-stable and the complete normalized trajectory is\nidentical across forward/reverse/rotating drive orders.\n- `PLAN.md` is narrowed to the remaining\nhost-crash-as-second-membership-change row and further queue/ring\ncorners.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove the coverage is effective\n- [x] `cargo fmt` and strict Clippy (`--workspace --all-targets\n--features tokio,json` and `...,hot-join`) pass with no warnings\n- [x] `cargo nextest run` passes\n\n### If Applicable\n\n- [x] `PLAN.md` updated (test-only change, so no changelog entry)\n\n## Testing\n\n- Differential suites: 37 default and 41 with `hot-join` at the first\ncommit; 38/42 after the host-failover addition, all passing.\n- Full Nextest: 3,036 default and 3,298 with `hot-join`, 73/74\nintentionally skipped.\n- Strict Clippy with `-D warnings` under both feature sets, `cargo fmt`,\nagent preflight, plan hygiene, doc links, typos, and markdownlint pass.\n- Red-green evidence: the N-peer removal initially failed the\nsynchronous-commit premise, then exposed the frozen bridge-frame\nboundary; both were fixed at the harness/reference level and restored\ngreen without production changes. The host-outage row initially failed\nthe builder's notify-delay bound and was corrected to a 600 ms timeout\nabove the 500 ms notify delay.\n\n## Related Issues\n\nRelates to #377. Remaining scope tracked there: a host crash that is\nitself a second membership change, the removed player's own spectator\nendpoint (documented fail-closed), and further queue/ring corners.",
+          "timestamp": "2026-11-09T15:23:39-08:00",
+          "tree_id": "5eea0a5444b70ce360011f33b9913fd3613744d1",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ede612d6a1988fad6f60dedbbc633e4799e4251b"
+        },
+        "date": 1794267135244,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60483,
+            "range": "± 5685",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 30054,
+            "range": "± 939",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1689,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 115",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3144,
+            "range": "± 182",
             "unit": "ns/iter"
           }
         ]
