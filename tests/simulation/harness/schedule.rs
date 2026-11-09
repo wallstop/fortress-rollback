@@ -971,7 +971,10 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
             ScheduleEvent::SetLink { from, to, .. }
             | ScheduleEvent::Block { from, to, .. }
             | ScheduleEvent::Hold { from, to, .. } => {
-                if *from >= n || *to >= n {
+                // `to == n` addresses the configured spectator endpoint, which
+                // lets a test isolate one host's observer feed from the mesh.
+                let spectator_target = *to == n && !schedule.config.spectator_hosts.is_empty();
+                if *from >= n || (*to > n) || (*to == n && !spectator_target) {
                     return Err(format!(
                         "schedule event link ({from} -> {to}) out of range for a {n}-peer mesh"
                     ));
@@ -980,6 +983,12 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                     return Err(format!(
                         "schedule event link ({from} -> {to}) must not target itself"
                     ));
+                }
+                if spectator_target && matches!(event, ScheduleEvent::SetLink { .. }) {
+                    return Err(
+                        "SetLink cannot target the spectator endpoint; use Block or Hold"
+                            .to_owned(),
+                    );
                 }
             },
             ScheduleEvent::PeerStall { peer, steps } => {

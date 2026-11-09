@@ -1019,6 +1019,12 @@ struct TraceFinalSummary {
     spectator_applied_frames: usize,
     spectator_max_frame: Option<i32>,
     spectator_final_hosts: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spectator_outage_start_frame: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spectator_max_frame_during_outage: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spectator_min_hosts_during_outage: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     progress_samples: Vec<ProgressSample>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1263,6 +1269,14 @@ pub struct RunReport {
     /// Number of redundant hosts the configured spectator still had at the end of
     /// the run. `None` when `SimConfig::spectator_hosts` is empty.
     pub spectator_final_hosts: Option<usize>,
+    /// Frame displayed when a spectator-directed transport outage began.
+    /// `None` when no host-to-spectator Block targeted the spectator endpoint.
+    pub spectator_outage_start_frame: Option<i32>,
+    /// Highest frame the spectator displayed while that outage was active.
+    pub spectator_max_frame_during_outage: Option<i32>,
+    /// Lowest host count the spectator observed while that outage was active.
+    /// `Some(1)` proves a surviving redundant host took over.
+    pub spectator_min_hosts_during_outage: Option<usize>,
 }
 
 /// One peer's cumulative protocol traffic counters across every remote link.
@@ -3053,7 +3067,14 @@ pub(crate) fn validate_run_options(
         let timeout_outlives_run = options
             .disconnect_timeout
             .is_some_and(|timeout| timeout > virtual_run);
-        let valid_timeout = if automatic_disconnect {
+        // A spectator-directed transport outage must be able to cross the
+        // spectator's host-failure timer inside the run, so that row uses a
+        // short timeout just like an automatic disconnect.
+        let spectator_outage = schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::Block { to, .. } if *to == n));
+        let valid_timeout = if automatic_disconnect || spectator_outage {
             options
                 .disconnect_timeout
                 .is_some_and(|timeout| timeout < virtual_run)
@@ -3482,6 +3503,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             }
         });
 
+    // Spectator-directed transport outage evidence (`Block` with `to == n`).
+    let mut spectator_outage_active = false;
+    let mut spectator_outage_start_frame: Option<i32> = None;
+    let mut spectator_max_frame_during_outage: Option<i32> = None;
+    let mut spectator_min_hosts_during_outage: Option<usize> = None;
+
     let differential = options.differential;
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
     let mut differential_input_delay_control = None;
@@ -3733,10 +3760,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     );
                 },
                 ScheduleEvent::Block { from, to, blocked } => {
-                    net.set_blocked(peers[*from].binding.local_addr(), addrs[*to], *blocked);
+                    let target = if *to == n { spectator_addr } else { addrs[*to] };
+                    net.set_blocked(peers[*from].binding.local_addr(), target, *blocked);
+                    if *to == n {
+                        spectator_outage_active = *blocked;
+                    }
                 },
                 ScheduleEvent::Hold { from, to, holding } => {
-                    net.set_holding(peers[*from].binding.local_addr(), addrs[*to], *holding);
+                    let target = if *to == n { spectator_addr } else { addrs[*to] };
+                    net.set_holding(peers[*from].binding.local_addr(), target, *holding);
                 },
                 ScheduleEvent::PeerStall { peer, steps } => {
                     // `peer` in range and `steps > 0` are validated up front.
@@ -4776,6 +4808,17 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 &mut observed_events,
                 &mut observed_events_truncated,
             );
+            if spectator_outage_active {
+                let frame = spectator.session.current_frame().as_i32();
+                spectator_outage_start_frame.get_or_insert(frame);
+                spectator_max_frame_during_outage = Some(
+                    spectator_max_frame_during_outage.map_or(frame, |current| current.max(frame)),
+                );
+                let hosts = spectator.session.num_hosts();
+                spectator_min_hosts_during_outage = Some(
+                    spectator_min_hosts_during_outage.map_or(hosts, |current| current.min(hosts)),
+                );
+            }
         }
 
         if trace_tail.len() == TRACE_TAIL_CAPACITY {
@@ -5184,6 +5227,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
+        spectator_outage_start_frame,
+        spectator_max_frame_during_outage,
+        spectator_min_hosts_during_outage,
         progress_samples: if schedule.schema_version >= 15 {
             progress_samples.clone()
         } else {
@@ -5291,6 +5337,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
+        spectator_outage_start_frame,
+        spectator_max_frame_during_outage,
+        spectator_min_hosts_during_outage,
     }
 }
 
@@ -5578,6 +5627,9 @@ mod tests {
             spectator_applied_frames: 0,
             spectator_max_frame: None,
             spectator_final_hosts: None,
+            spectator_outage_start_frame: None,
+            spectator_max_frame_during_outage: None,
+            spectator_min_hosts_during_outage: None,
             progress_samples: Vec::new(),
             frame_opportunities: Vec::new(),
             wait_frames_obeyed: Vec::new(),
@@ -6151,6 +6203,18 @@ mod tests {
         assert_eq!(
             implicit.spectator_final_hosts,
             explicit.spectator_final_hosts
+        );
+        assert_eq!(
+            implicit.spectator_outage_start_frame,
+            explicit.spectator_outage_start_frame
+        );
+        assert_eq!(
+            implicit.spectator_max_frame_during_outage,
+            explicit.spectator_max_frame_during_outage
+        );
+        assert_eq!(
+            implicit.spectator_min_hosts_during_outage,
+            explicit.spectator_min_hosts_during_outage
         );
         assert_eq!(implicit.verdict.passed(), explicit.verdict.passed());
     }

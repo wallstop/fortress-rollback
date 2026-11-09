@@ -1136,6 +1136,115 @@ fn check_spectator_graceful_remove_row(
     }
 }
 
+/// A canonical spectator host silenced after a membership change must fail over
+/// to the remaining survivor without inventing or losing history. The outage is
+/// transport-only (`Block` to the spectator address), so the game mesh keeps its
+/// confirmed history; only the spectator's observer feed changes.
+#[test]
+fn spectator_host_outage_after_removal_fails_over_to_surviving_host() {
+    let n = 3;
+    // Silencing the canonical host must promote the survivor; silencing the
+    // lower-priority host must not disturb the canonical display. Both must
+    // keep the exact certified frozen history across the outage.
+    for outage_host in [0, 2] {
+        check_spectator_host_outage(outage_host, n);
+    }
+}
+
+#[track_caller]
+fn check_spectator_host_outage(outage_host: usize, n: usize) {
+    let mut schedule =
+        graceful_remove_schedule_peers(n, SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    schedule.config.spectator_hosts = vec![0, 2];
+    schedule.config.steps = 360;
+    schedule.heal_at = 360;
+    schedule.events.push((
+        140,
+        ScheduleEvent::Block {
+            from: outage_host,
+            to: n,
+            blocked: true,
+        },
+    ));
+    schedule.events.push((
+        220,
+        ScheduleEvent::Block {
+            from: outage_host,
+            to: n,
+            blocked: false,
+        },
+    ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    let mut run_options = options(PeerDriveOrder::Forward, None);
+    // Longer than the default 500 ms notify delay, far shorter than the 80-step
+    // outage, so the spectator's host endpoint fails inside the blocked window.
+    run_options.disconnect_timeout = Some(Duration::from_millis(600));
+
+    let report = run(&schedule, &run_options);
+    report.expect_pass(&schedule);
+    let control = removal_control(&report);
+    let outage_start = report
+        .spectator_outage_start_frame
+        .expect("the spectator-directed outage is observed");
+    assert!(
+        outage_start >= control.freeze_frame,
+        "outage must begin after the certified removal cut: start={outage_start}, {control:?}"
+    );
+    assert_eq!(
+        report.spectator_min_hosts_during_outage,
+        Some(1),
+        "the spectator must observe the canonical host failure and retain one survivor"
+    );
+    assert!(
+        report
+            .spectator_max_frame_during_outage
+            .is_some_and(|frame| frame > outage_start),
+        "the surviving host must advance the spectator during the outage: start={outage_start}, max={:?}",
+        report.spectator_max_frame_during_outage
+    );
+    let history = spectator_inputs(&report);
+    assert!(
+        history
+            .keys()
+            .next_back()
+            .is_some_and(|frame| *frame > outage_start + 5),
+        "spectator did not resume past the outage window: {:?}",
+        history.keys().next_back()
+    );
+    for frame in control.freeze_frame..=control.freeze_frame + 10 {
+        let actual = history
+            .get(&frame)
+            .unwrap_or_else(|| panic!("spectator never displayed frame {frame}"));
+        let expected = reference_inputs::<StubInput>(frame, 0, n, None, Some(control))
+            .into_iter()
+            .enumerate()
+            .map(|(player, input)| {
+                (
+                    input.fingerprint(),
+                    if player == control.target && frame > control.freeze_frame {
+                        InputStatus::Disconnected
+                    } else {
+                        InputStatus::Confirmed
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, &expected,
+            "spectator frame {frame} across host failover"
+        );
+    }
+
+    let replay = run(&schedule, &run_options);
+    replay.expect_pass(&schedule);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.verdict.failures, replay.verdict.failures);
+    assert_eq!(
+        report.differential_trajectory,
+        replay.differential_trajectory
+    );
+}
+
 #[test]
 fn automatic_disconnect_matrix_matches_independent_frozen_history() {
     for (save_mode, input_delay, delivery) in [

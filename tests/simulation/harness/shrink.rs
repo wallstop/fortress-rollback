@@ -75,6 +75,9 @@ struct FinalSummary {
     spectator_applied_frames: usize,
     spectator_max_frame: Option<i32>,
     spectator_final_hosts: Option<usize>,
+    spectator_outage_start_frame: Option<i32>,
+    spectator_max_frame_during_outage: Option<i32>,
+    spectator_min_hosts_during_outage: Option<usize>,
     verdict_recovered_within_b: Option<bool>,
     violation_allowlist_hits: Vec<super::oracle::ViolationAllowlistHit>,
 }
@@ -107,6 +110,9 @@ impl From<&RunReport> for FinalSummary {
             spectator_applied_frames: report.spectator_applied_frames,
             spectator_max_frame: report.spectator_max_frame,
             spectator_final_hosts: report.spectator_final_hosts,
+            spectator_outage_start_frame: report.spectator_outage_start_frame,
+            spectator_max_frame_during_outage: report.spectator_max_frame_during_outage,
+            spectator_min_hosts_during_outage: report.spectator_min_hosts_during_outage,
             verdict_recovered_within_b: report.verdict.recovered_within_b,
             violation_allowlist_hits: report.verdict.violation_allowlist_hits.clone(),
         }
@@ -1043,6 +1049,9 @@ mod tests {
             spectator_applied_frames: 0,
             spectator_max_frame: None,
             spectator_final_hosts: None,
+            spectator_outage_start_frame: None,
+            spectator_max_frame_during_outage: None,
+            spectator_min_hosts_during_outage: None,
         }
     }
 
