@@ -38,8 +38,8 @@ use oracle::{
     ViolationSignature, ViolationSource, DEFAULT_VIOLATION_ALLOWLIST, POST_HEAL_MIN_ADVANCE,
 };
 use schedule::{
-    hot_join_host_for_slot, validate_schedule, AppModel, CpuFeedbackPolicy, DropPolicy, FrameModel,
-    Schedule, ScheduleEvent, WaitRecommendationPolicy,
+    hot_join_host_for_slot, validate_schedule, AppModel, BackgroundNoise, CpuFeedbackPolicy,
+    DropPolicy, FrameModel, SavePolicy, Schedule, ScheduleEvent, WaitRecommendationPolicy,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -1097,6 +1097,22 @@ pub struct DifferentialRemovalControl {
     pub load_count_at_commit: usize,
 }
 
+/// Successful automatic hot-join replacement applied to the nominal model.
+/// `freeze_frame` is the certified removal cut `F`: input `F` remains nominal,
+/// `F+1..snapshot_frame-1` repeat it, and `snapshot_frame` onward use the
+/// replacement generation's real input, which rewrites the snapshot frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DifferentialHotJoinControl {
+    pub host: usize,
+    pub target: usize,
+    pub removal_step: u32,
+    pub freeze_frame: i32,
+    pub handoff_floor: i32,
+    /// `i32::MAX` until the replacement's first load identifies the snapshot.
+    pub snapshot_frame: i32,
+    pub load_step: Option<u32>,
+}
+
 /// Normalized, peer-indexed confirmed history plus optional spectator display
 /// for differential cross-order comparison. Visit-order trace events and network
 /// counters are deliberately excluded. The values have already been checked
@@ -1108,6 +1124,7 @@ pub struct DifferentialTrajectory {
     pub spectator_inputs: Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
     pub input_delay_control: Option<DifferentialInputDelayControl>,
     pub removal_control: Option<DifferentialRemovalControl>,
+    pub hot_join_control: Option<DifferentialHotJoinControl>,
 }
 
 /// Outcome of one simulation run.
@@ -2030,6 +2047,7 @@ struct HotJoinRuntime<'a, I: SimInput> {
     peers: &'a mut [PeerSlot<I>],
     dead: &'a [bool],
     oracle: &'a mut Oracle,
+    differential_hot_join_control: &'a mut Option<DifferentialHotJoinControl>,
 }
 
 #[cfg(feature = "hot-join")]
@@ -2124,11 +2142,56 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         return;
     }
 
+    if ctx.options.differential.is_some() {
+        let handle = PlayerHandle::new(slot);
+        let freeze_frame = ctx.peers[host]
+            .session
+            .diagnostic_player_receipt_frame(handle)
+            .map(Frame::as_i32);
+        let connected = ctx.peers[host].session.diagnostic_player_connected(handle);
+        let running = ctx.peers[host].session.current_state() == SessionState::Running;
+        match freeze_frame {
+            Some(freeze) if freeze >= 0 && connected == Some(false) && running => {
+                *ctx.differential_hot_join_control = Some(DifferentialHotJoinControl {
+                    host,
+                    target: slot,
+                    removal_step: step,
+                    freeze_frame: freeze,
+                    handoff_floor: 0,
+                    snapshot_frame: i32::MAX,
+                    load_step: None,
+                });
+            },
+            _ => ctx.oracle.observe_runner_error(
+                "hot_join_removal_commit",
+                host,
+                step,
+                format!(
+                    "hot-join removal did not commit at a certified cut: freeze={freeze_frame:?}, connected={connected:?}, running={running}"
+                ),
+            ),
+        }
+    }
+
     let handoff_floor = ctx.peers[host]
         .session
         .confirmed_frame()
         .as_i32()
         .saturating_sub(i32::try_from(ctx.schedule.config.max_prediction).unwrap_or(i32::MAX));
+    if let Some(control) = ctx.differential_hot_join_control.as_mut() {
+        control.handoff_floor = handoff_floor;
+        if handoff_floor > control.freeze_frame {
+            ctx.oracle.observe_runner_error(
+                "hot_join_removal_commit",
+                host,
+                step,
+                format!(
+                    "hot-join handoff floor {handoff_floor} exceeds certified cut {}",
+                    control.freeze_frame
+                ),
+            );
+        }
+    }
     // `handoff_floor` is a post-advance state-frame boundary. Canonical
     // confirmed-input samples are keyed by the input frame that produces the
     // next state frame, so input frame `handoff_floor - 1` is the first sample
@@ -2170,12 +2233,35 @@ fn reference_input<I: SimInput>(
     peer: usize,
     control: Option<DifferentialInputDelayControl>,
     removal: Option<DifferentialRemovalControl>,
+    hot_join: Option<DifferentialHotJoinControl>,
 ) -> I {
+    if let Some(hot_join) = hot_join.filter(|hot_join| hot_join.target == peer) {
+        if frame > hot_join.freeze_frame && frame < hot_join.snapshot_frame {
+            // The removed generation's cut input stays nominal. Reactivation
+            // rewrites the snapshot frame itself with the replacement's real
+            // input, so only strictly earlier frames remain frozen.
+            return reference_input::<I>(
+                hot_join.freeze_frame,
+                input_delay,
+                peer,
+                control,
+                None,
+                None,
+            );
+        }
+    }
     if let Some(removal) = removal.filter(|removal| removal.target == peer) {
         if frame > removal.freeze_frame {
             // The certified cut itself still consumes the real nominal input.
             // Only strictly later frames repeat it, matching InputQueue::freeze_at.
-            return reference_input::<I>(removal.freeze_frame, input_delay, peer, control, None);
+            return reference_input::<I>(
+                removal.freeze_frame,
+                input_delay,
+                peer,
+                control,
+                None,
+                None,
+            );
         }
     }
     if let Some(control) = control.filter(|control| control.peer == peer) {
@@ -2184,7 +2270,7 @@ fn reference_input<I: SimInput>(
         let old_end = control.current_frame.saturating_add(old_delay);
         let new_end = control.current_frame.saturating_add(new_delay);
         if frame < old_end {
-            return reference_input::<I>(frame, control.old_delay, peer, None, removal);
+            return reference_input::<I>(frame, control.old_delay, peer, None, removal, hot_join);
         }
         if frame < new_end {
             let ordinal = u32::try_from(control.current_frame - 1).unwrap_or(0);
@@ -2210,8 +2296,19 @@ pub(super) fn reference_inputs<I: SimInput>(
     control: Option<DifferentialInputDelayControl>,
     removal: Option<DifferentialRemovalControl>,
 ) -> Vec<I> {
+    reference_inputs_with_hot_join(frame, input_delay, n, control, removal, None)
+}
+
+fn reference_inputs_with_hot_join<I: SimInput>(
+    frame: i32,
+    input_delay: usize,
+    n: usize,
+    control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialRemovalControl>,
+    hot_join: Option<DifferentialHotJoinControl>,
+) -> Vec<I> {
     (0..n)
-        .map(|peer| reference_input::<I>(frame, input_delay, peer, control, removal))
+        .map(|peer| reference_input::<I>(frame, input_delay, peer, control, removal, hot_join))
         .collect()
 }
 
@@ -2224,10 +2321,28 @@ fn reference_states<I: SimInput>(
     control: Option<DifferentialInputDelayControl>,
     removal: Option<DifferentialRemovalControl>,
 ) -> BTreeMap<i32, StateStub> {
+    reference_states_with_hot_join::<I>(through_post_frame, input_delay, n, control, removal, None)
+}
+
+fn reference_states_with_hot_join<I: SimInput>(
+    through_post_frame: i32,
+    input_delay: usize,
+    n: usize,
+    control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialRemovalControl>,
+    hot_join: Option<DifferentialHotJoinControl>,
+) -> BTreeMap<i32, StateStub> {
     let mut states = BTreeMap::new();
     let mut state = StateStub::default();
     for post_frame in 1..=through_post_frame.max(0) {
-        let inputs = reference_inputs::<I>(post_frame - 1, input_delay, n, control, removal);
+        let inputs = reference_inputs_with_hot_join::<I>(
+            post_frame - 1,
+            input_delay,
+            n,
+            control,
+            removal,
+            hot_join,
+        );
         let total = inputs
             .into_iter()
             .fold(0_u32, |total, input| total.wrapping_add(input.value()));
@@ -2690,17 +2805,56 @@ pub(crate) fn validate_run_options(
                 );
             }
         }
+        let hot_join_events: Vec<_> = schedule
+            .events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                ScheduleEvent::HotJoin { slot } => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        if hot_join_events.len() > 1 {
+            return Err("differential mode supports at most one HotJoin event".to_owned());
+        }
+        if let Some(&slot) = hot_join_events.first() {
+            if (slot, n) != (1, 2) {
+                return Err(
+                    "differential HotJoin requires the bounded two-peer slot=1 scenario".to_owned(),
+                );
+            }
+            if !removal_events.is_empty()
+                || !delay_events.is_empty()
+                || !peer_kills.is_empty()
+                || !schedule.config.spectator_hosts.is_empty()
+            {
+                return Err(
+                    "differential HotJoin cannot be combined with another lifecycle, SetInputDelay, or a spectator"
+                        .to_owned(),
+                );
+            }
+            if schedule.config.input_delay != 0 {
+                return Err("differential HotJoin requires input_delay 0".to_owned());
+            }
+            if schedule.config.save_mode != SavePolicy::EveryFrame {
+                return Err(
+                    "differential HotJoin requires SaveMode::EveryFrame for its bounded row"
+                        .to_owned(),
+                );
+            }
+            if schedule.config.noise != BackgroundNoise::Clean {
+                return Err("differential HotJoin requires BackgroundNoise::Clean".to_owned());
+            }
+        }
         if schedule.events.iter().any(|(_, event)| {
             matches!(
                 event,
                 ScheduleEvent::LegacyDisconnect { .. }
                     | ScheduleEvent::SpectatorHostKill { .. }
-                    | ScheduleEvent::HotJoin { .. }
                     | ScheduleEvent::Rebind { .. }
             )
         }) {
             return Err(
-                "differential mode forbids legacy disconnects, spectator kills, hot-join, and rebind"
+                "differential mode forbids legacy disconnects, spectator kills, and rebind"
                     .to_owned(),
             );
         }
@@ -3152,6 +3306,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         })
     });
     let mut differential_automatic_committed = vec![false; n];
+    let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
+    let mut hot_join_activation_values: Vec<Option<Vec<InputFingerprint>>> = vec![None; n];
+    let mut hot_join_activation_done = vec![false; n];
     let mut oracle = Oracle::new(n);
     validate_violation_allowlist(DEFAULT_VIOLATION_ALLOWLIST)
         .expect("reviewed default violation allowlist must stay valid");
@@ -3636,6 +3793,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         peers: &mut peers,
                         dead: &dead,
                         oracle: &mut oracle,
+                        differential_hot_join_control: &mut differential_hot_join_control,
                     };
                     start_hot_join_for_slot(*slot, step, &mut ctx);
                 },
@@ -3889,8 +4047,36 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                         )
                                     {
                                         let snapshot_frame = frame.as_i32();
+                                        // Reactivation rewrites the snapshot frame
+                                        // with the replacement's real input. Skip
+                                        // the transient frozen observation and
+                                        // check the authoritative final value below.
                                         slot.sampled_confirmed = snapshot_frame;
                                         slot.pending_replacement_handoff_floor = None;
+                                        if let Some(control) =
+                                            differential_hot_join_control.as_mut()
+                                        {
+                                            control.snapshot_frame = snapshot_frame;
+                                            control.load_step = Some(step);
+                                            oracle.forget_confirmed_input(snapshot_frame);
+                                            if let Some(histories) =
+                                                differential_confirmed_inputs.as_mut()
+                                            {
+                                                histories[i].remove(&snapshot_frame);
+                                                histories[control.host].remove(&snapshot_frame);
+                                            }
+                                            if snapshot_frame < control.handoff_floor {
+                                                oracle.observe_runner_error(
+                                                    "hot_join_snapshot_floor",
+                                                    i,
+                                                    step,
+                                                    format!(
+                                                        "replacement snapshot {snapshot_frame} is below handoff floor {}",
+                                                        control.handoff_floor
+                                                    ),
+                                                );
+                                            }
+                                        }
                                     }
                                 } else {
                                     slot.game.handle_requests(requests);
@@ -3919,12 +4105,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
                             Ok(inputs) => {
                                 if differential.is_some() {
-                                    let expected = reference_inputs::<I>(
+                                    let expected = reference_inputs_with_hot_join::<I>(
                                         frame,
                                         schedule.config.input_delay,
                                         n,
                                         differential_input_delay_control,
                                         differential_removal_control,
+                                        differential_hot_join_control,
                                     );
                                     oracle.observe_reference_inputs(i, frame, &expected, &inputs);
                                     if let Some(histories) = differential_confirmed_inputs.as_mut()
@@ -3977,6 +4164,52 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             }
             if run_c && step == recovery_anchor_at {
                 confirmed_after_recovery[i] = confirmed.as_i32();
+            }
+        }
+
+        if let Some(control) = differential_hot_join_control {
+            let activation = control.snapshot_frame;
+            if activation != i32::MAX {
+                let expected: Vec<InputFingerprint> = reference_inputs_with_hot_join::<I>(
+                    activation,
+                    schedule.config.input_delay,
+                    n,
+                    differential_input_delay_control,
+                    differential_removal_control,
+                    differential_hot_join_control,
+                )
+                .into_iter()
+                .map(SimInput::fingerprint)
+                .collect();
+                for peer in [control.host, control.target] {
+                    if hot_join_activation_done[peer] || step_confirmed[peer] < activation {
+                        continue;
+                    }
+                    match peers[peer]
+                        .session
+                        .confirmed_inputs_for_frame(Frame::new(activation))
+                    {
+                        Ok(inputs) => {
+                            let values: Vec<InputFingerprint> =
+                                inputs.iter().map(|input| input.fingerprint()).collect();
+                            // Reactivation rewrites the activation frame after
+                            // the replacement's backfill is reconciled; wait for
+                            // that authoritative value instead of recording the
+                            // transient frozen predecessor.
+                            let rewritten = values == expected;
+                            hot_join_activation_values[peer] = Some(values);
+                            hot_join_activation_done[peer] |= rewritten;
+                        },
+                        Err(error) => {
+                            oracle.observe_confirmed_unavailable(
+                                peer,
+                                activation,
+                                &format!("{error:?}"),
+                            );
+                            hot_join_activation_done[peer] = true;
+                        },
+                    }
+                }
             }
         }
 
@@ -4348,6 +4581,53 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         .map(|slot| slot.session.current_frame().as_i32())
         .collect();
 
+    if let Some(control) = differential_hot_join_control {
+        if control.snapshot_frame == i32::MAX || control.load_step.is_none() {
+            oracle.observe_runner_error(
+                "hot_join_snapshot_missing",
+                control.target,
+                schedule.config.steps.saturating_sub(1),
+                "hot-join replacement never loaded a snapshot",
+            );
+        } else {
+            // The activation frame is rewritten from the frozen predecessor to
+            // the replacement's real input. Validate the last value observed
+            // after it became confirmed; this catches both a permanently stale
+            // freeze and a transient rewrite without depending on queue
+            // retention at the end of a long run.
+            let activation = control.snapshot_frame;
+            let expected: Vec<InputFingerprint> = reference_inputs_with_hot_join::<I>(
+                activation,
+                schedule.config.input_delay,
+                n,
+                differential_input_delay_control,
+                differential_removal_control,
+                differential_hot_join_control,
+            )
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect();
+            for peer in [control.host, control.target] {
+                match &hot_join_activation_values[peer] {
+                    Some(values) => {
+                        oracle.observe_reference_inputs(peer, activation, &expected, values);
+                        oracle.observe_confirmed_inputs(peer, activation, values.clone());
+                        if let Some(histories) = differential_confirmed_inputs.as_mut() {
+                            histories[peer].insert(activation, values.clone());
+                        }
+                    },
+                    None if final_confirmed[peer] >= activation => oracle
+                        .observe_confirmed_unavailable(
+                            peer,
+                            activation,
+                            "activation frame was confirmed but never sampled",
+                        ),
+                    None => {},
+                }
+            }
+        }
+    }
+
     let differential_trajectory = differential.map(|_| {
         let maximum_required = final_confirmed
             .iter()
@@ -4356,12 +4636,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             .max()
             .unwrap_or(0);
         let maximum_reference_frame = maximum_required.saturating_add(1).max(0);
-        let expected_states = reference_states::<I>(
+        let expected_states = reference_states_with_hot_join::<I>(
             maximum_reference_frame,
             schedule.config.input_delay,
             n,
             differential_input_delay_control,
             differential_removal_control,
+            differential_hot_join_control,
         );
         let mut confirmed_states = Vec::with_capacity(n);
         for (peer, states) in recorded.iter().enumerate() {
@@ -4376,12 +4657,17 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .map_or(session_current_frames[peer], |boundary| {
                     session_current_frames[peer].min(boundary)
                 });
+            // A replacement generation has no state before its snapshot; the
+            // old generation's recorded prefix was pruned at handoff.
+            let state_floor = differential_hot_join_control
+                .filter(|control| control.target == peer)
+                .map_or(1, |control| control.snapshot_frame.saturating_add(1));
             // Confirmation can legally outrun the session's last local advance.
             // Derive the required recording ceiling from the independent session
             // frame, never from the game value being validated.
             let simulated_confirmed = confirmed.min(current_frame);
             let mut retained = BTreeMap::new();
-            for frame in 1..=simulated_confirmed.max(0) {
+            for frame in state_floor..=simulated_confirmed.max(0) {
                 let Some(&actual) = states.get(&frame) else {
                     oracle.observe_reference_state_missing(peer, frame, confirmed);
                     continue;
@@ -4413,7 +4699,8 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 let optional_frame = confirmed.saturating_add(1);
                 let within_retired_boundary =
                     retired_state_boundary.is_none_or(|boundary| optional_frame <= boundary);
-                if within_retired_boundary {
+                let within_replacement_floor = optional_frame >= state_floor;
+                if within_retired_boundary && within_replacement_floor {
                     if let Some(&actual) = states.get(&optional_frame) {
                         if let Some(&expected) = expected_states.get(&optional_frame) {
                             oracle.observe_reference_state(peer, optional_frame, expected, actual);
@@ -4435,6 +4722,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .map(|spectator| spectator.applied_inputs.clone()),
             input_delay_control: differential_input_delay_control,
             removal_control: differential_removal_control,
+            hot_join_control: differential_hot_join_control,
         }
     });
 
@@ -5461,6 +5749,7 @@ mod tests {
         let dead = vec![false; n];
         let mut oracle = Oracle::new(n);
         let options = RunOptions::default();
+        let mut differential_hot_join_control = None;
 
         {
             let mut ctx = HotJoinRuntime {
@@ -5472,6 +5761,7 @@ mod tests {
                 peers: &mut peers,
                 dead: &dead,
                 oracle: &mut oracle,
+                differential_hot_join_control: &mut differential_hot_join_control,
             };
             start_hot_join_for_slot::<StubInput>(1, 3, &mut ctx);
         }

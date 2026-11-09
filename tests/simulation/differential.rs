@@ -4,8 +4,10 @@
 //! post-synchronization input-delay increase, and the exact `StateStub`
 //! parity/sum transition, plus spectator display of that fixed history. Bounded
 //! two-peer explicit and three-peer automatic removals freeze the target at its
-//! certified cut. Other runtime membership changes and arbitrary game state
-//! semantics remain outside this oracle's claim.
+//! certified cut. One bounded two-peer hot-join freezes through frame `A-1`,
+//! then rewrites the snapshot frame `A` with the replacement's nominal input.
+//! Other membership widths and arbitrary game state semantics remain outside
+//! this oracle's claim.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
@@ -14,6 +16,8 @@ use super::harness::schedule::{
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::shrink::{shrink_failure, ShrinkConfig};
+#[cfg(feature = "hot-join")]
+use super::harness::DifferentialHotJoinControl;
 use super::harness::{
     actual_differential_input, peer_addr, reference_inputs, run, run_with_final_game_frame_offset,
     run_with_input, validate_run_options, DifferentialInputDelayControl, DifferentialMutation,
@@ -154,6 +158,60 @@ fn automatic_disconnect_schedule(
         .push((80, ScheduleEvent::PeerKill { peer: 2 }));
     schedule.events.sort_by_key(|(step, _)| *step);
     schedule
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_schedule() -> Schedule {
+    let mut schedule = schedule(SavePolicy::EveryFrame, 0, Delivery::Delayed);
+    schedule.config.max_prediction = 8;
+    // Hold the replacement's handshake long enough to force a non-empty
+    // post-cut freeze window before activation.
+    schedule
+        .events
+        .push((100, ScheduleEvent::HotJoin { slot: 1 }));
+    schedule.events.push((
+        100,
+        ScheduleEvent::Hold {
+            from: 1,
+            to: 0,
+            holding: true,
+        },
+    ));
+    schedule.events.push((
+        116,
+        ScheduleEvent::Hold {
+            from: 1,
+            to: 0,
+            holding: false,
+        },
+    ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_control(report: &RunReport) -> DifferentialHotJoinControl {
+    report
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.hot_join_control)
+        .expect("successful hot-join is anchored")
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_reference(frame: i32, control: DifferentialHotJoinControl) -> Vec<StubInput> {
+    if frame >= control.snapshot_frame {
+        return reference_inputs::<StubInput>(frame, 0, 2, None, None);
+    }
+    let frozen = DifferentialRemovalControl {
+        by: control.host,
+        target: control.target,
+        current_frame: control.freeze_frame,
+        freeze_frame: control.freeze_frame,
+        commit_step: control.removal_step,
+        load_count_at_commit: 0,
+    };
+    reference_inputs::<StubInput>(frame, 0, 2, None, Some(frozen))
 }
 
 fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
@@ -1211,6 +1269,259 @@ fn automatic_disconnect_post_freeze_state_and_missing_state_mutations_are_detect
         )));
 }
 
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_matches_independent_freeze_and_replacement_history() {
+    let schedule = hot_join_schedule();
+    let options = options(PeerDriveOrder::Forward, None);
+    let report = run(&schedule, &options);
+    report.expect_pass(&schedule);
+    let control = hot_join_control(&report);
+    assert_eq!((control.host, control.target), (0, 1));
+    assert_eq!(control.removal_step, 100);
+    assert!(control.freeze_frame >= 0);
+    assert!(control.handoff_floor >= 0);
+    assert!(control.handoff_floor <= control.freeze_frame);
+    assert!(control.snapshot_frame >= control.handoff_floor);
+    assert!(control
+        .load_step
+        .is_some_and(|load| load > control.removal_step));
+    assert!(
+        control.snapshot_frame >= control.freeze_frame + 2,
+        "held handshake must force a non-empty freeze window: {control:?}"
+    );
+
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    for frame in control.freeze_frame..=control.freeze_frame + 5 {
+        if frame < control.snapshot_frame {
+            assert_eq!(
+                trajectory.confirmed_inputs[0].get(&frame),
+                Some(
+                    &hot_join_reference(frame, control)
+                        .into_iter()
+                        .map(SimInput::fingerprint)
+                        .collect()
+                ),
+                "host freeze input frame {frame}"
+            );
+        }
+    }
+    for frame in control.snapshot_frame..=control.snapshot_frame + 20 {
+        let expected = hot_join_reference(frame, control)
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect::<Vec<_>>();
+        let actual = trajectory.confirmed_inputs[0]
+            .get(&frame)
+            .unwrap_or_else(|| panic!("host never confirmed post-resume frame {frame}"));
+        assert_eq!(actual, &expected, "host replacement input frame {frame}");
+        if frame >= control.snapshot_frame && frame <= report.final_confirmed[1] {
+            let replacement = trajectory.confirmed_inputs[1]
+                .get(&frame)
+                .unwrap_or_else(|| panic!("replacement never confirmed frame {frame}"));
+            assert_eq!(replacement, &expected, "replacement input frame {frame}");
+        }
+    }
+
+    let frozen = hot_join_reference(control.freeze_frame + 1, control);
+    let nominal = reference_inputs::<StubInput>(control.freeze_frame + 1, 0, 2, None, None);
+    assert_ne!(frozen, nominal, "freeze window must differ from nominal");
+    let resumed = hot_join_reference(control.snapshot_frame, control);
+    let still_frozen = hot_join_reference(control.snapshot_frame - 1, control);
+    assert_ne!(
+        resumed, still_frozen,
+        "activation frame must be rewritten to the nominal stream"
+    );
+    // The two-player StateStub fold is parity-only, and every nominal pair here
+    // has the same total parity, so the exact input rewrite above is this
+    // boundary's non-vacuous oracle; state controls are covered separately.
+
+    assert!(
+        trajectory.confirmed_states[1]
+            .keys()
+            .next()
+            .is_some_and(|frame| *frame == control.snapshot_frame + 1),
+        "replacement state history must start at A+1: {:?}",
+        trajectory.confirmed_states[1].keys().next()
+    );
+    let resumed_state = trajectory.confirmed_states[1][&(control.snapshot_frame + 1)];
+    assert_eq!(
+        trajectory.confirmed_states[0].get(&(control.snapshot_frame + 1)),
+        Some(&resumed_state),
+        "host and replacement must agree on the first post-resume state"
+    );
+
+    assert_eq!(
+        report.peer_event_counts_by_peer[0].get(&EventKind::PeerJoined),
+        Some(&1),
+        "host must observe exactly one PeerJoined"
+    );
+    let replay = run(&schedule, &options);
+    replay.expect_pass(&schedule);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.verdict.failures, replay.verdict.failures);
+    assert_eq!(
+        report.differential_trajectory,
+        replay.differential_trajectory
+    );
+    assert_eq!(hot_join_control(&replay), control);
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_activation_check_survives_long_drain() {
+    // The activation frame is validated while it is still retained, so a long
+    // post-resume drain must not turn a correct rewrite into an eviction error.
+    let mut schedule = hot_join_schedule();
+    schedule.config.steps = 400;
+    schedule.heal_at = 400;
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    report.expect_pass(&schedule);
+    let control = hot_join_control(&report);
+    let activation = control.snapshot_frame;
+    let expected = reference_inputs::<StubInput>(activation, 0, 2, None, None)
+        .into_iter()
+        .map(SimInput::fingerprint)
+        .collect::<Vec<_>>();
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    assert_eq!(
+        trajectory.confirmed_inputs[0].get(&activation),
+        Some(&expected),
+        "long drain must retain the rewritten activation frame"
+    );
+    assert!(report.final_confirmed[0] > activation + 128);
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_mutations_and_replacement_floor_are_detected() {
+    let schedule = hot_join_schedule();
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = hot_join_control(&nominal);
+    let resume = control.snapshot_frame;
+
+    let frozen_lie = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput {
+                ordinal: u32::try_from(control.freeze_frame).expect("non-negative cut"),
+            }),
+        ),
+    );
+    assert!(frozen_lie.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0, frame, .. } if *frame == control.freeze_frame
+    )));
+
+    let resume_lie = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput {
+                ordinal: u32::try_from(resume + 2).expect("non-negative resume"),
+            }),
+        ),
+    );
+    assert!(resume_lie.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0, frame, .. } if *frame == resume + 2
+    )));
+
+    let wrong_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedState { frame: resume + 2 }),
+        ),
+    );
+    assert!(wrong_state.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { frame, .. } if *frame == resume + 2
+    )));
+
+    let missing_resume_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingState {
+                peer: 1,
+                frame: resume + 3,
+            }),
+        ),
+    );
+    assert!(missing_resume_state
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume + 3
+        )));
+
+    let missing_snapshot_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingState {
+                peer: 1,
+                frame: resume,
+            }),
+        ),
+    );
+    assert!(
+        !missing_snapshot_state
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(
+                failure,
+                OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume
+            )),
+        "replacement snapshot frame legitimately has no recorded state"
+    );
+
+    let missing_history = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingStateHistory { peer: 1 }),
+        ),
+    );
+    assert!(missing_history
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume + 1
+        )));
+
+    let artifact = FailureArtifact::from_report(&schedule, &resume_lie);
+    artifact.validate().expect("hot-join artifact validates");
+    let encoded = serde_json::to_vec(&artifact).expect("hot-join artifact serializes");
+    let decoded: FailureArtifact =
+        serde_json::from_slice(&encoded).expect("hot-join artifact deserializes");
+    decoded
+        .validate()
+        .expect("decoded hot-join artifact validates");
+    let replay = run(&decoded.schedule, &decoded.replay_options);
+    assert_eq!(replay.trace_hash, resume_lie.trace_hash);
+    assert_eq!(replay.verdict.failures, resume_lie.verdict.failures);
+    assert_eq!(
+        replay.differential_trajectory,
+        resume_lie.differential_trajectory
+    );
+    assert_eq!(hot_join_control(&replay), control);
+}
+
 #[test]
 fn spectator_matrix_matches_nominal_history_across_delivery_and_drive_order() {
     for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
@@ -1922,7 +2233,6 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         ScheduleEvent::LegacyDisconnect { by: 0, target: 1 },
         ScheduleEvent::PeerKill { peer: 1 },
         ScheduleEvent::SpectatorHostKill { host: 0 },
-        ScheduleEvent::HotJoin { slot: 1 },
         ScheduleEvent::Rebind { peer: 1 },
     ];
     for event in forbidden_events {
@@ -1986,6 +2296,48 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
     automatic_timeout.disconnect_timeout = Some(Duration::from_millis(u64::from(STEPS) * 16));
     assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
+
+    #[cfg(feature = "hot-join")]
+    {
+        let hot = hot_join_schedule();
+        validate_run_options(&hot, &valid_options)
+            .expect("the bounded two-peer hot-join is supported");
+        let mut duplicate = hot.clone();
+        duplicate
+            .events
+            .push((101, ScheduleEvent::HotJoin { slot: 1 }));
+        assert!(validate_run_options(&duplicate, &valid_options).is_err());
+        let mut wrong_slot = hot.clone();
+        wrong_slot
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::HotJoin { .. }));
+        wrong_slot
+            .events
+            .push((100, ScheduleEvent::HotJoin { slot: 0 }));
+        assert!(validate_run_options(&wrong_slot, &valid_options).is_err());
+        let mut composed_delay = hot.clone();
+        composed_delay
+            .events
+            .push((120, ScheduleEvent::SetInputDelay { peer: 0, delay: 2 }));
+        assert!(validate_run_options(&composed_delay, &valid_options).is_err());
+        let mut composed_removal = hot.clone();
+        composed_removal
+            .events
+            .push((120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+        assert!(validate_run_options(&composed_removal, &valid_options).is_err());
+        let mut with_spectator = hot.clone();
+        with_spectator.config.spectator_hosts = vec![0];
+        assert!(validate_run_options(&with_spectator, &valid_options).is_err());
+        let mut nonzero_delay = hot.clone();
+        nonzero_delay.config.input_delay = 2;
+        assert!(validate_run_options(&nonzero_delay, &valid_options).is_err());
+        let mut sparse = hot.clone();
+        sparse.config.save_mode = SavePolicy::Sparse;
+        assert!(validate_run_options(&sparse, &valid_options).is_err());
+        let mut noisy = hot;
+        noisy.config.noise = BackgroundNoise::Mild;
+        assert!(validate_run_options(&noisy, &valid_options).is_err());
+    }
 
     for (old_delay, new_delay) in [(0, 2), (2, 4)] {
         let dynamic = runtime_delay_schedule(

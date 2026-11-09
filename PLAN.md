@@ -8,7 +8,7 @@
 
 1. **P0 — Differentially prove rollback equivalence and oracle fidelity.** Hypothesis: for one fixed committed input/membership
    history, arbitrary legal delivery/session interleavings produce the same confirmed trajectory as a non-networked reference,
-   including hot-join and redundant-spectator failover. Explore queue/ring boundaries,
+   including N-peer/cross-order hot-join and redundant-spectator failover. Explore queue/ring boundaries,
    repeated mispredictions, state-only divergence, and near-overflow frames; compare implementation traces with the
    relevant TLA+/Kani assumptions rather than treating a model pass as implementation proof. **Exit:** mutation controls
    demonstrate detection of input, state, freeze, false-positive, and silent-desync failures; every red case minimizes

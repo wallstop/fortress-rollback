@@ -724,6 +724,14 @@ impl Oracle {
         }
     }
 
+    /// Drops the first-writer record for one frame when a legitimate
+    /// reactivation rewrites that frame's confirmed input (hot-join re-roots
+    /// the activation frame from the frozen predecessor to the replacement's
+    /// real input). The next sample re-establishes the canonical value.
+    pub fn forget_confirmed_input(&mut self, frame: i32) {
+        self.canonical_inputs.remove(&frame);
+    }
+
     /// (a)-sampling: the session claimed `frame` confirmed but the inputs
     /// could not be fetched.
     pub fn observe_confirmed_unavailable(&mut self, peer: usize, frame: i32, error: &str) {
