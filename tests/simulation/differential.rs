@@ -530,6 +530,58 @@ fn assert_spectator_non_vacuous(report: &RunReport) {
     }
 }
 
+fn assert_spectator_removal_boundaries(
+    report: &RunReport,
+    baseline: &RunReport,
+    input_delay: usize,
+) {
+    let control = removal_control(report);
+    let history = spectator_inputs(report);
+    let baseline_history = spectator_inputs(baseline);
+    assert!(
+        history
+            .keys()
+            .next_back()
+            .is_some_and(|frame| *frame >= control.freeze_frame + 20),
+        "spectator did not display the frozen boundary window"
+    );
+    for frame in control.freeze_frame..=control.freeze_frame + 20 {
+        let actual = history
+            .get(&frame)
+            .unwrap_or_else(|| panic!("spectator never displayed removal boundary frame {frame}"));
+        let expected = reference_inputs::<StubInput>(frame, input_delay, 2, None, Some(control))
+            .into_iter()
+            .enumerate()
+            .map(|(player, input)| {
+                (
+                    input.fingerprint(),
+                    if player == control.target && frame > control.freeze_frame {
+                        InputStatus::Disconnected
+                    } else {
+                        InputStatus::Confirmed
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, &expected, "spectator removal frame {frame}");
+    }
+
+    let at_cut = &history[&(control.freeze_frame)];
+    let baseline_at_cut = &baseline_history[&(control.freeze_frame)];
+    assert_eq!(at_cut, baseline_at_cut, "cut frame must remain nominal");
+    assert_eq!(at_cut[control.target].1, InputStatus::Confirmed);
+
+    let frozen = &history[&(control.freeze_frame + 1)];
+    let baseline_frozen = &baseline_history[&(control.freeze_frame + 1)];
+    assert_eq!(frozen[control.target].0, at_cut[control.target].0);
+    assert_eq!(frozen[control.target].1, InputStatus::Disconnected);
+    assert_eq!(baseline_frozen[control.target].1, InputStatus::Confirmed);
+    assert_ne!(
+        frozen[control.target].0, baseline_frozen[control.target].0,
+        "frozen target fingerprint must differ from matched nominal input"
+    );
+}
+
 fn assert_green_non_vacuous(report: &RunReport, delivery: Delivery) {
     assert_green_non_vacuous_with_retired_minimum(report, delivery, 30);
 }
@@ -757,6 +809,68 @@ fn graceful_remove_matrix_matches_independent_frozen_history() {
 }
 
 #[test]
+fn spectator_graceful_remove_matrix_matches_frozen_history_and_statuses() {
+    for (save_mode, input_delay, delivery) in [
+        (SavePolicy::EveryFrame, 0, Delivery::Reordered),
+        (SavePolicy::Sparse, 2, Delivery::Delayed),
+    ] {
+        let mut schedule = graceful_remove_schedule(save_mode, input_delay, delivery);
+        schedule.config.spectator_hosts = vec![0];
+        let mut baseline_schedule = schedule.clone();
+        baseline_schedule
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::GracefulRemove { .. }));
+        let baseline = run(&baseline_schedule, &options(PeerDriveOrder::Forward, None));
+        baseline.expect_pass(&baseline_schedule);
+        assert_spectator_non_vacuous(&baseline);
+        let mut canonical = None;
+
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert_green_non_vacuous(&report, delivery);
+            assert_graceful_remove_boundaries(&report, input_delay);
+            assert_post_removal_rollback_evidence(&report);
+            assert_spectator_removal_boundaries(&report, &baseline, input_delay);
+            let control = removal_control(&report);
+
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            assert_eq!(removal_control(&replay), control);
+
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            let projection = (
+                control,
+                trajectory.confirmed_inputs[0].clone(),
+                trajectory.confirmed_states[0].clone(),
+                trajectory.spectator_inputs.clone(),
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &projection, expected,
+                    "spectator history changed for {order:?}"
+                );
+            } else {
+                canonical = Some(projection);
+            }
+        }
+    }
+}
+
+#[test]
 fn automatic_disconnect_matrix_matches_independent_frozen_history() {
     for (save_mode, input_delay, delivery) in [
         (SavePolicy::EveryFrame, 0, Delivery::Reordered),
@@ -870,7 +984,8 @@ fn graceful_remove_known_answer_preserves_cut_and_repeats_it_afterward() {
 
 #[test]
 fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
-    let schedule = graceful_remove_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    let mut schedule = graceful_remove_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    schedule.config.spectator_hosts = vec![0];
     let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
     nominal.expect_pass(&schedule);
     let control = removal_control(&nominal);
@@ -879,14 +994,29 @@ fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
     };
     let options = options(PeerDriveOrder::Forward, Some(mutation));
     let report = run(&schedule, &options);
-    assert!(report.verdict.failures.iter().any(|failure| matches!(
-        failure,
-        OracleFailure::ReferenceInput { peer: 0, frame, .. }
-            if *frame == control.freeze_frame + 1
-    )));
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceInput { peer: 0, frame, .. }
+                if *frame == control.freeze_frame + 1
+        )),
+        "missing survivor frozen-input failure at F+1: {:?}",
+        report.verdict.failures
+    );
+    let spectator_frame = control.freeze_frame + 1;
+    let spectator_actual = spectator_inputs(&report)[&spectator_frame][control.target].0;
+    let spectator_expected =
+        reference_inputs::<StubInput>(spectator_frame, 2, 2, None, Some(control))[control.target]
+            .fingerprint();
+    assert_ne!(
+        spectator_actual, spectator_expected,
+        "the retained spectator stream must contain the shared frozen-input lie"
+    );
     assert!(!report.verdict.failures.iter().any(|failure| matches!(
         failure,
-        OracleFailure::ReferenceState { .. } | OracleFailure::ConfirmedInputDivergence { .. }
+        OracleFailure::ReferenceState { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
+            | OracleFailure::SpectatorInputDivergence { .. }
     )));
 
     let artifact = FailureArtifact::from_report(&schedule, &report);
@@ -905,6 +1035,32 @@ fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
     );
     assert_eq!(replay.verdict.failures, report.verdict.failures);
     assert_eq!(removal_control(&replay), control);
+}
+
+#[test]
+fn spectator_graceful_remove_rejects_disconnected_status_lie() {
+    let mut schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    schedule.config.spectator_hosts = vec![0];
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = removal_control(&nominal);
+
+    let mut options = options(PeerDriveOrder::Forward, None);
+    options.corrupt_spectator_status_from = Some(control.freeze_frame + 1);
+    let report = run(&schedule, &options);
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 2, frame, .. }
+            if *frame == control.freeze_frame + 1
+    )));
+
+    let replay = run(&schedule, &options);
+    assert_eq!(replay.trace_hash, report.trace_hash);
+    assert_eq!(replay.verdict.failures, report.verdict.failures);
+    assert_eq!(
+        replay.differential_trajectory,
+        report.differential_trajectory
+    );
 }
 
 #[test]
@@ -1788,7 +1944,14 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     assert!(validate_run_options(&wrong_direction, &valid_options).is_err());
     let mut with_spectator = removal.clone();
     with_spectator.config.spectator_hosts = vec![0];
-    assert!(validate_run_options(&with_spectator, &valid_options).is_err());
+    validate_run_options(&with_spectator, &valid_options)
+        .expect("a surviving primary host supports spectator removal equivalence");
+    let mut removed_primary_spectator = removal.clone();
+    removed_primary_spectator.config.spectator_hosts = vec![1, 0];
+    assert!(validate_run_options(&removed_primary_spectator, &valid_options).is_err());
+    let mut removed_redundant_host = removal.clone();
+    removed_redundant_host.config.spectator_hosts = vec![0, 1];
+    assert!(validate_run_options(&removed_redundant_host, &valid_options).is_err());
     let mut with_delay_change = removal;
     with_delay_change
         .events

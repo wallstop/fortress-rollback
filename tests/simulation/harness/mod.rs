@@ -2466,6 +2466,7 @@ struct SpectatorReference {
     input_delay: usize,
     num_players: usize,
     input_delay_control: Option<DifferentialInputDelayControl>,
+    removal_control: Option<DifferentialRemovalControl>,
 }
 
 fn drive_spectator<I: SimInput>(
@@ -2498,15 +2499,29 @@ fn drive_spectator<I: SimInput>(
                 .applied_inputs
                 .get(&frame)
                 .map_or(&[][..], Vec::as_slice);
+            let removal = reference.removal_control;
             let expected = reference_inputs::<I>(
                 frame,
                 reference.input_delay,
                 reference.num_players,
                 reference.input_delay_control,
-                None,
+                removal,
             )
             .into_iter()
-            .map(SimInput::fingerprint)
+            .enumerate()
+            .map(|(player, input)| {
+                let disconnected = removal.is_some_and(|control| {
+                    control.target == player && frame > control.freeze_frame
+                });
+                (
+                    input.fingerprint(),
+                    if disconnected {
+                        InputStatus::Disconnected
+                    } else {
+                        InputStatus::Confirmed
+                    },
+                )
+            })
             .collect::<Vec<_>>();
             oracle.observe_reference_spectator_inputs(
                 reference.num_players,
@@ -2643,9 +2658,11 @@ pub(crate) fn validate_run_options(
                     "differential GracefulRemove cannot be combined with SetInputDelay".to_owned(),
                 );
             }
-            if !schedule.config.spectator_hosts.is_empty() {
+            if !schedule.config.spectator_hosts.is_empty()
+                && schedule.config.spectator_hosts.as_slice() != [0]
+            {
                 return Err(
-                    "differential GracefulRemove spectator equivalence is not yet supported"
+                    "differential GracefulRemove spectator equivalence requires only surviving host 0"
                         .to_owned(),
                 );
             }
@@ -4226,6 +4243,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     input_delay: schedule.config.input_delay,
                     num_players: n,
                     input_delay_control: differential_input_delay_control,
+                    removal_control: differential_removal_control,
                 }),
                 &mut oracle,
                 &mut observed_events,

@@ -655,17 +655,10 @@ impl Oracle {
         &mut self,
         observer: usize,
         frame: i32,
-        expected: &[InputFingerprint],
+        expected: &[(InputFingerprint, InputStatus)],
         actual: &[(InputFingerprint, InputStatus)],
     ) {
-        let matches = expected.len() == actual.len()
-            && expected
-                .iter()
-                .zip(actual)
-                .all(|(expected, (actual, status))| {
-                    expected == actual && *status == InputStatus::Confirmed
-                });
-        if !matches {
+        if expected != actual {
             self.push_failure(OracleFailure::ReferenceInput {
                 peer: observer,
                 frame,
