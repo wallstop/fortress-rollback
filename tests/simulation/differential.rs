@@ -3,11 +3,14 @@
 //! The independent reference covers the nominal input stream, one strict
 //! post-synchronization input-delay increase, and the exact `StateStub`
 //! parity/sum transition, plus spectator display of that fixed history. Bounded
-//! two-peer explicit and three-peer automatic removals freeze the target at its
-//! certified cut. One bounded two-peer hot-join freezes through frame `A-1`,
-//! then rewrites the snapshot frame `A` with the replacement's nominal input.
-//! Other membership widths and arbitrary game state semantics remain outside
-//! this oracle's claim.
+//! two-peer synchronous and three-peer asynchronous explicit removals, plus
+//! three-peer automatic removals, freeze the target at their certified cut;
+//! redundant spectator rows cover surviving-host priority orders and the exact
+//! frozen fingerprint/status boundary. Two- and three-peer hot-join rows either
+//! rewrite the snapshot frame `A` (two-peer) or keep it as a frozen bridge and
+//! activate at `A + 1` (N-peer). Input-queue capacity rows fill the queue from
+//! both the delay and prediction sides. Other membership widths and arbitrary
+//! game state semantics remain outside this oracle's claim.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
@@ -25,7 +28,7 @@ use super::harness::{
     PeerEventKey, PeerEventPayload, RunOptions, RunReport, SimInput, WideStubInput,
 };
 use crate::common::sim_net::LinkPolicy;
-use crate::common::stubs::StubInput;
+use crate::common::stubs::{StateStub, StubInput};
 use fortress_rollback::hash::fnv1a_hash;
 use fortress_rollback::{EventKind, InputStatus, PlayerHandle};
 use std::collections::BTreeMap;
@@ -121,7 +124,35 @@ fn graceful_remove_schedule(
     input_delay: usize,
     delivery: Delivery,
 ) -> Schedule {
+    graceful_remove_schedule_peers(2, save_mode, input_delay, delivery)
+}
+
+fn graceful_remove_schedule_peers(
+    n: usize,
+    save_mode: SavePolicy,
+    input_delay: usize,
+    delivery: Delivery,
+) -> Schedule {
     let mut schedule = schedule(save_mode, input_delay, delivery);
+    if n != 2 {
+        schedule.config.n_players = n;
+        let forward_policy = schedule.initial_links[0].2.clone();
+        let delayed_policy = schedule.initial_links[1].2.clone();
+        let mut initial_links = Vec::new();
+        for from in 0..n {
+            for to in 0..n {
+                if from != to {
+                    let policy = if from == 0 {
+                        &forward_policy
+                    } else {
+                        &delayed_policy
+                    };
+                    initial_links.push((from, to, policy.clone()));
+                }
+            }
+        }
+        schedule.initial_links = initial_links;
+    }
     schedule
         .events
         .push((120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
@@ -162,8 +193,38 @@ fn automatic_disconnect_schedule(
 
 #[cfg(feature = "hot-join")]
 fn hot_join_schedule() -> Schedule {
+    hot_join_schedule_with_peers(2)
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_schedule_with_peers(n: usize) -> Schedule {
     let mut schedule = schedule(SavePolicy::EveryFrame, 0, Delivery::Delayed);
     schedule.config.max_prediction = 8;
+    if n != 2 {
+        schedule.config.n_players = n;
+        // The N-peer serve pauses the whole mesh at the snapshot frame while
+        // the replacement, the coordinator, and every survivor converge on the
+        // reactivation handshake, so the bounded row needs headroom to observe
+        // confirmed post-activation frames.
+        schedule.config.steps = 400;
+        schedule.heal_at = 400;
+        let forward_policy = schedule.initial_links[0].2.clone();
+        let delayed_policy = schedule.initial_links[1].2.clone();
+        let mut initial_links = Vec::new();
+        for from in 0..n {
+            for to in 0..n {
+                if from != to {
+                    let policy = if from == 0 {
+                        &forward_policy
+                    } else {
+                        &delayed_policy
+                    };
+                    initial_links.push((from, to, policy.clone()));
+                }
+            }
+        }
+        schedule.initial_links = initial_links;
+    }
     // Hold the replacement's handshake long enough to force a non-empty
     // post-cut freeze window before activation.
     schedule
@@ -199,9 +260,11 @@ fn hot_join_control(report: &RunReport) -> DifferentialHotJoinControl {
 }
 
 #[cfg(feature = "hot-join")]
-fn hot_join_reference(frame: i32, control: DifferentialHotJoinControl) -> Vec<StubInput> {
-    if frame >= control.snapshot_frame {
-        return reference_inputs::<StubInput>(frame, 0, 2, None, None);
+fn hot_join_reference(frame: i32, n: usize, control: DifferentialHotJoinControl) -> Vec<StubInput> {
+    // Two-peer activation rewrites the snapshot frame itself. An N-peer serve
+    // keeps the snapshot as a bridge frame and activates at `S + 1`.
+    if frame > control.snapshot_frame || (n == 2 && frame == control.snapshot_frame) {
+        return reference_inputs::<StubInput>(frame, 0, n, None, None);
     }
     let frozen = DifferentialRemovalControl {
         by: control.host,
@@ -211,7 +274,7 @@ fn hot_join_reference(frame: i32, control: DifferentialHotJoinControl) -> Vec<St
         commit_step: control.removal_step,
         load_count_at_commit: 0,
     };
-    reference_inputs::<StubInput>(frame, 0, 2, None, Some(frozen))
+    reference_inputs::<StubInput>(frame, 0, n, None, Some(frozen))
 }
 
 fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
@@ -241,6 +304,22 @@ fn total_metric(
         .iter()
         .map(metric)
         .fold(0_u64, u64::saturating_add)
+}
+
+/// Certified-prefix projection shared by redundant-spectator cross-order checks.
+type SurvivorPrefixProjection = (
+    i32,
+    Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
+    Vec<(
+        BTreeMap<i32, Vec<InputFingerprint>>,
+        BTreeMap<i32, StateStub>,
+    )>,
+);
+
+fn prefix_until<T: Clone>(map: &BTreeMap<i32, T>, bound: i32) -> BTreeMap<i32, T> {
+    map.range(..=bound)
+        .map(|(frame, value)| (*frame, value.clone()))
+        .collect()
 }
 
 fn stub_input(ordinal: u32, peer: usize) -> StubInput {
@@ -429,10 +508,15 @@ fn assert_graceful_remove_boundaries(report: &RunReport, input_delay: usize) {
         } else {
             frozen_ordinal
         };
-        let expected = vec![
-            stub_fingerprint(survivor_ordinal, 0),
-            stub_fingerprint(target_ordinal, 1),
-        ];
+        let expected = (0..report.final_confirmed.len())
+            .map(|peer| {
+                if peer == control.target {
+                    stub_fingerprint(target_ordinal, peer)
+                } else {
+                    stub_fingerprint(survivor_ordinal, peer)
+                }
+            })
+            .collect::<Vec<_>>();
         assert_eq!(actual, &expected, "survivor input frame {frame}");
     }
 }
@@ -570,7 +654,7 @@ fn spectator_inputs(report: &RunReport) -> &BTreeMap<i32, Vec<(InputFingerprint,
         .expect("spectator differential trajectory retained")
 }
 
-fn assert_spectator_non_vacuous(report: &RunReport) {
+fn assert_spectator_non_vacuous(report: &RunReport, n: usize) {
     let history = spectator_inputs(report);
     assert!(
         history.len() >= 30,
@@ -578,7 +662,7 @@ fn assert_spectator_non_vacuous(report: &RunReport) {
         history.len()
     );
     for (frame, inputs) in history {
-        assert_eq!(inputs.len(), 2, "spectator frame {frame} player count");
+        assert_eq!(inputs.len(), n, "spectator frame {frame} player count");
         assert!(
             inputs
                 .iter()
@@ -592,6 +676,7 @@ fn assert_spectator_removal_boundaries(
     report: &RunReport,
     baseline: &RunReport,
     input_delay: usize,
+    n: usize,
 ) {
     let control = removal_control(report);
     let history = spectator_inputs(report);
@@ -607,7 +692,7 @@ fn assert_spectator_removal_boundaries(
         let actual = history
             .get(&frame)
             .unwrap_or_else(|| panic!("spectator never displayed removal boundary frame {frame}"));
-        let expected = reference_inputs::<StubInput>(frame, input_delay, 2, None, Some(control))
+        let expected = reference_inputs::<StubInput>(frame, input_delay, n, None, Some(control))
             .into_iter()
             .enumerate()
             .map(|(player, input)| {
@@ -772,6 +857,83 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
     }
 }
 
+/// Input-queue capacity boundaries: one row fills the queue from the delay
+/// side (`delay + prediction == MAX_FRAME_DELAY`) and one from the prediction
+/// side. Both must retain the exact nominal confirmed history past the
+/// boundary; a ring/indexing error shows up as a reference mismatch or queue
+/// error rather than as a silent stall.
+#[test]
+fn input_queue_capacity_boundaries_match_nominal_history() {
+    for (input_delay, max_prediction, steps) in [
+        (
+            fortress_rollback::__internal::MAX_FRAME_DELAY - 7,
+            7,
+            800_u32,
+        ),
+        (2, fortress_rollback::__internal::MAX_FRAME_DELAY - 2, 400),
+    ] {
+        let mut schedule = schedule(SavePolicy::EveryFrame, input_delay, Delivery::Delayed);
+        schedule.config.max_prediction = max_prediction;
+        schedule.config.steps = steps;
+        schedule.heal_at = steps;
+        let mut canonical: Option<DifferentialTrajectory> = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            // A full-delay queue leaves nothing to mispredict, so this row's
+            // non-vacuity is exact boundary coverage plus delivered delay, not
+            // rollback evidence (rollback rows live in the save/delay matrix).
+            assert!(
+                report.net_stats.base_delay_applications > 0,
+                "delay {input_delay}/prediction {max_prediction} never applied delivery delay"
+            );
+            assert!(
+                report.final_confirmed.iter().all(|frame| *frame > 120),
+                "delay {input_delay}/prediction {max_prediction} must confirm past the boundary: {:?}",
+                report.final_confirmed
+            );
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            assert!(
+                trajectory.confirmed_states[0].len() > 100,
+                "delay {input_delay}/prediction {max_prediction} retained only {} states",
+                trajectory.confirmed_states[0].len()
+            );
+            let boundary = i32::try_from(input_delay.max(max_prediction)).expect("fits i32");
+            for frame in [boundary, boundary + 1, boundary + 20] {
+                assert!(
+                    trajectory.confirmed_inputs[0].contains_key(&frame),
+                    "missing confirmed boundary frame {frame}: {:?}",
+                    trajectory.confirmed_inputs[0].keys().next_back()
+                );
+            }
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    report.differential_trajectory.as_ref(),
+                    Some(expected),
+                    "boundary trajectory changed for delay {input_delay}, {order:?}"
+                );
+            } else {
+                canonical = report.differential_trajectory.clone();
+            }
+        }
+    }
+}
+
 #[test]
 fn graceful_remove_matrix_matches_independent_frozen_history() {
     for (save_mode, input_delay, delivery) in [
@@ -872,15 +1034,37 @@ fn spectator_graceful_remove_matrix_matches_frozen_history_and_statuses() {
         (SavePolicy::EveryFrame, 0, Delivery::Reordered),
         (SavePolicy::Sparse, 2, Delivery::Delayed),
     ] {
-        let mut schedule = graceful_remove_schedule(save_mode, input_delay, delivery);
-        schedule.config.spectator_hosts = vec![0];
+        for (n, hosts) in [
+            (2, vec![0]),
+            (3, vec![0]),
+            (3, vec![2]),
+            (3, vec![0, 2]),
+            (3, vec![2, 0]),
+        ] {
+            check_spectator_graceful_remove_row(n, save_mode, input_delay, delivery, hosts);
+        }
+    }
+}
+
+#[track_caller]
+fn check_spectator_graceful_remove_row(
+    n: usize,
+    save_mode: SavePolicy,
+    input_delay: usize,
+    delivery: Delivery,
+    hosts: Vec<usize>,
+) {
+    {
+        let host_count = hosts.len();
+        let mut schedule = graceful_remove_schedule_peers(n, save_mode, input_delay, delivery);
+        schedule.config.spectator_hosts.clone_from(&hosts);
         let mut baseline_schedule = schedule.clone();
         baseline_schedule
             .events
             .retain(|(_, event)| !matches!(event, ScheduleEvent::GracefulRemove { .. }));
         let baseline = run(&baseline_schedule, &options(PeerDriveOrder::Forward, None));
         baseline.expect_pass(&baseline_schedule);
-        assert_spectator_non_vacuous(&baseline);
+        assert_spectator_non_vacuous(&baseline, n);
         let mut canonical = None;
 
         for order in [
@@ -894,7 +1078,16 @@ fn spectator_graceful_remove_matrix_matches_frozen_history_and_statuses() {
             assert_green_non_vacuous(&report, delivery);
             assert_graceful_remove_boundaries(&report, input_delay);
             assert_post_removal_rollback_evidence(&report);
-            assert_spectator_removal_boundaries(&report, &baseline, input_delay);
+            assert_spectator_removal_boundaries(&report, &baseline, input_delay, n);
+            assert_eq!(
+                report.spectator_final_hosts,
+                Some(host_count),
+                "hosts={hosts:?}: every configured surviving host must remain connected"
+            );
+            assert!(
+                report.spectator_applied_frames > 0,
+                "hosts={hosts:?}: spectator displayed no frames"
+            );
             let control = removal_control(&report);
 
             let replay = run(&schedule, &options);
@@ -910,11 +1103,26 @@ fn spectator_graceful_remove_matrix_matches_frozen_history_and_statuses() {
                 .differential_trajectory
                 .as_ref()
                 .expect("differential trajectory retained");
-            let projection = (
-                control,
-                trajectory.confirmed_inputs[0].clone(),
-                trajectory.confirmed_states[0].clone(),
-                trajectory.spectator_inputs.clone(),
+            // Only the certified prefix of surviving history is cross-order
+            // canonical; the asynchronous certificate can land at a different
+            // schedule step and every peer may retain order-dependent
+            // speculative tails beyond the common confirmed prefix.
+            let prefix_bound = control.freeze_frame + 20;
+            let projection: SurvivorPrefixProjection = (
+                control.freeze_frame,
+                trajectory
+                    .spectator_inputs
+                    .as_ref()
+                    .map(|history| prefix_until(history, prefix_bound)),
+                (0..n)
+                    .filter(|peer| *peer != control.target)
+                    .map(|peer| {
+                        (
+                            prefix_until(&trajectory.confirmed_inputs[peer], prefix_bound),
+                            prefix_until(&trajectory.confirmed_states[peer], prefix_bound),
+                        )
+                    })
+                    .collect(),
             );
             if let Some(expected) = &canonical {
                 assert_eq!(
@@ -1269,22 +1477,68 @@ fn automatic_disconnect_post_freeze_state_and_missing_state_mutations_are_detect
         )));
 }
 
+/// Cross-order projection identity for the bounded hot-join row. In this
+/// scenario the coordinator's snapshot/activation frame is order-stable, so
+/// the complete normalized trajectory (including the activation frame) must be
+/// identical across drive orders. If a future row allows the activation frame
+/// to differ by order, the projection must exclude that frame instead of
+/// weakening the confirmed-prefix comparison.
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_cross_order_projection_is_identical() {
+    for n in [2, 3] {
+        let schedule = hot_join_schedule_with_peers(n);
+        let mut canonical: Option<(DifferentialHotJoinControl, DifferentialTrajectory)> = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let report = run(&schedule, &options(order, None));
+            report.expect_pass(&schedule);
+            let observed = (
+                hot_join_control(&report),
+                report
+                    .differential_trajectory
+                    .clone()
+                    .expect("differential trajectory retained"),
+            );
+            match &canonical {
+                None => canonical = Some(observed),
+                Some((control, trajectory)) => {
+                    assert_eq!(
+                        &observed.0, control,
+                        "n={n} order={order:?} must certify the same cut and activation frame"
+                    );
+                    assert_eq!(
+                        &observed.1, trajectory,
+                        "n={n} order={order:?} must retain the same normalized trajectory"
+                    );
+                },
+            }
+        }
+    }
+}
+
 #[cfg(feature = "hot-join")]
 #[test]
 fn hot_join_matches_independent_freeze_and_replacement_history() {
-    let schedule = hot_join_schedule();
-    for order in [
-        PeerDriveOrder::Forward,
-        PeerDriveOrder::Reverse,
-        PeerDriveOrder::Rotating,
-    ] {
-        check_hot_join_order(&schedule, order);
+    for n in [2, 3] {
+        let schedule = hot_join_schedule_with_peers(n);
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            check_hot_join_order(&schedule, order);
+        }
     }
 }
 
 #[cfg(feature = "hot-join")]
 #[track_caller]
 fn check_hot_join_order(schedule: &Schedule, order: PeerDriveOrder) {
+    let n = schedule.config.n_players;
     let options = options(order, None);
     let report = run(schedule, &options);
     report.expect_pass(schedule);
@@ -1307,69 +1561,160 @@ fn check_hot_join_order(schedule: &Schedule, order: PeerDriveOrder) {
         .differential_trajectory
         .as_ref()
         .expect("differential trajectory retained");
-    for frame in control.freeze_frame..=control.freeze_frame + 5 {
-        if frame < control.snapshot_frame {
-            assert_eq!(
-                trajectory.confirmed_inputs[0].get(&frame),
-                Some(
-                    &hot_join_reference(frame, control)
-                        .into_iter()
-                        .map(SimInput::fingerprint)
-                        .collect()
-                ),
-                "host freeze input frame {frame}"
-            );
+    let survivors: Vec<usize> = (0..n).filter(|&peer| peer != control.target).collect();
+    for &peer in &survivors {
+        for frame in control.freeze_frame..=control.freeze_frame + 5 {
+            if frame < control.snapshot_frame {
+                assert_eq!(
+                    trajectory.confirmed_inputs[peer].get(&frame),
+                    Some(
+                        &hot_join_reference(frame, n, control)
+                            .into_iter()
+                            .map(SimInput::fingerprint)
+                            .collect()
+                    ),
+                    "survivor {peer} freeze input frame {frame}"
+                );
+            }
         }
     }
     for frame in control.snapshot_frame..=control.snapshot_frame + 20 {
-        let expected = hot_join_reference(frame, control)
+        let expected = hot_join_reference(frame, n, control)
             .into_iter()
             .map(SimInput::fingerprint)
             .collect::<Vec<_>>();
-        let actual = trajectory.confirmed_inputs[0]
-            .get(&frame)
-            .unwrap_or_else(|| panic!("host never confirmed post-resume frame {frame}"));
-        assert_eq!(actual, &expected, "host replacement input frame {frame}");
-        if frame >= control.snapshot_frame && frame <= report.final_confirmed[1] {
-            let replacement = trajectory.confirmed_inputs[1]
+        for peer in 0..n {
+            if report.final_confirmed[peer] < frame {
+                continue;
+            }
+            let actual = trajectory.confirmed_inputs[peer]
                 .get(&frame)
-                .unwrap_or_else(|| panic!("replacement never confirmed frame {frame}"));
-            assert_eq!(replacement, &expected, "replacement input frame {frame}");
+                .unwrap_or_else(|| panic!("peer {peer} never confirmed post-resume frame {frame}"));
+            assert_eq!(
+                actual, &expected,
+                "peer {peer} replacement input frame {frame}"
+            );
         }
     }
 
-    let frozen = hot_join_reference(control.freeze_frame + 1, control);
-    let nominal = reference_inputs::<StubInput>(control.freeze_frame + 1, 0, 2, None, None);
+    let frozen = hot_join_reference(control.freeze_frame + 1, n, control);
+    let nominal = reference_inputs::<StubInput>(control.freeze_frame + 1, 0, n, None, None);
     assert_ne!(frozen, nominal, "freeze window must differ from nominal");
-    let resumed = hot_join_reference(control.snapshot_frame, control);
-    let still_frozen = hot_join_reference(control.snapshot_frame - 1, control);
-    assert_ne!(
-        resumed, still_frozen,
-        "activation frame must be rewritten to the nominal stream"
-    );
-    // The two-player StateStub fold is parity-only, and every nominal pair here
-    // has the same total parity, so the exact input rewrite above is this
-    // boundary's non-vacuous oracle; state controls are covered separately.
+    let frozen_model = DifferentialRemovalControl {
+        by: control.host,
+        target: control.target,
+        current_frame: control.freeze_frame,
+        freeze_frame: control.freeze_frame,
+        commit_step: control.removal_step,
+        load_count_at_commit: 0,
+    };
+    let bridge_slot = hot_join_reference(control.snapshot_frame, n, control)[control.target];
+    let frozen_at_snapshot =
+        reference_inputs::<StubInput>(control.snapshot_frame, 0, n, None, Some(frozen_model))
+            [control.target];
+    if n == 2 {
+        assert_ne!(
+            bridge_slot, frozen_at_snapshot,
+            "two-peer activation frame must be rewritten to the nominal stream"
+        );
+    } else {
+        assert_eq!(
+            bridge_slot, frozen_at_snapshot,
+            "N-peer snapshot frame must carry the frozen predecessor as a bridge"
+        );
+        let activation_slot =
+            hot_join_reference(control.snapshot_frame + 1, n, control)[control.target];
+        assert_ne!(
+            activation_slot, bridge_slot,
+            "N-peer activation frame S+1 must author the replacement's input"
+        );
+    }
 
     assert!(
         trajectory.confirmed_states[1]
             .keys()
             .next()
             .is_some_and(|frame| *frame == control.snapshot_frame + 1),
-        "replacement state history must start at A+1: {:?}",
+        "replacement state history must start at A+1: control={control:?}, final={:?}, states={:?}",
+        report.final_confirmed,
         trajectory.confirmed_states[1].keys().next()
     );
     let resumed_state = trajectory.confirmed_states[1][&(control.snapshot_frame + 1)];
-    assert_eq!(
-        trajectory.confirmed_states[0].get(&(control.snapshot_frame + 1)),
-        Some(&resumed_state),
-        "host and replacement must agree on the first post-resume state"
-    );
+    for &peer in &survivors {
+        assert_eq!(
+            trajectory.confirmed_states[peer].get(&(control.snapshot_frame + 1)),
+            Some(&resumed_state),
+            "survivor {peer} and replacement must agree on the first post-resume state"
+        );
+    }
 
     assert_eq!(
-        report.peer_event_counts_by_peer[0].get(&EventKind::PeerJoined),
+        report.peer_event_counts_by_peer[control.host].get(&EventKind::PeerJoined),
         Some(&1),
-        "host must observe exactly one PeerJoined"
+        "coordinator must observe exactly one PeerJoined"
+    );
+    let target_addr = peer_addr(control.target);
+    for peer in 0..n {
+        if peer == control.target {
+            for kind in [
+                EventKind::Disconnected,
+                EventKind::PeerDropped,
+                EventKind::JoinRequested,
+                EventKind::PeerJoined,
+            ] {
+                assert_eq!(
+                    report.peer_event_counts_by_peer[peer].get(&kind),
+                    None,
+                    "replacement slot {peer} must not inherit old-generation {kind:?}"
+                );
+            }
+            continue;
+        }
+        assert_eq!(
+            report.peer_event_counts_by_peer[peer].get(&EventKind::Disconnected),
+            Some(&1),
+            "survivor {peer} must observe exactly one old-generation Disconnected"
+        );
+        assert_eq!(
+            report.peer_event_counts_by_peer[peer].get(&EventKind::PeerDropped),
+            Some(&1),
+            "survivor {peer} must observe exactly one old-generation PeerDropped"
+        );
+        for key in [
+            PeerEventKey {
+                kind: EventKind::Disconnected,
+                payload: PeerEventPayload::Addr(target_addr),
+            },
+            PeerEventKey {
+                kind: EventKind::PeerDropped,
+                payload: PeerEventPayload::PlayerAddr {
+                    handle: PlayerHandle::new(control.target),
+                    addr: target_addr,
+                },
+            },
+        ] {
+            assert_eq!(
+                report.peer_event_payload_counts_by_peer[peer].get(&key),
+                Some(&1),
+                "survivor {peer} must observe exactly one {key:?}"
+            );
+        }
+    }
+    for &peer in &survivors {
+        if peer != control.host {
+            for kind in [EventKind::JoinRequested, EventKind::PeerJoined] {
+                assert_eq!(
+                    report.peer_event_counts_by_peer[peer].get(&kind),
+                    None,
+                    "non-coordinator survivor {peer} must not emit {kind:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        report.peer_event_counts_by_peer[control.host].get(&EventKind::JoinRequested),
+        Some(&1),
+        "coordinator must observe exactly one JoinRequested"
     );
     let replay = run(schedule, &options);
     replay.expect_pass(schedule);
@@ -1413,7 +1758,15 @@ fn hot_join_activation_check_survives_long_drain() {
 #[cfg(feature = "hot-join")]
 #[test]
 fn hot_join_mutations_and_replacement_floor_are_detected() {
-    let schedule = hot_join_schedule();
+    for n in [2, 3] {
+        check_hot_join_mutations(n);
+    }
+}
+
+#[cfg(feature = "hot-join")]
+#[track_caller]
+fn check_hot_join_mutations(n: usize) {
+    let schedule = hot_join_schedule_with_peers(n);
     let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
     nominal.expect_pass(&schedule);
     let control = hot_join_control(&nominal);
@@ -1442,10 +1795,15 @@ fn hot_join_mutations_and_replacement_floor_are_detected() {
             }),
         ),
     );
-    assert!(resume_lie.verdict.failures.iter().any(|failure| matches!(
-        failure,
-        OracleFailure::ReferenceInput { peer: 0, frame, .. } if *frame == resume + 2
-    )));
+    assert!(
+        resume_lie.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceInput { frame, .. } if *frame == resume + 2
+        )),
+        "n={n} resume lie must fail at {}: control={control:?}, failures={:#?}",
+        resume + 2,
+        resume_lie.verdict.failures
+    );
 
     let wrong_state = run(
         &schedule,
@@ -1550,7 +1908,7 @@ fn spectator_matrix_matches_nominal_history_across_delivery_and_drive_order() {
                 let report = run(&schedule, &options);
                 report.expect_pass(&schedule);
                 assert_green_non_vacuous(&report, delivery);
-                assert_spectator_non_vacuous(&report);
+                assert_spectator_non_vacuous(&report, 2);
 
                 let replay = run(&schedule, &options);
                 replay.expect_pass(&schedule);
@@ -1581,7 +1939,7 @@ fn spectator_runtime_delay_matches_independent_gap_and_resume() {
     let report = run(&schedule, &options(PeerDriveOrder::Rotating, None));
     report.expect_pass(&schedule);
     assert_green_non_vacuous(&report, Delivery::Reordered);
-    assert_spectator_non_vacuous(&report);
+    assert_spectator_non_vacuous(&report, 2);
     assert_dynamic_confirmed_boundaries(&report);
     assert_post_control_rollback_evidence(&report, 120);
 
@@ -2220,8 +2578,12 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     let valid_options = options(PeerDriveOrder::Forward, None);
     validate_run_options(&valid_schedule, &valid_options).expect("canonical options are valid");
 
+    let mut nominal_three = valid_schedule.clone();
+    nominal_three.config.n_players = 3;
+    validate_run_options(&nominal_three, &valid_options)
+        .expect("a nominal three-peer mesh uses the same fixed reference");
     let mut wrong_size = valid_schedule.clone();
-    wrong_size.config.n_players = 3;
+    wrong_size.config.n_players = 4;
     assert!(validate_run_options(&wrong_size, &valid_options).is_err());
 
     let mut wrong_cadence = valid_schedule.clone();
@@ -2229,7 +2591,7 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     assert!(validate_run_options(&wrong_cadence, &valid_options).is_err());
 
     let mut wrong_delay = valid_schedule.clone();
-    wrong_delay.config.input_delay = 1;
+    wrong_delay.config.input_delay = fortress_rollback::__internal::MAX_FRAME_DELAY;
     assert!(validate_run_options(&wrong_delay, &valid_options).is_err());
 
     let mut no_prediction = valid_schedule.clone();
@@ -2274,6 +2636,19 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     let mut removed_redundant_host = removal.clone();
     removed_redundant_host.config.spectator_hosts = vec![0, 1];
     assert!(validate_run_options(&removed_redundant_host, &valid_options).is_err());
+    let removal_three =
+        graceful_remove_schedule_peers(3, SavePolicy::EveryFrame, 0, Delivery::Delayed);
+    validate_run_options(&removal_three, &valid_options)
+        .expect("a three-peer graceful removal certifies the cut asynchronously");
+    let mut survivor_hosts = removal_three;
+    survivor_hosts.config.spectator_hosts = vec![0, 2];
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("multiple surviving spectator hosts are supported");
+    survivor_hosts.config.spectator_hosts = vec![2, 0];
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("surviving host priority order is free");
+    survivor_hosts.config.spectator_hosts = vec![0, 1];
+    assert!(validate_run_options(&survivor_hosts, &valid_options).is_err());
     let mut with_delay_change = removal;
     with_delay_change
         .events
@@ -2314,6 +2689,17 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         let hot = hot_join_schedule();
         validate_run_options(&hot, &valid_options)
             .expect("the bounded two-peer hot-join is supported");
+        let hot_three = hot_join_schedule_with_peers(3);
+        validate_run_options(&hot_three, &valid_options)
+            .expect("the bounded N-peer hot-join is supported");
+        let mut wrong_n_peer_slot = hot_three;
+        wrong_n_peer_slot
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::HotJoin { .. }));
+        wrong_n_peer_slot
+            .events
+            .push((100, ScheduleEvent::HotJoin { slot: 2 }));
+        assert!(validate_run_options(&wrong_n_peer_slot, &valid_options).is_err());
         let mut duplicate = hot.clone();
         duplicate
             .events
