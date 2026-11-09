@@ -9,13 +9,13 @@
 1. **P0 — Differentially prove rollback equivalence and oracle fidelity.** Hypothesis: for one fixed committed input/membership
    history, arbitrary legal delivery/session interleavings produce the same confirmed trajectory as a non-networked reference.
    Covered: N-peer hot-join (frozen bridge at `S`, activation `S+1`), cross-order survivor identity, input-queue capacity
-   boundaries, and multiple surviving redundant spectator hosts across an asynchronous removal. Remaining
-   ([closure](https://github.com/wallstop/fortress-rollback/issues/377)): a host outage composed with removal (the removed
-   player's spectator endpoint is not withdrawn, so its stale stream correctly fails closed) and any further queue/ring
-   corners. Compare implementation traces with the relevant TLA+/Kani assumptions rather than treating a model pass as
-   implementation proof. **Exit:** mutation controls demonstrate detection of input, state, freeze, false-positive, and
-   silent-desync failures; every red case minimizes to a deterministic regression and is fixed at its root, or the green
-   claim is explicitly bounded to explored states.
+   boundaries, multiple surviving redundant spectator hosts across an asynchronous removal, and canonical/lower-priority
+   host silence with spectator failover. Remaining ([closure](https://github.com/wallstop/fortress-rollback/issues/377)):
+   a host crash that is itself a second membership change, the removed player's spectator endpoint (not withdrawn, so its
+   stale stream correctly fails closed), and any further queue/ring corners. Compare implementation traces with the
+   relevant TLA+/Kani assumptions rather than treating a model pass as implementation proof. **Exit:** mutation controls
+   demonstrate detection of input, state, freeze, false-positive, and silent-desync failures; every red case minimizes
+   to a deterministic regression and is fixed at its root, or the green claim is explicitly bounded to explored states.
 
 ## Future
 
