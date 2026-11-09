@@ -1273,9 +1273,21 @@ fn automatic_disconnect_post_freeze_state_and_missing_state_mutations_are_detect
 #[test]
 fn hot_join_matches_independent_freeze_and_replacement_history() {
     let schedule = hot_join_schedule();
-    let options = options(PeerDriveOrder::Forward, None);
-    let report = run(&schedule, &options);
-    report.expect_pass(&schedule);
+    for order in [
+        PeerDriveOrder::Forward,
+        PeerDriveOrder::Reverse,
+        PeerDriveOrder::Rotating,
+    ] {
+        check_hot_join_order(&schedule, order);
+    }
+}
+
+#[cfg(feature = "hot-join")]
+#[track_caller]
+fn check_hot_join_order(schedule: &Schedule, order: PeerDriveOrder) {
+    let options = options(order, None);
+    let report = run(schedule, &options);
+    report.expect_pass(schedule);
     let control = hot_join_control(&report);
     assert_eq!((control.host, control.target), (0, 1));
     assert_eq!(control.removal_step, 100);
@@ -1359,8 +1371,8 @@ fn hot_join_matches_independent_freeze_and_replacement_history() {
         Some(&1),
         "host must observe exactly one PeerJoined"
     );
-    let replay = run(&schedule, &options);
-    replay.expect_pass(&schedule);
+    let replay = run(schedule, &options);
+    replay.expect_pass(schedule);
     assert_eq!(report.trace_hash, replay.trace_hash);
     assert_eq!(report.verdict.failures, replay.verdict.failures);
     assert_eq!(
