@@ -1,29 +1,33 @@
-//! Bounded two-peer differential rollback oracle.
+//! Bounded differential rollback oracle.
 //!
 //! The independent reference covers the nominal input stream, one strict
 //! post-synchronization input-delay increase, and the exact `StateStub`
-//! parity/sum transition, plus spectator display of that fixed history. One
-//! bounded two-peer graceful removal freezes the target at its certified cut.
-//! Other runtime membership changes and arbitrary game state semantics remain
-//! outside this oracle's claim.
+//! parity/sum transition, plus spectator display of that fixed history. Bounded
+//! two-peer explicit and three-peer automatic removals freeze the target at its
+//! certified cut. One bounded two-peer hot-join freezes through frame `A-1`,
+//! then rewrites the snapshot frame `A` with the replacement's nominal input.
+//! Other membership widths and arbitrary game state semantics remain outside
+//! this oracle's claim.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
 use super::harness::schedule::{
-    BackgroundNoise, FrameModel, SavePolicy, Schedule, ScheduleEvent, SimConfig,
+    BackgroundNoise, DropPolicy, FrameModel, SavePolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::shrink::{shrink_failure, ShrinkConfig};
+#[cfg(feature = "hot-join")]
+use super::harness::DifferentialHotJoinControl;
 use super::harness::{
-    actual_differential_input, reference_inputs, run, run_with_final_game_frame_offset,
-    run_with_input, validate_run_options, DifferentialGracefulRemoveControl,
-    DifferentialInputDelayControl, DifferentialMutation, DifferentialOptions,
-    DifferentialTrajectory, PeerDriveOrder, RunOptions, RunReport, SimInput, WideStubInput,
+    actual_differential_input, peer_addr, reference_inputs, run, run_with_final_game_frame_offset,
+    run_with_input, validate_run_options, DifferentialInputDelayControl, DifferentialMutation,
+    DifferentialOptions, DifferentialRemovalControl, DifferentialTrajectory, PeerDriveOrder,
+    PeerEventKey, PeerEventPayload, RunOptions, RunReport, SimInput, WideStubInput,
 };
 use crate::common::sim_net::LinkPolicy;
 use crate::common::stubs::StubInput;
 use fortress_rollback::hash::fnv1a_hash;
-use fortress_rollback::{EventKind, InputStatus};
+use fortress_rollback::{EventKind, InputStatus, PlayerHandle};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -125,6 +129,91 @@ fn graceful_remove_schedule(
     schedule
 }
 
+fn automatic_disconnect_schedule(
+    save_mode: SavePolicy,
+    input_delay: usize,
+    delivery: Delivery,
+) -> Schedule {
+    let mut schedule = schedule(save_mode, input_delay, delivery);
+    let forward_policy = schedule.initial_links[0].2.clone();
+    let delayed_policy = schedule.initial_links[1].2.clone();
+    schedule.config.n_players = 3;
+    schedule.config.disconnect_behavior = DropPolicy::ContinueWithout;
+    let mut initial_links = Vec::new();
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                let policy = if from == 0 {
+                    &forward_policy
+                } else {
+                    &delayed_policy
+                };
+                initial_links.push((from, to, policy.clone()));
+            }
+        }
+    }
+    schedule.initial_links = initial_links;
+    schedule
+        .events
+        .push((80, ScheduleEvent::PeerKill { peer: 2 }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_schedule() -> Schedule {
+    let mut schedule = schedule(SavePolicy::EveryFrame, 0, Delivery::Delayed);
+    schedule.config.max_prediction = 8;
+    // Hold the replacement's handshake long enough to force a non-empty
+    // post-cut freeze window before activation.
+    schedule
+        .events
+        .push((100, ScheduleEvent::HotJoin { slot: 1 }));
+    schedule.events.push((
+        100,
+        ScheduleEvent::Hold {
+            from: 1,
+            to: 0,
+            holding: true,
+        },
+    ));
+    schedule.events.push((
+        116,
+        ScheduleEvent::Hold {
+            from: 1,
+            to: 0,
+            holding: false,
+        },
+    ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_control(report: &RunReport) -> DifferentialHotJoinControl {
+    report
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.hot_join_control)
+        .expect("successful hot-join is anchored")
+}
+
+#[cfg(feature = "hot-join")]
+fn hot_join_reference(frame: i32, control: DifferentialHotJoinControl) -> Vec<StubInput> {
+    if frame >= control.snapshot_frame {
+        return reference_inputs::<StubInput>(frame, 0, 2, None, None);
+    }
+    let frozen = DifferentialRemovalControl {
+        by: control.host,
+        target: control.target,
+        current_frame: control.freeze_frame,
+        freeze_frame: control.freeze_frame,
+        commit_step: control.removal_step,
+        load_count_at_commit: 0,
+    };
+    reference_inputs::<StubInput>(frame, 0, 2, None, Some(frozen))
+}
+
 fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
     RunOptions {
         disconnect_timeout: Some(TIMEOUT),
@@ -133,6 +222,13 @@ fn options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> Run
             mutation,
         }),
         ..RunOptions::default()
+    }
+}
+
+fn automatic_options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
+    RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(2)),
+        ..options(order, mutation)
     }
 }
 
@@ -169,12 +265,12 @@ fn input_delay_control(report: &RunReport) -> DifferentialInputDelayControl {
         .expect("successful runtime delay change is anchored")
 }
 
-fn graceful_remove_control(report: &RunReport) -> DifferentialGracefulRemoveControl {
+fn removal_control(report: &RunReport) -> DifferentialRemovalControl {
     report
         .differential_trajectory
         .as_ref()
-        .and_then(|trajectory| trajectory.graceful_remove_control)
-        .expect("successful graceful removal is anchored")
+        .and_then(|trajectory| trajectory.removal_control)
+        .expect("successful removal is anchored")
 }
 
 fn assert_dynamic_confirmed_boundaries(report: &RunReport) {
@@ -267,8 +363,9 @@ fn assert_post_control_rollback_evidence(report: &RunReport, event_step: u32) {
 }
 
 fn assert_post_removal_rollback_evidence(report: &RunReport) {
+    let control = removal_control(report);
     let at_control = report
-        .differential_graceful_remove_metrics_at_control
+        .differential_removal_metrics_at_control
         .as_ref()
         .expect("successful removal captures rollback baselines");
     assert_eq!(at_control.len(), report.metrics.len());
@@ -294,14 +391,17 @@ fn assert_post_removal_rollback_evidence(report: &RunReport) {
         report
             .load_game_state_observations
             .iter()
-            .any(|observation| observation.step >= 120),
-        "no post-removal LoadGameState: {:?}",
+            .skip(control.load_count_at_commit)
+            .any(|observation| observation.peer != control.target),
+        "no survivor LoadGameState after first commit at step {} (load cursor {}): {:?}",
+        control.commit_step,
+        control.load_count_at_commit,
         report.load_game_state_observations
     );
 }
 
 fn assert_graceful_remove_boundaries(report: &RunReport, input_delay: usize) {
-    let control = graceful_remove_control(report);
+    let control = removal_control(report);
     assert_eq!((control.by, control.target), (0, 1));
     assert!(control.current_frame > 0);
     assert!(control.freeze_frame >= 0);
@@ -335,6 +435,76 @@ fn assert_graceful_remove_boundaries(report: &RunReport, input_delay: usize) {
         ];
         assert_eq!(actual, &expected, "survivor input frame {frame}");
     }
+}
+
+fn assert_automatic_disconnect_boundaries(report: &RunReport, input_delay: usize) {
+    let control = removal_control(report);
+    assert_eq!(control.target, 2);
+    assert!(control.by < 2);
+    assert!(control.current_frame > 0);
+    assert!(control.freeze_frame >= 0);
+    assert!(control.commit_step > 80);
+
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    assert_eq!(trajectory.confirmed_inputs.len(), 3);
+    for survivor in 0..2 {
+        assert!(report.final_confirmed[survivor] > control.freeze_frame + 20);
+        let target_addr = peer_addr(control.target);
+        for (kind, payload) in [
+            (
+                EventKind::NetworkInterrupted,
+                PeerEventPayload::Addr(target_addr),
+            ),
+            (
+                EventKind::PeerDropped,
+                PeerEventPayload::PlayerAddr {
+                    handle: PlayerHandle::new(control.target),
+                    addr: target_addr,
+                },
+            ),
+            (EventKind::Disconnected, PeerEventPayload::Addr(target_addr)),
+        ] {
+            assert_eq!(
+                report.peer_event_counts_by_peer[survivor].get(&kind),
+                Some(&1),
+                "survivor {survivor} must observe exactly one {kind:?} overall"
+            );
+            let key = PeerEventKey { kind, payload };
+            assert_eq!(
+                report.peer_event_payload_counts_by_peer[survivor].get(&key),
+                Some(&1),
+                "survivor {survivor} must observe exactly one {key:?}"
+            );
+        }
+        for frame in control.freeze_frame..=control.freeze_frame + 20 {
+            let actual = trajectory.confirmed_inputs[survivor]
+                .get(&frame)
+                .unwrap_or_else(|| panic!("survivor {survivor} never confirmed frame {frame}"));
+            let expected =
+                reference_inputs::<StubInput>(frame, input_delay, 3, None, Some(control))
+                    .into_iter()
+                    .map(SimInput::fingerprint)
+                    .collect::<Vec<_>>();
+            assert_eq!(actual, &expected, "survivor {survivor}, frame {frame}");
+        }
+    }
+
+    let frozen = reference_inputs::<StubInput>(
+        control.freeze_frame + 1,
+        input_delay,
+        3,
+        None,
+        Some(control),
+    );
+    let nominal =
+        reference_inputs::<StubInput>(control.freeze_frame + 1, input_delay, 3, None, None);
+    assert_ne!(
+        frozen, nominal,
+        "the first post-cut input must exercise the freeze, not the nominal stream"
+    );
 }
 
 fn check_runtime_delay_order(
@@ -418,7 +588,67 @@ fn assert_spectator_non_vacuous(report: &RunReport) {
     }
 }
 
+fn assert_spectator_removal_boundaries(
+    report: &RunReport,
+    baseline: &RunReport,
+    input_delay: usize,
+) {
+    let control = removal_control(report);
+    let history = spectator_inputs(report);
+    let baseline_history = spectator_inputs(baseline);
+    assert!(
+        history
+            .keys()
+            .next_back()
+            .is_some_and(|frame| *frame >= control.freeze_frame + 20),
+        "spectator did not display the frozen boundary window"
+    );
+    for frame in control.freeze_frame..=control.freeze_frame + 20 {
+        let actual = history
+            .get(&frame)
+            .unwrap_or_else(|| panic!("spectator never displayed removal boundary frame {frame}"));
+        let expected = reference_inputs::<StubInput>(frame, input_delay, 2, None, Some(control))
+            .into_iter()
+            .enumerate()
+            .map(|(player, input)| {
+                (
+                    input.fingerprint(),
+                    if player == control.target && frame > control.freeze_frame {
+                        InputStatus::Disconnected
+                    } else {
+                        InputStatus::Confirmed
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, &expected, "spectator removal frame {frame}");
+    }
+
+    let at_cut = &history[&(control.freeze_frame)];
+    let baseline_at_cut = &baseline_history[&(control.freeze_frame)];
+    assert_eq!(at_cut, baseline_at_cut, "cut frame must remain nominal");
+    assert_eq!(at_cut[control.target].1, InputStatus::Confirmed);
+
+    let frozen = &history[&(control.freeze_frame + 1)];
+    let baseline_frozen = &baseline_history[&(control.freeze_frame + 1)];
+    assert_eq!(frozen[control.target].0, at_cut[control.target].0);
+    assert_eq!(frozen[control.target].1, InputStatus::Disconnected);
+    assert_eq!(baseline_frozen[control.target].1, InputStatus::Confirmed);
+    assert_ne!(
+        frozen[control.target].0, baseline_frozen[control.target].0,
+        "frozen target fingerprint must differ from matched nominal input"
+    );
+}
+
 fn assert_green_non_vacuous(report: &RunReport, delivery: Delivery) {
+    assert_green_non_vacuous_with_retired_minimum(report, delivery, 30);
+}
+
+fn assert_green_non_vacuous_with_retired_minimum(
+    report: &RunReport,
+    delivery: Delivery,
+    retired_minimum: usize,
+) {
     assert!(
         total_metric(report, |metrics| metrics.rollback_count) > 0,
         "differential row performed no rollback: {:?}",
@@ -443,22 +673,36 @@ fn assert_green_non_vacuous(report: &RunReport, delivery: Delivery) {
         .differential_trajectory
         .as_ref()
         .expect("differential mode retains normalized history");
-    assert_eq!(trajectory.confirmed_inputs.len(), 2);
-    assert_eq!(trajectory.confirmed_states.len(), 2);
-    assert!(
-        trajectory
-            .confirmed_inputs
-            .iter()
-            .all(|history| history.len() >= 30),
-        "reference input coverage was vacuous: {trajectory:?}"
+    assert_eq!(
+        trajectory.confirmed_inputs.len(),
+        report.final_confirmed.len()
     );
-    assert!(
-        trajectory
-            .confirmed_states
-            .iter()
-            .all(|history| history.len() >= 30),
-        "reference state coverage was vacuous: {trajectory:?}"
+    assert_eq!(
+        trajectory.confirmed_states.len(),
+        report.final_confirmed.len()
     );
+    let dead = &report
+        .trace_tail
+        .last()
+        .expect("completed run retains a final snapshot")
+        .dead;
+    assert_eq!(dead.len(), trajectory.confirmed_inputs.len());
+    for (peer, history) in trajectory.confirmed_inputs.iter().enumerate() {
+        let required = if dead[peer] { retired_minimum } else { 30 };
+        assert!(
+            history.len() >= required,
+            "reference input coverage was vacuous for peer {peer}: {} frames (required {required})",
+            history.len()
+        );
+    }
+    for (peer, history) in trajectory.confirmed_states.iter().enumerate() {
+        let required = if dead[peer] { retired_minimum } else { 30 };
+        assert!(
+            history.len() >= required,
+            "reference state coverage was vacuous for peer {peer}: {} frames (required {required})",
+            history.len()
+        );
+    }
 }
 
 #[test]
@@ -551,7 +795,7 @@ fn graceful_remove_matrix_matches_independent_frozen_history() {
             assert_green_non_vacuous(&report, delivery);
             assert_graceful_remove_boundaries(&report, input_delay);
             assert_post_removal_rollback_evidence(&report);
-            let control = graceful_remove_control(&report);
+            let control = removal_control(&report);
             let trajectory = report
                 .differential_trajectory
                 .as_ref()
@@ -623,11 +867,130 @@ fn graceful_remove_matrix_matches_independent_frozen_history() {
 }
 
 #[test]
+fn spectator_graceful_remove_matrix_matches_frozen_history_and_statuses() {
+    for (save_mode, input_delay, delivery) in [
+        (SavePolicy::EveryFrame, 0, Delivery::Reordered),
+        (SavePolicy::Sparse, 2, Delivery::Delayed),
+    ] {
+        let mut schedule = graceful_remove_schedule(save_mode, input_delay, delivery);
+        schedule.config.spectator_hosts = vec![0];
+        let mut baseline_schedule = schedule.clone();
+        baseline_schedule
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::GracefulRemove { .. }));
+        let baseline = run(&baseline_schedule, &options(PeerDriveOrder::Forward, None));
+        baseline.expect_pass(&baseline_schedule);
+        assert_spectator_non_vacuous(&baseline);
+        let mut canonical = None;
+
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert_green_non_vacuous(&report, delivery);
+            assert_graceful_remove_boundaries(&report, input_delay);
+            assert_post_removal_rollback_evidence(&report);
+            assert_spectator_removal_boundaries(&report, &baseline, input_delay);
+            let control = removal_control(&report);
+
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            assert_eq!(removal_control(&replay), control);
+
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            let projection = (
+                control,
+                trajectory.confirmed_inputs[0].clone(),
+                trajectory.confirmed_states[0].clone(),
+                trajectory.spectator_inputs.clone(),
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &projection, expected,
+                    "spectator history changed for {order:?}"
+                );
+            } else {
+                canonical = Some(projection);
+            }
+        }
+    }
+}
+
+#[test]
+fn automatic_disconnect_matrix_matches_independent_frozen_history() {
+    for (save_mode, input_delay, delivery) in [
+        (SavePolicy::EveryFrame, 0, Delivery::Reordered),
+        (SavePolicy::Sparse, 2, Delivery::Delayed),
+    ] {
+        let schedule = automatic_disconnect_schedule(save_mode, input_delay, delivery);
+        let mut canonical = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = automatic_options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert_green_non_vacuous_with_retired_minimum(&report, delivery, 1);
+            assert_automatic_disconnect_boundaries(&report, input_delay);
+            assert_post_removal_rollback_evidence(&report);
+            let control = removal_control(&report);
+
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(report.verdict.failures, replay.verdict.failures);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            assert_eq!(removal_control(&replay), control);
+
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            // Only the surviving fixed-membership history is cross-order
+            // canonical. The killed peer can retain different abandoned tails.
+            let projection = (
+                control.target,
+                control.freeze_frame,
+                trajectory.confirmed_inputs[0].clone(),
+                trajectory.confirmed_states[0].clone(),
+                trajectory.confirmed_inputs[1].clone(),
+                trajectory.confirmed_states[1].clone(),
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &projection, expected,
+                    "survivor history changed for {order:?}"
+                );
+            } else {
+                canonical = Some(projection);
+            }
+        }
+    }
+}
+
+#[test]
 fn graceful_remove_reordered_row_prunes_abandoned_target_authorship() {
     let schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
     let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
     report.expect_pass(&schedule);
-    let control = graceful_remove_control(&report);
+    let control = removal_control(&report);
     let trajectory = report
         .differential_trajectory
         .as_ref()
@@ -651,11 +1014,13 @@ fn graceful_remove_reordered_row_prunes_abandoned_target_authorship() {
 #[test]
 fn graceful_remove_known_answer_preserves_cut_and_repeats_it_afterward() {
     for (input_delay, freeze_frame) in [(0, 5), (2, 7)] {
-        let control = DifferentialGracefulRemoveControl {
+        let control = DifferentialRemovalControl {
             by: 0,
             target: 1,
             current_frame: freeze_frame + 2,
             freeze_frame,
+            commit_step: 120,
+            load_count_at_commit: 0,
         };
         let at = |frame| reference_inputs::<StubInput>(frame, input_delay, 2, None, Some(control));
         let delay = i32::try_from(input_delay).expect("input delay fits in i32");
@@ -677,23 +1042,39 @@ fn graceful_remove_known_answer_preserves_cut_and_repeats_it_afterward() {
 
 #[test]
 fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
-    let schedule = graceful_remove_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    let mut schedule = graceful_remove_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    schedule.config.spectator_hosts = vec![0];
     let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
     nominal.expect_pass(&schedule);
-    let control = graceful_remove_control(&nominal);
+    let control = removal_control(&nominal);
     let mutation = DifferentialMutation::SharedInput {
         ordinal: u32::try_from(control.freeze_frame - 2).expect("cut ordinal is non-negative"),
     };
     let options = options(PeerDriveOrder::Forward, Some(mutation));
     let report = run(&schedule, &options);
-    assert!(report.verdict.failures.iter().any(|failure| matches!(
-        failure,
-        OracleFailure::ReferenceInput { peer: 0, frame, .. }
-            if *frame == control.freeze_frame + 1
-    )));
+    assert!(
+        report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceInput { peer: 0, frame, .. }
+                if *frame == control.freeze_frame + 1
+        )),
+        "missing survivor frozen-input failure at F+1: {:?}",
+        report.verdict.failures
+    );
+    let spectator_frame = control.freeze_frame + 1;
+    let spectator_actual = spectator_inputs(&report)[&spectator_frame][control.target].0;
+    let spectator_expected =
+        reference_inputs::<StubInput>(spectator_frame, 2, 2, None, Some(control))[control.target]
+            .fingerprint();
+    assert_ne!(
+        spectator_actual, spectator_expected,
+        "the retained spectator stream must contain the shared frozen-input lie"
+    );
     assert!(!report.verdict.failures.iter().any(|failure| matches!(
         failure,
-        OracleFailure::ReferenceState { .. } | OracleFailure::ConfirmedInputDivergence { .. }
+        OracleFailure::ReferenceState { .. }
+            | OracleFailure::ConfirmedInputDivergence { .. }
+            | OracleFailure::SpectatorInputDivergence { .. }
     )));
 
     let artifact = FailureArtifact::from_report(&schedule, &report);
@@ -711,7 +1092,33 @@ fn graceful_remove_frozen_input_mutation_and_artifact_replay_are_detected() {
         report.differential_trajectory
     );
     assert_eq!(replay.verdict.failures, report.verdict.failures);
-    assert_eq!(graceful_remove_control(&replay), control);
+    assert_eq!(removal_control(&replay), control);
+}
+
+#[test]
+fn spectator_graceful_remove_rejects_disconnected_status_lie() {
+    let mut schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    schedule.config.spectator_hosts = vec![0];
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = removal_control(&nominal);
+
+    let mut options = options(PeerDriveOrder::Forward, None);
+    options.corrupt_spectator_status_from = Some(control.freeze_frame + 1);
+    let report = run(&schedule, &options);
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 2, frame, .. }
+            if *frame == control.freeze_frame + 1
+    )));
+
+    let replay = run(&schedule, &options);
+    assert_eq!(replay.trace_hash, report.trace_hash);
+    assert_eq!(replay.verdict.failures, report.verdict.failures);
+    assert_eq!(
+        replay.differential_trajectory,
+        report.differential_trajectory
+    );
 }
 
 #[test]
@@ -719,7 +1126,7 @@ fn graceful_remove_post_freeze_state_and_missing_state_mutations_are_detected() 
     let schedule = graceful_remove_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
     let nominal = run(&schedule, &options(PeerDriveOrder::Reverse, None));
     nominal.expect_pass(&schedule);
-    let control = graceful_remove_control(&nominal);
+    let control = removal_control(&nominal);
     let frame = control.freeze_frame + 2;
 
     let wrong_state = run(
@@ -783,6 +1190,348 @@ fn graceful_remove_post_freeze_state_and_missing_state_mutations_are_detected() 
             OracleFailure::ReferenceState { peer: 1, expected, actual, .. }
                 if actual.frame != expected.frame
         )));
+}
+
+#[test]
+fn automatic_disconnect_frozen_input_mutation_and_artifact_replay_are_detected() {
+    let schedule = automatic_disconnect_schedule(SavePolicy::Sparse, 2, Delivery::Delayed);
+    let nominal = run(&schedule, &automatic_options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = removal_control(&nominal);
+    let mutation = DifferentialMutation::SharedInput {
+        ordinal: u32::try_from(control.freeze_frame - 2).expect("cut ordinal is non-negative"),
+    };
+    let options = automatic_options(PeerDriveOrder::Forward, Some(mutation));
+    let report = run(&schedule, &options);
+    assert!(report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0 | 1, frame, .. }
+            if *frame == control.freeze_frame + 1
+    )));
+    // A changed logical input may also change the independent reference state;
+    // what must remain absent is mere cross-peer disagreement about the shared lie.
+    assert!(!report.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+    )));
+
+    let artifact = FailureArtifact::from_report(&schedule, &report);
+    artifact
+        .validate()
+        .expect("automatic-removal artifact validates");
+    let encoded = serde_json::to_vec(&artifact).expect("automatic-removal artifact serializes");
+    let decoded: FailureArtifact =
+        serde_json::from_slice(&encoded).expect("automatic-removal artifact deserializes");
+    decoded.validate().expect("decoded artifact validates");
+    let replay = run(&decoded.schedule, &decoded.replay_options);
+    assert_eq!(replay.trace_hash, report.trace_hash);
+    assert_eq!(replay.verdict.failures, report.verdict.failures);
+    assert_eq!(
+        replay.differential_trajectory,
+        report.differential_trajectory
+    );
+    assert_eq!(removal_control(&replay), removal_control(&report));
+}
+
+#[test]
+fn automatic_disconnect_post_freeze_state_and_missing_state_mutations_are_detected() {
+    let schedule = automatic_disconnect_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    let nominal = run(&schedule, &automatic_options(PeerDriveOrder::Reverse, None));
+    nominal.expect_pass(&schedule);
+    let frame = removal_control(&nominal).freeze_frame + 2;
+
+    let wrong_state = run(
+        &schedule,
+        &automatic_options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::SharedState { frame }),
+        ),
+    );
+    assert!(wrong_state.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { peer: 0 | 1, frame: actual, .. } if *actual == frame
+    )));
+
+    let missing_state = run(
+        &schedule,
+        &automatic_options(
+            PeerDriveOrder::Reverse,
+            Some(DifferentialMutation::MissingState { peer: 0, frame }),
+        ),
+    );
+    assert!(missing_state
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 0, frame: actual, .. } if *actual == frame
+        )));
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_matches_independent_freeze_and_replacement_history() {
+    let schedule = hot_join_schedule();
+    for order in [
+        PeerDriveOrder::Forward,
+        PeerDriveOrder::Reverse,
+        PeerDriveOrder::Rotating,
+    ] {
+        check_hot_join_order(&schedule, order);
+    }
+}
+
+#[cfg(feature = "hot-join")]
+#[track_caller]
+fn check_hot_join_order(schedule: &Schedule, order: PeerDriveOrder) {
+    let options = options(order, None);
+    let report = run(schedule, &options);
+    report.expect_pass(schedule);
+    let control = hot_join_control(&report);
+    assert_eq!((control.host, control.target), (0, 1));
+    assert_eq!(control.removal_step, 100);
+    assert!(control.freeze_frame >= 0);
+    assert!(control.handoff_floor >= 0);
+    assert!(control.handoff_floor <= control.freeze_frame);
+    assert!(control.snapshot_frame >= control.handoff_floor);
+    assert!(control
+        .load_step
+        .is_some_and(|load| load > control.removal_step));
+    assert!(
+        control.snapshot_frame >= control.freeze_frame + 2,
+        "held handshake must force a non-empty freeze window: {control:?}"
+    );
+
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    for frame in control.freeze_frame..=control.freeze_frame + 5 {
+        if frame < control.snapshot_frame {
+            assert_eq!(
+                trajectory.confirmed_inputs[0].get(&frame),
+                Some(
+                    &hot_join_reference(frame, control)
+                        .into_iter()
+                        .map(SimInput::fingerprint)
+                        .collect()
+                ),
+                "host freeze input frame {frame}"
+            );
+        }
+    }
+    for frame in control.snapshot_frame..=control.snapshot_frame + 20 {
+        let expected = hot_join_reference(frame, control)
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect::<Vec<_>>();
+        let actual = trajectory.confirmed_inputs[0]
+            .get(&frame)
+            .unwrap_or_else(|| panic!("host never confirmed post-resume frame {frame}"));
+        assert_eq!(actual, &expected, "host replacement input frame {frame}");
+        if frame >= control.snapshot_frame && frame <= report.final_confirmed[1] {
+            let replacement = trajectory.confirmed_inputs[1]
+                .get(&frame)
+                .unwrap_or_else(|| panic!("replacement never confirmed frame {frame}"));
+            assert_eq!(replacement, &expected, "replacement input frame {frame}");
+        }
+    }
+
+    let frozen = hot_join_reference(control.freeze_frame + 1, control);
+    let nominal = reference_inputs::<StubInput>(control.freeze_frame + 1, 0, 2, None, None);
+    assert_ne!(frozen, nominal, "freeze window must differ from nominal");
+    let resumed = hot_join_reference(control.snapshot_frame, control);
+    let still_frozen = hot_join_reference(control.snapshot_frame - 1, control);
+    assert_ne!(
+        resumed, still_frozen,
+        "activation frame must be rewritten to the nominal stream"
+    );
+    // The two-player StateStub fold is parity-only, and every nominal pair here
+    // has the same total parity, so the exact input rewrite above is this
+    // boundary's non-vacuous oracle; state controls are covered separately.
+
+    assert!(
+        trajectory.confirmed_states[1]
+            .keys()
+            .next()
+            .is_some_and(|frame| *frame == control.snapshot_frame + 1),
+        "replacement state history must start at A+1: {:?}",
+        trajectory.confirmed_states[1].keys().next()
+    );
+    let resumed_state = trajectory.confirmed_states[1][&(control.snapshot_frame + 1)];
+    assert_eq!(
+        trajectory.confirmed_states[0].get(&(control.snapshot_frame + 1)),
+        Some(&resumed_state),
+        "host and replacement must agree on the first post-resume state"
+    );
+
+    assert_eq!(
+        report.peer_event_counts_by_peer[0].get(&EventKind::PeerJoined),
+        Some(&1),
+        "host must observe exactly one PeerJoined"
+    );
+    let replay = run(schedule, &options);
+    replay.expect_pass(schedule);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.verdict.failures, replay.verdict.failures);
+    assert_eq!(
+        report.differential_trajectory,
+        replay.differential_trajectory
+    );
+    assert_eq!(hot_join_control(&replay), control);
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_activation_check_survives_long_drain() {
+    // The activation frame is validated while it is still retained, so a long
+    // post-resume drain must not turn a correct rewrite into an eviction error.
+    let mut schedule = hot_join_schedule();
+    schedule.config.steps = 400;
+    schedule.heal_at = 400;
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    report.expect_pass(&schedule);
+    let control = hot_join_control(&report);
+    let activation = control.snapshot_frame;
+    let expected = reference_inputs::<StubInput>(activation, 0, 2, None, None)
+        .into_iter()
+        .map(SimInput::fingerprint)
+        .collect::<Vec<_>>();
+    let trajectory = report
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    assert_eq!(
+        trajectory.confirmed_inputs[0].get(&activation),
+        Some(&expected),
+        "long drain must retain the rewritten activation frame"
+    );
+    assert!(report.final_confirmed[0] > activation + 128);
+}
+
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_mutations_and_replacement_floor_are_detected() {
+    let schedule = hot_join_schedule();
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    nominal.expect_pass(&schedule);
+    let control = hot_join_control(&nominal);
+    let resume = control.snapshot_frame;
+
+    let frozen_lie = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput {
+                ordinal: u32::try_from(control.freeze_frame).expect("non-negative cut"),
+            }),
+        ),
+    );
+    assert!(frozen_lie.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0, frame, .. } if *frame == control.freeze_frame
+    )));
+
+    let resume_lie = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput {
+                ordinal: u32::try_from(resume + 2).expect("non-negative resume"),
+            }),
+        ),
+    );
+    assert!(resume_lie.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceInput { peer: 0, frame, .. } if *frame == resume + 2
+    )));
+
+    let wrong_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedState { frame: resume + 2 }),
+        ),
+    );
+    assert!(wrong_state.verdict.failures.iter().any(|failure| matches!(
+        failure,
+        OracleFailure::ReferenceState { frame, .. } if *frame == resume + 2
+    )));
+
+    let missing_resume_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingState {
+                peer: 1,
+                frame: resume + 3,
+            }),
+        ),
+    );
+    assert!(missing_resume_state
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume + 3
+        )));
+
+    let missing_snapshot_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingState {
+                peer: 1,
+                frame: resume,
+            }),
+        ),
+    );
+    assert!(
+        !missing_snapshot_state
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(
+                failure,
+                OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume
+            )),
+        "replacement snapshot frame legitimately has no recorded state"
+    );
+
+    let missing_history = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::MissingStateHistory { peer: 1 }),
+        ),
+    );
+    assert!(missing_history
+        .verdict
+        .failures
+        .iter()
+        .any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceStateMissing { peer: 1, frame, .. } if *frame == resume + 1
+        )));
+
+    let artifact = FailureArtifact::from_report(&schedule, &resume_lie);
+    artifact.validate().expect("hot-join artifact validates");
+    let encoded = serde_json::to_vec(&artifact).expect("hot-join artifact serializes");
+    let decoded: FailureArtifact =
+        serde_json::from_slice(&encoded).expect("hot-join artifact deserializes");
+    decoded
+        .validate()
+        .expect("decoded hot-join artifact validates");
+    let replay = run(&decoded.schedule, &decoded.replay_options);
+    assert_eq!(replay.trace_hash, resume_lie.trace_hash);
+    assert_eq!(replay.verdict.failures, resume_lie.verdict.failures);
+    assert_eq!(
+        replay.differential_trajectory,
+        resume_lie.differential_trajectory
+    );
+    assert_eq!(hot_join_control(&replay), control);
 }
 
 #[test]
@@ -1496,7 +2245,6 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         ScheduleEvent::LegacyDisconnect { by: 0, target: 1 },
         ScheduleEvent::PeerKill { peer: 1 },
         ScheduleEvent::SpectatorHostKill { host: 0 },
-        ScheduleEvent::HotJoin { slot: 1 },
         ScheduleEvent::Rebind { peer: 1 },
     ];
     for event in forbidden_events {
@@ -1518,12 +2266,90 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     assert!(validate_run_options(&wrong_direction, &valid_options).is_err());
     let mut with_spectator = removal.clone();
     with_spectator.config.spectator_hosts = vec![0];
-    assert!(validate_run_options(&with_spectator, &valid_options).is_err());
+    validate_run_options(&with_spectator, &valid_options)
+        .expect("a surviving primary host supports spectator removal equivalence");
+    let mut removed_primary_spectator = removal.clone();
+    removed_primary_spectator.config.spectator_hosts = vec![1, 0];
+    assert!(validate_run_options(&removed_primary_spectator, &valid_options).is_err());
+    let mut removed_redundant_host = removal.clone();
+    removed_redundant_host.config.spectator_hosts = vec![0, 1];
+    assert!(validate_run_options(&removed_redundant_host, &valid_options).is_err());
     let mut with_delay_change = removal;
     with_delay_change
         .events
         .push((121, ScheduleEvent::SetInputDelay { peer: 0, delay: 2 }));
     assert!(validate_run_options(&with_delay_change, &valid_options).is_err());
+
+    let automatic = automatic_disconnect_schedule(SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    let automatic_options = automatic_options(PeerDriveOrder::Forward, None);
+    validate_run_options(&automatic, &automatic_options)
+        .expect("the bounded three-peer automatic disconnect is supported");
+    let mut duplicate_kill = automatic.clone();
+    duplicate_kill
+        .events
+        .push((41, ScheduleEvent::PeerKill { peer: 2 }));
+    assert!(validate_run_options(&duplicate_kill, &automatic_options).is_err());
+    let mut wrong_kill_target = automatic.clone();
+    wrong_kill_target.events = vec![(40, ScheduleEvent::PeerKill { peer: 1 })];
+    assert!(validate_run_options(&wrong_kill_target, &automatic_options).is_err());
+    let mut halt = automatic.clone();
+    halt.config.disconnect_behavior = DropPolicy::Halt;
+    assert!(validate_run_options(&halt, &automatic_options).is_err());
+    let mut automatic_spectator = automatic.clone();
+    automatic_spectator.config.spectator_hosts = vec![0];
+    assert!(validate_run_options(&automatic_spectator, &automatic_options).is_err());
+    let mut automatic_delay_change = automatic.clone();
+    automatic_delay_change
+        .events
+        .push((120, ScheduleEvent::SetInputDelay { peer: 0, delay: 2 }));
+    assert!(validate_run_options(&automatic_delay_change, &automatic_options).is_err());
+    let mut automatic_timeout = automatic_options;
+    automatic_timeout.disconnect_timeout = None;
+    assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
+    automatic_timeout.disconnect_timeout = Some(Duration::from_millis(u64::from(STEPS) * 16));
+    assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
+
+    #[cfg(feature = "hot-join")]
+    {
+        let hot = hot_join_schedule();
+        validate_run_options(&hot, &valid_options)
+            .expect("the bounded two-peer hot-join is supported");
+        let mut duplicate = hot.clone();
+        duplicate
+            .events
+            .push((101, ScheduleEvent::HotJoin { slot: 1 }));
+        assert!(validate_run_options(&duplicate, &valid_options).is_err());
+        let mut wrong_slot = hot.clone();
+        wrong_slot
+            .events
+            .retain(|(_, event)| !matches!(event, ScheduleEvent::HotJoin { .. }));
+        wrong_slot
+            .events
+            .push((100, ScheduleEvent::HotJoin { slot: 0 }));
+        assert!(validate_run_options(&wrong_slot, &valid_options).is_err());
+        let mut composed_delay = hot.clone();
+        composed_delay
+            .events
+            .push((120, ScheduleEvent::SetInputDelay { peer: 0, delay: 2 }));
+        assert!(validate_run_options(&composed_delay, &valid_options).is_err());
+        let mut composed_removal = hot.clone();
+        composed_removal
+            .events
+            .push((120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }));
+        assert!(validate_run_options(&composed_removal, &valid_options).is_err());
+        let mut with_spectator = hot.clone();
+        with_spectator.config.spectator_hosts = vec![0];
+        assert!(validate_run_options(&with_spectator, &valid_options).is_err());
+        let mut nonzero_delay = hot.clone();
+        nonzero_delay.config.input_delay = 2;
+        assert!(validate_run_options(&nonzero_delay, &valid_options).is_err());
+        let mut sparse = hot.clone();
+        sparse.config.save_mode = SavePolicy::Sparse;
+        assert!(validate_run_options(&sparse, &valid_options).is_err());
+        let mut noisy = hot;
+        noisy.config.noise = BackgroundNoise::Mild;
+        assert!(validate_run_options(&noisy, &valid_options).is_err());
+    }
 
     for (old_delay, new_delay) in [(0, 2), (2, 4)] {
         let dynamic = runtime_delay_schedule(

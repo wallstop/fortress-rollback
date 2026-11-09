@@ -996,7 +996,7 @@ mod tests {
             replay_input_width_bytes: 4,
             differential_trajectory: None,
             differential_input_delay_metrics_at_control: None,
-            differential_graceful_remove_metrics_at_control: None,
+            differential_removal_metrics_at_control: None,
             verdict: Verdict {
                 failures,
                 recovered_within_b: None,

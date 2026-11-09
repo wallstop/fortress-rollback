@@ -655,17 +655,10 @@ impl Oracle {
         &mut self,
         observer: usize,
         frame: i32,
-        expected: &[InputFingerprint],
+        expected: &[(InputFingerprint, InputStatus)],
         actual: &[(InputFingerprint, InputStatus)],
     ) {
-        let matches = expected.len() == actual.len()
-            && expected
-                .iter()
-                .zip(actual)
-                .all(|(expected, (actual, status))| {
-                    expected == actual && *status == InputStatus::Confirmed
-                });
-        if !matches {
+        if expected != actual {
             self.push_failure(OracleFailure::ReferenceInput {
                 peer: observer,
                 frame,
@@ -729,6 +722,14 @@ impl Oracle {
                 }
             },
         }
+    }
+
+    /// Drops the first-writer record for one frame when a legitimate
+    /// reactivation rewrites that frame's confirmed input (hot-join re-roots
+    /// the activation frame from the frozen predecessor to the replacement's
+    /// real input). The next sample re-establishes the canonical value.
+    pub fn forget_confirmed_input(&mut self, frame: i32) {
+        self.canonical_inputs.remove(&frame);
     }
 
     /// (a)-sampling: the session claimed `frame` confirmed but the inputs
