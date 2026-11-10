@@ -60,7 +60,8 @@ The [threat model](Threat-Model) records the complete single-dishonest-peer capa
   window, and input delay on every peer. Protocol v2 rejects incompatible peers during sync.
 - Pick a disconnect policy deliberately. `Halt` ends progress after a drop;
   `ContinueWithout` coordinates a graceful removal when another live endpoint can witness the
-  certificate; witnessless automatic timeouts fail closed. Configure the same policy on every peer.
+  certificate and a strict majority of the agreed membership remains reachable; automatic
+  timeouts without both fail closed. Configure the same policy on every peer.
 - Set disconnect notification and timeout values from measured packet-loss bursts, not only
   average RTT. Test them under the worst supported network preset.
 - Handle `NetworkInterrupted`, `NetworkResumed`, `PeerDropped`, and `Disconnected` as distinct

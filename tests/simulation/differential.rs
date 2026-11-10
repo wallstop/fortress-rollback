@@ -18,6 +18,8 @@
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
+#[cfg(feature = "hot-join")]
+use super::harness::reference_inputs_with_cuts;
 use super::harness::schedule::{
     BackgroundNoise, DropPolicy, FrameModel, SavePolicy, Schedule, ScheduleEvent, SimConfig,
     SCHEDULE_SCHEMA_VERSION,
@@ -250,6 +252,28 @@ fn hot_join_schedule_with_peers(n: usize) -> Schedule {
             holding: false,
         },
     ));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
+}
+
+/// Hot-join replacement for slot 1 while the coordinator's removal certificate
+/// for slot 2 is still in flight. `remove_player(1)` is queued behind the first
+/// certificate, so both membership changes overlap at step 100.
+#[cfg(feature = "hot-join")]
+fn hot_join_during_removal_schedule() -> Schedule {
+    let mut schedule = hot_join_schedule_with_peers(3);
+    schedule.events.retain(|(_, event)| {
+        !matches!(
+            event,
+            ScheduleEvent::HotJoin { .. } | ScheduleEvent::Hold { .. }
+        )
+    });
+    schedule
+        .events
+        .push((100, ScheduleEvent::GracefulRemove { by: 0, target: 2 }));
+    schedule
+        .events
+        .push((100, ScheduleEvent::HotJoin { slot: 1 }));
     schedule.events.sort_by_key(|(step, _)| *step);
     schedule
 }
@@ -1930,6 +1954,149 @@ fn hot_join_activation_check_survives_long_drain() {
         "long drain must retain the rewritten activation frame"
     );
     assert!(report.final_confirmed[0] > activation + 128);
+}
+
+/// A replacement may rejoin a live mesh while the coordinator's removal
+/// certificate for a *different* slot is still in flight. The explicit removal
+/// and the hot-join replacement are two independent certified membership cuts;
+/// the composed nominal reference must describe both, and no survivor may
+/// diverge across either cut or the replacement handoff.
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_during_removal_certificate_certifies_both_cuts() {
+    let schedule = hot_join_during_removal_schedule();
+    let n = schedule.config.n_players;
+    let mut canonical: Option<DifferentialTrajectory> = None;
+
+    for order in [PeerDriveOrder::Forward, PeerDriveOrder::Reverse] {
+        let report = run(&schedule, &options(order, None));
+        report.expect_pass(&schedule);
+        let trajectory = report
+            .differential_trajectory
+            .as_ref()
+            .expect("differential trajectory retained");
+        let removal = trajectory
+            .removal_control
+            .expect("the explicit removal must certify its cut");
+        let hot_join = trajectory
+            .hot_join_control
+            .expect("the replacement must activate");
+
+        assert_eq!((removal.by, removal.target), (0, 2));
+        assert_eq!((hot_join.host, hot_join.target), (0, 1));
+        assert_eq!(hot_join.removal_step, 100);
+        assert!(
+            removal.commit_step > hot_join.removal_step,
+            "the hot-join must start while the removal certificate is still in flight: {removal:?} vs {hot_join:?}"
+        );
+        assert!(hot_join.freeze_frame >= 0);
+        assert!(hot_join.handoff_floor <= hot_join.freeze_frame);
+        assert!(hot_join.snapshot_frame >= hot_join.freeze_frame);
+        assert!(hot_join.snapshot_frame > removal.freeze_frame);
+        assert!(hot_join
+            .load_step
+            .is_some_and(|load| load > hot_join.removal_step));
+
+        // Every confirmed frame must match the independent composed reference:
+        // peer 2 frozen at the explicit removal cut, peer 1 frozen at the
+        // hot-join cut and activated after its snapshot.
+        for frame in [
+            removal.freeze_frame,
+            removal.freeze_frame + 1,
+            hot_join.freeze_frame,
+            hot_join.freeze_frame + 1,
+            hot_join.snapshot_frame,
+            hot_join.snapshot_frame + 1,
+            hot_join.snapshot_frame + 20,
+        ] {
+            let expected: Vec<InputFingerprint> = reference_inputs_with_cuts::<StubInput>(
+                frame,
+                0,
+                n,
+                None,
+                Some(removal),
+                None,
+                Some(hot_join),
+            )
+            .into_iter()
+            .map(SimInput::fingerprint)
+            .collect();
+            for peer in 0..n {
+                if report.final_confirmed[peer] < frame {
+                    continue;
+                }
+                // A hot-join replacement generation has no retained history
+                // below its snapshot frame.
+                if peer == hot_join.target && frame < hot_join.snapshot_frame {
+                    continue;
+                }
+                assert_eq!(
+                    trajectory.confirmed_inputs[peer].get(&frame),
+                    Some(&expected),
+                    "{order:?}: peer {peer} composed input frame {frame}, removal={removal:?}, hot_join={hot_join:?}"
+                );
+            }
+        }
+
+        // Exact replay: the same schedule reproduces the same trace.
+        let replay = run(&schedule, &options(order, None));
+        assert_eq!(report.trace_hash, replay.trace_hash);
+
+        match canonical.as_ref() {
+            Some(canonical) => assert_eq!(
+                trajectory, canonical,
+                "the composed membership trajectory must be drive-order identical"
+            ),
+            None => canonical = Some(trajectory.clone()),
+        }
+    }
+
+    // Mutation controls: a frozen-slot lie and a wrong post-activation state
+    // must both be detected against the composed reference.
+    let nominal = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    let trajectory = nominal
+        .differential_trajectory
+        .as_ref()
+        .expect("differential trajectory retained");
+    let removal = trajectory.removal_control.expect("removal control");
+    let hot_join = trajectory.hot_join_control.expect("hot-join control");
+
+    let frozen_lie = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedInput {
+                ordinal: u32::try_from(removal.freeze_frame).expect("non-negative cut"),
+            }),
+        ),
+    );
+    assert!(
+        frozen_lie.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceInput { frame, .. } if *frame == removal.freeze_frame
+        )),
+        "a lie on the explicit removal cut must be detected: {:?}",
+        frozen_lie.verdict.failures
+    );
+
+    let activation = hot_join.snapshot_frame;
+    let wrong_state = run(
+        &schedule,
+        &options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedState {
+                frame: activation + 2,
+            }),
+        ),
+    );
+    assert!(
+        wrong_state.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ReferenceState { frame, .. } if *frame == activation + 2
+        )),
+        "a wrong post-activation state must be detected: {:?}",
+        wrong_state.verdict.failures
+    );
 }
 
 #[cfg(feature = "hot-join")]

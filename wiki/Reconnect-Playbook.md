@@ -30,9 +30,11 @@ choosing `ContinueWithout` does not make that call graceful.
 
 Every peer should use the same policy and lifecycle entry point. A partition that cannot produce
 the required certificate fails closed instead of inventing a new confirmed history. Automatic
-timeout requires another live remote endpoint as an independent witness; a two-endpoint partition
-stops both sides rather than committing opposite one-member certificates. Explicit
-`remove_player(handle)` retains its one-survivor path for an application-directed match decision.
+timeout requires another live remote endpoint as an independent witness **and** a strict majority
+of the agreed membership to remain reachable; a symmetric partition leaves only the
+majority component running, while components without a majority stop rather than committing
+complementary one-sided certificates. Explicit `remove_player(handle)` retains its one-survivor
+path for an application-directed match decision.
 
 ## Timeout presets
 

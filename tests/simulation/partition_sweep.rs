@@ -2655,3 +2655,293 @@ fn coordinator_loss_during_removal_certificate_fails_closed_without_fork() {
         "the mutation control must flip FailedClosed to Forked"
     );
 }
+
+/// Directed block/unblock events for a symmetric two-component bisection of
+/// `n` peers at `split`. Both directions of every cross-component link are
+/// black-holed at step 100 and restored at step 300.
+fn healed_bisection_events(n: usize, split: usize) -> Vec<(u32, ScheduleEvent)> {
+    let mut events = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to && ((from < split) != (to < split)) {
+                events.push((
+                    100,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: true,
+                    },
+                ));
+                events.push((
+                    300,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: false,
+                    },
+                ));
+            }
+        }
+    }
+    events.sort_by_key(|(step, _)| *step);
+    events
+}
+
+fn healed_bisection_components(n: usize, split: usize) -> Vec<usize> {
+    (0..n).map(|peer| usize::from(peer >= split)).collect()
+}
+
+/// CAP matrix heal/reflap row: a symmetric partition that outlives the
+/// disconnect timeout must not resume as two live confirmed histories after
+/// the link heals. Neither even split (2/2 at N=4, 4/4 at N=8) can form a
+/// strict survivor majority of the agreed membership, so both components fail
+/// closed at their shared cut. The heal is proven to fire (`NetworkResumed`),
+/// so the terminal state is not a vacuous "the partition never healed".
+#[test]
+fn healed_symmetric_partition_without_survivor_quorum_stays_failed_closed() {
+    const HEAL_CONFIRM_ALLOWANCE: i32 = 2;
+
+    for (n, split) in [(4, 2), (8, 4)] {
+        let schedule = disruption_schedule(n, healed_bisection_events(n, split));
+        let component = healed_bisection_components(n, split);
+        let mut options = disruption_options(component.clone());
+        options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+        options.receive_message_limit = Some(RECEIVE_MESSAGE_LIMIT);
+
+        let report = run_with_input::<StubInput>(&schedule, &options);
+        let evidence = report.component_scope.as_ref().expect("scope");
+        assert_eq!(evidence.component, component);
+        assert_eq!(
+            evidence.cut_confirmed.len(),
+            n,
+            "the declared partition must actually fire"
+        );
+        let cut = evidence
+            .cut_confirmed
+            .iter()
+            .copied()
+            .min()
+            .expect("partition snapshot");
+        assert!(
+            evidence
+                .final_confirmed
+                .iter()
+                .all(|frame| *frame <= cut + HEAL_CONFIRM_ALLOWANCE),
+            "a quorum-less heal must not resume confirmation: {:?} vs cut {cut}",
+            evidence.final_confirmed
+        );
+        assert!(
+            evidence
+                .final_states
+                .iter()
+                .all(|state| *state == TraceSessionState::Synchronizing),
+            "every component must stay failed closed: {:?}",
+            evidence.final_states
+        );
+        assert_eq!(
+            classify_component_scope(evidence, HEAL_CONFIRM_ALLOWANCE),
+            ComponentOutcome::FailedClosed {
+                shared_prefix: evidence
+                    .final_confirmed
+                    .iter()
+                    .copied()
+                    .min()
+                    .expect("confirmed history"),
+            },
+            "a healed quorum-less partition must fail closed, never fork"
+        );
+        assert!(
+            report
+                .peer_event_counts
+                .get(&EventKind::NetworkResumed)
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the heal must be observed so the terminal row is not vacuous: {:?}",
+            report.peer_event_counts
+        );
+        for kind in [EventKind::Disconnected, EventKind::PeerDropped] {
+            assert_eq!(
+                report.peer_event_counts.get(&kind).copied().unwrap_or(0),
+                0,
+                "a quorum-less partition must not invent a removal ({kind:?}): {:?}",
+                report.peer_event_counts
+            );
+        }
+        assert!(
+            !report.verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ConfirmedInputDivergence { .. }
+                    | OracleFailure::StateDivergence { .. }
+            )),
+            "the failing-closed components must keep one confirmed history: {:?}",
+            report.verdict.failures
+        );
+        assert!(
+            typed_safe_failure_diagnostics_hold(
+                &report,
+                false,
+                false,
+                schedule.config.recovery_window_steps(),
+            ),
+            "the healed terminal failures must stay the reviewed EndProgress set: {:?}",
+            report.verdict.failures
+        );
+
+        // Exact replay: the same schedule must produce the same trace.
+        let replay = run_with_input::<StubInput>(&schedule, &options);
+        assert_eq!(
+            replay.trace_hash, report.trace_hash,
+            "the healed partition row must replay exactly"
+        );
+
+        // Mutation control: rewriting one component on the shared frame must
+        // flip FailedClosed to Forked.
+        let shared_frame = evidence
+            .confirmed_inputs
+            .first()
+            .and_then(|history| history.keys().next_back().copied())
+            .expect("component history");
+        let mut forked = evidence.clone();
+        for peer in (0..n).filter(|peer| component[*peer] == 0) {
+            let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_frame) else {
+                panic!("component history is missing the shared frame {shared_frame}");
+            };
+            let Some(slot) = inputs.first_mut() else {
+                panic!("shared frame {shared_frame} has no rendered peers");
+            };
+            *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"healed-fork");
+        }
+        assert_eq!(
+            classify_component_scope(&forked, HEAL_CONFIRM_ALLOWANCE),
+            ComponentOutcome::Forked {
+                frame: shared_frame,
+                component: 0,
+                other_component: 1,
+            },
+            "the mutation control must flip FailedClosed to Forked"
+        );
+    }
+}
+
+/// CAP matrix heal/reflap row, majority shape: when one component holds a
+/// strict majority of the agreed membership (2/1 at N=3, 6/2 at N=8), the
+/// majority certifies the isolated component's drop and continues on one
+/// history. The minority stays failed closed at the shared cut. This is the
+/// explicit split-match outcome, and it proves the quorum gate does not
+/// blanket-halt every healed partition.
+#[test]
+fn healed_majority_partition_continues_on_one_history() {
+    const HEAL_CONFIRM_ALLOWANCE: i32 = 2;
+
+    for (n, split) in [(3, 2), (8, 6)] {
+        let schedule = disruption_schedule(n, healed_bisection_events(n, split));
+        let component = healed_bisection_components(n, split);
+        let mut options = disruption_options(component.clone());
+        options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+        options.receive_message_limit = Some(RECEIVE_MESSAGE_LIMIT);
+
+        let report = run_with_input::<StubInput>(&schedule, &options);
+        let evidence = report.component_scope.as_ref().expect("scope");
+        let cut = evidence
+            .cut_confirmed
+            .iter()
+            .copied()
+            .min()
+            .expect("partition snapshot");
+        let shared_prefix = evidence
+            .confirmed_inputs
+            .iter()
+            .filter_map(|history| history.keys().next_back().copied())
+            .min()
+            .expect("confirmed history");
+
+        assert_eq!(
+            classify_component_scope(evidence, HEAL_CONFIRM_ALLOWANCE),
+            ComponentOutcome::SplitMatch {
+                shared_prefix,
+                continued: vec![0],
+            },
+            "the majority component must continue alone on one history"
+        );
+        assert!(
+            evidence
+                .final_states
+                .iter()
+                .zip(&component)
+                .all(|(state, component)| if *component == 0 {
+                    *state == TraceSessionState::Running
+                } else {
+                    *state == TraceSessionState::Synchronizing
+                }),
+            "only the majority component may keep running: {:?}",
+            evidence.final_states
+        );
+        for (peer, component) in component.iter().enumerate() {
+            if *component == 0 {
+                assert!(
+                    evidence.final_confirmed[peer] > cut + 100,
+                    "majority peer {peer} must keep confirming: {:?} vs cut {cut}",
+                    evidence.final_confirmed
+                );
+            } else {
+                assert!(
+                    evidence.final_confirmed[peer] <= cut + HEAL_CONFIRM_ALLOWANCE,
+                    "minority peer {peer} must fail closed at the cut: {:?} vs cut {cut}",
+                    evidence.final_confirmed
+                );
+            }
+        }
+        assert!(
+            report
+                .peer_event_counts
+                .get(&EventKind::PeerDropped)
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the majority must certify the isolated component's drop: {:?}",
+            report.peer_event_counts
+        );
+        assert!(
+            !report.verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ConfirmedInputDivergence { .. }
+                    | OracleFailure::StateDivergence { .. }
+            )),
+            "the split match must keep one shared confirmed prefix: {:?}",
+            report.verdict.failures
+        );
+        assert!(
+            typed_safe_failure_diagnostics_hold(
+                &report,
+                false,
+                false,
+                schedule.config.recovery_window_steps(),
+            ),
+            "the minority terminal failures must stay the reviewed set: {:?}",
+            report.verdict.failures
+        );
+
+        // Mutation control: rewriting the majority value on the shared frame
+        // must flip SplitMatch to Forked.
+        let mut forked = evidence.clone();
+        for peer in (0..n).filter(|peer| component[*peer] == 0) {
+            let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_prefix) else {
+                panic!("majority history is missing the shared frame {shared_prefix}");
+            };
+            let Some(slot) = inputs.first_mut() else {
+                panic!("shared frame {shared_prefix} has no rendered peers");
+            };
+            *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"healed-majority-fork");
+        }
+        assert_eq!(
+            classify_component_scope(&forked, HEAL_CONFIRM_ALLOWANCE),
+            ComponentOutcome::Forked {
+                frame: shared_prefix,
+                component: 0,
+                other_component: 1,
+            },
+            "the mutation control must flip SplitMatch to Forked"
+        );
+    }
+}

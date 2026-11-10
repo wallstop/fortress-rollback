@@ -309,7 +309,7 @@ the notification delay is greater than the disconnect timeout.
 **Notes:**
 
 - Default is `DisconnectBehavior::Halt`, preserving the legacy GGRS-style halt-on-drop semantics.
-- `DisconnectBehavior::ContinueWithout` enables coordinated graceful peer drop on the **automatic** disconnect-timeout path. Survivors hold confirmation until the same certificate described for `remove_player` commits; only then are `PeerDropped` and `Disconnected` emitted and remaining peers continue advancing. Automatic timeout requires another live remote endpoint as an independent witness; without one, the session fails closed without `PeerDropped`. Explicit `remove_player` retains its one-survivor certificate path.
+- `DisconnectBehavior::ContinueWithout` enables coordinated graceful peer drop on the **automatic** disconnect-timeout path. Survivors hold confirmation until the same certificate described for `remove_player` commits; only then are `PeerDropped` and `Disconnected` emitted and remaining peers continue advancing. Automatic timeout requires another live remote endpoint as an independent witness and a strict majority of the agreed membership to remain reachable; without both, the session fails closed without `PeerDropped`. Explicit `remove_player` retains its one-survivor certificate path.
 - The setting governs only the automatic-timeout path. The explicit `P2PSession::remove_player` always performs a graceful drop regardless of this setting; the legacy `P2PSession::disconnect_player` retains its non-graceful semantics regardless of this setting.
 
 ---

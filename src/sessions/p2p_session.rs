@@ -1226,6 +1226,56 @@ impl<T: Config> P2PSession<T> {
             .any(|(addr, endpoint)| addr != target_addr && endpoint.is_running())
     }
 
+    /// Whether the locally reachable player handles form a strict majority of
+    /// the current membership epoch.
+    ///
+    /// An automatic timeout may only start a graceful-drop certificate when
+    /// this holds. A witness alone is not sufficient: in a symmetric partition
+    /// both components have a witness, and each one could certify the other as
+    /// dropped, then continue on its own divergent confirmed history after the
+    /// link heals. Requiring a strict majority of the agreed epoch means at
+    /// most one component can produce a certificate.
+    ///
+    /// The epoch is every player slot that has not been certified dropped and
+    /// was not born disconnected (a reserved hot-join slot). A slot stays in
+    /// the epoch while its status is connected even if its endpoint currently
+    /// looks silent, so a partitioned peer keeps the denominator fixed for
+    /// both sides. Reachable survivors are the local handles plus remote
+    /// handles whose endpoint is currently `Running` and has not already
+    /// emitted its silence-timeout verdict. A timed-out endpoint may later
+    /// deliver `NetworkResumed`, but it could not have answered the
+    /// certificate that is being judged now, so it must not count as a
+    /// witness.
+    fn automatic_drop_survivor_quorum_met(&self) -> bool {
+        let mut epoch = 0_u32;
+        let mut survivors = 0_u32;
+        for handle_idx in 0..self.num_players {
+            let Some(status) = self.local_connect_status.get(handle_idx) else {
+                continue;
+            };
+            let handle = PlayerHandle::new(handle_idx);
+            let player_type = self.player_reg.handles.get(&handle);
+            if !matches!(player_type, Some(PlayerType::Local)) && status.disconnected {
+                continue;
+            }
+            epoch = epoch.saturating_add(1);
+            match player_type {
+                Some(PlayerType::Local) => {
+                    survivors = survivors.saturating_add(1);
+                },
+                Some(PlayerType::Remote(addr)) => {
+                    if self.player_reg.remotes.get(addr).is_some_and(|endpoint| {
+                        endpoint.is_running() && !endpoint.has_reported_disconnect()
+                    }) {
+                        survivors = survivors.saturating_add(1);
+                    }
+                },
+                Some(PlayerType::Spectator(_)) | None => {},
+            }
+        }
+        survivors.saturating_mul(2) > epoch
+    }
+
     fn begin_coordinated_drop(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         if let Some(active) = self.coordinated_drop.active.as_ref() {
             if active
@@ -2384,6 +2434,14 @@ impl<T: Config> P2PSession<T> {
                     .get(handle.as_usize())
                     .is_some_and(|status| status.disconnected)
                 {
+                    return;
+                }
+                // The queue only holds automatic-timeout intents. The mesh may
+                // have lost reachability while the previous certificate was in
+                // flight, so re-check the survivor quorum at start time rather
+                // than trusting the check made when the intent was queued.
+                if !self.automatic_drop_survivor_quorum_met() {
+                    self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
                     return;
                 }
                 if let Err(error) = self.begin_coordinated_drop(handle) {
@@ -3583,13 +3641,17 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            // Arm selection (N2): the N-peer arm is taken iff at least one
-            // running, non-reserved remote endpoint exists besides the joiner's
-            // address (a survivor that must agree on the activation frame). An
-            // empty survivor set falls through to the 2-peer flow below,
-            // byte-identical to today.
+            // Arm selection (N2): the N-peer arm is taken by every 3+-machine
+            // mesh, even when no survivor is currently reachable. The joiner's
+            // role is derived from its own registered remote machines, so a
+            // 3+-slot joiner always expects the N-peer snapshot shape (bridge
+            // inputs + statuses). Falling back to the 2-peer rewrite when the
+            // last survivor dropped would make that joiner reject every
+            // snapshot as "the 2-peer serve shape". A 2-machine mesh has one
+            // remote endpoint and keeps the 2-peer flow byte-identically.
+            let npeer_mesh = self.player_reg.remotes.len() > 1;
             let survivors = self.npeer_survivor_addrs(&addr);
-            if !survivors.is_empty() {
+            if npeer_mesh {
                 self.try_open_npeer_serve(addr, handle, survivors);
                 continue;
             }
@@ -12194,7 +12256,8 @@ impl<T: Config> P2PSession<T> {
                     Some(PlayerType::Remote(_)) => {
                         if self.disconnect_behavior == DisconnectBehavior::ContinueWithout {
                             if !peer_sent_goodbye
-                                && !self.coordinated_drop_has_independent_witness(&addr)
+                                && (!self.coordinated_drop_has_independent_witness(&addr)
+                                    || !self.automatic_drop_survivor_quorum_met())
                             {
                                 self.enter_fail_closed_disconnect_state_at(
                                     confirmed_before_disconnect,
@@ -16394,7 +16457,10 @@ mod tests {
 
         // Positive control: the SAME endpoint requesting the slot it DOES own
         // (handle 2) passes the gate and opens a serve — proving the saved state
-        // is servable and only the ownership mismatch blocked handle 1.
+        // is servable and only the ownership mismatch blocked handle 1. This
+        // host has two remote machines, so the N-peer bridge-serve shape is the
+        // correct arm even while both slots are still reserved (the old
+        // survivor-count heuristic would have selected the 2-peer rewrite).
         host.player_reg
             .remotes
             .get_mut(&addr_b)
@@ -16402,30 +16468,22 @@ mod tests {
             .set_pending_join_request_for_test(2);
         host.poll_hot_join();
         assert!(
-            host.hot_join.joining.contains_key(&PlayerHandle::new(2)),
-            "an endpoint requesting the reserved slot it owns must open a serve"
-        );
-        assert!(
-            host.player_reg
-                .remotes
-                .get(&addr_b)
-                .expect("addr_b endpoint exists")
-                .defers_input_processing(),
-            "an open serve must defer pre-commit Input packets"
+            host.hot_join
+                .npeer
+                .as_ref()
+                .is_some_and(|serve| serve.handle == PlayerHandle::new(2)),
+            "an endpoint requesting the reserved slot it owns must open the N-peer serve"
         );
         assert!(
             !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
             "the spoofed handle 1 must never be served"
         );
-        assert!(host.abort_hot_join_serve(PlayerHandle::new(2)));
         assert!(
-            !host
-                .player_reg
-                .remotes
-                .get(&addr_b)
-                .expect("addr_b endpoint exists")
-                .defers_input_processing(),
-            "serve abort must restore ordinary Input processing"
+            host.hot_join
+                .npeer
+                .as_ref()
+                .is_none_or(|serve| serve.handle != PlayerHandle::new(1)),
+            "the spoofed handle 1 must never open the N-peer serve either"
         );
     }
 
