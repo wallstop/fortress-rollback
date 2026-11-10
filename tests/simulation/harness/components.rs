@@ -32,7 +32,7 @@ impl ComponentScopeOptions {
     ///
     /// # Errors
     /// Returns a human-readable reason when the layout cannot describe a
-    /// partition (wrong length, non-contiguous ids, or fewer than two
+    /// partition (wrong length, an id outside `0..n_players`, or fewer than two
     /// non-empty components).
     pub fn validate(&self, n_players: usize) -> Result<(), String> {
         if self.component.len() != n_players {
