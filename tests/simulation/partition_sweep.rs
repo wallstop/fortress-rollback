@@ -2530,3 +2530,128 @@ fn disruption_options(component: Vec<usize>) -> RunOptions {
         ..RunOptions::default()
     }
 }
+
+/// CAP matrix row 5: the coordinator that started a graceful removal certificate
+/// dies before the inventory can commit. The survivors must fail closed at the
+/// shared cut — never fork and never present the aborted removal as one
+/// continued history.
+#[test]
+fn coordinator_loss_during_removal_certificate_fails_closed_without_fork() {
+    let n = 4;
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let config = SimConfig {
+        n_players: n,
+        steps: STEPS,
+        noise: BackgroundNoise::Clean,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        ..SimConfig::smoke(n)
+    };
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1111_2222_3333_4444,
+        config,
+        initial_links,
+        events: vec![
+            (120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }),
+            (120, ScheduleEvent::PeerKill { peer: 0 }),
+        ],
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(DISCONNECT_TIMEOUT),
+        // Peers 0 and 1 are the lost/removed generation; 2 and 3 are the
+        // surviving component.
+        component_scope: Some(ComponentScopeOptions {
+            component: vec![1, 1, 0, 0],
+        }),
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let evidence = report
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    assert_eq!(
+        evidence.cut_confirmed.len(),
+        n,
+        "the coordinator loss must fire at a captured cut"
+    );
+    let shared_prefix = evidence
+        .confirmed_inputs
+        .iter()
+        .filter_map(|history| history.keys().next_back().copied())
+        .min()
+        .expect("confirmed history");
+    assert_eq!(
+        classify_component_scope(evidence, 2),
+        ComponentOutcome::FailedClosed { shared_prefix },
+        "an aborted certificate must fail closed on the surviving component"
+    );
+    for peer in [2, 3] {
+        assert_eq!(
+            evidence.final_states[peer],
+            TraceSessionState::Synchronizing,
+            "survivor {peer} must fail closed, got {:?}",
+            evidence.final_states
+        );
+    }
+    assert_eq!(
+        report
+            .peer_event_counts
+            .get(&EventKind::DesyncDetected)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "an aborted certificate must not present a desync: {:?}",
+        report.peer_event_counts
+    );
+    assert!(
+        typed_safe_failure_diagnostics_hold(
+            &report,
+            false,
+            true,
+            schedule.config.recovery_window_steps(),
+        ),
+        "the terminal failures must stay the reviewed drop-timeout/EndProgress set: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "the failing-closed survivors must keep one confirmed history: {:?}",
+        report.verdict.failures
+    );
+
+    // Mutation control: rewriting the surviving component on the shared frame
+    // must flip FailedClosed to Forked.
+    let mut forked = evidence.clone();
+    for peer in (0..n).filter(|peer| evidence.component[*peer] == 0) {
+        let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_prefix) else {
+            panic!("survivor history is missing the shared frame {shared_prefix}");
+        };
+        let Some(slot) = inputs.first_mut() else {
+            panic!("shared frame {shared_prefix} has no rendered peers");
+        };
+        *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"coordinator-loss-fork");
+    }
+    assert_eq!(
+        classify_component_scope(&forked, 2),
+        ComponentOutcome::Forked {
+            frame: shared_prefix,
+            component: 0,
+            other_component: 1,
+        },
+        "the mutation control must flip FailedClosed to Forked"
+    );
+}
