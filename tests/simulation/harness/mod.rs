@@ -4317,8 +4317,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 if let (Some(target), Some((confirmed_before_poll, sampled_before_poll))) =
                     (differential_host_kill_target, host_kill_history_before_poll)
                 {
-                    if dead[target] && target != i && differential_second_removal_control.is_none()
-                    {
+                    if dead[target] && target != i {
                         observe_automatic_removal_commit(
                             &peers,
                             i,
