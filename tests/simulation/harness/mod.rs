@@ -3676,7 +3676,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         .component_scope
         .as_ref()
         .map(|_| vec![BTreeMap::new(); n]);
-    let mut component_partition_confirmed: Vec<i32> = Vec::new();
+    let mut component_cut_confirmed: Vec<i32> = Vec::new();
     let mut differential_input_delay_control = None;
     let mut differential_input_delay_metrics_at_control = None;
     let mut differential_removal_control = None;
@@ -3947,14 +3947,14 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // partition: snapshot every peer's confirmed frame so the
                     // component comparison knows where the cut was.
                     if *blocked
-                        && component_partition_confirmed.is_empty()
+                        && component_cut_confirmed.is_empty()
                         && *to < n
                         && component_confirmed_inputs.is_some()
                         && options.component_scope.as_ref().is_some_and(|scope| {
                             scope.component.get(*from) != scope.component.get(*to)
                         })
                     {
-                        component_partition_confirmed = peers
+                        component_cut_confirmed = peers
                             .iter()
                             .map(|slot| slot.session.confirmed_frame().as_i32())
                             .collect();
@@ -3981,6 +3981,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         resume_step: None,
                         confirmed_at_resume: None,
                     });
+                    // A declared stall is the component-scoped cut for the
+                    // timeout-versus-slow-peer row: snapshot every peer's
+                    // confirmed frame before the slow peer falls silent.
+                    if component_cut_confirmed.is_empty() && component_confirmed_inputs.is_some() {
+                        component_cut_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
+                    }
                 },
                 ScheduleEvent::SetInputDelay { peer, delay } => {
                     // Reconfigure the peer's own local input delay mid-run. A
@@ -5517,7 +5526,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .iter()
                 .map(|slot| slot.session.current_state().into())
                 .collect(),
-            partition_confirmed: component_partition_confirmed,
+            cut_confirmed: component_cut_confirmed,
         });
     RunReport {
         replay_options: options.clone(),

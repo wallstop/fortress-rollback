@@ -72,8 +72,9 @@ pub struct ComponentScopeEvidence {
     /// Every peer's session state at the end of the run.
     pub final_states: Vec<TraceSessionState>,
     /// Confirmed frame per peer sampled when the declared components were first
-    /// isolated. Empty when no cross-component `Block` ever fired.
-    pub partition_confirmed: Vec<i32>,
+    /// isolated (the first cross-component `Block` or declared `PeerStall`).
+    /// Empty when no declared disruption ever fired.
+    pub cut_confirmed: Vec<i32>,
 }
 
 /// Outcome of the component-scoped comparison.
@@ -82,9 +83,12 @@ pub enum ComponentOutcome {
     /// Every component stopped confirming at or before the partition cut and
     /// the components' shared confirmed prefix is identical.
     FailedClosed { shared_prefix: i32 },
-    /// At least one component confirmed strictly past the partition cut while
-    /// every shared frame still agreed. This is a one-sided continuation: an
-    /// explicit split-branch outcome, not a silent fork.
+    /// Every component confirmed strictly past the cut and every shared frame
+    /// still agreed: the disruption healed without a second history.
+    ContinuedTogether { shared_prefix: i32 },
+    /// At least one, but not every, component confirmed strictly past the cut
+    /// while every shared frame still agreed. This is a one-sided continuation:
+    /// an explicit split-branch outcome, not a silent fork.
     SplitMatch {
         shared_prefix: i32,
         continued: Vec<usize>,
@@ -105,7 +109,10 @@ impl ComponentOutcome {
     /// True when the outcome is one of the legal terminal outcomes.
     #[must_use]
     pub fn is_legal(&self) -> bool {
-        matches!(self, Self::FailedClosed { .. } | Self::SplitMatch { .. })
+        matches!(
+            self,
+            Self::FailedClosed { .. } | Self::ContinuedTogether { .. } | Self::SplitMatch { .. }
+        )
     }
 }
 
@@ -123,7 +130,7 @@ pub fn classify_component_scope(
     allowance: i32,
 ) -> ComponentOutcome {
     let n = evidence.component.len();
-    if n < 2 || evidence.confirmed_inputs.len() != n || evidence.partition_confirmed.len() != n {
+    if n < 2 || evidence.confirmed_inputs.len() != n || evidence.cut_confirmed.len() != n {
         return ComponentOutcome::Invalid {
             reason: "component evidence is incomplete",
         };
@@ -228,7 +235,7 @@ pub fn classify_component_scope(
 
     // A component that confirmed beyond the cut continued on its own.
     let cut = evidence
-        .partition_confirmed
+        .cut_confirmed
         .iter()
         .copied()
         .min()
@@ -242,6 +249,10 @@ pub fn classify_component_scope(
         .collect();
     if continued.is_empty() {
         ComponentOutcome::FailedClosed {
+            shared_prefix: shared,
+        }
+    } else if continued.len() == component_ids.len() {
+        ComponentOutcome::ContinuedTogether {
             shared_prefix: shared,
         }
     } else {
@@ -274,7 +285,7 @@ mod tests {
     fn build_evidence(
         component: Vec<usize>,
         histories: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
-        partition_confirmed: Vec<i32>,
+        cut_confirmed: Vec<i32>,
     ) -> ComponentScopeEvidence {
         let final_confirmed = histories
             .iter()
@@ -286,7 +297,7 @@ mod tests {
             confirmed_inputs: histories,
             final_confirmed,
             final_states,
-            partition_confirmed,
+            cut_confirmed,
         }
     }
 
@@ -340,6 +351,19 @@ mod tests {
                 component: 0,
                 frame: 1,
             }
+        );
+    }
+
+    #[test]
+    fn every_component_continuing_agrees_on_one_history() {
+        let mut shared = history([(0, 7), (1, 7), (2, 7)]);
+        for frame in 3..=6 {
+            shared.insert(frame, vec![InputFingerprint::from_bytes(7, &[7, 7])]);
+        }
+        let evidence = build_evidence(vec![0, 1], vec![shared.clone(), shared], vec![2, 2]);
+        assert_eq!(
+            classify_component_scope(&evidence, 0),
+            ComponentOutcome::ContinuedTogether { shared_prefix: 6 }
         );
     }
 

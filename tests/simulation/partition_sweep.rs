@@ -2048,14 +2048,14 @@ fn check_partition_components_fail_closed(case: SweepCase, component: Vec<usize>
         .as_ref()
         .expect("component-scoped evidence was requested");
     assert_eq!(
-        evidence.partition_confirmed.len(),
+        evidence.cut_confirmed.len(),
         component.len(),
         "the declared partition must actually fire"
     );
     assert_eq!(evidence.component, component);
 
     let cut = evidence
-        .partition_confirmed
+        .cut_confirmed
         .iter()
         .copied()
         .min()
@@ -2139,4 +2139,193 @@ fn check_partition_components_fail_closed(case: SweepCase, component: Vec<usize>
         },
         "the mutation control must flip FailedClosed to Forked"
     );
+}
+
+/// CAP matrix row 2: timeout-versus-slow-peer ambiguity.
+///
+/// A peer that is merely slow (its application stops polling for less than the
+/// disconnect timeout) must not be expelled, and the mesh must keep one
+/// confirmed history across the pause. Silence at or beyond the timeout is a
+/// different contract: the peers may certify the slow slot as dropped, which is
+/// the documented terminal outcome and must be *detectable*, never a second
+/// history presented as one session.
+///
+/// The component-scoped comparison treats the slow peer as its own component
+/// and requires the within-timeout row to converge (`ContinuedTogether`, one
+/// shared prefix, zero `Disconnected`/`PeerDropped`/`DesyncDetected` events).
+/// The beyond-timeout row is the matched negative control: it must not converge
+/// and must expose the divergence through an explicit event/failure.
+#[test]
+fn slow_peer_within_timeout_is_not_expelled_and_keeps_one_history() {
+    // Confirmation can drain a frame or two while the stall begins.
+    const STALL_CONFIRM_ALLOWANCE: i32 = 2;
+    // 60 * 16 ms = 960 ms < the 2 s disconnect timeout.
+    const WITHIN_TIMEOUT_STEPS: u32 = 60;
+    // 200 * 16 ms = 3.2 s > the 2 s disconnect timeout.
+    const BEYOND_TIMEOUT_STEPS: u32 = 200;
+
+    let within = run_slow_peer(WITHIN_TIMEOUT_STEPS);
+    let evidence = within
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    assert_eq!(evidence.component, vec![0, 0, 1]);
+    assert_eq!(
+        evidence.cut_confirmed.len(),
+        3,
+        "the declared stall must actually fire"
+    );
+    let cut = evidence
+        .cut_confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("stall cut snapshot");
+    assert!(
+        within.final_confirmed.iter().all(|frame| *frame > cut + 50),
+        "a slow-but-alive peer must let the mesh keep confirming: {:?} vs cut {cut}",
+        within.final_confirmed
+    );
+    assert!(
+        evidence
+            .final_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Running),
+        "no peer may leave Running for a pause shorter than the timeout: {:?}",
+        evidence.final_states
+    );
+    let outcome = classify_component_scope(evidence, STALL_CONFIRM_ALLOWANCE);
+    assert_eq!(
+        outcome,
+        ComponentOutcome::ContinuedTogether {
+            shared_prefix: evidence
+                .confirmed_inputs
+                .iter()
+                .filter_map(|history| history.keys().next_back().copied())
+                .min()
+                .expect("confirmed history"),
+        },
+        "a sub-timeout stall must converge on one confirmed history"
+    );
+    for kind in [
+        EventKind::Disconnected,
+        EventKind::PeerDropped,
+        EventKind::DesyncDetected,
+    ] {
+        assert_eq!(
+            within.peer_event_counts.get(&kind).copied().unwrap_or(0),
+            0,
+            "a slow-but-alive peer must not produce {kind:?}: {:?}",
+            within.peer_event_counts
+        );
+    }
+    assert!(
+        within.verdict.failures.is_empty(),
+        "a sub-timeout stall is a healthy pause, got {:?}",
+        within.verdict.failures
+    );
+
+    // Mutation control: rewriting one component's value on a shared confirmed
+    // frame must be reported as a fork by the same comparison.
+    let shared_frame = evidence
+        .confirmed_inputs
+        .first()
+        .and_then(|history| history.keys().next_back().copied())
+        .expect("component history");
+    let mut forked = evidence.clone();
+    for peer in (0..evidence.component.len()).filter(|peer| evidence.component[*peer] == 0) {
+        let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_frame) else {
+            panic!("component history is missing the shared frame {shared_frame}");
+        };
+        let Some(slot) = inputs.first_mut() else {
+            panic!("shared frame {shared_frame} has no rendered peers");
+        };
+        *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"slow-peer-fork");
+    }
+    assert_eq!(
+        classify_component_scope(&forked, STALL_CONFIRM_ALLOWANCE),
+        ComponentOutcome::Forked {
+            frame: shared_frame,
+            component: 0,
+            other_component: 1,
+        },
+        "the mutation control must flip ContinuedTogether to Forked"
+    );
+
+    // Matched negative control: silence past the timeout is a different
+    // contract. The slow peer is certified as dropped and the histories branch;
+    // the divergence must be surfaced explicitly, not silently accepted.
+    let beyond = run_slow_peer(BEYOND_TIMEOUT_STEPS);
+    let evidence = beyond
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    let outcome = classify_component_scope(evidence, STALL_CONFIRM_ALLOWANCE);
+    assert!(
+        matches!(outcome, ComponentOutcome::Forked { .. }),
+        "the post-timeout branch must be visible as a fork, got {outcome:?}"
+    );
+    assert!(
+        beyond
+            .peer_event_counts
+            .get(&EventKind::PeerDropped)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the timed-out slow peer must be certified as dropped: {:?}",
+        beyond.peer_event_counts
+    );
+    assert!(
+        beyond
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::ConfirmedInputDivergence { .. })),
+        "the post-timeout branch must be detected, not silent: {:?}",
+        beyond.verdict.failures
+    );
+}
+
+/// Runs a three-peer clean mesh where peer 2's application stops polling for
+/// `stall_steps` steps starting at step 120. The slow peer is component 1.
+fn run_slow_peer(stall_steps: u32) -> RunReport {
+    let n = 3;
+    let config = SimConfig {
+        n_players: n,
+        steps: STEPS,
+        noise: BackgroundNoise::Clean,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1111_2222_3333_4444,
+        config,
+        initial_links,
+        events: vec![(
+            120,
+            ScheduleEvent::PeerStall {
+                peer: 2,
+                steps: stall_steps,
+            },
+        )],
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(DISCONNECT_TIMEOUT),
+        component_scope: Some(ComponentScopeOptions {
+            component: vec![0, 0, 1],
+        }),
+        ..RunOptions::default()
+    };
+    run_with_input::<StubInput>(&schedule, &options)
 }
