@@ -3641,13 +3641,17 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            // Arm selection (N2): the N-peer arm is taken iff at least one
-            // running, non-reserved remote endpoint exists besides the joiner's
-            // address (a survivor that must agree on the activation frame). An
-            // empty survivor set falls through to the 2-peer flow below,
-            // byte-identical to today.
+            // Arm selection (N2): the N-peer arm is taken by every 3+-machine
+            // mesh, even when no survivor is currently reachable. The joiner's
+            // role is derived from its own registered remote machines, so a
+            // 3+-slot joiner always expects the N-peer snapshot shape (bridge
+            // inputs + statuses). Falling back to the 2-peer rewrite when the
+            // last survivor dropped would make that joiner reject every
+            // snapshot as "the 2-peer serve shape". A 2-machine mesh has one
+            // remote endpoint and keeps the 2-peer flow byte-identically.
+            let npeer_mesh = self.player_reg.remotes.len() > 1;
             let survivors = self.npeer_survivor_addrs(&addr);
-            if !survivors.is_empty() {
+            if npeer_mesh {
                 self.try_open_npeer_serve(addr, handle, survivors);
                 continue;
             }
@@ -16453,7 +16457,10 @@ mod tests {
 
         // Positive control: the SAME endpoint requesting the slot it DOES own
         // (handle 2) passes the gate and opens a serve — proving the saved state
-        // is servable and only the ownership mismatch blocked handle 1.
+        // is servable and only the ownership mismatch blocked handle 1. This
+        // host has two remote machines, so the N-peer bridge-serve shape is the
+        // correct arm even while both slots are still reserved (the old
+        // survivor-count heuristic would have selected the 2-peer rewrite).
         host.player_reg
             .remotes
             .get_mut(&addr_b)
@@ -16461,30 +16468,22 @@ mod tests {
             .set_pending_join_request_for_test(2);
         host.poll_hot_join();
         assert!(
-            host.hot_join.joining.contains_key(&PlayerHandle::new(2)),
-            "an endpoint requesting the reserved slot it owns must open a serve"
-        );
-        assert!(
-            host.player_reg
-                .remotes
-                .get(&addr_b)
-                .expect("addr_b endpoint exists")
-                .defers_input_processing(),
-            "an open serve must defer pre-commit Input packets"
+            host.hot_join
+                .npeer
+                .as_ref()
+                .is_some_and(|serve| serve.handle == PlayerHandle::new(2)),
+            "an endpoint requesting the reserved slot it owns must open the N-peer serve"
         );
         assert!(
             !host.hot_join.joining.contains_key(&PlayerHandle::new(1)),
             "the spoofed handle 1 must never be served"
         );
-        assert!(host.abort_hot_join_serve(PlayerHandle::new(2)));
         assert!(
-            !host
-                .player_reg
-                .remotes
-                .get(&addr_b)
-                .expect("addr_b endpoint exists")
-                .defers_input_processing(),
-            "serve abort must restore ordinary Input processing"
+            host.hot_join
+                .npeer
+                .as_ref()
+                .is_none_or(|serve| serve.handle != PlayerHandle::new(1)),
+            "the spoofed handle 1 must never open the N-peer serve either"
         );
     }
 

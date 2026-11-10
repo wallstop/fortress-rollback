@@ -2309,11 +2309,13 @@ fn try_commit_pending_hot_join<I: SimInput>(
         .diagnostic_player_receipt_frame(handle)
         .map(Frame::as_i32);
     let running = session.current_state() == SessionState::Running;
+    // Only the sampled history must be bounded by the cut. A host that keeps
+    // confirming other slots while its own removal certificate waits behind an
+    // unrelated membership change legitimately advances its global confirmed
+    // frame past the slot's freeze; the slot's history is still frozen.
     let valid = running
         && current_frame > 0
-        && freeze_frame.is_some_and(|freeze| {
-            freeze >= 0 && confirmed_before_poll <= freeze && sampled_before_poll <= freeze
-        });
+        && freeze_frame.is_some_and(|freeze| freeze >= 0 && sampled_before_poll <= freeze);
     let Some(freeze) = freeze_frame.filter(|_| valid) else {
         oracle.observe_runner_error(
             "hot_join_removal_commit",
@@ -2514,7 +2516,7 @@ fn reference_inputs_with_hot_join<I: SimInput>(
 /// Two-cut nominal reference: `removal` is the first certified membership cut
 /// and `second_removal` is a later one (a player host crash composed with the
 /// first removal). Each target freezes independently at its own certified cut.
-fn reference_inputs_with_cuts<I: SimInput>(
+pub(super) fn reference_inputs_with_cuts<I: SimInput>(
     frame: i32,
     input_delay: usize,
     n: usize,
@@ -3054,9 +3056,10 @@ pub(crate) fn validate_run_options(
             return Err("differential mode supports at most one GracefulRemove event".to_owned());
         }
         if let Some(&(by, target)) = removal_events.first() {
-            if (by, target) != (0, 1) {
+            let composed_with_hot_join = has_hot_join && (by, target) == (0, 2);
+            if (by, target) != (0, 1) && !composed_with_hot_join {
                 return Err(
-                    "differential GracefulRemove requires the bounded by=0, target=1 scenario"
+                    "differential GracefulRemove requires the bounded by=0, target=1 scenario, or by=0, target=2 composed with a HotJoin for slot 1"
                         .to_owned(),
                 );
             }
@@ -3132,13 +3135,18 @@ pub(crate) fn validate_run_options(
                         .to_owned(),
                 );
             }
-            if !removal_events.is_empty()
+            // A replacement may rejoin while a separate removal certificate for
+            // another slot is still in flight. The bounded composed shape keeps
+            // the two membership changes independent: peer 0 removes peer 2 and
+            // simultaneously serves a replacement into slot 1.
+            let composed_removal = removal_events.as_slice() == [(0, 2)] && n == 3;
+            if (!removal_events.is_empty() && !composed_removal)
                 || !delay_events.is_empty()
                 || !peer_kills.is_empty()
                 || !schedule.config.spectator_hosts.is_empty()
             {
                 return Err(
-                    "differential HotJoin cannot be combined with another lifecycle, SetInputDelay, or a spectator"
+                    "differential HotJoin can only be combined with a composed GracefulRemove { by: 0, target: 2 } in the three-peer shape"
                         .to_owned(),
                 );
             }
@@ -4291,16 +4299,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 },
             };
             frame_opportunities[i] = frame_opportunities[i].saturating_add(opportunities);
-            // The old generation at a pending N-peer hot-join slot is frozen
-            // out of the drive loop until the coordinated drop commits; the
-            // replacement session built alongside it waits offline.
-            #[cfg(feature = "hot-join")]
-            let awaiting_replacement = pending_hot_join
-                .as_ref()
-                .is_some_and(|state| state.target == i);
-            #[cfg(not(feature = "hot-join"))]
-            let awaiting_replacement = false;
-            let blocked_elsewhere = dead[i] || step < stalled_until[i] || awaiting_replacement;
+            // The old generation at a pending hot-join slot keeps polling
+            // until its own coordinated drop commits: it may still be a
+            // required witness for another membership change already in
+            // flight, and the offline replacement no longer shares its
+            // address inbox.
+            let blocked_elsewhere = dead[i] || step < stalled_until[i];
             let cpu_delayed = cpu_drives
                 .get_mut(i)
                 .and_then(Option::as_mut)
@@ -4728,16 +4732,11 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             }
         }
 
-        // Keep an offline replacement polling while its slot is still awaiting
-        // the coordinated drop, so its join handshake re-arms promptly once the
-        // commit lands. It is not part of the oracle's live set until the swap.
-        #[cfg(feature = "hot-join")]
-        if let Some(state) = pending_hot_join.as_mut() {
-            state.replacement.poll_remote_clients();
-            let pending_events: Vec<FortressEvent<I::SessionConfig>> =
-                state.replacement.events().collect();
-            drop(pending_events);
-        }
+        // A pending replacement whose slot is still connected shares the live
+        // slot's address inbox. Polling it there would consume the old
+        // generation's drop-control traffic and could starve an unrelated
+        // membership certificate for which that slot is a required witness.
+        // The replacement starts polling only after the commit swaps it in.
 
         if let Some(control) = differential_hot_join_control {
             let activation = control.snapshot_frame;

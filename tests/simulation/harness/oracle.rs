@@ -523,6 +523,11 @@ pub struct Oracle {
     /// Later observations belong to the abandoned pre-removal trajectory and
     /// must not be compared with the survivor's frozen continuation.
     retired_state_ceilings: Vec<Option<i32>>,
+    /// Peers whose live generation was replaced by a hot-join snapshot. Their
+    /// pre-activation bridge frames are replayed as `Confirmed`, so a slot
+    /// that was frozen before the snapshot shows its `Disconnected` run only
+    /// from the activation frame. The freeze *value* remains comparable.
+    replacement_generations: Vec<bool>,
     /// (c) bounded post-heal liveness inputs. Inert by default; the runner sets
     /// it via [`Self::set_heal_liveness`] once it has the heal-anchored
     /// confirmed snapshots. Oracle unit tests never set it, so (c) stays inert
@@ -545,6 +550,7 @@ impl Oracle {
             per_class_cap: 8,
             dead: vec![false; n_players],
             retired_state_ceilings: vec![None; n_players],
+            replacement_generations: vec![false; n_players],
             heal: HealLiveness::default(),
             violation_allowlist: DEFAULT_VIOLATION_ALLOWLIST,
             violation_allowlist_hits: vec![0; DEFAULT_VIOLATION_ALLOWLIST.len()],
@@ -609,6 +615,9 @@ impl Oracle {
         );
         self.canonical_inputs
             .retain(|frame, (first_author, _)| *first_author != peer || *frame < input_from_frame);
+        if let Some(replaced) = self.replacement_generations.get_mut(peer) {
+            *replaced = true;
+        }
     }
 
     /// Whether `peer` was retired mid-run.
@@ -1033,13 +1042,31 @@ impl Oracle {
                     match canonical {
                         None => canonical = Some((peer, observed)),
                         Some((first_author, expected)) if expected != observed => {
-                            self.push_failure(OracleFailure::FreezeFrameDivergence {
-                                slot,
-                                peer,
-                                first_author,
-                                expected,
-                                actual: observed,
-                            });
+                            // A hot-join replacement replays the bridge frames
+                            // as `Confirmed`, so it can only expose a
+                            // pre-activation freeze from its activation frame.
+                            // The certified freeze value is still comparable;
+                            // other live peers pin the transition frame.
+                            let value_only_match = self
+                                .replacement_generations
+                                .get(peer)
+                                .copied()
+                                .unwrap_or(false)
+                                && match (expected.as_ref(), observed.as_ref()) {
+                                    (Some(expected), Some(observed)) => {
+                                        expected.input == observed.input
+                                    },
+                                    _ => false,
+                                };
+                            if !value_only_match {
+                                self.push_failure(OracleFailure::FreezeFrameDivergence {
+                                    slot,
+                                    peer,
+                                    first_author,
+                                    expected,
+                                    actual: observed,
+                                });
+                            }
                         },
                         Some(_) => {},
                     }

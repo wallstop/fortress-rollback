@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a majority fail closed, while a majority component continues on one history. Two-endpoint
   partitions still never commit opposite one-member certificates, and explicit `remove_player`
   calls retain the one-survivor removal path.
+- **Pre-existing:** hot-join serving in a 3+-machine mesh now always uses the N-peer bridge
+  snapshot shape, even when no other survivor is currently reachable. A joiner built for 3+ slots
+  always expects bridge inputs, so the previous fallback to the 2-peer frame rewrite made every
+  snapshot reject as "the 2-peer serve shape" and a rejoin after the last other peer left could
+  never activate. Two-machine meshes keep the 2-peer flow unchanged.
 - **Pre-existing:** Cargo lockfile refreshes no longer cancel the semver gate before its cold
   dependency build can finish and populate the shared cache.
 - **Pre-existing:** synchronization and disconnect timers now compare monotonic elapsed durations
