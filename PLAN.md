@@ -16,8 +16,9 @@
    prefix; each scenario either converges to one survivor history within a measured post-heal bound, emits the documented
    terminal/fail-closed outcome, or exposes an explicit split-match decision—never two silent histories presented as one
    session. Any quorum, split-brain, or recovery limitation becomes an explicit contract, not an inferred guarantee.
-   Remaining row: hot-join rejoin while a removal certificate for another slot is in flight
-   ([#384](https://github.com/wallstop/fortress-rollback/issues/384)).
+   Remaining row: an asymmetric one-way partition exposes a divergent confirmed prefix before the isolated peer fails closed
+   ([#386](https://github.com/wallstop/fortress-rollback/issues/386)); the rejoin-during-membership-change row is now covered by
+   [#384](https://github.com/wallstop/fortress-rollback/issues/384).
 
 ## Future
 
