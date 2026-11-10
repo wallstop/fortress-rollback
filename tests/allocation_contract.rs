@@ -440,6 +440,15 @@ fn input_event_snapshot_clone_stats(num_players: usize) -> Stats {
 /// cannot observe concurrently running tests in this integration-test process.
 #[test]
 fn warmed_hot_paths_obey_allocation_contracts() {
+    // `stats_alloc` materializes its per-thread accounting lazily on first use.
+    // On the macOS hosted runner the first measured region was charged six
+    // one-time allocations (956 bytes beyond the known 4 KiB) before the
+    // control ran, failing the exact sensitivity assertion. Charge that
+    // one-time setup outside every measured region.
+    let (warmup, _warmup_stats) = measure(|| vec![0_u8; 4_096]);
+    black_box(&warmup);
+    drop(warmup);
+
     // Counter sensitivity: this must detect one known allocation or every
     // zero-allocation assertion below would be capable of passing vacuously.
     let (allocation, control) = measure(|| vec![0_u8; 4_096]);
