@@ -6,7 +6,7 @@
 
 ## In progress
 
-1. **P0 — Close the partition/membership CAP matrix.** Using [the reconnect contract](docs/reconnect-playbook.md),
+1. **P0 — Close the partition/membership CAP matrix ([#382](https://github.com/wallstop/fortress-rollback/issues/382)).** Using [the reconnect contract](docs/reconnect-playbook.md),
    test symmetric/asymmetric partitions, majority and minority components, concurrent drops, timeout-versus-slow-peer
    ambiguity, coordinator/origin loss, repeated heal/reflap, and rejoin during another membership change. Include Halt,
    ContinueWithout, redundant spectators, and hot-join. Add component-scoped confirmed-state comparison before making
