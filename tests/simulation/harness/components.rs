@@ -172,67 +172,79 @@ pub fn classify_component_scope(
             .min()
             .unwrap_or(0);
         floors.push(floor);
-        let Some(&first) = peers.first() else {
-            return ComponentOutcome::Invalid {
-                reason: "empty component",
-            };
-        };
-        for peer in peers.iter().skip(1) {
-            for frame in 0..=floor {
-                let Some(expected) = evidence.confirmed_inputs[first].get(&frame) else {
-                    return ComponentOutcome::Invalid {
-                        reason: "component history has a hole",
-                    };
+        // Compare every frame any member confirmed, not only the frames below
+        // the component floor: after a heal one member may resume while another
+        // stays failed closed, and their continued tails must still agree.
+        let max_frame = peers
+            .iter()
+            .filter_map(|peer| last_confirmed[*peer])
+            .max()
+            .unwrap_or(0);
+        for frame in 0..=max_frame {
+            let mut expected: Option<&Vec<InputFingerprint>> = None;
+            for peer in peers {
+                let Some(value) = evidence.confirmed_inputs[*peer].get(&frame) else {
+                    continue;
                 };
-                let Some(actual) = evidence.confirmed_inputs[*peer].get(&frame) else {
-                    return ComponentOutcome::Invalid {
-                        reason: "component peer history has a hole",
-                    };
-                };
-                if expected != actual {
-                    return ComponentOutcome::InternalDivergence {
-                        component: *component,
-                        frame,
-                    };
+                match expected {
+                    Some(expected) if expected != value => {
+                        return ComponentOutcome::InternalDivergence {
+                            component: *component,
+                            frame,
+                        };
+                    },
+                    Some(_) => {},
+                    None => expected = Some(value),
                 }
             }
         }
     }
 
-    // Cross-component agreement on the shared prefix.
-    let shared = floors.iter().copied().min().unwrap_or(0);
-    let Some(&first_component) = component_ids.first() else {
-        return ComponentOutcome::Invalid {
-            reason: "no component",
-        };
-    };
-    let Some(first_peer) = members
-        .get(&first_component)
-        .and_then(|peers| peers.first())
-    else {
-        return ComponentOutcome::Invalid {
-            reason: "no component representative",
-        };
-    };
-    for component in component_ids.iter().skip(1) {
-        let Some(&peer) = members.get(component).and_then(|peers| peers.first()) else {
-            return ComponentOutcome::Invalid {
-                reason: "no component representative",
-            };
-        };
-        for frame in 0..=shared {
-            let left = evidence.confirmed_inputs[*first_peer].get(&frame);
-            let right = evidence.confirmed_inputs[peer].get(&frame);
-            if left != right {
-                return ComponentOutcome::Forked {
-                    frame,
-                    component: first_component,
-                    other_component: *component,
+    // Cross-component agreement over every frame any pair of peers in
+    // different components both confirmed. Comparing only the common floor
+    // would miss the post-heal shape where one member of each component
+    // resumed past a stopped peer and their continued tails disagree.
+    for i in 0..component_ids.len() {
+        for j in (i + 1)..component_ids.len() {
+            let Some(left_peers) = members.get(&component_ids[i]) else {
+                return ComponentOutcome::Invalid {
+                    reason: "component membership vanished",
                 };
+            };
+            let Some(right_peers) = members.get(&component_ids[j]) else {
+                return ComponentOutcome::Invalid {
+                    reason: "component membership vanished",
+                };
+            };
+            for left_peer in left_peers {
+                for right_peer in right_peers {
+                    let Some(left_last) = last_confirmed[*left_peer] else {
+                        return ComponentOutcome::Invalid {
+                            reason: "missing peer history",
+                        };
+                    };
+                    let Some(right_last) = last_confirmed[*right_peer] else {
+                        return ComponentOutcome::Invalid {
+                            reason: "missing peer history",
+                        };
+                    };
+                    for frame in 0..=left_last.min(right_last) {
+                        let left = evidence.confirmed_inputs[*left_peer].get(&frame);
+                        let right = evidence.confirmed_inputs[*right_peer].get(&frame);
+                        if left != right {
+                            return ComponentOutcome::Forked {
+                                frame,
+                                component: component_ids[i],
+                                other_component: component_ids[j],
+                            };
+                        }
+                    }
+                }
             }
         }
     }
 
+    let shared = floors.iter().copied().min().unwrap_or(0);
     // A component that confirmed beyond the cut continued on its own.
     let cut = evidence
         .cut_confirmed
@@ -364,6 +376,49 @@ mod tests {
         assert_eq!(
             classify_component_scope(&evidence, 0),
             ComponentOutcome::ContinuedTogether { shared_prefix: 6 }
+        );
+    }
+
+    #[test]
+    fn members_that_diverge_after_the_floor_are_caught() {
+        let shared = history([(0, 7), (1, 7)]);
+        let mut divergent = shared.clone();
+        divergent.insert(1, vec![InputFingerprint::from_bytes(8, &[8])]);
+        let evidence = build_evidence(
+            vec![0, 0, 1],
+            vec![shared.clone(), divergent, shared],
+            vec![1, 1, 1],
+        );
+        assert_eq!(
+            classify_component_scope(&evidence, 0),
+            ComponentOutcome::InternalDivergence {
+                component: 0,
+                frame: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn post_floor_tails_across_components_are_compared() {
+        // The heal shape: one member of each component resumed past its
+        // stopped sibling and the two tails disagree at frame 2.
+        let stopped = history([(0, 7), (1, 7)]);
+        let mut left_tail = stopped.clone();
+        left_tail.insert(2, vec![InputFingerprint::from_bytes(8, &[8])]);
+        let mut right_tail = stopped.clone();
+        right_tail.insert(2, vec![InputFingerprint::from_bytes(9, &[9])]);
+        let evidence = build_evidence(
+            vec![0, 0, 1, 1],
+            vec![stopped.clone(), left_tail, stopped, right_tail],
+            vec![1, 1, 1, 1],
+        );
+        assert_eq!(
+            classify_component_scope(&evidence, 0),
+            ComponentOutcome::Forked {
+                frame: 2,
+                component: 0,
+                other_component: 1,
+            }
         );
     }
 
