@@ -1528,10 +1528,13 @@ pub enum DisconnectBehavior {
     /// impact (AI takeover, pause, end the match, etc.).
     ///
     /// An automatic timeout requires another live remote endpoint as an
-    /// independent certificate witness. Without one (including a two-endpoint
-    /// session's last remote), the session fails closed in
-    /// [`crate::SessionState::Synchronizing`] and emits no `PeerDropped` event;
-    /// isolated endpoints must not certify different successor histories.
+    /// independent certificate witness **and** a strict majority of the agreed
+    /// membership to remain locally reachable. Without both, the session fails
+    /// closed in [`crate::SessionState::Synchronizing`] and emits no
+    /// `PeerDropped` event; split components must not certify complementary
+    /// successor histories and resume them after the link heals. Explicit
+    /// [`P2PSession::remove_player`] calls retain the application-directed
+    /// one-survivor path.
     ///
     /// **Note:** this setting governs only the **automatic** disconnect-timeout
     /// path. The legacy [`P2PSession::disconnect_player`] retains its original

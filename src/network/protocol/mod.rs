@@ -1187,6 +1187,18 @@ impl<T: Config> UdpProtocol<T> {
         self.state == ProtocolState::Running
     }
 
+    /// Whether this endpoint has already emitted its silence-timeout
+    /// `Event::Disconnected` verdict.
+    ///
+    /// The protocol keeps running after that verdict so a transiently silent
+    /// peer can still deliver `NetworkResumed`, and the flag is intentionally
+    /// latched (the timeout is a verdict, not a connectivity poll). Callers use
+    /// it as the reachability half of the automatic-drop quorum: an endpoint
+    /// that timed out cannot witness a certificate it never answered.
+    pub(crate) fn has_reported_disconnect(&self) -> bool {
+        self.disconnect_event_sent
+    }
+
     /// Activates the bounded raw handshake trace before synchronization begins.
     ///
     /// Re-activating while still initializing replaces the unused recorder. The

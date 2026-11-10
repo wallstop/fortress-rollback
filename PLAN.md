@@ -16,9 +16,8 @@
    prefix; each scenario either converges to one survivor history within a measured post-heal bound, emits the documented
    terminal/fail-closed outcome, or exposes an explicit split-match decision—never two silent histories presented as one
    session. Any quorum, split-brain, or recovery limitation becomes an explicit contract, not an inferred guarantee.
-   Open red case: heal after a symmetric partition resumes one peer per component on divergent histories
-   ([#383](https://github.com/wallstop/fortress-rollback/issues/383)); resolve or codify its terminal contract before the
-   heal/reflap row can be green.
+   Remaining row: hot-join rejoin while a removal certificate for another slot is in flight
+   ([#384](https://github.com/wallstop/fortress-rollback/issues/384)).
 
 ## Future
 

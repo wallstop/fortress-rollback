@@ -1961,16 +1961,26 @@ fn spectator_failover_survives_configured_host_kill_under_partition() {
         "without the host-kill event the spectator should still retain all three hosts"
     );
     assert!(
-        partitioned_report.verdict.failures.iter().any(|failure| {
-            matches!(
+        partitioned_report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::EndProgress { peer: 0, .. })),
+        "partition-only control should fail closed at the isolated host's confirmed \
+         prefix before spectator failover can commit: {:?}",
+        partitioned_report.verdict.failures
+    );
+    assert!(
+        !partitioned_report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(
                 failure,
-                OracleFailure::Violation { violation, .. }
-                    if violation.contains("coordinated graceful drop")
-                        && violation.contains("failed closed: Timeout")
-            )
-        }),
-        "partition-only control should fail through the uncertified graceful-drop \
-         barrier before spectator failover can commit: {:?}",
+                OracleFailure::ConfirmedInputDivergence { .. }
+                    | OracleFailure::StateDivergence { .. }
+            )),
+        "the majority component must drop the isolated host on one confirmed history: {:?}",
         partitioned_report.verdict.failures
     );
 

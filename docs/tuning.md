@@ -87,8 +87,10 @@ evidence. Controls at N=2 and N=16 inject state corruption at frame 120 and boun
 confirmed prefix at healing. Poll-stall controls corrupt a surviving peer while the oracle names the
 observing peer. The 15 safe-failure rows each retain a 64-step (1.024-second) terminal plateau after a
 useful pre-partition confirmed prefix. This finite observation is not a proof of permanent liveness. Odd
-permanent-`ContinueWithout` rows isolate every peer; two-component majority/minority progress needs the
-component-scoped state oracle tracked in `PLAN.md`.
+permanent-`ContinueWithout` rows isolate every peer. The component-scoped CAP rows add the
+majority/minority shapes: an even 2/2 or 4/4 split fails closed on both sides, while a 2/1 or 6/2
+split lets the strict-majority component certify the isolated drop and continue as an explicit
+split match.
 
 All 66 rows match their complete deterministic replay evidence, not only their trace hashes. Reproduce
 the artifact with:
