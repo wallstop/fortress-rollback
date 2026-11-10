@@ -61,13 +61,7 @@
    differences. No panic or unexpected violation occurs; any platform limitation has a compatibility regression and narrowed
    support documentation. A simulator-only pass is not cross-platform evidence.
 
-6. **P2 — Evaluate source-linked Lean proofs against Kani.** Follow [#365](https://github.com/wallstop/fortress-rollback/issues/365).
-   After the preceding correctness/oracle work, baseline full-domain Kani varint contracts, then timebox Hax/Aeneas extraction
-   of production `Frame::buffer_index` and `rle` varint. Compare arbitrary-slice assurance, mutation detection, assumptions,
-   maintenance, CI time, and cache cost. **Exit:** retain Lean only for valuable proofs beyond Kani with fail-closed regeneration,
-   axiom audits, compiling-mutant rejection, restored-green evidence, and measured budgets; otherwise record the rejected experiment.
-
-7. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
+6. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
    evaluate its multi-night stability before any ratchet. Then use the
    [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare violation-site coverage, PCT,
    prefix branching, and LDFI-lite against fresh-seed search at equal compute. **Exit:**
