@@ -6,11 +6,15 @@
 //! two-peer synchronous and three-peer asynchronous explicit removals, plus
 //! three-peer automatic removals, freeze the target at their certified cut;
 //! redundant spectator rows cover surviving-host priority orders and the exact
-//! frozen fingerprint/status boundary. Two- and three-peer hot-join rows either
-//! rewrite the snapshot frame `A` (two-peer) or keep it as a frozen bridge and
-//! activate at `A + 1` (N-peer). Input-queue capacity rows fill the queue from
-//! both the delay and prediction sides. Other membership widths and arbitrary
-//! game state semantics remain outside this oracle's claim.
+//! frozen fingerprint/status boundary. A four-peer prepared row composes the
+//! first explicit removal with a player host crash, modeling both certified
+//! cuts independently while the survivors converge and the spectator fails
+//! over. Two- and three-peer hot-join rows either rewrite the snapshot frame
+//! `A` (two-peer) or keep it as a frozen bridge and activate at `A + 1`
+//! (N-peer). Input-queue capacity rows fill the queue from both the delay and
+//! prediction sides, and a minimal-prediction row exercises long-run saved-state
+//! ring wrap. Other membership widths and arbitrary game state semantics remain
+//! outside this oracle's claim.
 
 use super::harness::artifact::{read_artifact, FailureArtifact, FAILURE_ARTIFACT_SCHEMA_VERSION};
 use super::harness::oracle::{InputFingerprint, OracleFailure};
@@ -926,6 +930,70 @@ fn input_queue_capacity_boundaries_match_nominal_history() {
                     report.differential_trajectory.as_ref(),
                     Some(expected),
                     "boundary trajectory changed for delay {input_delay}, {order:?}"
+                );
+            } else {
+                canonical = report.differential_trajectory.clone();
+            }
+        }
+    }
+}
+
+/// Long-run saved-state ring wrap with a minimal prediction window: the
+/// circular buffer holds two cells, so every saved state is overwritten almost
+/// immediately and every rollback reloads across a wrap. The confirmed history
+/// must still match the independent nominal reference exactly across all drive
+/// orders and both save policies; a ring/indexing error surfaces as a reference
+/// mismatch or a `LoadGameState` failure rather than as a silent stall.
+#[test]
+fn saved_state_ring_wrap_with_minimal_prediction_window_matches_nominal_history() {
+    for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
+        let mut schedule = schedule(save_mode, 0, Delivery::Delayed);
+        schedule.config.max_prediction = 1;
+        schedule.config.steps = 480;
+        schedule.heal_at = 480;
+        let mut canonical: Option<DifferentialTrajectory> = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert!(
+                report.final_confirmed.iter().all(|frame| *frame > 80),
+                "{save_mode:?} with max_prediction 1 must confirm deep into the wrap: {:?}",
+                report.final_confirmed
+            );
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            assert!(
+                trajectory.confirmed_states[0].len() > 60,
+                "{save_mode:?} retained only {} confirmed states",
+                trajectory.confirmed_states[0].len()
+            );
+            // Frames far past the two-cell ring must still be present and exact.
+            for frame in [2, 3, 40, 41, 80] {
+                assert!(
+                    trajectory.confirmed_inputs[0].contains_key(&frame),
+                    "{save_mode:?} missing confirmed frame {frame} after ring wrap: {:?}",
+                    trajectory.confirmed_inputs[0].keys().next_back()
+                );
+            }
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    report.differential_trajectory.as_ref(),
+                    Some(expected),
+                    "ring-wrap trajectory changed for {save_mode:?}, {order:?}"
                 );
             } else {
                 canonical = report.differential_trajectory.clone();
@@ -2741,10 +2809,18 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         .expect("a surviving primary host supports spectator removal equivalence");
     let mut removed_primary_spectator = removal.clone();
     removed_primary_spectator.config.spectator_hosts = vec![1, 0];
-    assert!(validate_run_options(&removed_primary_spectator, &valid_options).is_err());
+    validate_run_options(&removed_primary_spectator, &valid_options)
+        .expect("a removed canonical host is a runnable fail-closed row");
+    let mut removed_only_host = removal.clone();
+    removed_only_host.config.spectator_hosts = vec![1];
+    assert!(
+        validate_run_options(&removed_only_host, &valid_options).is_err(),
+        "a host set without any surviving endpoint cannot display the match"
+    );
     let mut removed_redundant_host = removal.clone();
     removed_redundant_host.config.spectator_hosts = vec![0, 1];
-    assert!(validate_run_options(&removed_redundant_host, &valid_options).is_err());
+    validate_run_options(&removed_redundant_host, &valid_options)
+        .expect("a surviving canonical host may list the removed endpoint redundantly");
     let removal_three =
         graceful_remove_schedule_peers(3, SavePolicy::EveryFrame, 0, Delivery::Delayed);
     validate_run_options(&removal_three, &valid_options)
@@ -2757,7 +2833,47 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     validate_run_options(&survivor_hosts, &valid_options)
         .expect("surviving host priority order is free");
     survivor_hosts.config.spectator_hosts = vec![0, 1];
-    assert!(validate_run_options(&survivor_hosts, &valid_options).is_err());
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("the removed endpoint may trail a surviving canonical host");
+    survivor_hosts.config.spectator_hosts = vec![1, 0];
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("a removed canonical host is a runnable fail-closed row");
+    survivor_hosts.config.spectator_hosts = vec![1];
+    assert!(
+        validate_run_options(&survivor_hosts, &valid_options).is_err(),
+        "a host set without any surviving endpoint cannot display the match"
+    );
+
+    // A second membership change (player host crash) composes with the first
+    // explicit removal only in the bounded four-peer shape.
+    let composed = host_crash_after_removal_schedule(2);
+    validate_run_options(
+        &composed,
+        &host_crash_options(PeerDriveOrder::Forward, None),
+    )
+    .expect("the bounded composed-membership row is supported");
+    let composed_rejects = |mutate: &dyn Fn(&mut Schedule)| {
+        let mut invalid = composed.clone();
+        mutate(&mut invalid);
+        assert!(
+            validate_run_options(&invalid, &host_crash_options(PeerDriveOrder::Forward, None))
+                .is_err(),
+            "the invalid composed-membership shape must be rejected"
+        );
+    };
+    composed_rejects(&|schedule| schedule.config.n_players = 3);
+    composed_rejects(&|schedule| schedule.config.disconnect_behavior = DropPolicy::Halt);
+    composed_rejects(&|schedule| {
+        schedule
+            .events
+            .push((300, ScheduleEvent::SpectatorHostKill { host: 3 }));
+    });
+    composed_rejects(&|schedule| schedule.config.spectator_hosts = vec![2]);
+    composed_rejects(&|schedule| {
+        schedule
+            .events
+            .push((300, ScheduleEvent::PeerKill { peer: 3 }));
+    });
     let mut with_delay_change = removal;
     with_delay_change
         .events
@@ -3043,4 +3159,248 @@ fn differential_shrinking_canonicalizes_save_mode_and_drive_order() {
         replay.verdict.failures.first().map(OracleFailure::class),
         Some("ReferenceInput")
     );
+}
+
+/// Normalized certified prefix used for cross-order composed-membership identity.
+type CertifiedPrefix = Vec<(
+    BTreeMap<i32, Vec<InputFingerprint>>,
+    BTreeMap<i32, StateStub>,
+)>;
+
+/// A removed player's co-located spectator endpoint is not withdrawn by
+/// `remove_player`, so it must never become a source of truth after the
+/// certified cut. Two halves of that contract are pinned here:
+///
+/// - When a **surviving** host is canonical, listing the removed endpoint
+///   redundantly after it changes nothing: the spectator displays exactly the
+///   certified frozen history that the independent reference derives.
+/// - When the **removed** endpoint is canonical, the spectator fails closed:
+///   it stops at that endpoint's last forwarded frame and never presents a
+///   forked history, even though the surviving mesh keeps confirming.
+#[test]
+fn removed_player_spectator_endpoint_keeps_certified_history_or_fails_closed() {
+    let schedule_with_hosts = |hosts: Vec<usize>| {
+        let mut schedule =
+            graceful_remove_schedule_peers(3, SavePolicy::EveryFrame, 0, Delivery::Reordered);
+        schedule.config.spectator_hosts = hosts;
+        schedule.config.steps = 360;
+        schedule.heal_at = 360;
+        schedule
+    };
+
+    // Surviving canonical host first, removed endpoint anywhere after it.
+    for hosts in [vec![0, 2, 1], vec![2, 0, 1], vec![0, 1, 2]] {
+        let schedule = schedule_with_hosts(hosts.clone());
+        let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+        report.expect_pass(&schedule);
+        let control = removal_control(&report);
+        assert!(
+            report
+                .spectator_max_frame
+                .is_some_and(|frame| frame > control.freeze_frame + 5),
+            "hosts {hosts:?} must keep displaying past the cut: max={:?}, {control:?}",
+            report.spectator_max_frame
+        );
+        assert_eq!(
+            report.spectator_final_hosts,
+            Some(hosts.len()),
+            "hosts {hosts:?} must retain the removed endpoint without losing a source"
+        );
+        assert_eq!(
+            report
+                .peer_event_counts
+                .get(&EventKind::SpectatorDivergence)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "hosts {hosts:?} must not invent a divergence"
+        );
+    }
+
+    // Removed canonical host: fail closed, never advance past its last frame.
+    let schedule = schedule_with_hosts(vec![1, 0, 2]);
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    let progress_missing: Vec<_> = report
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|failure| match failure {
+            OracleFailure::SpectatorProgressMissing {
+                required_min_frame,
+                observed_max_frame,
+                ..
+            } => Some((*required_min_frame, *observed_max_frame)),
+            _ => None,
+        })
+        .collect();
+    let (required, observed) = progress_missing
+        .first()
+        .copied()
+        .expect("the stale canonical host must leave the display behind the mesh");
+    assert!(
+        observed.is_some_and(|frame| frame < required.unwrap_or(i32::MAX)),
+        "the display must stop short of the mesh progress: required={required:?}, observed={observed:?}"
+    );
+    assert!(
+        report.final_confirmed[0] > observed.unwrap_or(i32::MAX),
+        "survivors must keep confirming past the stalled display: {:?}",
+        report.final_confirmed
+    );
+    for failure in &report.verdict.failures {
+        assert!(
+            matches!(failure, OracleFailure::SpectatorProgressMissing { .. }),
+            "the stale canonical host must fail closed without forking history: {failure:?}"
+        );
+    }
+}
+
+/// A player host crash composed with the first explicit removal: the second
+/// certified membership cut must be modeled independently (each target freezes
+/// at its own cut), the two survivors must stay on one confirmed history, and
+/// the spectator must fail over to the surviving host after the killed one goes
+/// silent. Four peers are required so two independent survivors remain.
+#[test]
+fn host_crash_after_removal_certifies_second_cut_and_spectator_failover() {
+    for killed_host in [2_usize, 3] {
+        let schedule = host_crash_after_removal_schedule(killed_host);
+        let mut canonical: Option<CertifiedPrefix> = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let report = run(&schedule, &host_crash_options(order, None));
+            report.expect_pass(&schedule);
+            let first = removal_control(&report);
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            let second = trajectory
+                .second_removal_control
+                .unwrap_or_else(|| panic!("killed host {killed_host} has no second certified cut"));
+            assert_eq!(second.target, killed_host);
+            assert!(
+                second.freeze_frame > first.freeze_frame,
+                "the second cut must follow the first removal: first={first:?}, second={second:?}"
+            );
+            assert!(
+                report
+                    .spectator_max_frame
+                    .is_some_and(|frame| frame > second.freeze_frame + 5),
+                "the spectator must keep displaying past the second cut: max={:?}, second={second:?}",
+                report.spectator_max_frame
+            );
+            assert_eq!(
+                report.spectator_final_hosts,
+                Some(2),
+                "the spectator must fail over to the surviving hosts after the kill"
+            );
+            // Both survivors converge past the second cut, and the killed peer
+            // stops at its own certified cut.
+            for (peer, confirmed) in report.final_confirmed.iter().enumerate() {
+                if peer == first.target || peer == killed_host {
+                    continue;
+                }
+                assert!(
+                    *confirmed > second.freeze_frame + 5,
+                    "survivor {peer} must keep confirming past the second cut: {:?} vs {second:?}",
+                    report.final_confirmed
+                );
+            }
+            assert_eq!(
+                report
+                    .peer_event_counts
+                    .get(&EventKind::SpectatorDivergence)
+                    .copied()
+                    .unwrap_or(0),
+                0,
+                "host failover must not invent a spectator divergence"
+            );
+
+            // Cross-order identity covers the certified prefix both survivors
+            // must share; per-order control bookkeeping (commit step, sampled
+            // tail) is deliberately excluded, matching the other removal rows.
+            let bound = second.freeze_frame;
+            let projection: CertifiedPrefix = (0..schedule.config.n_players)
+                .map(|peer| {
+                    (
+                        prefix_until(&trajectory.confirmed_inputs[peer], bound),
+                        prefix_until(&trajectory.confirmed_states[peer], bound),
+                    )
+                })
+                .collect();
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &projection, expected,
+                    "composed-membership certified prefix changed for kill {killed_host}, {order:?}"
+                );
+            } else {
+                canonical = Some(projection);
+            }
+
+            let replay = run(&schedule, &host_crash_options(order, None));
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+        }
+    }
+}
+
+#[test]
+fn host_crash_after_removal_post_cut_state_mutation_is_detected() {
+    let schedule = host_crash_after_removal_schedule(2);
+    let nominal = run(
+        &schedule,
+        &host_crash_options(PeerDriveOrder::Forward, None),
+    );
+    nominal.expect_pass(&schedule);
+    let second = nominal
+        .differential_trajectory
+        .as_ref()
+        .and_then(|trajectory| trajectory.second_removal_control)
+        .expect("second certified cut");
+    let frame = second.freeze_frame + 3;
+    let report = run(
+        &schedule,
+        &host_crash_options(
+            PeerDriveOrder::Forward,
+            Some(DifferentialMutation::SharedState { frame }),
+        ),
+    );
+    assert!(
+        report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::ReferenceState { .. })),
+        "a wrong post-second-cut state must be detected: {:?}",
+        report.verdict.failures
+    );
+}
+
+fn host_crash_options(order: PeerDriveOrder, mutation: Option<DifferentialMutation>) -> RunOptions {
+    RunOptions {
+        // Far shorter than the 240-step kill-to-end window, far longer than the
+        // scheduled delivery delay, so the killed host is certified as dropped.
+        disconnect_timeout: Some(Duration::from_millis(600)),
+        ..options(order, mutation)
+    }
+}
+
+fn host_crash_after_removal_schedule(killed_host: usize) -> Schedule {
+    let mut schedule =
+        graceful_remove_schedule_peers(4, SavePolicy::EveryFrame, 0, Delivery::Reordered);
+    schedule.config.disconnect_behavior = DropPolicy::ContinueWithout;
+    schedule.config.spectator_hosts = vec![0, 2, 3];
+    schedule.config.steps = 480;
+    schedule.heal_at = 480;
+    schedule
+        .events
+        .push((240, ScheduleEvent::SpectatorHostKill { host: killed_host }));
+    schedule.events.sort_by_key(|(step, _)| *step);
+    schedule
 }

@@ -4201,6 +4201,61 @@ mod kani_proofs {
         kani::assert(index == frame_val % queue_len, "Modulo should be correct");
     }
 
+    /// Proof: `Frame::buffer_index` returns `None` for every invalid input.
+    ///
+    /// A negative frame or a zero buffer size returns `None` for the full
+    /// symbolic `i32` x `usize` domain; the valid-input half is
+    /// `proof_frame_buffer_index_valid_modulo`.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Invalid-input ring-index contract
+    /// - Related: proof_frame_modulo_for_queue, proof_frame_buffer_index_valid_modulo
+    #[kani::proof]
+    fn proof_frame_buffer_index_invalid_none() {
+        let frame_val: i32 = kani::any();
+        let buffer_size: usize = kani::any();
+        kani::assume(frame_val < 0 || buffer_size == 0);
+
+        kani::assert(
+            Frame::new(frame_val).buffer_index(buffer_size).is_none(),
+            "negative frame or zero buffer size must return None",
+        );
+    }
+
+    /// Proof: `Frame::buffer_index` returns the exact, in-bounds index for the
+    /// supported ring-size domain.
+    ///
+    /// The frame is bounded to a realistic session length and the divisor to a
+    /// 7-bit ring size; a fully symbolic 64-bit modulus does not discharge in
+    /// Kani's SAT backend within the verification budget (measured >15 min),
+    /// which is exactly the unbounded-arithmetic gap recorded for the Lean
+    /// pilot in `.agents/skills/verification/references/kani-obligations.md`.
+    ///
+    /// - Tier: 1 (Fast, <30s)
+    /// - Verifies: Exact modulo index and bounds for the production ring domain
+    /// - Related: proof_frame_modulo_for_queue, proof_frame_buffer_index_invalid_none
+    #[kani::proof]
+    fn proof_frame_buffer_index_valid_modulo() {
+        let frame_val: i32 = kani::any();
+        kani::assume(frame_val >= 0);
+
+        // The production ring is `MAX_FRAME_DELAY + 1 == 128`; the full symbolic
+        // divisor is recorded as a Lean candidate because a 64-bit symbolic
+        // modulus exceeds the Kani budget.
+        let buffer_size = 128usize;
+
+        match Frame::new(frame_val).buffer_index(buffer_size) {
+            Some(index) => {
+                kani::assert(
+                    index == (frame_val as usize) % buffer_size,
+                    "valid frame must return the exact modulo index",
+                );
+                kani::assert(index < buffer_size, "index must be in bounds");
+            },
+            None => kani::assert(false, "valid frame and size must return Some"),
+        }
+    }
+
     /// Proof: Frame::to_option correctly handles null and valid frames.
     ///
     /// - Tier: 1 (Fast, <30s)

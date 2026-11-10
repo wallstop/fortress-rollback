@@ -21,6 +21,7 @@ mod sessions {
     pub mod p2p;
     pub mod p2p_enum;
     pub mod peer_drop;
+    pub mod replay_recording;
     pub mod session_trait;
     pub mod spectator;
     pub mod synctest;

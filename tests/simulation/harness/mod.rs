@@ -15,9 +15,14 @@
 #![allow(dead_code)]
 
 pub mod artifact;
+pub mod components;
 pub mod oracle;
 pub mod schedule;
 pub mod shrink;
+
+pub use components::{
+    classify_component_scope, ComponentOutcome, ComponentScopeEvidence, ComponentScopeOptions,
+};
 
 use super::sometimes_state::{aggregate_peer_vectors, SometimesStateVector, SOMETIMES_STATE_COUNT};
 use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBinding};
@@ -363,6 +368,10 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+    /// Declare a two-or-more component partition layout and capture each
+    /// component's independently exposed confirmed history for the CAP rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_scope: Option<ComponentScopeOptions>,
     /// Opt into the bounded two-peer fixed-history differential oracle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differential: Option<DifferentialOptions>,
@@ -1132,6 +1141,9 @@ pub struct DifferentialTrajectory {
     pub spectator_inputs: Option<BTreeMap<i32, Vec<(InputFingerprint, InputStatus)>>>,
     pub input_delay_control: Option<DifferentialInputDelayControl>,
     pub removal_control: Option<DifferentialRemovalControl>,
+    /// A later certified membership cut (player host crash composed with the
+    /// first removal). `None` for single-cut scenarios.
+    pub second_removal_control: Option<DifferentialRemovalControl>,
     pub hot_join_control: Option<DifferentialHotJoinControl>,
 }
 
@@ -1260,6 +1272,9 @@ pub struct RunReport {
     /// Same event counts split by observing peer and relevant event payload.
     /// Indexed by observing peer.
     pub peer_event_payload_counts_by_peer: Vec<BTreeMap<PeerEventKey, u64>>,
+    /// Component-scoped confirmed-history evidence captured when
+    /// [`RunOptions::component_scope`] declared a partition layout.
+    pub component_scope: Option<ComponentScopeEvidence>,
     /// Number of frames the configured spectator displayed and handed to the
     /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
     pub spectator_applied_frames: usize,
@@ -2374,15 +2389,34 @@ fn input_for<I: SimInput>(step: u32, peer: usize) -> I {
 /// successful increase at `C`, the changed peer repeats its last old-delay input
 /// throughout the gap and resumes from the new delay at `C + new`. This function
 /// never observes a mutation or peer state.
+#[allow(clippy::too_many_arguments)]
 fn reference_input<I: SimInput>(
     frame: i32,
     input_delay: usize,
     peer: usize,
     control: Option<DifferentialInputDelayControl>,
     removal: Option<DifferentialRemovalControl>,
+    second_removal: Option<DifferentialRemovalControl>,
     hot_join: Option<DifferentialHotJoinControl>,
     hot_join_bridge: bool,
 ) -> I {
+    if let Some(second) = second_removal.filter(|second| second.target == peer) {
+        // A second membership change (a player host crash composed with the
+        // first removal) certifies its own cut exactly like the first: the cut
+        // frame keeps the real nominal input and every later frame repeats it.
+        if frame > second.freeze_frame {
+            return reference_input::<I>(
+                second.freeze_frame,
+                input_delay,
+                peer,
+                control,
+                None,
+                None,
+                None,
+                false,
+            );
+        }
+    }
     if let Some(hot_join) = hot_join.filter(|hot_join| hot_join.target == peer) {
         // The two-peer reactivation rewrites the snapshot frame itself with the
         // replacement's real input, so only strictly earlier frames are frozen.
@@ -2400,6 +2434,7 @@ fn reference_input<I: SimInput>(
                 peer,
                 control,
                 None,
+                second_removal,
                 None,
                 false,
             );
@@ -2415,6 +2450,7 @@ fn reference_input<I: SimInput>(
                 peer,
                 control,
                 None,
+                second_removal,
                 None,
                 false,
             );
@@ -2432,6 +2468,7 @@ fn reference_input<I: SimInput>(
                 peer,
                 None,
                 removal,
+                second_removal,
                 hot_join,
                 hot_join_bridge,
             );
@@ -2471,6 +2508,21 @@ fn reference_inputs_with_hot_join<I: SimInput>(
     removal: Option<DifferentialRemovalControl>,
     hot_join: Option<DifferentialHotJoinControl>,
 ) -> Vec<I> {
+    reference_inputs_with_cuts(frame, input_delay, n, control, removal, None, hot_join)
+}
+
+/// Two-cut nominal reference: `removal` is the first certified membership cut
+/// and `second_removal` is a later one (a player host crash composed with the
+/// first removal). Each target freezes independently at its own certified cut.
+fn reference_inputs_with_cuts<I: SimInput>(
+    frame: i32,
+    input_delay: usize,
+    n: usize,
+    control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialRemovalControl>,
+    second_removal: Option<DifferentialRemovalControl>,
+    hot_join: Option<DifferentialHotJoinControl>,
+) -> Vec<I> {
     let hot_join_bridge = n >= 3 && hot_join.is_some();
     (0..n)
         .map(|peer| {
@@ -2480,6 +2532,7 @@ fn reference_inputs_with_hot_join<I: SimInput>(
                 peer,
                 control,
                 removal,
+                second_removal,
                 hot_join,
                 hot_join_bridge,
             )
@@ -2507,15 +2560,36 @@ fn reference_states_with_hot_join<I: SimInput>(
     removal: Option<DifferentialRemovalControl>,
     hot_join: Option<DifferentialHotJoinControl>,
 ) -> BTreeMap<i32, StateStub> {
+    reference_states_with_cuts::<I>(
+        through_post_frame,
+        input_delay,
+        n,
+        control,
+        removal,
+        None,
+        hot_join,
+    )
+}
+
+fn reference_states_with_cuts<I: SimInput>(
+    through_post_frame: i32,
+    input_delay: usize,
+    n: usize,
+    control: Option<DifferentialInputDelayControl>,
+    removal: Option<DifferentialRemovalControl>,
+    second_removal: Option<DifferentialRemovalControl>,
+    hot_join: Option<DifferentialHotJoinControl>,
+) -> BTreeMap<i32, StateStub> {
     let mut states = BTreeMap::new();
     let mut state = StateStub::default();
     for post_frame in 1..=through_post_frame.max(0) {
-        let inputs = reference_inputs_with_hot_join::<I>(
+        let inputs = reference_inputs_with_cuts::<I>(
             post_frame - 1,
             input_delay,
             n,
             control,
             removal,
+            second_removal,
             hot_join,
         );
         let total = inputs
@@ -2757,6 +2831,7 @@ struct SpectatorReference {
     num_players: usize,
     input_delay_control: Option<DifferentialInputDelayControl>,
     removal_control: Option<DifferentialRemovalControl>,
+    second_removal_control: Option<DifferentialRemovalControl>,
 }
 
 fn drive_spectator<I: SimInput>(
@@ -2790,19 +2865,23 @@ fn drive_spectator<I: SimInput>(
                 .get(&frame)
                 .map_or(&[][..], Vec::as_slice);
             let removal = reference.removal_control;
-            let expected = reference_inputs::<I>(
+            let second_removal = reference.second_removal_control;
+            let expected = reference_inputs_with_cuts::<I>(
                 frame,
                 reference.input_delay,
                 reference.num_players,
                 reference.input_delay_control,
                 removal,
+                second_removal,
+                None,
             )
             .into_iter()
             .enumerate()
             .map(|(player, input)| {
-                let disconnected = removal.is_some_and(|control| {
-                    control.target == player && frame > control.freeze_frame
-                });
+                let disconnected = [removal, second_removal]
+                    .into_iter()
+                    .flatten()
+                    .any(|control| control.target == player && frame > control.freeze_frame);
                 (
                     input.fingerprint(),
                     if disconnected {
@@ -2865,6 +2944,9 @@ pub(crate) fn validate_run_options(
     options: &RunOptions,
 ) -> Result<(), String> {
     let n = schedule.config.n_players;
+    if let Some(scope) = &options.component_scope {
+        scope.validate(n)?;
+    }
     if let Some(differential) = options.differential {
         let peer_kills: Vec<_> = schedule
             .events
@@ -2883,8 +2965,19 @@ pub(crate) fn validate_run_options(
             .events
             .iter()
             .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. }));
+        let spectator_kills: Vec<_> = schedule
+            .events
+            .iter()
+            .filter_map(|(step, event)| match event {
+                ScheduleEvent::SpectatorHostKill { host } => Some((*step, *host)),
+                _ => None,
+            })
+            .collect();
+        let composed_membership = has_graceful_remove && !spectator_kills.is_empty();
         let valid_peer_count = if automatic_disconnect {
             n == 3
+        } else if composed_membership {
+            n == 4
         } else {
             matches!(n, 2 | 3)
         };
@@ -2972,16 +3065,30 @@ pub(crate) fn validate_run_options(
                     "differential GracefulRemove cannot be combined with SetInputDelay".to_owned(),
                 );
             }
-            if schedule.config.spectator_hosts.contains(&target) {
-                // A removed player's spectator endpoint is not withdrawn by
-                // `remove_player`; its stale post-cut stream conflicts with the
-                // survivors' frozen history and the spectator correctly fails
-                // closed. That composition needs a separately modeled host
-                // outage, so the differential row keeps surviving hosts only.
-                return Err(
-                    "differential GracefulRemove spectator equivalence requires surviving hosts only"
-                        .to_owned(),
-                );
+            // A removed player's spectator endpoint is deliberately **not**
+            // withdrawn by `remove_player`: it is an independent endpoint that
+            // stops at its own last forwarded frame. The differential rows pin
+            // both halves of that contract: a surviving canonical host keeps
+            // displaying the certified frozen history even with the removed
+            // endpoint listed redundantly after it, while a removed *canonical*
+            // host must fail closed (the display never advances past the stale
+            // endpoint) instead of forking the survivors' history. Both shapes
+            // are accepted here so those rows can assert the exact outcome.
+            if schedule.config.spectator_hosts.first() == Some(&target) {
+                // The removed endpoint can never bootstrap or extend the
+                // display, so a host set made only of retired endpoints is not
+                // a runnable scenario.
+                let has_surviving_host = schedule
+                    .config
+                    .spectator_hosts
+                    .iter()
+                    .any(|host| *host != target);
+                if !has_surviving_host {
+                    return Err(
+                        "differential GracefulRemove spectator hosts must include a surviving host"
+                            .to_owned(),
+                    );
+                }
             }
         }
         if automatic_disconnect {
@@ -3048,18 +3155,64 @@ pub(crate) fn validate_run_options(
                 return Err("differential HotJoin requires BackgroundNoise::Clean".to_owned());
             }
         }
+        if !spectator_kills.is_empty() {
+            // A player host crash composed with the first explicit removal is a
+            // second certified membership cut. It is supported only in the
+            // bounded four-peer shape that leaves two survivors, so the mesh
+            // still has an independent witness and the spectator keeps a
+            // surviving host after the killed one goes silent.
+            if spectator_kills.len() != 1 {
+                return Err(
+                    "differential composed membership supports exactly one SpectatorHostKill"
+                        .to_owned(),
+                );
+            }
+            if removal_events.len() != 1 || !has_graceful_remove {
+                return Err(
+                    "differential SpectatorHostKill requires exactly one GracefulRemove".to_owned(),
+                );
+            }
+            if automatic_disconnect {
+                return Err(
+                    "differential SpectatorHostKill cannot be combined with PeerKill".to_owned(),
+                );
+            }
+            let (_, killed_host) = spectator_kills[0];
+            let (_, removal_target) = removal_events[0];
+            if killed_host == removal_target {
+                return Err(
+                    "differential SpectatorHostKill must target a different peer than the removal"
+                        .to_owned(),
+                );
+            }
+            if schedule.config.disconnect_behavior != DropPolicy::ContinueWithout {
+                return Err("differential SpectatorHostKill requires ContinueWithout".to_owned());
+            }
+            if !schedule.config.spectator_hosts.contains(&killed_host) {
+                return Err(
+                    "differential SpectatorHostKill requires the killed host to be a spectator source"
+                        .to_owned(),
+                );
+            }
+            if !schedule
+                .config
+                .spectator_hosts
+                .iter()
+                .any(|host| *host != killed_host && *host != removal_target)
+            {
+                return Err(
+                    "differential SpectatorHostKill requires a surviving spectator host after the kill"
+                        .to_owned(),
+                );
+            }
+        }
         if schedule.events.iter().any(|(_, event)| {
             matches!(
                 event,
-                ScheduleEvent::LegacyDisconnect { .. }
-                    | ScheduleEvent::SpectatorHostKill { .. }
-                    | ScheduleEvent::Rebind { .. }
+                ScheduleEvent::LegacyDisconnect { .. } | ScheduleEvent::Rebind { .. }
             )
         }) {
-            return Err(
-                "differential mode forbids legacy disconnects, spectator kills, and rebind"
-                    .to_owned(),
-            );
+            return Err("differential mode forbids legacy disconnects and rebind".to_owned());
         }
         let virtual_run = Duration::from_millis(
             u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
@@ -3074,7 +3227,15 @@ pub(crate) fn validate_run_options(
             .events
             .iter()
             .any(|(_, event)| matches!(event, ScheduleEvent::Block { to, .. } if *to == n));
-        let valid_timeout = if automatic_disconnect || spectator_outage {
+        // A composed membership row deliberately lets the killed host's
+        // disconnect timer fire, exactly like the automatic-disconnect row.
+        let composed_membership_timeout = composed_membership;
+        let component_scope_timeout = options.component_scope.is_some();
+        let valid_timeout = if automatic_disconnect
+            || spectator_outage
+            || composed_membership_timeout
+            || component_scope_timeout
+        {
             options
                 .disconnect_timeout
                 .is_some_and(|timeout| timeout < virtual_run)
@@ -3511,10 +3672,27 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
     let differential = options.differential;
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
+    let mut component_confirmed_inputs = options
+        .component_scope
+        .as_ref()
+        .map(|_| vec![BTreeMap::new(); n]);
+    let mut component_cut_confirmed: Vec<i32> = Vec::new();
     let mut differential_input_delay_control = None;
     let mut differential_input_delay_metrics_at_control = None;
     let mut differential_removal_control = None;
     let mut differential_removal_metrics_at_control = None;
+    // A second certified membership cut: a `SpectatorHostKill` on a player
+    // host changes mesh membership in addition to the first removal. Its cut is
+    // observed exactly like an automatic removal (all-survivor committed).
+    let mut differential_second_removal_control = None;
+    let mut differential_second_removal_metrics_at_control = None;
+    let mut differential_second_removal_committed = vec![false; n];
+    let differential_host_kill_target = differential.and_then(|_| {
+        schedule.events.iter().find_map(|(_, event)| match event {
+            ScheduleEvent::SpectatorHostKill { host } => Some(*host),
+            _ => None,
+        })
+    });
     let differential_automatic_target = differential.and_then(|_| {
         schedule.events.iter().find_map(|(_, event)| match event {
             ScheduleEvent::PeerKill { peer } => Some(*peer),
@@ -3765,6 +3943,22 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     if *to == n {
                         spectator_outage_active = *blocked;
                     }
+                    // The first cross-component block starts the declared
+                    // partition: snapshot every peer's confirmed frame so the
+                    // component comparison knows where the cut was.
+                    if *blocked
+                        && component_cut_confirmed.is_empty()
+                        && *to < n
+                        && component_confirmed_inputs.is_some()
+                        && options.component_scope.as_ref().is_some_and(|scope| {
+                            scope.component.get(*from) != scope.component.get(*to)
+                        })
+                    {
+                        component_cut_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
+                    }
                 },
                 ScheduleEvent::Hold { from, to, holding } => {
                     let target = if *to == n { spectator_addr } else { addrs[*to] };
@@ -3787,6 +3981,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         resume_step: None,
                         confirmed_at_resume: None,
                     });
+                    // A declared stall is the component-scoped cut for the
+                    // timeout-versus-slow-peer row: snapshot every peer's
+                    // confirmed frame before the slow peer falls silent.
+                    if component_cut_confirmed.is_empty() && component_confirmed_inputs.is_some() {
+                        component_cut_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
+                    }
                 },
                 ScheduleEvent::SetInputDelay { peer, delay } => {
                     // Reconfigure the peer's own local input delay mid-run. A
@@ -3848,6 +4051,14 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // remaining live peers must learn the drop through gossip and
                     // keep a byte-consistent confirmed prefix.
                     if !dead[*by] && !dead[*target] {
+                        if component_cut_confirmed.is_empty()
+                            && component_confirmed_inputs.is_some()
+                        {
+                            component_cut_confirmed = peers
+                                .iter()
+                                .map(|slot| slot.session.confirmed_frame().as_i32())
+                                .collect();
+                        }
                         let handle = PlayerHandle::new(*target);
                         let receipt_before = differential.and_then(|_| {
                             peers[*by].session.diagnostic_player_receipt_frame(handle)
@@ -3971,6 +4182,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // `UnattachedPolicy::Drop`), and exclude it from the oracle's
                     // liveness checks. Its remaining mesh survives per the
                     // configured `DisconnectBehavior`. Idempotent.
+                    if component_cut_confirmed.is_empty() && component_confirmed_inputs.is_some() {
+                        component_cut_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
+                    }
                     retire_peer_for_lifecycle(
                         *peer,
                         &peers,
@@ -4106,6 +4323,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                             peers[i].sampled_confirmed,
                         )
                     });
+                let host_kill_history_before_poll = differential_host_kill_target.map(|_| {
+                    (
+                        peers[i].session.confirmed_frame().as_i32(),
+                        peers[i].sampled_confirmed,
+                    )
+                });
                 #[cfg(feature = "hot-join")]
                 let hot_join_history_before_poll = pending_hot_join
                     .as_ref()
@@ -4150,6 +4373,25 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                             &mut differential_automatic_committed,
                             &mut differential_removal_control,
                             &mut differential_removal_metrics_at_control,
+                            &mut oracle,
+                        );
+                    }
+                }
+                if let (Some(target), Some((confirmed_before_poll, sampled_before_poll))) =
+                    (differential_host_kill_target, host_kill_history_before_poll)
+                {
+                    if dead[target] && target != i {
+                        observe_automatic_removal_commit(
+                            &peers,
+                            i,
+                            target,
+                            step,
+                            confirmed_before_poll,
+                            sampled_before_poll,
+                            load_game_state_observations.len(),
+                            &mut differential_second_removal_committed,
+                            &mut differential_second_removal_control,
+                            &mut differential_second_removal_metrics_at_control,
                             &mut oracle,
                         );
                     }
@@ -4420,12 +4662,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         match slot.session.confirmed_inputs_for_frame(Frame::new(frame)) {
                             Ok(inputs) => {
                                 if differential.is_some() {
-                                    let expected = reference_inputs_with_hot_join::<I>(
+                                    let expected = reference_inputs_with_cuts::<I>(
                                         frame,
                                         schedule.config.input_delay,
                                         n,
                                         differential_input_delay_control,
                                         differential_removal_control,
+                                        differential_second_removal_control,
                                         differential_hot_join_control,
                                     );
                                     oracle.observe_reference_inputs(i, frame, &expected, &inputs);
@@ -4442,6 +4685,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                 }
                                 let values: Vec<InputFingerprint> =
                                     inputs.iter().map(|input| input.fingerprint()).collect();
+                                if let Some(histories) = component_confirmed_inputs.as_mut() {
+                                    histories[i].insert(frame, values.clone());
+                                }
                                 oracle.observe_confirmed_inputs(i, frame, values);
                             },
                             Err(error) => {
@@ -4496,12 +4742,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         if let Some(control) = differential_hot_join_control {
             let activation = control.snapshot_frame;
             if activation != i32::MAX {
-                let expected: Vec<InputFingerprint> = reference_inputs_with_hot_join::<I>(
+                let expected: Vec<InputFingerprint> = reference_inputs_with_cuts::<I>(
                     activation,
                     schedule.config.input_delay,
                     n,
                     differential_input_delay_control,
                     differential_removal_control,
+                    differential_second_removal_control,
                     differential_hot_join_control,
                 )
                 .into_iter()
@@ -4803,6 +5050,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     num_players: n,
                     input_delay_control: differential_input_delay_control,
                     removal_control: differential_removal_control,
+                    second_removal_control: differential_second_removal_control,
                 }),
                 &mut oracle,
                 &mut observed_events,
@@ -4933,12 +5181,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             // freeze and a transient rewrite without depending on queue
             // retention at the end of a long run.
             let activation = control.snapshot_frame;
-            let expected: Vec<InputFingerprint> = reference_inputs_with_hot_join::<I>(
+            let expected: Vec<InputFingerprint> = reference_inputs_with_cuts::<I>(
                 activation,
                 schedule.config.input_delay,
                 n,
                 differential_input_delay_control,
                 differential_removal_control,
+                differential_second_removal_control,
                 differential_hot_join_control,
             )
             .into_iter()
@@ -4973,19 +5222,25 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             .max()
             .unwrap_or(0);
         let maximum_reference_frame = maximum_required.saturating_add(1).max(0);
-        let expected_states = reference_states_with_hot_join::<I>(
+        let expected_states = reference_states_with_cuts::<I>(
             maximum_reference_frame,
             schedule.config.input_delay,
             n,
             differential_input_delay_control,
             differential_removal_control,
+            differential_second_removal_control,
             differential_hot_join_control,
         );
         let mut confirmed_states = Vec::with_capacity(n);
         for (peer, states) in recorded.iter().enumerate() {
-            let retired_at = differential_removal_control
-                .filter(|control| control.target == peer)
-                .map(|control| control.freeze_frame);
+            let retired_at = [
+                differential_removal_control,
+                differential_second_removal_control,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|control| control.target == peer)
+            .map(|control| control.freeze_frame);
             let retired_state_boundary = retired_at.map(|freeze| freeze.saturating_add(1));
             let confirmed = retired_state_boundary.map_or(final_confirmed[peer], |boundary| {
                 final_confirmed[peer].min(boundary)
@@ -5059,6 +5314,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .map(|spectator| spectator.applied_inputs.clone()),
             input_delay_control: differential_input_delay_control,
             removal_control: differential_removal_control,
+            second_removal_control: differential_second_removal_control,
             hot_join_control: differential_hot_join_control,
         }
     });
@@ -5273,10 +5529,24 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         net: TraceNetStats::from(net.stats()),
     };
     fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
+    let component_scope = options
+        .component_scope
+        .as_ref()
+        .map(|scope| ComponentScopeEvidence {
+            component: scope.component.clone(),
+            confirmed_inputs: component_confirmed_inputs.take().unwrap_or_default(),
+            final_confirmed: final_confirmed.clone(),
+            final_states: peers
+                .iter()
+                .map(|slot| slot.session.current_state().into())
+                .collect(),
+            cut_confirmed: component_cut_confirmed,
+        });
     RunReport {
         replay_options: options.clone(),
         replay_input_width_bytes: I::WIDTH_BYTES,
         differential_trajectory,
+        component_scope,
         differential_input_delay_metrics_at_control,
         differential_removal_metrics_at_control,
         verdict,
@@ -6268,7 +6538,7 @@ mod tests {
             &schedule,
             &RunOptions {
                 pending_output_probe_link: Some((1, 0)),
-                ..options
+                ..options.clone()
             },
         );
         assert_ne!(first.trace_hash, reverse.trace_hash);

@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** replays recorded by a session that repaired a remote misprediction no longer
+  capture the pre-correction speculative checksum for the repaired frames. Recordings now settle
+  those checksums after the correction requests execute (or omit a checksum whose saved-state cell
+  is no longer buffered), so decoding and playing back a correctly played-out match no longer reports
+  `ReplayDesync` at every corrected frame.
 - **Pre-existing:** automatic `ContinueWithout` timeouts now fail closed when no independent
   surviving endpoint can witness the graceful-drop certificate. Two-endpoint partitions no longer
   commit opposite one-member certificates and fork confirmed history; explicit `remove_player`

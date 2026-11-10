@@ -414,11 +414,14 @@ TIER1_PROOFS=(
     "proof_frame_to_option"
     "proof_frame_from_option"
     "proof_frame_ordering"
+    "proof_frame_buffer_index_invalid_none"
+    "proof_frame_buffer_index_valid_modulo"
     # Varint proofs (src/rle.rs)
     "proof_varint_encoded_len_correct"
     "proof_varint_encode_single_byte"
     "proof_varint_encoded_len_no_overflow"
     "proof_varint_decode_empty_safe"
+    "proof_varint_full_u64_roundtrip_fixed_buffer"
     # TimeSync proofs (src/time_sync.rs)
     "proof_window_index_in_bounds"
     "proof_sum_no_overflow"

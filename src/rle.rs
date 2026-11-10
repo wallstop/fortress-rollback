@@ -55,90 +55,17 @@ pub type RleResult<T> = Result<T, FortressError>;
 /// callers that do not provide a protocol-specific bound.
 pub const DEFAULT_MAX_DECODED_LEN: usize = 64 * 1024 * 1024;
 
-/// Varint encoding/decoding utilities.
-///
-/// Uses LEB128 (Little Endian Base 128) variable-length encoding.
-mod varint {
-    use super::{rle_decode_error, truncated_data, RleResult};
-    use crate::RleDecodeReason;
+/// LEB128 varint encoding/decoding, isolated in its own dependency-free file
+/// so the production source can be extracted unchanged for verification.
+mod varint;
 
-    /// Returns the number of bytes needed to encode a value.
-    #[inline]
-    pub fn encoded_len(value: u64) -> usize {
-        if value == 0 {
-            return 1;
-        }
-        // Number of bits needed, divided by 7, rounded up
-        let bits = 64 - value.leading_zeros() as usize;
-        bits.div_ceil(7)
-    }
-
-    /// Encodes a value as a varint into the provided buffer.
-    /// Returns the number of bytes written.
-    #[inline]
-    pub fn encode(mut value: u64, buf: &mut [u8]) -> usize {
-        let mut i = 0;
-        while value >= 0x80 {
-            if let Some(byte) = buf.get_mut(i) {
-                *byte = (value as u8) | 0x80;
-            } else {
-                return i; // Buffer too small, return bytes written so far
-            }
-            value >>= 7;
-            i += 1;
-        }
-        if let Some(byte) = buf.get_mut(i) {
-            *byte = value as u8;
-            i + 1
-        } else {
-            i // Buffer too small, return bytes written so far
-        }
-    }
-
-    /// Encodes a value as a varint, returning a Vec.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn encode_to_vec(value: u64) -> Vec<u8> {
-        // alloc-bound: encoded_len(value) is at most 10 (max LEB128 bytes for a u64)
-        let mut buf = vec![0u8; encoded_len(value)];
-        encode(value, &mut buf);
-        buf
-    }
-
-    /// Decodes a varint from the buffer starting at offset.
-    /// Returns (decoded_value, bytes_consumed).
-    #[inline]
-    #[allow(clippy::while_let_loop)] // Multiple break conditions make while-let less clear
-    pub fn decode(buf: &[u8], offset: usize) -> RleResult<(u64, usize)> {
-        let mut value: u64 = 0;
-        let mut shift = 0;
-        let mut i = offset;
-
-        loop {
-            let byte = match buf.get(i) {
-                Some(&b) => b,
-                None => return Err(truncated_data(i, buf.len())),
-            };
-            if shift == 63 && byte > 1 {
-                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
-                    offset,
-                }));
-            }
-            value |= ((byte & 0x7F) as u64) << shift;
-            i += 1;
-
-            if byte & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-            if shift >= 64 {
-                return Err(rle_decode_error(RleDecodeReason::MalformedVarint {
-                    offset,
-                }));
-            }
-        }
-
-        Ok((value, i - offset))
+/// Maps a varint-layer failure onto the public RLE error.
+fn varint_error(error: varint::VarintError) -> FortressError {
+    match error {
+        varint::VarintError::Truncated { offset, buffer_len } => truncated_data(offset, buffer_len),
+        varint::VarintError::Malformed { offset } => {
+            rle_decode_error(RleDecodeReason::MalformedVarint { offset })
+        },
     }
 }
 
@@ -446,7 +373,7 @@ fn decode_with_offset(buf: &[u8], mut offset: usize, max_decoded_len: usize) -> 
     let mut ptr = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset)?;
+        let (next, consumed) = varint::decode(buf, offset).map_err(varint_error)?;
         offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
@@ -498,7 +425,7 @@ fn decode_len_with_offset(
     let mut len: usize = 0;
 
     while offset < buf.len() {
-        let (next, consumed) = varint::decode(buf, offset)?;
+        let (next, consumed) = varint::decode(buf, offset).map_err(varint_error)?;
         offset = checked_buffer_end(offset, consumed, buf.len())?;
 
         let repeat = next & 1;
@@ -590,6 +517,26 @@ mod tests {
     // Varint tests
     // ================
 
+    /// Test-only replacement for the extracted `encode_to_vec` helper: the
+    /// production seam intentionally keeps the varint module allocation-free.
+    fn encode_to_vec(value: u64) -> Vec<u8> {
+        let mut buf = [0_u8; 10];
+        let written = varint::encode(value, &mut buf);
+        buf[..written].to_vec()
+    }
+
+    /// Decodes a valid varint without requiring `Debug` on the error type
+    /// (the `Debug` derive is deliberately absent so the production module
+    /// extracts through Aeneas).
+    fn decode_varint_ok(buf: &[u8], offset: usize) -> (u64, usize) {
+        match varint::decode(buf, offset) {
+            Ok(decoded) => decoded,
+            Err(varint::VarintError::Truncated { .. } | varint::VarintError::Malformed { .. }) => {
+                panic!("expected a valid varint")
+            },
+        }
+    }
+
     #[test]
     fn test_varint_encode_decode_zero() {
         let mut buf = [0u8; 10];
@@ -597,7 +544,7 @@ mod tests {
         assert_eq!(written, 1);
         assert_eq!(buf[0], 0);
 
-        let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
+        let (decoded, consumed) = decode_varint_ok(&buf, 0);
         assert_eq!(decoded, 0);
         assert_eq!(consumed, 1);
     }
@@ -609,7 +556,7 @@ mod tests {
             let written = varint::encode(value, &mut buf);
             assert_eq!(written, 1, "value {} should encode to 1 byte", value);
 
-            let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
+            let (decoded, consumed) = decode_varint_ok(&buf, 0);
             assert_eq!(decoded, value);
             assert_eq!(consumed, 1);
         }
@@ -618,8 +565,8 @@ mod tests {
     #[test]
     fn test_varint_encode_decode_medium() {
         for value in [128u64, 255, 256, 1000, 16383, 16384] {
-            let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
+            let encoded = encode_to_vec(value);
+            let (decoded, consumed) = decode_varint_ok(&encoded, 0);
             assert_eq!(decoded, value, "Failed for value {}", value);
             assert_eq!(consumed, encoded.len());
         }
@@ -628,8 +575,8 @@ mod tests {
     #[test]
     fn test_varint_encode_decode_large() {
         for value in [u32::MAX as u64, u64::MAX / 2, u64::MAX] {
-            let encoded = varint::encode_to_vec(value);
-            let (decoded, _consumed) = varint::decode(&encoded, 0).unwrap();
+            let encoded = encode_to_vec(value);
+            let (decoded, _consumed) = decode_varint_ok(&encoded, 0);
             assert_eq!(decoded, value, "Failed for value {}", value);
         }
     }
@@ -954,10 +901,10 @@ mod tests {
         // Test that varint decode correctly accumulates bits across multiple bytes
         // Value 128 encodes as [0x80, 0x01]
         let value = 128u64;
-        let encoded = varint::encode_to_vec(value);
+        let encoded = encode_to_vec(value);
         assert_eq!(encoded, vec![0x80, 0x01]);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
+        let (decoded, consumed) = decode_varint_ok(&encoded, 0);
         assert_eq!(decoded, value);
         assert_eq!(consumed, 2);
 
@@ -965,8 +912,8 @@ mod tests {
         // Low 7 bits: 0101100 = 44 + 0x80 = 0xAC
         // High bits: 10 = 2
         let value2 = 300u64;
-        let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, consumed2) = varint::decode(&encoded2, 0).unwrap();
+        let encoded2 = encode_to_vec(value2);
+        let (decoded2, consumed2) = decode_varint_ok(&encoded2, 0);
         assert_eq!(decoded2, value2);
         assert_eq!(consumed2, encoded2.len());
     }
@@ -977,13 +924,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::RleDecodeError {
-                    reason: RleDecodeReason::TruncatedData {
-                        offset: 1,
-                        buffer_len: 1,
-                    },
-                },
+            Err(varint::VarintError::Truncated {
+                offset: 1,
+                buffer_len: 1,
             })
         ));
     }
@@ -994,11 +937,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::RleDecodeError {
-                    reason: RleDecodeReason::MalformedVarint { offset: 0 },
-                },
-            })
+            Err(varint::VarintError::Malformed { offset: 0 })
         ));
     }
 
@@ -1071,7 +1010,7 @@ mod tests {
         // drive an enormous `vec![0u8; len]` without the cap.
         let bomb_len = (DEFAULT_MAX_DECODED_LEN as u64) + 1;
         let header = (bomb_len << 2) | 1; // repeat=1, bit=0 (zero fill)
-        let bomb = varint::encode_to_vec(header);
+        let bomb = encode_to_vec(header);
 
         // Act
         let result = decode(&bomb);
@@ -1092,7 +1031,7 @@ mod tests {
         assert!(length > DEFAULT_MAX_DECODED_LEN as u64);
         assert_eq!(length as u32 as u64, 7); // truncates to an in-cap value
         let header = (length << 2) | 1;
-        let bomb = varint::encode_to_vec(header);
+        let bomb = encode_to_vec(header);
 
         assert_decoded_length_exceeds_maximum(decode(&bomb));
     }
@@ -1103,7 +1042,7 @@ mod tests {
         // varint(length << 1 | 0) (repeat=0).
         let length = (1u64 << 32) | 7;
         let header = length << 1;
-        let bomb = varint::encode_to_vec(header);
+        let bomb = encode_to_vec(header);
 
         assert_decoded_length_exceeds_maximum(decode(&bomb));
     }
@@ -1114,8 +1053,8 @@ mod tests {
         // u64::MAX >> 2; summed (and even individually) they exceed the cap, and
         // the accumulation would overflow usize without checked arithmetic.
         let huge = (u64::MAX << 2) | 1; // repeat=1, length = u64::MAX >> 2
-        let mut data = varint::encode_to_vec(huge);
-        data.extend(varint::encode_to_vec(huge));
+        let mut data = encode_to_vec(huge);
+        data.extend(encode_to_vec(huge));
 
         // Act
         let result = decode(&data);
@@ -1182,7 +1121,7 @@ mod tests {
         // Arrange: a contiguous run claiming exactly the default limit in zeros.
         // This is the boundary case (<=) and must be accepted, not rejected.
         let header = ((DEFAULT_MAX_DECODED_LEN as u64) << 2) | 1; // repeat=1, bit=0
-        let encoded = varint::encode_to_vec(header);
+        let encoded = encode_to_vec(header);
 
         // Act
         let decoded = decode(&encoded).unwrap();
@@ -1367,22 +1306,22 @@ mod tests {
         // Second byte: 0x02 (2, final byte)
         // Decoded: (128 & 0x7F) | (2 << 7) = 0 | 256 = 256
         let value = 256u64;
-        let encoded = varint::encode_to_vec(value);
+        let encoded = encode_to_vec(value);
 
-        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
+        let (decoded, consumed) = decode_varint_ok(&encoded, 0);
         assert_eq!(decoded, value);
         assert_eq!(consumed, encoded.len());
 
         // Another test: 0x3FFF (16383) - max 2-byte value
         let value2 = 16383u64;
-        let encoded2 = varint::encode_to_vec(value2);
-        let (decoded2, _) = varint::decode(&encoded2, 0).unwrap();
+        let encoded2 = encode_to_vec(value2);
+        let (decoded2, _) = decode_varint_ok(&encoded2, 0);
         assert_eq!(decoded2, value2);
 
         // Test 0x4000 (16384) - first 3-byte value
         let value3 = 16384u64;
-        let encoded3 = varint::encode_to_vec(value3);
-        let (decoded3, _) = varint::decode(&encoded3, 0).unwrap();
+        let encoded3 = encode_to_vec(value3);
+        let (decoded3, _) = decode_varint_ok(&encoded3, 0);
         assert_eq!(decoded3, value3);
     }
 
@@ -1478,6 +1417,24 @@ mod tests {
 )]
 mod property_tests {
     use super::*;
+
+    /// Mirror of the test helper in `tests`; the production varint module is
+    /// allocation-free after the extraction seam.
+    fn encode_to_vec(value: u64) -> Vec<u8> {
+        let mut buf = [0_u8; 10];
+        let written = varint::encode(value, &mut buf);
+        buf[..written].to_vec()
+    }
+
+    /// Mirror of the `tests` decode helper (no `Debug` on the seam error).
+    fn decode_varint_ok(buf: &[u8], offset: usize) -> (u64, usize) {
+        match varint::decode(buf, offset) {
+            Ok(decoded) => decoded,
+            Err(varint::VarintError::Truncated { .. } | varint::VarintError::Malformed { .. }) => {
+                panic!("expected a valid varint")
+            },
+        }
+    }
     use crate::test_config::miri_case_count;
     use proptest::prelude::*;
 
@@ -1616,8 +1573,8 @@ mod property_tests {
         /// Property: Varint roundtrip - decode(encode(n)) == n for all u64 values.
         #[test]
         fn prop_varint_roundtrip(value in any::<u64>()) {
-            let encoded = varint::encode_to_vec(value);
-            let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
+            let encoded = encode_to_vec(value);
+            let (decoded, consumed) = decode_varint_ok(&encoded, 0);
             prop_assert_eq!(
                 value, decoded,
                 "Varint roundtrip failed: {} != {}",
@@ -1637,7 +1594,7 @@ mod property_tests {
         #[test]
         fn prop_varint_length_optimal(value in any::<u64>()) {
             let encoded_len = varint::encoded_len(value);
-            let actual_len = varint::encode_to_vec(value).len();
+            let actual_len = encode_to_vec(value).len();
             prop_assert_eq!(
                 encoded_len, actual_len,
                 "Varint length prediction mismatch for {}: predicted {}, actual {}",
@@ -1770,6 +1727,39 @@ mod kani_proofs {
         kani::assert(buf[0] & 0x80 == 0, "Continuation bit should not be set");
     }
 
+    /// Proof: full-`u64` varint roundtrip with a fixed ten-byte buffer.
+    ///
+    /// For every `u64`, encoding into a fixed ten-byte buffer writes exactly
+    /// `encoded_len(value)` bytes (never more than ten), and decoding from the
+    /// start recovers the value while consuming exactly the bytes written.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Full-domain LEB128 encode/decode roundtrip
+    /// - Related: proof_varint_roundtrip_small, proof_varint_encoded_len_correct
+    #[kani::proof]
+    #[kani::unwind(12)] // 10 encoded bytes plus loop overhead
+    fn proof_varint_full_u64_roundtrip_fixed_buffer() {
+        let value: u64 = kani::any();
+        let mut buf = [0u8; 10];
+
+        let written = varint::encode(value, &mut buf);
+        kani::assert(
+            written == varint::encoded_len(value),
+            "encode must write exactly encoded_len bytes",
+        );
+        kani::assert(written <= 10, "a u64 varint must fit ten bytes");
+
+        let Ok((decoded, consumed)) = varint::decode(&buf, 0) else {
+            kani::assert(false, "a valid encoding must decode");
+            return;
+        };
+        kani::assert(decoded == value, "roundtrip must preserve every u64");
+        kani::assert(
+            consumed == written,
+            "decode must consume exactly the written bytes",
+        );
+    }
+
     /// Proof: varint::decode terminates and returns valid consumed count on success.
     ///
     /// This proves that the decode loop always terminates and, for valid inputs,
@@ -1848,14 +1838,15 @@ mod kani_proofs {
         let value: u64 = kani::any();
         kani::assume(value < 16384); // Keep proof tractable
 
-        let encoded = varint::encode_to_vec(value);
-        let (decoded, consumed) = varint::decode(&encoded, 0).unwrap();
+        let mut encoded = [0_u8; 10];
+        let written = varint::encode(value, &mut encoded);
+        let Ok((decoded, consumed)) = varint::decode(&encoded, 0) else {
+            kani::assert(false, "a valid encoding must decode");
+            return;
+        };
 
         kani::assert(decoded == value, "Roundtrip should preserve value");
-        kani::assert(
-            consumed == encoded.len(),
-            "Should consume all encoded bytes",
-        );
+        kani::assert(consumed == written, "Should consume all encoded bytes");
     }
 
     /// Proof: varint::encoded_len never overflows.
@@ -1909,7 +1900,10 @@ mod kani_proofs {
         kani::assume(byte2 & 0x80 == 0); // Second doesn't
 
         let buf = [byte1, byte2];
-        let (value, consumed) = varint::decode(&buf, 0).unwrap();
+        let Ok((value, consumed)) = varint::decode(&buf, 0) else {
+            kani::assert(false, "two-byte varint with a terminator must decode");
+            return;
+        };
 
         kani::assert(consumed == 2, "Should consume both bytes");
 

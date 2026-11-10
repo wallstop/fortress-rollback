@@ -29,6 +29,9 @@ rkyv = "rkyv"         # serialization crate
 repr = "repr"         # Rust repr attribute
 bitcode = "bitcode"   # serialization crate
 
+# Verification tooling names
+hax = "hax"           # Hax, the Rust-to-Lean/F*/Coq translator (#365)
+
 # Common Rust/crate names that look like typos
 proptest = "proptest"
 nextest = "nextest"

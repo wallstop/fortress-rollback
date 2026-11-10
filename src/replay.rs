@@ -756,6 +756,17 @@ impl<I> ReplayRecorder<I> {
         self.checksums.push(checksum);
     }
 
+    /// Replaces the checksum recorded for the frame at `index`.
+    ///
+    /// Used to settle checksums that were captured before a rollback
+    /// correction executed. Out-of-range indices are ignored: recording is
+    /// frame-indexed from zero, and only already-recorded frames are settled.
+    pub(crate) fn set_checksum(&mut self, index: usize, checksum: Option<u128>) {
+        if let Some(slot) = self.checksums.get_mut(index) {
+            *slot = checksum;
+        }
+    }
+
     /// Records a skipped frame with default placeholder inputs and no checksum.
     ///
     /// This maintains frame index alignment in the replay when the real
