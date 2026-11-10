@@ -2007,8 +2007,9 @@ fn divergence_frame_uses_minimum_and_checksum_only_stays_unknown() {
 }
 
 /// CAP matrix row 1: a symmetric two-component partition under
-/// `ContinueWithout` must fail **closed** on both components at the same
-/// certified cut, never keep confirming into two silent histories.
+/// `ContinueWithout` must fail **closed** on every component at the same
+/// certified cut, never keep confirming into two silent histories. Both the
+/// even bisection (2/2) and the odd singleton isolation (2/1) are covered.
 ///
 /// This is the component-scoped counterpart to the single-history oracle: the
 /// global live-peer minimum cannot describe a partition, so each component's
@@ -2025,10 +2026,20 @@ fn symmetric_partition_components_fail_closed_without_fork() {
     // applies; anything beyond this is a component that kept confirming.
     const PARTITION_CONFIRM_ALLOWANCE: i32 = 2;
 
-    let case = SweepCase::base(4, ScenarioKind::PermanentContinue);
+    // Even peer counts bisect into two equal components; odd peer counts
+    // isolate a singleton, so the majority component has two independent
+    // survivors. Both shapes must fail closed today.
+    for component in [vec![0, 0, 1, 1], vec![0, 0, 1]] {
+        let case = SweepCase::base(component.len(), ScenarioKind::PermanentContinue);
+        check_partition_components_fail_closed(case, component, PARTITION_CONFIRM_ALLOWANCE);
+    }
+}
+
+#[track_caller]
+fn check_partition_components_fail_closed(case: SweepCase, component: Vec<usize>, allowance: i32) {
     let (schedule, mut options) = materialize(case);
     options.component_scope = Some(ComponentScopeOptions {
-        component: vec![0, 0, 1, 1],
+        component: component.clone(),
     });
 
     let report = run_with_input::<StubInput>(&schedule, &options);
@@ -2038,10 +2049,10 @@ fn symmetric_partition_components_fail_closed_without_fork() {
         .expect("component-scoped evidence was requested");
     assert_eq!(
         evidence.partition_confirmed.len(),
-        4,
-        "the declared symmetric partition must actually fire"
+        component.len(),
+        "the declared partition must actually fire"
     );
-    assert_eq!(evidence.component, vec![0, 0, 1, 1]);
+    assert_eq!(evidence.component, component);
 
     let cut = evidence
         .partition_confirmed
@@ -2053,15 +2064,15 @@ fn symmetric_partition_components_fail_closed_without_fork() {
         evidence
             .final_confirmed
             .iter()
-            .all(|frame| *frame + PARTITION_CONFIRM_ALLOWANCE >= cut),
+            .all(|frame| *frame + allowance >= cut),
         "every peer must have confirmed at least to within the allowance of the cut: {:?} vs cut {cut}",
         evidence.final_confirmed
     );
 
-    let outcome = classify_component_scope(evidence, PARTITION_CONFIRM_ALLOWANCE);
+    let outcome = classify_component_scope(evidence, allowance);
     assert!(
         matches!(outcome, ComponentOutcome::FailedClosed { .. }),
-        "a symmetric permanent partition must fail closed on both components, got {outcome:?}"
+        "a permanent partition must fail closed on every component, got {outcome:?}"
     );
     assert!(outcome.is_legal());
     assert!(
@@ -2108,9 +2119,9 @@ fn symmetric_partition_components_fail_closed_without_fork() {
         .and_then(|history| history.keys().next_back().copied())
         .expect("component history");
     let mut forked = evidence.clone();
-    // Rewrite both members of component 0 identically so the intra-component
+    // Rewrite every member of component 0 identically so the intra-component
     // check still passes and only the cross-component comparison can catch it.
-    for peer in 0..2 {
+    for peer in (0..component.len()).filter(|peer| component[*peer] == 0) {
         let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_frame) else {
             panic!("component history is missing the shared frame {shared_frame}");
         };
@@ -2120,7 +2131,7 @@ fn symmetric_partition_components_fail_closed_without_fork() {
         *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"silent-fork");
     }
     assert_eq!(
-        classify_component_scope(&forked, PARTITION_CONFIRM_ALLOWANCE),
+        classify_component_scope(&forked, allowance),
         ComponentOutcome::Forked {
             frame: shared_frame,
             component: 0,
