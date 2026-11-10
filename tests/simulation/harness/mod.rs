@@ -15,9 +15,14 @@
 #![allow(dead_code)]
 
 pub mod artifact;
+pub mod components;
 pub mod oracle;
 pub mod schedule;
 pub mod shrink;
+
+pub use components::{
+    classify_component_scope, ComponentOutcome, ComponentScopeEvidence, ComponentScopeOptions,
+};
 
 use super::sometimes_state::{aggregate_peer_vectors, SometimesStateVector, SOMETIMES_STATE_COUNT};
 use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBinding};
@@ -363,6 +368,10 @@ pub struct RunOptions {
     /// frame onward by reporting it as `Confirmed`. Negative controls use this
     /// to pin the dropped-slot status half of §6.2(d).
     pub corrupt_spectator_status_from: Option<i32>,
+    /// Declare a two-or-more component partition layout and capture each
+    /// component's independently exposed confirmed history for the CAP rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_scope: Option<ComponentScopeOptions>,
     /// Opt into the bounded two-peer fixed-history differential oracle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differential: Option<DifferentialOptions>,
@@ -1263,6 +1272,9 @@ pub struct RunReport {
     /// Same event counts split by observing peer and relevant event payload.
     /// Indexed by observing peer.
     pub peer_event_payload_counts_by_peer: Vec<BTreeMap<PeerEventKey, u64>>,
+    /// Component-scoped confirmed-history evidence captured when
+    /// [`RunOptions::component_scope`] declared a partition layout.
+    pub component_scope: Option<ComponentScopeEvidence>,
     /// Number of frames the configured spectator displayed and handed to the
     /// oracle. Zero when `SimConfig::spectator_hosts` is empty.
     pub spectator_applied_frames: usize,
@@ -2932,6 +2944,9 @@ pub(crate) fn validate_run_options(
     options: &RunOptions,
 ) -> Result<(), String> {
     let n = schedule.config.n_players;
+    if let Some(scope) = &options.component_scope {
+        scope.validate(n)?;
+    }
     if let Some(differential) = options.differential {
         let peer_kills: Vec<_> = schedule
             .events
@@ -3215,14 +3230,18 @@ pub(crate) fn validate_run_options(
         // A composed membership row deliberately lets the killed host's
         // disconnect timer fire, exactly like the automatic-disconnect row.
         let composed_membership_timeout = composed_membership;
-        let valid_timeout =
-            if automatic_disconnect || spectator_outage || composed_membership_timeout {
-                options
-                    .disconnect_timeout
-                    .is_some_and(|timeout| timeout < virtual_run)
-            } else {
-                timeout_outlives_run
-            };
+        let component_scope_timeout = options.component_scope.is_some();
+        let valid_timeout = if automatic_disconnect
+            || spectator_outage
+            || composed_membership_timeout
+            || component_scope_timeout
+        {
+            options
+                .disconnect_timeout
+                .is_some_and(|timeout| timeout < virtual_run)
+        } else {
+            timeout_outlives_run
+        };
         if !valid_timeout {
             return Err(if automatic_disconnect {
                 format!(
@@ -3653,6 +3672,11 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
     let differential = options.differential;
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
+    let mut component_confirmed_inputs = options
+        .component_scope
+        .as_ref()
+        .map(|_| vec![BTreeMap::new(); n]);
+    let mut component_partition_confirmed: Vec<i32> = Vec::new();
     let mut differential_input_delay_control = None;
     let mut differential_input_delay_metrics_at_control = None;
     let mut differential_removal_control = None;
@@ -3918,6 +3942,22 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     net.set_blocked(peers[*from].binding.local_addr(), target, *blocked);
                     if *to == n {
                         spectator_outage_active = *blocked;
+                    }
+                    // The first cross-component block starts the declared
+                    // partition: snapshot every peer's confirmed frame so the
+                    // component comparison knows where the cut was.
+                    if *blocked
+                        && component_partition_confirmed.is_empty()
+                        && *to < n
+                        && component_confirmed_inputs.is_some()
+                        && options.component_scope.as_ref().is_some_and(|scope| {
+                            scope.component.get(*from) != scope.component.get(*to)
+                        })
+                    {
+                        component_partition_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
                     }
                 },
                 ScheduleEvent::Hold { from, to, holding } => {
@@ -4622,6 +4662,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                 }
                                 let values: Vec<InputFingerprint> =
                                     inputs.iter().map(|input| input.fingerprint()).collect();
+                                if let Some(histories) = component_confirmed_inputs.as_mut() {
+                                    histories[i].insert(frame, values.clone());
+                                }
                                 oracle.observe_confirmed_inputs(i, frame, values);
                             },
                             Err(error) => {
@@ -5463,10 +5506,24 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         net: TraceNetStats::from(net.stats()),
     };
     fold_trace(&mut trace_hash, &final_trace_summary, &mut trace_scratch);
+    let component_scope = options
+        .component_scope
+        .as_ref()
+        .map(|scope| ComponentScopeEvidence {
+            component: scope.component.clone(),
+            confirmed_inputs: component_confirmed_inputs.take().unwrap_or_default(),
+            final_confirmed: final_confirmed.clone(),
+            final_states: peers
+                .iter()
+                .map(|slot| slot.session.current_state().into())
+                .collect(),
+            partition_confirmed: component_partition_confirmed,
+        });
     RunReport {
         replay_options: options.clone(),
         replay_input_width_bytes: I::WIDTH_BYTES,
         differential_trajectory,
+        component_scope,
         differential_input_delay_metrics_at_control,
         differential_removal_metrics_at_control,
         verdict,
@@ -6458,7 +6515,7 @@ mod tests {
             &schedule,
             &RunOptions {
                 pending_output_probe_link: Some((1, 0)),
-                ..options
+                ..options.clone()
             },
         );
         assert_ne!(first.trace_hash, reverse.trace_hash);

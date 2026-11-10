@@ -8,14 +8,15 @@
 
 use super::harness::artifact::{ArtifactFailure, FailureClass};
 use super::harness::oracle::{
-    OracleFailure, ViolationSource, MIN_END_CONFIRMED, POST_HEAL_MIN_ADVANCE,
+    InputFingerprint, OracleFailure, ViolationSource, MIN_END_CONFIRMED, POST_HEAL_MIN_ADVANCE,
 };
 use super::harness::schedule::{
     BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    run_with_input, HealRecoveryObservation, PeerStallObservation, PeerWireTotals, RunOptions,
-    RunReport, SimInput, TraceNetStats, TraceSessionState, TraceSnapshot,
+    classify_component_scope, run_with_input, ComponentOutcome, ComponentScopeOptions,
+    HealRecoveryObservation, PeerStallObservation, PeerWireTotals, RunOptions, RunReport, SimInput,
+    TraceNetStats, TraceSessionState, TraceSnapshot,
 };
 use crate::common::sim_net::{LinkPolicy, SimReceiveStats};
 use crate::common::stubs::StubInput;
@@ -2003,4 +2004,128 @@ fn divergence_frame_uses_minimum_and_checksum_only_stays_unknown() {
     ];
     assert_eq!(first_observed_divergence(&checksum_only, true), None);
     assert_eq!(first_observed_divergence(&failures, true), Some(40));
+}
+
+/// CAP matrix row 1: a symmetric two-component partition under
+/// `ContinueWithout` must fail **closed** on both components at the same
+/// certified cut, never keep confirming into two silent histories.
+///
+/// This is the component-scoped counterpart to the single-history oracle: the
+/// global live-peer minimum cannot describe a partition, so each component's
+/// exposed confirmed history is compared independently. The row asserts the
+/// declared cut actually fired, both components stopped within the in-flight
+/// delivery allowance of it, the shared confirmed prefix is byte-identical, all
+/// peers end `Synchronizing`, and no `Disconnected` event was invented. The
+/// mutation control flips one component's value on a shared confirmed frame and
+/// requires the same comparison to report a fork, so a silent divergence cannot
+/// be mistaken for a healthy terminal state.
+#[test]
+fn symmetric_partition_components_fail_closed_without_fork() {
+    // Confirmation can drain a frame or two past the step at which the block
+    // applies; anything beyond this is a component that kept confirming.
+    const PARTITION_CONFIRM_ALLOWANCE: i32 = 2;
+
+    let case = SweepCase::base(4, ScenarioKind::PermanentContinue);
+    let (schedule, mut options) = materialize(case);
+    options.component_scope = Some(ComponentScopeOptions {
+        component: vec![0, 0, 1, 1],
+    });
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let evidence = report
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    assert_eq!(
+        evidence.partition_confirmed.len(),
+        4,
+        "the declared symmetric partition must actually fire"
+    );
+    assert_eq!(evidence.component, vec![0, 0, 1, 1]);
+
+    let cut = evidence
+        .partition_confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("partition snapshot");
+    assert!(
+        evidence
+            .final_confirmed
+            .iter()
+            .all(|frame| *frame + PARTITION_CONFIRM_ALLOWANCE >= cut),
+        "every peer must have confirmed at least to within the allowance of the cut: {:?} vs cut {cut}",
+        evidence.final_confirmed
+    );
+
+    let outcome = classify_component_scope(evidence, PARTITION_CONFIRM_ALLOWANCE);
+    assert!(
+        matches!(outcome, ComponentOutcome::FailedClosed { .. }),
+        "a symmetric permanent partition must fail closed on both components, got {outcome:?}"
+    );
+    assert!(outcome.is_legal());
+    assert!(
+        evidence
+            .final_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Synchronizing),
+        "every component must fail closed, got {:?}",
+        evidence.final_states
+    );
+    assert_eq!(
+        report
+            .peer_event_counts
+            .get(&EventKind::Disconnected)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "a failed-closed partition must not invent a peer removal"
+    );
+    assert!(
+        typed_safe_failure_diagnostics_hold(
+            &report,
+            false,
+            true,
+            schedule.config.recovery_window_steps(),
+        ),
+        "the terminal failures must stay the reviewed drop-timeout/EndProgress set: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "the failing-closed components must keep one confirmed history: {:?}",
+        report.verdict.failures
+    );
+
+    // Mutation control: flipping one component's value on a shared confirmed
+    // frame must be reported as a fork by the same comparison.
+    let shared_frame = evidence
+        .confirmed_inputs
+        .first()
+        .and_then(|history| history.keys().next_back().copied())
+        .expect("component history");
+    let mut forked = evidence.clone();
+    // Rewrite both members of component 0 identically so the intra-component
+    // check still passes and only the cross-component comparison can catch it.
+    for peer in 0..2 {
+        let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_frame) else {
+            panic!("component history is missing the shared frame {shared_frame}");
+        };
+        let Some(slot) = inputs.first_mut() else {
+            panic!("shared frame {shared_frame} has no rendered peers");
+        };
+        *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"silent-fork");
+    }
+    assert_eq!(
+        classify_component_scope(&forked, PARTITION_CONFIRM_ALLOWANCE),
+        ComponentOutcome::Forked {
+            frame: shared_frame,
+            component: 0,
+            other_component: 1,
+        },
+        "the mutation control must flip FailedClosed to Forked"
+    );
 }

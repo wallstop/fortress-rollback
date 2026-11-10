@@ -193,6 +193,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
+        component_scope: options.component_scope.clone(),
         differential: options.differential,
     }
 }
@@ -1001,6 +1002,7 @@ mod tests {
             replay_options: RunOptions::default(),
             replay_input_width_bytes: 4,
             differential_trajectory: None,
+            component_scope: None,
             differential_input_delay_metrics_at_control: None,
             differential_removal_metrics_at_control: None,
             verdict: Verdict {
@@ -1189,6 +1191,7 @@ mod tests {
         ];
         schedule.heal_at = 20;
         let options = RunOptions {
+            component_scope: None,
             receive_message_limit: Some(512),
             disconnect_timeout: Some(Duration::from_secs(90)),
             corrupt_state_from: Some((3, 8)),
