@@ -48,6 +48,47 @@ cargo kani --harness proof_varint_full_u64_roundtrip_fixed_buffer --default-unwi
 All three are registered in `scripts/verification/verify-kani.sh` Tier 1 and are
 checked by `bash scripts/verification/check-kani-coverage.sh`.
 
+## Extraction smoke test (ordered work item 2)
+
+Run on the unchanged `Frame::buffer_index` body (verbatim `if self.frame >= 0 &&
+buffer_size > 0 { Some(self.frame as usize % buffer_size) } else { None }`) in a
+minimal standalone crate. The surrounding struct must be a plain named-field
+struct; a tuple struct with `#[derive(...)]` failed with Aeneas `Unreachable` at
+the derive span.
+
+| Pin | Observed |
+| --- | --- |
+| hax | `cargo install --locked cargo-hax --version 0.4.2` |
+| Charon | auto-downloaded by cargo-hax 0.4.2 |
+| Aeneas | `build-183e4f0` (pinned by the generated `lakefile.toml`) |
+| hax-lean | `v0.3.30` (pinned by the generated `lakefile.toml`) |
+| Lean / elan | `leanprover/lean4:v4.31.0` / elan installer |
+
+Commands (inside the smoke crate):
+
+```bash
+cargo hax into lean     # exit 0; writes proofs/lean/**
+cd proofs/lean && lake build   # Build completed successfully (1735 jobs)
+```
+
+Extracted definition (shape only; the generated file carries the full
+`RustM` monad and `Std` shims):
+
+```text
+def Frame.buffer_index (self : Frame) (buffer_size : Std.Usize) :
+    RustM (core.option.Option Std.Usize) := do
+  if self.frame >= 0#i32 then
+    if buffer_size > 0#usize then
+      let i ← lift (IScalar.hcast .Usize self.frame)
+      let i1 ← i % buffer_size
+      ok (core.option.Option.Some i1)
+    else ok core.option.Option.None
+  else ok core.option.Option.None
+```
+
+This proves toolchain feasibility only. It is not a theorem, a mutation control,
+or evidence about the varint contracts; ordered items 3-4 own those.
+
 ## Lean pilot boundary
 
 The pilot is retained only if it proves a property beyond this calibrated
