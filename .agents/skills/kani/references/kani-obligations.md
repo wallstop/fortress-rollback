@@ -89,6 +89,36 @@ def Frame.buffer_index (self : Frame) (buffer_size : Std.Usize) :
 This proves toolchain feasibility only. It is not a theorem, a mutation control,
 or evidence about the varint contracts; ordered items 3-4 own those.
 
+## Varint seam extraction (ordered work item 3)
+
+The varint implementation now lives in the dependency-free
+`src/rle/varint.rs`; `src/rle.rs` maps `VarintError` onto `FortressError` at the
+seam. A differential test suite compares the seam against a pre-refactor
+reference decoder for every encoded prefix and inner offset, malformed
+continuation sequences, short-buffer writes, and boundary roundtrips.
+
+Extraction uses the unchanged production file via `#[path]` in a standalone
+smoke crate. `cargo hax into lean` (hax 0.4.2, Aeneas `build-183e4f0`, hax-lean
+`v0.3.30`) exits 0 and generates `varint.encoded_len`, `varint.encode` (loop),
+and `varint.decode` (loop); `lake build` completes. Aeneas rejects a `Debug`
+derive with `Unreachable`, so the seam keeps `Clone, Copy, PartialEq, Eq` only.
+
+| Contract | Evaluation |
+| --- | --- |
+| `encoded_len(0) == 1` | Lean-proven (`VarintSmoke.Verification.Contracts.encoded_len_zero`) |
+| `1 <= encoded_len(v) <= 10` | Kani full-`u64` `proof_varint_encoded_len_correct` + Rust boundary tests; Lean loop-free proof deferred (needs `BitVec.leadingZeros`/`div_ceil` model lemmas) |
+| Short-buffer `encode` writes the full encoding's prefix | Rust `short_buffers_write_the_prefix_of_the_full_encoding` + Kani encode bounds; Lean deferred (loop induction) |
+| Full-`u64` roundtrip | Kani `proof_varint_full_u64_roundtrip_fixed_buffer` (every value) + Rust boundary tests; Lean deferred (two `partial_fixpoint` loop inductions) |
+| Termination / panic freedom | Rust zero-panic + Kani termination proofs; Lean deferred (Aeneas emits `loop` as `partial_fixpoint`, so a termination proof needs a decreasing measure) |
+| Consumed-byte bounds | Rust differential + Kani `proof_varint_decode_offset_safe`; Lean deferred |
+| Malformed / truncated classification | Rust differential `malformed_continuations_match_the_reference` + exact `VarintError` mapping tests; Lean-visible in the generated branch structure, proof deferred |
+
+**Compiling-source mutation control (pass):** changing the actual production
+`encoded_len(0)` return from `1` to `2` still compiles and extracts
+(`cargo hax into lean` exit 0), and `lake build` then fails
+`encoded_len_zero` with an unsolved `False` goal. Restoring the source extracts
+and builds green again (1733 jobs).
+
 ## Lean pilot boundary
 
 The pilot is retained only if it proves a property beyond this calibrated
