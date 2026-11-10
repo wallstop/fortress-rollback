@@ -215,6 +215,10 @@ fn correction_burst_does_not_report_desync_detected() -> Result<(), FortressErro
         run.sess1.metrics().rollback_count > 0,
         "the witness must actually repair mispredictions"
     );
+    assert!(
+        run.sess1.metrics().checksums_compared > 0,
+        "the witness must actually compare scheduled confirmations, otherwise the check is vacuous"
+    );
     let reported: Vec<Frame> = run
         .events
         .iter()
