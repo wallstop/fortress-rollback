@@ -371,6 +371,17 @@ where
     recording: Option<ReplayRecorder<T::Input>>,
     /// The last frame recorded to the replay recorder.
     last_recorded_frame: Frame,
+    /// Lowest frame whose recorded replay checksum may have been captured
+    /// before a rollback correction executed.
+    ///
+    /// `advance_frame` records confirmed inputs (and their saved-state
+    /// checksums) before returning the correction `LoadGameState`/`SaveGameState`
+    /// requests, so frames recorded in the same call as a rollback still hold
+    /// their speculative checksum in the saved-state cell. The real checksum is
+    /// only observable after the application executes those requests, so the
+    /// affected range is re-read on the next call (and before the replay is
+    /// exported) to keep recordings truthful.
+    pending_replay_checksum_refresh: Option<Frame>,
     /// Controls how the session reacts when a peer disconnects.
     /// See [`DisconnectBehavior`] for options.
     disconnect_behavior: DisconnectBehavior,
@@ -2880,6 +2891,7 @@ impl<T: Config> P2PSession<T> {
             max_event_queue_size: event_queue_size,
             recording: recording.then(|| ReplayRecorder::new(num_players)),
             last_recorded_frame: Frame::NULL,
+            pending_replay_checksum_refresh: None,
             disconnect_behavior,
             halt_confirmed_ceiling: None,
             exposed_confirmed_high_water: AtomicI32::new(Frame::NULL.as_i32()),
@@ -3000,6 +3012,11 @@ impl<T: Config> P2PSession<T> {
             trace!("Session not synchronized; returning error");
             return Err(FortressError::NotSynchronized);
         }
+
+        // The application has executed the previous call's requests, so any
+        // rollback correction whose speculative checksums were recorded is now
+        // observable in the saved-state cells.
+        self.finalize_pending_replay_checksums();
 
         // Hot-join: if a snapshot was just applied, the joiner must restore the
         // received state BEFORE any normal-path AdvanceFrame. Return exactly
@@ -8396,7 +8413,8 @@ impl<T: Config> P2PSession<T> {
     /// ```
     ///
     /// [`SessionBuilder::with_recording`]: crate::SessionBuilder::with_recording
-    pub fn into_replay(self) -> FortressResult<Replay<T::Input>> {
+    pub fn into_replay(mut self) -> FortressResult<Replay<T::Input>> {
+        self.finalize_pending_replay_checksums();
         self.recording
             .map(ReplayRecorder::into_replay)
             .ok_or_else(|| {
@@ -8425,6 +8443,7 @@ impl<T: Config> P2PSession<T> {
     /// // Session continues without recording
     /// ```
     pub fn take_replay(&mut self) -> FortressResult<Replay<T::Input>> {
+        self.finalize_pending_replay_checksums();
         self.recording
             .take()
             .map(ReplayRecorder::into_replay)
@@ -8434,6 +8453,52 @@ impl<T: Config> P2PSession<T> {
                 }
                 .into()
             })
+    }
+
+    /// Re-reads the saved-state checksums of frames recorded before a rollback
+    /// correction executed.
+    ///
+    /// Must run after the correction's `LoadGameState`/`SaveGameState` requests
+    /// have been executed by the application and before those saved cells are
+    /// overwritten by newer frames; `advance_frame` and the replay export paths
+    /// both call it at those points. Frames whose cell is no longer buffered
+    /// record no checksum rather than the speculative value, so decoded playback
+    /// can never fail against a checksum the session itself has since replaced.
+    fn finalize_pending_replay_checksums(&mut self) {
+        let Some(lowest_dirty_frame) = self.pending_replay_checksum_refresh.take() else {
+            return;
+        };
+        if self.recording.is_none() {
+            return;
+        }
+
+        // Only cells still buffered by the saved-state ring can have been
+        // resimulated, and `last_recorded_frame` never exceeds the current
+        // frame, so this window bounds the walk independently of how far the
+        // rollback target was gossiped down.
+        let window_floor = Frame::new(
+            self.sync_layer
+                .current_frame()
+                .as_i32()
+                .saturating_sub(i32::try_from(self.max_prediction).unwrap_or(i32::MAX))
+                .max(0),
+        );
+        let mut frame = lowest_dirty_frame.max(window_floor);
+        let end = self.last_recorded_frame;
+        while frame <= end {
+            let checksum = self
+                .sync_layer
+                .saved_state_by_frame(frame)
+                .and_then(|cell| cell.checksum());
+            if let (Ok(index), Some(recorder)) = (frame.try_as_usize(), self.recording.as_mut()) {
+                recorder.set_checksum(index, checksum);
+            }
+            let next = frame.saturating_next();
+            if next == frame {
+                break;
+            }
+            frame = next;
+        }
     }
 
     /// Records confirmed inputs up to the given frame into the replay recorder.
@@ -10332,6 +10397,16 @@ impl<T: Config> P2PSession<T> {
             if let Some(telemetry) = &self.telemetry {
                 telemetry.on_rollback(depth, load_target);
             }
+        }
+
+        // The frames recorded so far (or later in this call) may carry the
+        // speculative checksums of the states this rollback is about to
+        // replace; see `pending_replay_checksum_refresh`.
+        if self.recording.is_some() {
+            let lowest = self
+                .pending_replay_checksum_refresh
+                .map_or(load_target, |pending| pending.min(load_target));
+            self.pending_replay_checksum_refresh = Some(lowest);
         }
 
         // request to load that frame
