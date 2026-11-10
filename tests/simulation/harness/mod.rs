@@ -2972,16 +2972,30 @@ pub(crate) fn validate_run_options(
                     "differential GracefulRemove cannot be combined with SetInputDelay".to_owned(),
                 );
             }
-            if schedule.config.spectator_hosts.contains(&target) {
-                // A removed player's spectator endpoint is not withdrawn by
-                // `remove_player`; its stale post-cut stream conflicts with the
-                // survivors' frozen history and the spectator correctly fails
-                // closed. That composition needs a separately modeled host
-                // outage, so the differential row keeps surviving hosts only.
-                return Err(
-                    "differential GracefulRemove spectator equivalence requires surviving hosts only"
-                        .to_owned(),
-                );
+            // A removed player's spectator endpoint is deliberately **not**
+            // withdrawn by `remove_player`: it is an independent endpoint that
+            // stops at its own last forwarded frame. The differential rows pin
+            // both halves of that contract: a surviving canonical host keeps
+            // displaying the certified frozen history even with the removed
+            // endpoint listed redundantly after it, while a removed *canonical*
+            // host must fail closed (the display never advances past the stale
+            // endpoint) instead of forking the survivors' history. Both shapes
+            // are accepted here so those rows can assert the exact outcome.
+            if schedule.config.spectator_hosts.first() == Some(&target) {
+                // The removed endpoint can never bootstrap or extend the
+                // display, so a host set made only of retired endpoints is not
+                // a runnable scenario.
+                let has_surviving_host = schedule
+                    .config
+                    .spectator_hosts
+                    .iter()
+                    .any(|host| *host != target);
+                if !has_surviving_host {
+                    return Err(
+                        "differential GracefulRemove spectator hosts must include a surviving host"
+                            .to_owned(),
+                    );
+                }
             }
         }
         if automatic_disconnect {

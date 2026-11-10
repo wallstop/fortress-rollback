@@ -934,6 +934,70 @@ fn input_queue_capacity_boundaries_match_nominal_history() {
     }
 }
 
+/// Long-run saved-state ring wrap with a minimal prediction window: the
+/// circular buffer holds two cells, so every saved state is overwritten almost
+/// immediately and every rollback reloads across a wrap. The confirmed history
+/// must still match the independent nominal reference exactly across all drive
+/// orders and both save policies; a ring/indexing error surfaces as a reference
+/// mismatch or a `LoadGameState` failure rather than as a silent stall.
+#[test]
+fn saved_state_ring_wrap_with_minimal_prediction_window_matches_nominal_history() {
+    for save_mode in [SavePolicy::EveryFrame, SavePolicy::Sparse] {
+        let mut schedule = schedule(save_mode, 0, Delivery::Delayed);
+        schedule.config.max_prediction = 1;
+        schedule.config.steps = 480;
+        schedule.heal_at = 480;
+        let mut canonical: Option<DifferentialTrajectory> = None;
+        for order in [
+            PeerDriveOrder::Forward,
+            PeerDriveOrder::Reverse,
+            PeerDriveOrder::Rotating,
+        ] {
+            let options = options(order, None);
+            let report = run(&schedule, &options);
+            report.expect_pass(&schedule);
+            assert!(
+                report.final_confirmed.iter().all(|frame| *frame > 80),
+                "{save_mode:?} with max_prediction 1 must confirm deep into the wrap: {:?}",
+                report.final_confirmed
+            );
+            let trajectory = report
+                .differential_trajectory
+                .as_ref()
+                .expect("differential trajectory retained");
+            assert!(
+                trajectory.confirmed_states[0].len() > 60,
+                "{save_mode:?} retained only {} confirmed states",
+                trajectory.confirmed_states[0].len()
+            );
+            // Frames far past the two-cell ring must still be present and exact.
+            for frame in [2, 3, 40, 41, 80] {
+                assert!(
+                    trajectory.confirmed_inputs[0].contains_key(&frame),
+                    "{save_mode:?} missing confirmed frame {frame} after ring wrap: {:?}",
+                    trajectory.confirmed_inputs[0].keys().next_back()
+                );
+            }
+            let replay = run(&schedule, &options);
+            replay.expect_pass(&schedule);
+            assert_eq!(report.trace_hash, replay.trace_hash);
+            assert_eq!(
+                report.differential_trajectory,
+                replay.differential_trajectory
+            );
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    report.differential_trajectory.as_ref(),
+                    Some(expected),
+                    "ring-wrap trajectory changed for {save_mode:?}, {order:?}"
+                );
+            } else {
+                canonical = report.differential_trajectory.clone();
+            }
+        }
+    }
+}
+
 #[test]
 fn graceful_remove_matrix_matches_independent_frozen_history() {
     for (save_mode, input_delay, delivery) in [
@@ -2741,10 +2805,18 @@ fn differential_options_validate_the_bounded_scenario_contract() {
         .expect("a surviving primary host supports spectator removal equivalence");
     let mut removed_primary_spectator = removal.clone();
     removed_primary_spectator.config.spectator_hosts = vec![1, 0];
-    assert!(validate_run_options(&removed_primary_spectator, &valid_options).is_err());
+    validate_run_options(&removed_primary_spectator, &valid_options)
+        .expect("a removed canonical host is a runnable fail-closed row");
+    let mut removed_only_host = removal.clone();
+    removed_only_host.config.spectator_hosts = vec![1];
+    assert!(
+        validate_run_options(&removed_only_host, &valid_options).is_err(),
+        "a host set without any surviving endpoint cannot display the match"
+    );
     let mut removed_redundant_host = removal.clone();
     removed_redundant_host.config.spectator_hosts = vec![0, 1];
-    assert!(validate_run_options(&removed_redundant_host, &valid_options).is_err());
+    validate_run_options(&removed_redundant_host, &valid_options)
+        .expect("a surviving canonical host may list the removed endpoint redundantly");
     let removal_three =
         graceful_remove_schedule_peers(3, SavePolicy::EveryFrame, 0, Delivery::Delayed);
     validate_run_options(&removal_three, &valid_options)
@@ -2757,7 +2829,16 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     validate_run_options(&survivor_hosts, &valid_options)
         .expect("surviving host priority order is free");
     survivor_hosts.config.spectator_hosts = vec![0, 1];
-    assert!(validate_run_options(&survivor_hosts, &valid_options).is_err());
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("the removed endpoint may trail a surviving canonical host");
+    survivor_hosts.config.spectator_hosts = vec![1, 0];
+    validate_run_options(&survivor_hosts, &valid_options)
+        .expect("a removed canonical host is a runnable fail-closed row");
+    survivor_hosts.config.spectator_hosts = vec![1];
+    assert!(
+        validate_run_options(&survivor_hosts, &valid_options).is_err(),
+        "a host set without any surviving endpoint cannot display the match"
+    );
     let mut with_delay_change = removal;
     with_delay_change
         .events
@@ -3043,4 +3124,91 @@ fn differential_shrinking_canonicalizes_save_mode_and_drive_order() {
         replay.verdict.failures.first().map(OracleFailure::class),
         Some("ReferenceInput")
     );
+}
+
+/// A removed player's co-located spectator endpoint is not withdrawn by
+/// `remove_player`, so it must never become a source of truth after the
+/// certified cut. Two halves of that contract are pinned here:
+///
+/// - When a **surviving** host is canonical, listing the removed endpoint
+///   redundantly after it changes nothing: the spectator displays exactly the
+///   certified frozen history that the independent reference derives.
+/// - When the **removed** endpoint is canonical, the spectator fails closed:
+///   it stops at that endpoint's last forwarded frame and never presents a
+///   forked history, even though the surviving mesh keeps confirming.
+#[test]
+fn removed_player_spectator_endpoint_keeps_certified_history_or_fails_closed() {
+    let schedule_with_hosts = |hosts: Vec<usize>| {
+        let mut schedule =
+            graceful_remove_schedule_peers(3, SavePolicy::EveryFrame, 0, Delivery::Reordered);
+        schedule.config.spectator_hosts = hosts;
+        schedule.config.steps = 360;
+        schedule.heal_at = 360;
+        schedule
+    };
+
+    // Surviving canonical host first, removed endpoint anywhere after it.
+    for hosts in [vec![0, 2, 1], vec![2, 0, 1], vec![0, 1, 2]] {
+        let schedule = schedule_with_hosts(hosts.clone());
+        let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+        report.expect_pass(&schedule);
+        let control = removal_control(&report);
+        assert!(
+            report
+                .spectator_max_frame
+                .is_some_and(|frame| frame > control.freeze_frame + 5),
+            "hosts {hosts:?} must keep displaying past the cut: max={:?}, {control:?}",
+            report.spectator_max_frame
+        );
+        assert_eq!(
+            report.spectator_final_hosts,
+            Some(hosts.len()),
+            "hosts {hosts:?} must retain the removed endpoint without losing a source"
+        );
+        assert_eq!(
+            report
+                .peer_event_counts
+                .get(&EventKind::SpectatorDivergence)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "hosts {hosts:?} must not invent a divergence"
+        );
+    }
+
+    // Removed canonical host: fail closed, never advance past its last frame.
+    let schedule = schedule_with_hosts(vec![1, 0, 2]);
+    let report = run(&schedule, &options(PeerDriveOrder::Forward, None));
+    let progress_missing: Vec<_> = report
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|failure| match failure {
+            OracleFailure::SpectatorProgressMissing {
+                required_min_frame,
+                observed_max_frame,
+                ..
+            } => Some((*required_min_frame, *observed_max_frame)),
+            _ => None,
+        })
+        .collect();
+    let (required, observed) = progress_missing
+        .first()
+        .copied()
+        .expect("the stale canonical host must leave the display behind the mesh");
+    assert!(
+        observed.is_some_and(|frame| frame < required.unwrap_or(i32::MAX)),
+        "the display must stop short of the mesh progress: required={required:?}, observed={observed:?}"
+    );
+    assert!(
+        report.final_confirmed[0] > observed.unwrap_or(i32::MAX),
+        "survivors must keep confirming past the stalled display: {:?}",
+        report.final_confirmed
+    );
+    for failure in &report.verdict.failures {
+        assert!(
+            matches!(failure, OracleFailure::SpectatorProgressMissing { .. }),
+            "the stale canonical host must fail closed without forking history: {failure:?}"
+        );
+    }
 }
