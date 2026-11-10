@@ -175,6 +175,25 @@ fn remap_hostile_gossip(
     })
 }
 
+/// Drops a shrunk-away peer from the declared component layout. The layout is
+/// discarded when fewer than two non-empty components remain, because such a
+/// schedule can no longer describe a partition.
+fn remap_component_scope(
+    value: Option<super::ComponentScopeOptions>,
+    removed: usize,
+) -> Option<super::ComponentScopeOptions> {
+    value.and_then(|mut scope| {
+        if removed < scope.component.len() {
+            scope.component.remove(removed);
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for component in &scope.component {
+            *counts.entry(*component).or_insert(0_usize) += 1;
+        }
+        (counts.len() >= 2).then_some(scope)
+    })
+}
+
 fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions {
     let pending_output_probe_link = options
         .pending_output_probe_link
@@ -193,7 +212,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         phase_resolved_control_samples: options.phase_resolved_control_samples,
         corrupt_spectator_input_from: options.corrupt_spectator_input_from,
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
-        component_scope: options.component_scope.clone(),
+        component_scope: remap_component_scope(options.component_scope.clone(), removed),
         differential: options.differential,
     }
 }
@@ -939,6 +958,7 @@ mod tests {
         AppModel, BackgroundNoise, CpuFeedbackPolicy, FrameModel, SimConfig,
         WaitRecommendationPolicy, SCHEDULE_SCHEMA_VERSION,
     };
+    use crate::simulation::harness::ComponentScopeOptions;
     use crate::simulation::harness::{
         validate_run_options, HostileGossipMode, HostileGossipOptions,
     };
@@ -1191,7 +1211,6 @@ mod tests {
         ];
         schedule.heal_at = 20;
         let options = RunOptions {
-            component_scope: None,
             receive_message_limit: Some(512),
             disconnect_timeout: Some(Duration::from_secs(90)),
             corrupt_state_from: Some((3, 8)),
@@ -1211,6 +1230,9 @@ mod tests {
             phase_resolved_control_samples: false,
             corrupt_spectator_input_from: Some(11),
             corrupt_spectator_status_from: Some(12),
+            component_scope: Some(ComponentScopeOptions {
+                component: vec![0, 0, 1, 1],
+            }),
             differential: None,
         };
         let (candidate, mapped) = remove_peer(&schedule, &options, 1).expect("can remove peer");
@@ -1245,6 +1267,23 @@ mod tests {
         );
         assert_eq!(mapped.corrupt_spectator_input_from, Some(11));
         assert_eq!(mapped.corrupt_spectator_status_from, Some(12));
+        assert_eq!(
+            mapped.component_scope,
+            Some(ComponentScopeOptions {
+                component: vec![0, 1, 1],
+            }),
+            "the shrunk layout keeps the surviving peers' component ids"
+        );
+        assert_eq!(
+            remap_component_scope(
+                Some(ComponentScopeOptions {
+                    component: vec![0, 1, 1],
+                }),
+                0,
+            ),
+            None,
+            "a layout that collapses to one component is discarded"
+        );
         assert_eq!(candidate.events.len(), schedule.events.len() - 1);
         assert!(matches!(
             candidate.events[0].1,
