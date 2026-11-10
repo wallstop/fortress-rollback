@@ -1770,6 +1770,36 @@ mod kani_proofs {
         kani::assert(buf[0] & 0x80 == 0, "Continuation bit should not be set");
     }
 
+    /// Proof: full-`u64` varint roundtrip with a fixed ten-byte buffer.
+    ///
+    /// For every `u64`, encoding into a fixed ten-byte buffer writes exactly
+    /// `encoded_len(value)` bytes (never more than ten), and decoding from the
+    /// start recovers the value while consuming exactly the bytes written.
+    ///
+    /// - Tier: 2 (Medium, 30s-2min)
+    /// - Verifies: Full-domain LEB128 encode/decode roundtrip
+    /// - Related: proof_varint_roundtrip_small, proof_varint_encoded_len_correct
+    #[kani::proof]
+    #[kani::unwind(12)] // 10 encoded bytes plus loop overhead
+    fn proof_varint_full_u64_roundtrip_fixed_buffer() {
+        let value: u64 = kani::any();
+        let mut buf = [0u8; 10];
+
+        let written = varint::encode(value, &mut buf);
+        kani::assert(
+            written == varint::encoded_len(value),
+            "encode must write exactly encoded_len bytes",
+        );
+        kani::assert(written <= 10, "a u64 varint must fit ten bytes");
+
+        let (decoded, consumed) = varint::decode(&buf, 0).unwrap();
+        kani::assert(decoded == value, "roundtrip must preserve every u64");
+        kani::assert(
+            consumed == written,
+            "decode must consume exactly the written bytes",
+        );
+    }
+
     /// Proof: varint::decode terminates and returns valid consumed count on success.
     ///
     /// This proves that the decode loop always terminates and, for valid inputs,

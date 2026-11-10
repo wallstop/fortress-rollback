@@ -299,6 +299,14 @@ literals like `let x: u32 = 42`. Never intra-doc-link a `#[cfg(kani)]`-only item
 (e.g. `InlineVec`) — `cargo doc` lacks `--cfg kani` so the link breaks; use a code
 span ([doc-code-sync.md](../doc-code-sync/SKILL.md#intra-doc-links-to-cfgkani-only-items)).
 
+### Obligations reference
+
+The calibrated contracts, domains, target-width assumptions, existing coverage,
+and exclusions for `Frame::buffer_index` and the RLE varint are recorded in
+[references/kani-obligations.md](references/kani-obligations.md). Consult it
+before adding or re-baselining those harnesses; a symbolic 64-bit modulus is
+explicitly outside the Kani budget.
+
 ## Checklist for New Kani Proofs
 
 - [ ] Identify ALL loops (including nested/called functions) and add `#[kani::unwind(N)]` (N = max + 1)
