@@ -4,7 +4,7 @@
 //! reference `crate::*`, `super::*`, allocation, or the RLE error type. The
 //! production source can therefore be extracted unchanged by Hax/Aeneas (see
 //! `.agents/skills/kani/references/kani-obligations.md`), while `rle.rs` maps
-//! [`VarintError`] into the public [`FortressError`] at the seam.
+//! `VarintError` into the public [`FortressError`] at the seam.
 //!
 //! Keep it dependency-free: adding a `use crate::...`, a `Vec`, or a trait
 //! object to this file breaks the extraction smoke package.
