@@ -128,3 +128,14 @@ warm verification around five minutes or less, and an explicit owner. Duplicated
 scalar coverage of these tables is not a Lean win. The stop conditions in #365
 (handwritten replacement implementation, sustained upstream fork, extensive
 production rewriting, unapproved assumptions) end the experiment early.
+
+**Decision (ordered work item 4): not retained.** The reproducible harness lives
+in `scripts/verification/lean-varint-pilot/` (deterministic regeneration,
+normalized-output manifest, axiom audit, and cost measurement). Measured locally:
+warm extraction ~1.1 s, warm verification ~0.9 s, cold project verification
+~118 s, dependency cache 7.8 GB uncompressed / 2.8 GB gzip. Cost meets the
+budget, but the only Lean theorem is `encoded_len_zero`, which Kani's
+full-`u64` `proof_varint_encoded_len_correct` already covers; the loop-heavy
+varint contracts still need `partial_fixpoint` induction and no maintenance
+owner exists. Revisit when a beyond-Kani property, the loop proofs, and an owner
+are nominated.
