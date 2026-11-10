@@ -2329,3 +2329,204 @@ fn run_slow_peer(stall_steps: u32) -> RunReport {
     };
     run_with_input::<StubInput>(&schedule, &options)
 }
+
+/// CAP matrix row 3: a single automatic drop leaves a three-of-four majority
+/// component alive. The majority must keep confirming on one history while the
+/// killed component stops at the shared cut — an explicit split match, never a
+/// fork and never a silent second session.
+#[test]
+fn majority_component_continues_after_single_automatic_drop() {
+    const CUT_ALLOWANCE: i32 = 2;
+    let schedule = disruption_schedule(4, vec![(120, ScheduleEvent::PeerKill { peer: 3 })]);
+    let mut options = disruption_options(vec![0, 0, 0, 1]);
+    options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let evidence = report
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    assert_eq!(evidence.component, vec![0, 0, 0, 1]);
+    assert_eq!(
+        evidence.cut_confirmed.len(),
+        4,
+        "the declared drop must actually fire"
+    );
+    let cut = evidence
+        .cut_confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("drop cut snapshot");
+    let killed_prefix = evidence
+        .confirmed_inputs
+        .get(3)
+        .and_then(|history| history.keys().next_back().copied())
+        .expect("killed peer confirmed a prefix");
+    assert!(
+        killed_prefix >= cut,
+        "the killed peer must certify up to the cut: {killed_prefix} vs {cut}"
+    );
+
+    let outcome = classify_component_scope(evidence, CUT_ALLOWANCE);
+    assert_eq!(
+        outcome,
+        ComponentOutcome::SplitMatch {
+            shared_prefix: killed_prefix,
+            continued: vec![0],
+        },
+        "the surviving majority must continue alone past the killed component"
+    );
+    for peer in [0, 1, 2] {
+        assert_eq!(
+            evidence.final_states[peer],
+            TraceSessionState::Running,
+            "survivor {peer} must keep running"
+        );
+        assert!(
+            evidence.final_confirmed[peer] > killed_prefix + 300,
+            "survivor {peer} must keep confirming well past the cut: {:?}",
+            evidence.final_confirmed
+        );
+    }
+    assert!(
+        report
+            .peer_event_counts
+            .get(&EventKind::PeerDropped)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the automatic drop must be certified: {:?}",
+        report.peer_event_counts
+    );
+    assert!(
+        report.verdict.failures.is_empty(),
+        "a certified majority continuation is a healthy outcome, got {:?}",
+        report.verdict.failures
+    );
+
+    // Mutation control: rewriting the survivor component on the last shared
+    // frame must flip the split match to a fork.
+    let mut forked = evidence.clone();
+    for peer in (0..evidence.component.len()).filter(|peer| evidence.component[*peer] == 0) {
+        let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&killed_prefix) else {
+            panic!("survivor history is missing the shared frame {killed_prefix}");
+        };
+        let Some(slot) = inputs.first_mut() else {
+            panic!("shared frame {killed_prefix} has no rendered peers");
+        };
+        *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"majority-fork");
+    }
+    assert_eq!(
+        classify_component_scope(&forked, CUT_ALLOWANCE),
+        ComponentOutcome::Forked {
+            frame: killed_prefix,
+            component: 0,
+            other_component: 1,
+        },
+        "the mutation control must flip SplitMatch to Forked"
+    );
+}
+
+/// CAP matrix row 4: two independent graceful removals started at the same step
+/// in disjoint pairs. Concurrent drop certificates must not silently fork the
+/// mesh: today both live coordinators fail closed at the shared cut. The row
+/// pins that terminal outcome, the reviewed drop-timeout diagnostics, and the
+/// absence of a fork or a second history.
+#[test]
+fn concurrent_disjoint_graceful_removals_fail_closed_without_fork() {
+    let schedule = disruption_schedule(
+        4,
+        vec![
+            (120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }),
+            (120, ScheduleEvent::GracefulRemove { by: 2, target: 3 }),
+        ],
+    );
+    let mut options = disruption_options(vec![0, 0, 1, 1]);
+    options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let evidence = report
+        .component_scope
+        .as_ref()
+        .expect("component-scoped evidence was requested");
+    assert_eq!(
+        evidence.cut_confirmed.len(),
+        4,
+        "the concurrent removals must actually fire"
+    );
+    assert_eq!(
+        classify_component_scope(evidence, 2),
+        ComponentOutcome::FailedClosed {
+            shared_prefix: evidence
+                .confirmed_inputs
+                .iter()
+                .filter_map(|history| history.keys().next_back().copied())
+                .min()
+                .expect("confirmed history"),
+        },
+        "concurrent drop certificates must fail closed on every component"
+    );
+    assert!(
+        report
+            .peer_event_counts
+            .get(&EventKind::DesyncDetected)
+            .copied()
+            .unwrap_or(0)
+            == 0,
+        "a failed-closed concurrent drop must not present a desync: {:?}",
+        report.peer_event_counts
+    );
+    assert!(
+        typed_safe_failure_diagnostics_hold(
+            &report,
+            false,
+            true,
+            schedule.config.recovery_window_steps(),
+        ),
+        "the terminal failures must stay the reviewed drop-timeout/EndProgress set: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "the failing-closed peers must keep one confirmed history: {:?}",
+        report.verdict.failures
+    );
+}
+
+fn disruption_schedule(n: usize, events: Vec<(u32, ScheduleEvent)>) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: STEPS,
+        noise: BackgroundNoise::Clean,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1111_2222_3333_4444,
+        config,
+        initial_links,
+        events,
+        heal_at: STEPS,
+    }
+}
+
+fn disruption_options(component: Vec<usize>) -> RunOptions {
+    RunOptions {
+        component_scope: Some(ComponentScopeOptions { component }),
+        ..RunOptions::default()
+    }
+}

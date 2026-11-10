@@ -4051,6 +4051,14 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // remaining live peers must learn the drop through gossip and
                     // keep a byte-consistent confirmed prefix.
                     if !dead[*by] && !dead[*target] {
+                        if component_cut_confirmed.is_empty()
+                            && component_confirmed_inputs.is_some()
+                        {
+                            component_cut_confirmed = peers
+                                .iter()
+                                .map(|slot| slot.session.confirmed_frame().as_i32())
+                                .collect();
+                        }
                         let handle = PlayerHandle::new(*target);
                         let receipt_before = differential.and_then(|_| {
                             peers[*by].session.diagnostic_player_receipt_frame(handle)
@@ -4174,6 +4182,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     // `UnattachedPolicy::Drop`), and exclude it from the oracle's
                     // liveness checks. Its remaining mesh survives per the
                     // configured `DisconnectBehavior`. Idempotent.
+                    if component_cut_confirmed.is_empty() && component_confirmed_inputs.is_some() {
+                        component_cut_confirmed = peers
+                            .iter()
+                            .map(|slot| slot.session.confirmed_frame().as_i32())
+                            .collect();
+                    }
                     retire_peer_for_lifecycle(
                         *peer,
                         &peers,
