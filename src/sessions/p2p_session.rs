@@ -8202,6 +8202,24 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns each remote endpoint's newest acknowledged local input
+    /// frame. Used by the deterministic #388 ack-exposure experiment.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_ack_exposure(&self) -> Vec<(PlayerHandle, Frame)> {
+        let mut exposure: Vec<(PlayerHandle, Frame)> = Vec::new();
+        for endpoint in self.player_reg.remotes.values() {
+            let last_acked = endpoint.last_acked_input_frame();
+            let handles = endpoint.handles();
+            for &handle in handles.iter() {
+                exposure.push((handle, last_acked));
+            }
+        }
+        exposure.sort_by_key(|(handle, _)| handle.as_usize());
+        exposure
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
     /// API): returns the exact receiver-side cache and fold contribution for
     /// one remote endpoint's report about a third-party slot.
     #[doc(hidden)]

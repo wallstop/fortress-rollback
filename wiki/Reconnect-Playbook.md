@@ -42,7 +42,10 @@ majority's certified cut before the dead path fails it closed. The contract disc
 tail**: the majority's certified history is authoritative, and the isolated peer's post-cut frames
 are not match results. The prediction window bounds the tail to its own length plus one frame of
 cut-observation slack; reconciliation requires rebuilding the isolated session, not replaying its
-tail.
+tail. An acknowledgement-bounded confirmation floor removes that tail but adds a reverse trip: the
+measured 250 ms / 15% terrible-network path exceeds the default prediction window by 2x, so always
+binding, and half-window gating, both stall survivors. Removing the tail without that cost needs a
+bounded input archive and a pacing-aware policy (see the [tuning experiment](Tuning#acknowledgement-bounded-confirmation-experiment-388)).
 
 ## Timeout presets
 

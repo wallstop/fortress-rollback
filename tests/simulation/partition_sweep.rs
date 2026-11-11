@@ -3259,3 +3259,101 @@ fn asymmetric_one_way_partition_variants_expose_only_bounded_tails() {
         );
     }
 }
+
+/// #388 scoped experiment: measure the actual receipt-based cut against the
+/// floor an acknowledgement-bounded policy would expose on the #386 one-way
+/// row.
+///
+/// Candidate policies:
+/// 1. receipt-only (current bounded split tail),
+/// 2. always fold `last_acked_input` into confirmed,
+/// 3. gate only when the unacked span exceeds half the prediction window.
+///
+/// Candidates 2/3 meet the one-way tail goal by exposing at or below the
+/// shared cut, but the terrible-network integration row shows that their
+/// reverse-trip floor consumes the whole prediction window. The current
+/// bounded-tail contract therefore remains. Exact replay and a mutated ack
+/// snapshot control pin the measurement.
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn ack_exposure_candidates_reject_healthy_liveness() {
+    const ASYMMETRIC_CONFIRM_ALLOWANCE: i32 = 2;
+    const PROBE_STEP: u32 = CUT_STEP + 50;
+
+    let one_way = one_way_schedule(3, DropPolicy::ContinueWithout);
+    let mut options = disruption_options(vec![0, 0, 1]);
+    options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+    options.receive_message_limit = Some(RECEIVE_MESSAGE_LIMIT);
+    options.ack_exposure_probe_at = Some(PROBE_STEP);
+
+    let report = run_with_input::<StubInput>(&one_way, &options);
+    let replay = run_with_input::<StubInput>(&one_way, &options);
+    assert_eq!(report.trace_hash, replay.trace_hash);
+    assert_eq!(report.ack_exposure_probe, replay.ack_exposure_probe);
+
+    let evidence = report.component_scope.as_ref().expect("scope");
+    let tail_allowance = i32::try_from(one_way.config.max_prediction).unwrap_or(i32::MAX) + 1;
+    let outcome =
+        classify_component_scope_with_tail(evidence, ASYMMETRIC_CONFIRM_ALLOWANCE, tail_allowance);
+    let ComponentOutcome::SplitTail {
+        shared_prefix,
+        tail,
+        ..
+    } = outcome
+    else {
+        panic!("the one-way row must remain a bounded split tail, got {outcome:?}");
+    };
+    assert!(tail > 0 && tail <= tail_allowance);
+
+    let exposure = report
+        .ack_exposure_probe
+        .as_ref()
+        .expect("ack exposure probe");
+    assert_eq!(exposure.len(), 3);
+    let isolated = &exposure[2];
+    let min_acked = isolated
+        .remote_last_acked
+        .iter()
+        .map(|(_, frame)| *frame)
+        .min()
+        .expect("isolated peer has remote endpoints");
+    assert!(
+        min_acked >= 0 && min_acked + 1 >= shared_prefix,
+        "the exposure probe must report a current acknowledged frame, not a \
+         default/zero value: shared={shared_prefix}, last_acked={min_acked}, \
+         exposure={isolated:?}"
+    );
+    assert!(
+        min_acked <= shared_prefix + 1,
+        "an acknowledgement-bound policy would expose at or below the cut: \
+         shared={shared_prefix}, last_acked={min_acked}, exposure={isolated:?}"
+    );
+    assert!(
+        isolated.current - min_acked
+            >= i32::try_from(one_way.config.max_prediction / 2).unwrap_or(i32::MAX),
+        "the half-window gate must be active on the isolated peer: {isolated:?}"
+    );
+    println!(
+        "ACK-EXPOSURE one_way shared={shared_prefix} tail={tail} current={} confirmed={} \
+         last_acked={min_acked} max_prediction={}",
+        isolated.current, isolated.confirmed, one_way.config.max_prediction
+    );
+
+    // Mutation control: if the measured acknowledgements were carried forward
+    // to the probe's current frame, the ack-bound floor would move past the
+    // cut. The pass above is therefore caused by the observed ack lag, not by
+    // a constant in the assertion.
+    let mut mutated = exposure.clone();
+    let isolated = &mut mutated[2];
+    let current = isolated.current;
+    for (_, frame) in &mut isolated.remote_last_acked {
+        *frame = current;
+    }
+    let mutated_min = isolated
+        .remote_last_acked
+        .iter()
+        .map(|(_, frame)| *frame)
+        .min()
+        .expect("mutated isolated peer has remote endpoints");
+    assert!(mutated_min > shared_prefix + 1);
+}

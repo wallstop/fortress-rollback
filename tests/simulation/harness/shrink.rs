@@ -204,6 +204,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         corrupt_state_from: remap_peer_frame(options.corrupt_state_from, removed),
         corrupt_checksum_from: remap_peer_frame(options.corrupt_checksum_from, removed),
         probe_confirmed_at: options.probe_confirmed_at.filter(|probe| *probe < steps),
+        ack_exposure_probe_at: options.ack_exposure_probe_at.filter(|probe| *probe < steps),
         pending_output_probe_link,
         receipt_range_probe_target: options
             .receipt_range_probe_target
@@ -1036,6 +1037,7 @@ mod tests {
             final_confirmed,
             trace_tail: Vec::new(),
             probe_confirmed: Vec::new(),
+            ack_exposure_probe: None,
             probe_peer_wire_by_link: BTreeMap::new(),
             pending_output_probe: None,
             receipt_range_probe: None,
@@ -1216,6 +1218,7 @@ mod tests {
             corrupt_state_from: Some((3, 8)),
             corrupt_checksum_from: Some((1, 9)),
             probe_confirmed_at: Some(19),
+            ack_exposure_probe_at: None,
             pending_output_probe_link: Some((3, 0)),
             receipt_range_probe_target: Some(2),
             hostile_gossip: Some(HostileGossipOptions {

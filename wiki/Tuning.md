@@ -138,6 +138,26 @@ The bandwidth, MTU/fragmentation, and NAT-rebinding rows remain in the partition
 evidence below; unsupported rebinding still follows the fail-closed replacement flow in the
 [reconnect playbook](Reconnect-Playbook).
 
+### Acknowledgement-bounded confirmation experiment (#388)
+
+The #386 one-way row and the deterministic 250 ms / 15% `ChaosConfig::terrible_network` arm now
+record each peer's current frame, receipt-based confirmed frame, and every remote endpoint's newest
+acknowledged local input. Measured results:
+
+- #386: shared cut 95, receipt-based confirmed 104 (a 9-frame bounded tail), isolated peer's last
+  acknowledged input 95. Always-ack and half-window-gated exposure would both stop at the cut, so
+  they meet the tail goal.
+- Terrible network (2 peers, virtual clock, seeds 42/43): the peak distance from current frame to
+  the always-ack floor is 16 and 17 frames. The default prediction window is 8, and the half-window
+  gate is active throughout. Both candidates therefore stall survivor progress; the rejected
+  prototype's 38/100 frames is the expected consequence.
+
+Decision: retain the documented bounded terminal-tail contract. Removing the tail without that
+liveness cost needs a bounded input archive and a pacing-aware exposure policy, which remains
+future work rather than a configuration switch. Exact replay and mutated-ack controls pin both
+arms of the experiment; see `tests/simulation/partition_sweep.rs` and
+`tests/network/resilience.rs`.
+
 ## Partition and directed-fault consistency evidence
 
 At commit `ba28701`, a separate, expectation-aware schema-v6 ledger records 66 fixed-budget rows using

@@ -335,6 +335,12 @@ pub struct RunOptions {
     /// dynamics because a clean drain always converges. The probe contributes
     /// to trace/shrinker identity and must be within `0..steps`.
     pub probe_confirmed_at: Option<u32>,
+    /// If set, capture each peer's current/confirmed frame and every remote
+    /// endpoint's newest acknowledged local input at the end of this step.
+    /// Used by the deterministic ack-exposure experiment; output is
+    /// [`RunReport::ack_exposure_probe`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_exposure_probe_at: Option<u32>,
     /// If set, sample the sender's exact protocol `pending_output_len` gauge
     /// for one directed `(from, to)` link after every simulation step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1148,6 +1154,20 @@ pub struct DifferentialTrajectory {
     pub hot_join_control: Option<DifferentialHotJoinControl>,
 }
 
+/// Ack-exposure evidence captured for one peer at a probe step.
+///
+/// `remote_last_acked` is the newest local input frame each remote endpoint
+/// acknowledged, sorted by player handle. The experiment compares the actual
+/// receipt-based confirmation cut against the floor that an acknowledgement-
+/// bounded policy would expose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AckExposureEvidence {
+    pub peer: usize,
+    pub current: i32,
+    pub confirmed: i32,
+    pub remote_last_acked: Vec<(usize, i32)>,
+}
+
 /// Outcome of one simulation run.
 #[derive(Clone, Debug)]
 pub struct RunReport {
@@ -1179,6 +1199,9 @@ pub struct RunReport {
     /// Each peer's confirmed frame sampled at [`RunOptions::probe_confirmed_at`]
     /// (empty when no probe step was requested). Indexed by peer.
     pub probe_confirmed: Vec<i32>,
+    /// Ack-exposure snapshots at [`RunOptions::ack_exposure_probe_at`], or
+    /// `None` when no probe was requested.
+    pub ack_exposure_probe: Option<Vec<AckExposureEvidence>>,
     /// Per-directed-link wire counters sampled after every peer has completed
     /// the step selected by [`RunOptions::probe_confirmed_at`]. Empty when no
     /// probe was requested. Keys are `(local_peer, remote_peer)`.
@@ -1386,6 +1409,25 @@ impl PeerWireTotals {
             .copied()
             .fold(0u64, u64::saturating_add)
     }
+}
+
+/// Collects ack-exposure evidence for every peer at one post-step cut.
+fn collect_ack_exposure<I: SimInput>(peers: &[PeerSlot<I>]) -> Vec<AckExposureEvidence> {
+    peers
+        .iter()
+        .enumerate()
+        .map(|(peer, slot)| AckExposureEvidence {
+            peer,
+            current: slot.session.current_frame().as_i32(),
+            confirmed: slot.session.confirmed_frame().as_i32(),
+            remote_last_acked: slot
+                .session
+                .diagnostic_ack_exposure()
+                .into_iter()
+                .map(|(handle, frame)| (handle.as_usize(), frame.as_i32()))
+                .collect(),
+        })
+        .collect()
 }
 
 fn collect_peer_wire_by_link<I: SimInput>(
@@ -3308,6 +3350,15 @@ pub(crate) fn validate_run_options(
             schedule.config.steps
         ));
     }
+    if options
+        .ack_exposure_probe_at
+        .is_some_and(|probe| probe >= schedule.config.steps)
+    {
+        return Err(format!(
+            "ack_exposure_probe_at must be within 0..{}",
+            schedule.config.steps
+        ));
+    }
     if let Some(hostile) = options.hostile_gossip {
         if n < 3
             || hostile.liar >= n
@@ -3846,6 +3897,8 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut probe_confirmed: Vec<i32> = options
         .probe_confirmed_at
         .map_or_else(Vec::new, |_| vec![Frame::NULL.as_i32(); n]);
+    let mut ack_exposure_probe: Option<Vec<AckExposureEvidence>> =
+        options.ack_exposure_probe_at.map(|_| Vec::new());
     let mut probe_peer_wire_by_link: BTreeMap<(usize, usize), PeerWireTotals> = BTreeMap::new();
     let mut hostile_gossip_probe = None;
     let mut pending_output_probe =
@@ -4982,6 +5035,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         // Sample link-specific wire counters only after the fixed-order peer
         // loop completes, so the probe describes one unambiguous end-of-step
         // cut rather than a mixture of before/after states across peers.
+        if options.ack_exposure_probe_at == Some(step) {
+            ack_exposure_probe = Some(collect_ack_exposure(&peers));
+        }
         if options.probe_confirmed_at == Some(step) {
             probe_peer_wire_by_link = collect_peer_wire_by_link(&peers, n);
             if let Some(hostile) = options.hostile_gossip {
@@ -5556,6 +5612,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         final_confirmed,
         trace_tail: trace_tail.into(),
         probe_confirmed,
+        ack_exposure_probe,
         probe_peer_wire_by_link,
         pending_output_probe,
         receipt_range_probe,

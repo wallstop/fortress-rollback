@@ -1555,6 +1555,14 @@ impl<T: Config> UdpProtocol<T> {
         self.time_sync_layer.average_frame_advantage()
     }
 
+    /// Returns the newest local input frame this peer has acknowledged, or
+    /// [`Frame::NULL`] before the first acknowledgement. Exposed only through
+    /// the hidden ack-exposure diagnostic used by the deterministic #388
+    /// experiment; it is not part of the stable public API.
+    pub(crate) fn last_acked_input_frame(&self) -> Frame {
+        self.last_acked_input.frame
+    }
+
     pub(crate) fn peer_addr(&self) -> T::Address {
         self.peer_addr.clone()
     }

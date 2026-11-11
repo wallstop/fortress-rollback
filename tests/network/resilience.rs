@@ -1114,6 +1114,119 @@ fn test_determinism_under_stress() -> Result<(), FortressError> {
     Ok(())
 }
 
+/// #388 terrible-network arm: run the deterministic 250 ms / 15% `terrible_network`
+/// preset and record the maximum distance between each peer's current frame and
+/// the floor an acknowledgement-bounded policy would expose. Returns the peak
+/// always-bound span for each peer plus whether the half-window gate was active.
+fn terrible_network_ack_exposure() -> (i32, i32, bool, bool) {
+    let clock = TestClock::new();
+
+    let mut chaos_config1 = ChaosConfig::terrible_network();
+    chaos_config1.seed = Some(42);
+    let mut chaos_config2 = ChaosConfig::terrible_network();
+    chaos_config2.seed = Some(43);
+    let (socket1, socket2, addr1, addr2) =
+        create_chaos_channel_pair(chaos_config1, chaos_config2, &clock);
+
+    let mut sess1 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .expect("local")
+        .add_player(PlayerType::Remote(addr2), PlayerHandle::new(1))
+        .expect("remote")
+        .start_p2p_session(socket1)
+        .expect("session 1");
+    let mut sess2 = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .add_player(PlayerType::Remote(addr1), PlayerHandle::new(0))
+        .expect("remote")
+        .add_player(PlayerType::Local, PlayerHandle::new(1))
+        .expect("local")
+        .start_p2p_session(socket2)
+        .expect("session 2");
+    let mut stub1 = GameStub::new();
+    let mut stub2 = GameStub::new();
+
+    for _ in 0..400 {
+        sess1.poll_remote_clients();
+        sess2.poll_remote_clients();
+        if sess1.current_state() == SessionState::Running
+            && sess2.current_state() == SessionState::Running
+        {
+            break;
+        }
+        clock.advance(Duration::from_millis(25));
+    }
+    assert_eq!(sess1.current_state(), SessionState::Running);
+    assert_eq!(sess2.current_state(), SessionState::Running);
+
+    let max_prediction = 8;
+    let mut peak = [0_i32; 2];
+    let mut half_gate = false;
+    let mut saw_valid_ack = false;
+    for i in 0..100_u32 {
+        for _ in 0..8 {
+            sess1.poll_remote_clients();
+            sess2.poll_remote_clients();
+        }
+        clock.advance(Duration::from_millis(30));
+        sess1
+            .add_local_input(PlayerHandle::new(0), StubInput { inp: i * 3 })
+            .expect("input 1");
+        sess2
+            .add_local_input(PlayerHandle::new(1), StubInput { inp: i * 5 + 1 })
+            .expect("input 2");
+        let requests1 = sess1.advance_frame().expect("advance 1");
+        let requests2 = sess2.advance_frame().expect("advance 2");
+        stub1.handle_requests(requests1);
+        stub2.handle_requests(requests2);
+
+        for (index, session) in [&sess1, &sess2].into_iter().enumerate() {
+            let exposure = session.diagnostic_ack_exposure();
+            let Some(min_ack) = exposure.iter().map(|(_, frame)| frame.as_i32()).min() else {
+                continue;
+            };
+            saw_valid_ack |= min_ack >= 0;
+            let current = session.current_frame().as_i32();
+            let confirmed = session.confirmed_frame().as_i32();
+            let always_floor = confirmed.min(min_ack);
+            peak[index] = peak[index].max(current - always_floor);
+            half_gate |= current - min_ack >= max_prediction / 2;
+        }
+    }
+
+    (peak[0], peak[1], half_gate, saw_valid_ack)
+}
+
+/// #388 scoped experiment, terrible-network arm. The always-ack-bound floor
+/// consumes at least the whole prediction window on both peers, and the
+/// half-window gate is active, so those candidates are rejected in favor of the
+/// documented bounded-tail contract. The deterministic preset replays exactly.
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+fn terrible_network_ack_exposure_rejects_always_bound() {
+    let first = terrible_network_ack_exposure();
+    let replay = terrible_network_ack_exposure();
+    assert_eq!(first, replay, "the terrible-network exposure must replay");
+    let (peer0, peer1, half_gate, saw_valid_ack) = first;
+    assert!(
+        saw_valid_ack,
+        "the probe must observe a real acknowledged frame"
+    );
+    println!(
+        "ACK-EXPOSURE terrible_network peak_always_bound_span=[{peer0},{peer1}] \
+         half_gate_active={half_gate} max_prediction=8"
+    );
+    assert!(
+        peer0 >= 8 && peer1 >= 8,
+        "always-ack-bound must exhaust the prediction window: peer0={peer0}, peer1={peer1}"
+    );
+    assert!(
+        half_gate,
+        "the half-window gate must activate under terrible loss"
+    );
+}
+
 /// Test that no panics occur even under worst-case network conditions.
 /// This test validates graceful degradation.
 #[test]
