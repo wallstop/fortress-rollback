@@ -706,6 +706,12 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Cache Playwright browser
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/godot-emscripten/package-lock.json') }}
+
       - name: Restore Godot runtime files
         id: godot-cache
         uses: actions/cache/restore@v6
@@ -774,8 +780,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xauth
+          # Runner apt/DNS outages must not fail the browser lane before the
+          # test runs. The Ubuntu image normally already provides xauth.
+          sudo apt-get update || true
+          if ! sudo apt-get install --yes --no-install-recommends xauth; then
+            echo "warning: xauth install failed; continuing with the runner image" >&2
+          fi
+          command -v xauth >/dev/null 2>&1 || echo "warning: xauth is unavailable" >&2
 
       - name: Run Godot browser fixture
         env:
