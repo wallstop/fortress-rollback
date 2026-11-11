@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794355649541,
+  "lastUpdate": 1794363431601,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "1934c2b3d5e8843cb00815e0d8d6bd176274ff2c",
-          "message": "Add browser transport throughput diagnostics (#243)\n\n## Summary\n\n- record per-player protocol-message enqueue demand in the deterministic\nsweep and schema-v3 baseline\n- distinguish Fortress enqueue demand from socket-adapter, relay, and\nobserved network throughput across metrics and public documentation\n- document the bounded multi-message burst/backpressure contract for\nasynchronous `NonBlockingSocket` adapters\n\n## Root cause\n\nThis is the Fortress-side diagnostic and contract work for #242. Signal\nFish client v0.8.0's Godot WebSocket transport submits one frame, then\nreports it pending until the socket-wide browser\n`WebSocket.bufferedAmount` returns to zero. The polling client stops at\nthat first pending send. Browser event-loop semantics therefore limit\nthis path to one new WebSocket frame per rendered callback.\n\nThe deterministic clean two-player sweep measures 135.8125 protocol\nmessages enqueued per player per second, including one-time\nsynchronization traffic (135.1875 steady state). A 16 ms polling\ncallback can service at most 62.5 messages per second under the upstream\nstop-and-wait behavior. Accounting for time-based control traffic gives\nthe approximate capacity model `2F + F/30 + 10 <= 62.5`, or `F <= 25.8`,\nbefore network, relay, or browser costs.\n\nFortress's default eight-frame prediction stall is a safety throttle\nafter confirmations fall behind, not the root cause. Server reliable\nFIFO delivery and batching can amplify latency but are not necessary for\nthe capacity mismatch.\n\nOwning upstream issue:\nhttps://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/61\nServer residual-risk discussion:\nhttps://github.com/Ambiguous-Interactive/signal-fish-server/issues/136#issuecomment-4987500021\nFull Fortress RCA:\nhttps://github.com/wallstop/fortress-rollback/issues/242#issuecomment-4987500310\n\n## Impact\n\nThis PR intentionally does not change Fortress production pacing,\nacknowledgement, or prediction behavior. It adds durable, data-driven\nevidence for offered protocol demand and prevents custom transport\nintegrations from misreading enqueue counters as accepted/physical\nthroughput.\n\nThe upstream browser transport fix and a real Godot/browser/server E2E\nremain required before #242 can close.\n\n## Validation\n\n- `cargo check`\n- `cargo nextest run --no-capture`: 2,869 passed, 74 skipped\n- `cargo nextest run --features hot-join --no-capture`: 3,125 passed, 75\nskipped\n- `cargo test --test simulation sweep_pr_gate -- --nocapture`\n- `cargo test --test simulation\npeer_wire_metrics_are_wired_across_smoke_fleet -- --nocapture`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- `cargo doc --no-deps`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- markdown, links, wiki consistency, semantic documentation, spelling,\nformatting, and diff checks\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A — no production architecture change\n- CHANGELOG reviewed: N/A — diagnostics/contracts only; no released\nbehavior change\n\nRefs #242.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Documentation, rustdoc, and deterministic test baseline only; runtime\nprotocol and session logic are unchanged per the PR scope.\n> \n> **Overview**\n> Clarifies that **`PeerMetrics`**, **`NetworkStats::kbps_sent`**, and\nrelated APIs measure **Fortress protocol enqueue demand** (encoded\nbytes/messages entering the socket-bound queue), not adapter acceptance\nor observed network throughput. Public rustdoc, API contracts,\ntelemetry, tuning, production checklist, and user-guide text are updated\naccordingly, including guidance to compare\n**`PeerMetrics::packets_sent`** deltas with custom transport admission\nrate, queue depth, and oldest-message age.\n> \n> Documents an explicit **`NonBlockingSocket`** contract: one session\nupdate may call **`send_to`** multiple times; async adapters must return\npromptly with bounded bursts or freshness-preserving drop policy, and\nmust not block until the outbound buffer empties after each message\n(stop-and-wait).\n> \n> The deterministic baseline sweep moves to **schema v3**\n(`sweep-v3.json`), adding\n**`protocol_messages_enqueued_per_player_per_sec`** to **`CellReport`**,\nPR gate comparisons, and the checked-in ledger; simulation harness\ncomments and fleet tests use the same “protocol-cost / enqueue demand”\nvocabulary. **No production pacing, acknowledgement, or prediction\nbehavior changes.**\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n9fb91d1e929b71312ae16162844f26d73e4cc1b8. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-15T21:15:04-07:00",
-          "tree_id": "2c4fa61d66cd53af3bd6a1944aa09165749cc2c6",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/1934c2b3d5e8843cb00815e0d8d6bd176274ff2c"
-        },
-        "date": 1784175805172,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 138537,
-            "range": "± 919",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46587,
-            "range": "± 367",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 93",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3133,
-            "range": "± 202",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5522,
             "range": "± 294",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9c3b8584a414cf2ba22ac75ba75b019ba42220e7",
+          "message": "test(simulation): codify one-way partition as a bounded terminal split (#386) (#387)\n\n## Description\n\nCloses the last open row of the P0 CAP matrix (#382): a one-way\npartition lets the isolated peer keep confirming its prediction window\nafter the majority's certified cut because it still receives the\nmajority's inputs while none of its own arrive. #386 recorded the\nresulting divergence between the isolated peer's live slot values and\nthe majority's frozen prefix.\n\n**Ack-bounding `confirmed_frame` was prototyped and measured, then\nrejected for this change.** Folding each endpoint's `last_acked_input`\ninto the local slot's confirmed contribution makes #386 clean, but it\nlowers confirmation by a round trip on every lossy link and shrinks the\neffective rollback window. Measured blast radius:\n`test_determinism_under_stress` dropped to **38/100** simulated frames\nunder `ChaosConfig::terrible_network` (250 ms latency, 15 % loss),\n`test_eventual_consistency` to 56/60, every baseline drifted,\ndifferential survivor liveness failed across rows, and long\nGilbert–Elliott one-way loss made acknowledged frames jump farther than\nthe bounded input ring can hold (`confirmed_inputs_for_frame`\nunavailable). It remains the clean eventual fix only alongside a\nseparate pacing/queue redesign; this session records the contract and\nevidence.\n\nThis change makes the limitation explicit instead:\n\n- `ComponentOutcome::SplitTail` reports a failed-closed component's\nbounded post-cut tail. `classify_component_scope_with_tail` accepts it\nonly when the first divergence is strictly after the delivery-ambiguity\nwindow, one side is a Running survivor and the other is\nall-`Synchronizing`, every survivor pair agrees over its full shared\nrange, and every failed-closed component's floor is within the caller's\ntail allowance. All other shapes remain `Forked`.\n- `docs/reconnect-playbook.md` (and its wiki mirror) states the\ncontract: the majority's certified history is authoritative, the\nisolated peer's post-cut tail is discarded, the prediction window bounds\nit (plus one frame of cut-observation slack), and recovery requires\nrebuilding the isolated session.\n- `PLAN.md` drops the completed P0 CAP-matrix item; the next queued work\nis the P1 list.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n(none: no behavior changed; the existing behavior is now documented as\nan explicit contract)\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n-\n`asymmetric_one_way_partition_isolated_peer_exposes_only_a_bounded_tail`:\n3 peers, `ContinueWithout`. Reproduces #386 (pre-contract `[774, 774,\n104]`, divergence 96–104), now classifies as `SplitTail { shared_prefix:\n95, continued: [0], tail: 9 }` with a `max_prediction + 1` allowance;\nevery oracle divergence is strictly after the shared prefix; exact\nreplay; mutation controls flip a shared-prefix rewrite and an overlong\ntail to `Forked`.\n- `asymmetric_one_way_partition_variants_expose_only_bounded_tails`:\n3-peer `Halt`, 4-peer `ContinueWithout`, 4-peer `Halt`, each a legal\nbounded `SplitTail` with the expected survivor set and exact replay.\n- Four classifier unit tests: bounded split tail, overlong tail,\ndiverging-but-Running terminal, and divergence inside the cut window.\n\n**Verification:**\n\n- `cargo nextest run --no-fail-fast`: **3067/3067 passed** (73 skipped).\n- `cargo nextest run --features hot-join --no-fail-fast`: **3330/3330\npassed** (74 skipped).\n- `cargo fmt --check` and `cargo clippy --workspace --all-targets\n--features tokio,json -- -D warnings`: clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n- `cargo update`: no compatible updates (six root dependencies remain\ndeliberately pinned majors/minors).\n\n## Related Issues\n\nCloses #386\nCloses #382\nCloses #384",
+          "timestamp": "2026-11-10T18:08:46-08:00",
+          "tree_id": "ccc526c74d5e776874d5423ff83b8650cacb08d5",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/9c3b8584a414cf2ba22ac75ba75b019ba42220e7"
+        },
+        "date": 1794363430138,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 43588,
+            "range": "± 330",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 26063,
+            "range": "± 483",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 675,
+            "range": "± 75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 870,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6828,
+            "range": "± 251",
             "unit": "ns/iter"
           }
         ]
