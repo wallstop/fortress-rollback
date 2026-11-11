@@ -98,6 +98,13 @@ The [threat model](threat-model.md) records the complete single-dishonest-peer c
   `advance_frame`. `MissingLocalInput` currently does not name the omitted handles, so compare and
   log `local_player_handles()` when diagnosing it.
 
+Runnable counterexamples live in `tests/sessions/misuse.rs` (missing rollback save, checksum
+serialization failure, omitted local input) and `tests/sessions/macro_tests.rs` (fallible macro
+stops before later requests). Event-starvation, variable-width input, mismatched-configuration, and
+NAT-rebinding failures have their own deterministic tests in the simulation, protocol,
+compatibility, and census suites. Canonical examples use `try_handle_requests!` when they must
+abort on the first request error.
+
 ## Capacity and frame lifetime
 
 - Size the event queue, input queue, checksum history, and prediction window from measured load.

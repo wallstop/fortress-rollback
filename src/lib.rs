@@ -2294,6 +2294,12 @@ impl<T: Config> std::fmt::Display for FortressRequest<T> {
 /// macro handles all variants. If a new variant is added in a future version,
 /// the compiler will notify you at compile time.
 ///
+/// # Fallible Handlers
+///
+/// This macro discards closure return values and cannot stop on an error. Use
+/// [`try_handle_requests!`](crate::try_handle_requests) when a missing saved
+/// state or checksum failure must abort the request loop.
+///
 /// [`P2PSession::advance_frame`]: crate::P2PSession::advance_frame
 /// [`RequestVec<T>`]: crate::RequestVec
 /// [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
@@ -2324,6 +2330,62 @@ macro_rules! handle_requests {
                 },
             }
         }
+    }};
+}
+
+/// Fallible variant of [`handle_requests!`](crate::handle_requests).
+///
+/// Each closure returns a `Result`; the first `Err` aborts the request loop and
+/// returns from the enclosing function via `?`. Use this for canonical game
+/// loops where a missing `LoadGameState` save or a checksum serialization
+/// failure must never be silently ignored.
+///
+/// ```ignore
+/// try_handle_requests!(
+///     requests,
+///     save: |cell, frame| -> Result<(), ExampleError> {
+///         let checksum = compute_checksum(&state)?;
+///         cell.save(frame, Some(state.clone()), Some(checksum));
+///         Ok(())
+///     },
+///     load: |cell, frame| -> Result<(), ExampleError> {
+///         state = cell.load().ok_or(ExampleError::MissingState(frame))?;
+///         Ok(())
+///     },
+///     advance: |inputs| -> Result<(), ExampleError> {
+///         state.advance(&inputs);
+///         Ok(())
+///     }
+/// )?;
+/// ```
+#[macro_export]
+macro_rules! try_handle_requests {
+    (
+        $requests:expr,
+        save: $save:expr,
+        load: $load:expr,
+        advance: $advance:expr
+        $(,)?
+    ) => {{
+        (|requests| {
+            for request in requests {
+                match request {
+                    $crate::FortressRequest::SaveGameState { cell, frame } => {
+                        #[allow(clippy::redundant_closure_call)]
+                        ($save)(cell, frame)?;
+                    },
+                    $crate::FortressRequest::LoadGameState { cell, frame } => {
+                        #[allow(clippy::redundant_closure_call)]
+                        ($load)(cell, frame)?;
+                    },
+                    $crate::FortressRequest::AdvanceFrame { inputs } => {
+                        #[allow(clippy::redundant_closure_call)]
+                        ($advance)(inputs)?;
+                    },
+                }
+            }
+            ::core::result::Result::Ok(())
+        })($requests)
     }};
 }
 

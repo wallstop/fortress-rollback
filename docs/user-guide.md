@@ -502,7 +502,7 @@ use fortress_rollback::{FortressRequest, RequestVec, compute_checksum};
 fn handle_requests(
     requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     for request in requests {
         match request {
             FortressRequest::SaveGameState { cell, frame } => {
@@ -512,24 +512,26 @@ fn handle_requests(
                 // Clone your state
                 let state_copy = game_state.clone();
 
-                // Compute a checksum for desync detection
-                let checksum = compute_checksum(game_state).ok();
+                // Compute a checksum for desync detection. A serialization
+                // failure aborts the loop instead of saving a checksum-less state.
+                let checksum = compute_checksum(game_state)?;
 
                 // Save it
-                cell.save(frame, Some(state_copy), checksum);
+                cell.save(frame, Some(state_copy), Some(checksum));
             }
 
             FortressRequest::LoadGameState { cell, frame } => {
                 // LoadGameState is only requested for previously saved frames.
-                // Missing state indicates a library bug, but we handle gracefully.
-                if let Some(loaded) = cell.load() {
-                    *game_state = loaded;
-                    // Optionally verify frame consistency (use debug_assert in tests only)
-                    debug_assert_eq!(game_state.frame, frame.as_i32());
-                } else {
-                    // This should never happen - log for debugging
-                    eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
-                }
+                // A missing state is a hard error; continuing from stale state
+                // would silently corrupt deterministic history.
+                *game_state = cell.load().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("missing saved state at frame {}", frame.as_i32()),
+                    )
+                })?;
+                // Optionally verify frame consistency (use debug_assert in tests only)
+                debug_assert_eq!(game_state.frame, frame.as_i32());
             }
 
             FortressRequest::AdvanceFrame { inputs } => {
@@ -555,44 +557,49 @@ fn handle_requests(
             }
         }
     }
+    Ok(())
 }
 ```
 
-### Using the `handle_requests!` Macro
+### Using the `try_handle_requests!` Macro
 
-For simpler cases, you can use the `handle_requests!` macro to reduce boilerplate:
+For simpler cases, use `try_handle_requests!` to reduce boilerplate while still aborting on the
+first missing load or checksum error:
 
 ```rust
 use fortress_rollback::{
-    handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec, RequestVec,
+    try_handle_requests, compute_checksum, FortressRequest, Frame, GameStateCell, InputVec,
+    RequestVec,
 };
 
 fn handle_requests_simple(
     requests: RequestVec<GameConfig>,
     game_state: &mut GameState,
-) {
-    handle_requests!(
+) -> Result<(), Box<dyn std::error::Error>> {
+    try_handle_requests!(
         requests,
-        save: |cell: GameStateCell<GameState>, frame: Frame| {
-            let checksum = compute_checksum(game_state).ok();
-            cell.save(frame, Some(game_state.clone()), checksum);
+        save: |cell: GameStateCell<GameState>, frame: Frame| -> Result<(), Box<dyn std::error::Error>> {
+            let checksum = compute_checksum(game_state)?;
+            cell.save(frame, Some(game_state.clone()), Some(checksum));
+            Ok(())
         },
-        load: |cell: GameStateCell<GameState>, frame: Frame| {
-            // LoadGameState is only requested for previously saved frames.
-            // Missing state indicates a library bug, but we handle gracefully.
-            if let Some(loaded) = cell.load() {
-                *game_state = loaded;
-            } else {
-                eprintln!("WARNING: LoadGameState for frame {frame:?} but no state found");
-            }
+        load: |cell: GameStateCell<GameState>, frame: Frame| -> Result<(), Box<dyn std::error::Error>> {
+            *game_state = cell.load().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing saved state at frame {}", frame.as_i32()),
+                )
+            })?;
+            Ok(())
         },
-        advance: |inputs: InputVec<GameInput>| {
+        advance: |inputs: InputVec<GameInput>| -> Result<(), Box<dyn std::error::Error>> {
             for (_input, _status) in inputs.iter() {
                 // Apply input
             }
             game_state.frame += 1;
+            Ok(())
         }
-    );
+    )
 }
 ```
 

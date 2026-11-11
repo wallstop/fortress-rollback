@@ -81,10 +81,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let checksum = compute_checksum(&state)?;
                     cell.save(frame, Some(state.clone()), Some(checksum));
                 },
-                FortressRequest::LoadGameState { cell, .. } => {
-                    if let Some(saved) = cell.load() {
-                        state = saved;
-                    }
+                FortressRequest::LoadGameState { cell, frame } => {
+                    // A missing saved state is a hard error: continuing would
+                    // silently corrupt the deterministic history.
+                    state = cell.load().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("missing saved state at frame {}", frame.as_i32()),
+                        )
+                    })?;
                 },
                 FortressRequest::AdvanceFrame { inputs } => {
                     for (input, status) in inputs {
@@ -109,6 +114,11 @@ Three rules matter:
 1. Submit input for every local player before each `advance_frame` call.
 2. Process every returned request once, in order.
 3. Save every value that affects gameplay and restore the saved state on a load request.
+
+Return an error when a load has no saved state or checksum serialization fails; do not warn and
+continue with stale state. If you use the request macro, use `try_handle_requests!` so the first
+error aborts the loop. The [request-handling example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)
+shows both manual and fallible macro forms.
 
 Apply both confirmed and predicted inputs to the simulation. Skip an input only when its status is
 `InputStatus::Disconnected`; rollback corrects a predicted value later if the peer sends a different

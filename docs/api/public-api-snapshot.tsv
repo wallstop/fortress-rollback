@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2749
-# textual-paths=2743
+# symbols=2750
+# textual-paths=2744
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -2754,3 +2754,4 @@ fortress_rollback::tokio_socket::TokioUdpSocket::wait_readable	function	all-feat
 fortress_rollback::tokio_socket::TokioUdpSocket::wait_writable	function	all-features	yes	transport	rustdoc-contract	supported-public-contract	keep-supported	-	src/network/tokio_socket.rs
 fortress_rollback::tokio_socket::TokioUdpSocket::with_buffer_sizes	function	all-features	yes	transport	rustdoc-contract	supported-public-contract	keep-supported	-	src/network/tokio_socket.rs
 fortress_rollback::try_check_invariants	macro	no-default+all-features	yes	observability	rustdoc-contract	supported-public-contract	keep-supported	-	src/telemetry.rs
+fortress_rollback::try_handle_requests	macro	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
