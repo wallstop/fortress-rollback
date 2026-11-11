@@ -21,7 +21,8 @@ pub mod schedule;
 pub mod shrink;
 
 pub use components::{
-    classify_component_scope, ComponentOutcome, ComponentScopeEvidence, ComponentScopeOptions,
+    classify_component_scope, classify_component_scope_with_tail, ComponentOutcome,
+    ComponentScopeEvidence, ComponentScopeOptions,
 };
 
 use super::sometimes_state::{aggregate_peer_vectors, SometimesStateVector, SOMETIMES_STATE_COUNT};

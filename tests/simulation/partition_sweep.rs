@@ -14,9 +14,9 @@ use super::harness::schedule::{
     BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
-    classify_component_scope, run_with_input, ComponentOutcome, ComponentScopeOptions,
-    HealRecoveryObservation, PeerStallObservation, PeerWireTotals, RunOptions, RunReport, SimInput,
-    TraceNetStats, TraceSessionState, TraceSnapshot,
+    classify_component_scope, classify_component_scope_with_tail, run_with_input, ComponentOutcome,
+    ComponentScopeOptions, HealRecoveryObservation, PeerStallObservation, PeerWireTotals,
+    RunOptions, RunReport, SimInput, TraceNetStats, TraceSessionState, TraceSnapshot,
 };
 use crate::common::sim_net::{LinkPolicy, SimReceiveStats};
 use crate::common::stubs::StubInput;
@@ -2524,6 +2524,48 @@ fn disruption_schedule(n: usize, events: Vec<(u32, ScheduleEvent)>) -> Schedule 
     }
 }
 
+/// Three-or-more peer mesh where the last peer can no longer send to any other
+/// peer (a one-way partition). The peer still receives the others' traffic.
+fn one_way_schedule(n: usize, policy: DropPolicy) -> Schedule {
+    let config = SimConfig {
+        n_players: n,
+        steps: STEPS,
+        noise: BackgroundNoise::Clean,
+        disconnect_behavior: policy,
+        ..SimConfig::smoke(n)
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let isolated = n.saturating_sub(1);
+    let events: Vec<_> = (0..isolated)
+        .map(|to| {
+            (
+                CUT_STEP,
+                ScheduleEvent::Block {
+                    from: isolated,
+                    to,
+                    blocked: true,
+                },
+            )
+        })
+        .collect();
+    Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1111_2222_3333_4444,
+        config,
+        initial_links,
+        events,
+        heal_at: STEPS,
+    }
+}
+
 fn disruption_options(component: Vec<usize>) -> RunOptions {
     RunOptions {
         component_scope: Some(ComponentScopeOptions { component }),
@@ -2942,6 +2984,278 @@ fn healed_majority_partition_continues_on_one_history() {
                 other_component: 1,
             },
             "the mutation control must flip SplitMatch to Forked"
+        );
+    }
+}
+
+#[test]
+fn asymmetric_one_way_partition_isolated_peer_exposes_only_a_bounded_tail() {
+    // One-way isolation: peer 2 can no longer send to 0 or 1, but still
+    // receives their traffic. It therefore keeps confirming its prediction
+    // window past the majority's certified cut before the dead outbound path
+    // fails it closed. That tail is terminal and discarded; the outcome must be
+    // an explicit split with a bounded tail, never a silent fork.
+    const ASYMMETRIC_CONFIRM_ALLOWANCE: i32 = 2;
+
+    let schedule = one_way_schedule(3, DropPolicy::ContinueWithout);
+    let component = vec![0, 0, 1];
+    let mut options = disruption_options(component.clone());
+    options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+    options.receive_message_limit = Some(RECEIVE_MESSAGE_LIMIT);
+    // A one-way-isolated peer cannot confirm past its prediction window: it
+    // stalls as soon as `current - confirmed == max_prediction`, so the
+    // terminal tail is bounded by that window plus the cut-observation slack.
+    let tail_allowance = i32::try_from(schedule.config.max_prediction).unwrap_or(i32::MAX) + 1;
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let evidence = report.component_scope.as_ref().expect("scope");
+    assert_eq!(evidence.component, component);
+    assert_eq!(
+        evidence.cut_confirmed.len(),
+        3,
+        "the declared one-way block must actually fire"
+    );
+    let cut = evidence
+        .cut_confirmed
+        .iter()
+        .copied()
+        .min()
+        .expect("partition snapshot");
+
+    let outcome =
+        classify_component_scope_with_tail(evidence, ASYMMETRIC_CONFIRM_ALLOWANCE, tail_allowance);
+    assert!(
+        outcome.is_legal(),
+        "the one-way partition must be a legal terminal outcome, got {outcome:?}"
+    );
+    let ComponentOutcome::SplitTail {
+        shared_prefix,
+        continued,
+        tail,
+    } = outcome
+    else {
+        panic!("the one-way partition must be an explicit split tail, got {outcome:?}");
+    };
+    assert_eq!(continued, vec![0]);
+    assert!(
+        tail > 0 && tail <= tail_allowance,
+        "the isolated peer's tail must be non-empty but prediction-window bounded: {tail} (allowance {tail_allowance})"
+    );
+    assert_eq!(
+        evidence.final_confirmed[2],
+        shared_prefix + tail,
+        "the failed-closed peer's floor must be exactly the shared prefix plus its tail"
+    );
+    assert!(
+        evidence.final_confirmed[0] > cut + 100 && evidence.final_confirmed[1] > cut + 100,
+        "the two-peer majority must keep confirming: {:?} vs cut {cut}",
+        evidence.final_confirmed
+    );
+    assert_eq!(
+        evidence.final_states,
+        vec![
+            TraceSessionState::Running,
+            TraceSessionState::Running,
+            TraceSessionState::Synchronizing,
+        ],
+        "the isolated peer must fail closed while the majority keeps running"
+    );
+    assert!(
+        report
+            .peer_event_counts
+            .get(&EventKind::PeerDropped)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the majority must certify the isolated peer's drop: {:?}",
+        report.peer_event_counts
+    );
+    // The oracle still reports the tail's value disagreement; every such
+    // failure must lie strictly after the last shared frame. A disagreement at
+    // or before it would be a rewrite of the shared prefix, not a discarding
+    // split tail.
+    for failure in &report.verdict.failures {
+        match failure {
+            OracleFailure::ConfirmedInputDivergence { frame, .. }
+            | OracleFailure::StateDivergence { frame, .. } => assert!(
+                *frame > shared_prefix,
+                "a divergence at frame {frame} rewrites the shared prefix ending at {shared_prefix}"
+            ),
+            OracleFailure::Violation { violation, .. } => assert!(
+                violation.starts_with("[Error/NetworkProtocol] coordinated graceful drop ")
+                    && violation.contains(" failed closed: Timeout;"),
+                "the isolated peer's only protocol diagnostic must be the reviewed drop timeout: {violation}"
+            ),
+            OracleFailure::EndProgress { peer: 2, .. } => {},
+            other => panic!("unexpected oracle failure for the one-way split: {other:?}"),
+        }
+    }
+
+    // Exact replay: the same schedule must produce the same trace.
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        replay.trace_hash, report.trace_hash,
+        "the asymmetric partition row must replay exactly"
+    );
+
+    // Mutation control 1: rewriting the majority value on the shared frame must
+    // flip the split tail to a fork (a shared-prefix rewrite is never legal).
+    let mut forked = evidence.clone();
+    for peer in [0, 1] {
+        let Some(inputs) = forked.confirmed_inputs[peer].get_mut(&shared_prefix) else {
+            panic!("majority history is missing the shared frame {shared_prefix}");
+        };
+        let Some(slot) = inputs.first_mut() else {
+            panic!("shared frame {shared_prefix} has no rendered peers");
+        };
+        *slot = InputFingerprint::from_bytes(0xDEAD_BEEF, b"asymmetric-fork");
+    }
+    assert_eq!(
+        classify_component_scope_with_tail(&forked, ASYMMETRIC_CONFIRM_ALLOWANCE, tail_allowance),
+        ComponentOutcome::Forked {
+            frame: shared_prefix,
+            component: 0,
+            other_component: 1,
+        },
+        "a shared-prefix rewrite must remain a fork"
+    );
+
+    // Mutation control 2: a terminal tail beyond the prediction-window bound
+    // must flip to a fork, so the documented bound is load-bearing.
+    let mut overlong = evidence.clone();
+    let overlong_frame = shared_prefix + tail_allowance + 1;
+    overlong
+        .confirmed_inputs
+        .get_mut(2)
+        .expect("isolated peer history")
+        .insert(
+            overlong_frame,
+            vec![InputFingerprint::from_bytes(0xDEAD_BEEF, b"overlong-tail")],
+        );
+    assert_eq!(
+        classify_component_scope_with_tail(&overlong, ASYMMETRIC_CONFIRM_ALLOWANCE, tail_allowance),
+        ComponentOutcome::Forked {
+            frame: shared_prefix + 1,
+            component: 0,
+            other_component: 1,
+        },
+        "a tail beyond the prediction-window bound must be a fork"
+    );
+}
+
+#[test]
+fn asymmetric_one_way_partition_variants_expose_only_bounded_tails() {
+    // `#386` sweep: the one-way shape must stay an explicit bounded split for
+    // both policies and for a larger mesh. `Halt` never certifies a removal, so
+    // no component continues; the isolated peer's prediction-window tail is the
+    // only post-cut history and it is discarded the same way.
+    const ASYMMETRIC_CONFIRM_ALLOWANCE: i32 = 2;
+
+    for (n, policy, expected_continued, expect_peer_dropped) in [
+        (3usize, DropPolicy::Halt, Vec::new(), false),
+        (4usize, DropPolicy::ContinueWithout, vec![0usize], true),
+        (4usize, DropPolicy::Halt, Vec::new(), false),
+    ] {
+        let isolated = n.saturating_sub(1);
+        let schedule = one_way_schedule(n, policy);
+        let component = {
+            let mut component = vec![0; n];
+            component[isolated] = 1;
+            component
+        };
+        let mut options = disruption_options(component.clone());
+        options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+        options.receive_message_limit = Some(RECEIVE_MESSAGE_LIMIT);
+        let tail_allowance = i32::try_from(schedule.config.max_prediction).unwrap_or(i32::MAX) + 1;
+
+        let report = run_with_input::<StubInput>(&schedule, &options);
+        let evidence = report.component_scope.as_ref().expect("scope");
+        assert_eq!(evidence.component, component);
+        assert_eq!(
+            evidence.cut_confirmed.len(),
+            n,
+            "the declared one-way block must actually fire"
+        );
+        let cut = evidence
+            .cut_confirmed
+            .iter()
+            .copied()
+            .min()
+            .expect("partition snapshot");
+        let outcome = classify_component_scope_with_tail(
+            evidence,
+            ASYMMETRIC_CONFIRM_ALLOWANCE,
+            tail_allowance,
+        );
+        assert!(
+            outcome.is_legal(),
+            "policy {policy:?} n={n}: one-way partition must be legal, got {outcome:?}"
+        );
+        let ComponentOutcome::SplitTail {
+            shared_prefix,
+            continued,
+            tail,
+        } = outcome
+        else {
+            panic!("policy {policy:?} n={n}: expected a split tail, got {outcome:?}");
+        };
+        assert_eq!(
+            continued, expected_continued,
+            "policy {policy:?} n={n}: unexpected survivor set"
+        );
+        assert!(
+            tail > 0 && tail <= tail_allowance,
+            "policy {policy:?} n={n}: tail {tail} must be prediction-window bounded ({tail_allowance})"
+        );
+        assert!(
+            evidence.final_confirmed[isolated] <= shared_prefix + tail_allowance,
+            "policy {policy:?} n={n}: isolated peer exposed {:?}",
+            evidence.final_confirmed
+        );
+        let expected_terminal_state = if expected_continued.is_empty() {
+            TraceSessionState::Synchronizing
+        } else {
+            TraceSessionState::Running
+        };
+        for peer in 0..isolated {
+            assert_eq!(
+                evidence.final_states[peer], expected_terminal_state,
+                "policy {policy:?} n={n}: survivor {peer} state"
+            );
+            if expected_continued.is_empty() {
+                assert!(
+                    evidence.final_confirmed[peer] <= shared_prefix + tail_allowance,
+                    "policy {policy:?} n={n}: halted peer {peer} must not continue"
+                );
+            } else {
+                assert!(
+                    evidence.final_confirmed[peer] > cut + 100,
+                    "policy {policy:?} n={n}: survivor {peer} must keep confirming: {:?} vs cut {cut}",
+                    evidence.final_confirmed
+                );
+            }
+        }
+        assert_eq!(
+            evidence.final_states[isolated],
+            TraceSessionState::Synchronizing,
+            "policy {policy:?} n={n}: the isolated peer must fail closed"
+        );
+        let peer_dropped = report
+            .peer_event_counts
+            .get(&EventKind::PeerDropped)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            peer_dropped > 0,
+            expect_peer_dropped,
+            "policy {policy:?} n={n}: PeerDropped presence {peer_dropped}"
+        );
+
+        // Exact replay: the same schedule must produce the same trace.
+        let replay = run_with_input::<StubInput>(&schedule, &options);
+        assert_eq!(
+            replay.trace_hash, report.trace_hash,
+            "policy {policy:?} n={n}: the one-way variant must replay exactly"
         );
     }
 }
