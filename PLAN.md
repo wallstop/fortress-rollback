@@ -6,19 +6,20 @@
 
 ## In progress
 
-_None._
+- **P1 — Qualify gameplay experience and performance with representative states.** The release
+  representative-state ledger now publishes 2/4/16-player p50–p99.9 frame-service, rollback,
+  allocation, bandwidth, and confirmation evidence plus reference budgets
+  (`tests/representative_perf.rs`, `docs/tuning.md`). Remaining: a playable/reference game
+  workload, visible correction magnitude, audio/presentation duplication, downstream queue
+  behavior, and a profile-before-optimize pass on the target hardware. **Exit:** extend the
+  published per-tier budgets and failure thresholds to that workload, reproduce the current
+  mobile/4-player/16-player costs, and accept changes only when the correctness oracle stays green
+  and a statistically useful end-to-end improvement exceeds run variance. Evaluate topology
+  changes only if tuning cannot meet the chosen budget.
 
 ## Future
 
-1. **P1 — Qualify gameplay experience and performance with representative states.** Extend beyond tiny stubs to realistic
-   snapshot sizes, simulation costs, input widths, and a playable/reference workload. Measure input latency, visible
-   correction frequency/magnitude, audio/presentation duplication, frame-time p50/p95/p99/p99.9, rollback CPU,
-   allocations, memory plateau, and bandwidth across the supported tiers. **Exit:** publish per-tier budgets and failure
-   thresholds; reproduce the current mobile/4-player/16-player costs, profile before optimizing, and accept changes only
-   when the same correctness oracle stays green and statistically useful end-to-end improvement exceeds run variance.
-   Evaluate topology changes only if tuning cannot meet the chosen budget.
-
-2. **P1 — Make the safest integration the easiest integration.** Exercise the public package as an external consumer,
+1. **P1 — Make the safest integration the easiest integration.** Exercise the public package as an external consumer,
    then mutate the getting-started/request-handling paths: missing or wrong-frame loads, checksum serialization failure,
    omitted local input, undrained events, ignored WaitRecommendation, variable-width input, and mismatched lifecycle
    configuration. Current examples silently continue on missing loads and often erase checksum errors. **Exit:** every
@@ -26,14 +27,14 @@ _None._
    never silent corruption. Canonical examples return errors rather than warn-and-continue, cover rollback-sensitive side
    effects, and a clean two-process quickstart reaches confirmed play with enough telemetry to diagnose each failure.
 
-3. **P1 — Verify portability and long-session determinism.** Replay identical captured corpora across supported native
+2. **P1 — Verify portability and long-session determinism.** Replay identical captured corpora across supported native
    architectures, WASM/browser and Emscripten adapters, release/safe-release profiles, and mixed transport paths; include
    background-tab resume and extended frame/ring operation. **Exit:** under one captured replay/schedule, requests and
    artifacts are byte-identical; live mixed transports agree on confirmed checkpoints despite legal speculative timing
    differences. No panic or unexpected violation occurs; any platform limitation has a compatibility regression and narrowed
    support documentation. A simulator-only pass is not cross-platform evidence.
 
-4. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
+3. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
    evaluate its multi-night stability before any ratchet. Then use the
    [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare violation-site coverage, PCT,
    prefix branching, and LDFI-lite against fresh-seed search at equal compute. **Exit:**

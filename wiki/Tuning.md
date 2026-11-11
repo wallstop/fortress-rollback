@@ -114,6 +114,40 @@ The PR gate also records `stalls_per_min` and `confirmation_lag_mean`; regressio
 two stalls per minute, and 10% plus 0.25 frames respectively, fail the sweep so this cliff cannot
 move silently.
 
+## Representative-state qualification
+
+`tests/representative_perf.rs` runs real `P2PSession` meshes over an in-memory fabric with
+configurable snapshot payloads, per-frame simulation work, input loss, input delay, prediction
+window, and player count. It records frame-service percentiles, rollback work, allocations,
+bandwidth, and confirmation progress. The normal suite runs a small smoke row; the full ledger is a
+release-mode manual/nightly run:
+
+```bash
+FORTRESS_PERF_ENFORCE=1 FORTRESS_PERF_OUT=/tmp/representative-perf.jsonl \
+cargo nextest run --release --features tokio,json --run-ignored ignored-only \
+  -E 'test(representative_tier_ledger)' --test representative_perf --no-capture
+```
+
+Reference release measurements on the development host (state bytes / per-frame work bytes,
+zero configured input delay, deterministic protocol-message drops of 20% for the 2/4-player rows
+and 5% for the 16-player row, chosen to exercise visible corrections rather than to model a
+specific network):
+
+| Tier | Players | State | Work | Frames | p50 | p95 | p99 | p99.9 | Rollbacks | Max depth | Net bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2p-rep-64k | 2 | 64 KiB | 1 MiB | 300 | 0.035 ms | 0.060 ms | 0.076 ms | 0.105 ms | 294 | 2 | 1.13 MiB |
+| 4p-rep-256k | 4 | 256 KiB | 4 MiB | 240 | 0.181 ms | 0.348 ms | 0.499 ms | 0.625 ms | 729 | 6 | 9.02 MiB |
+| 16p-rep-64k | 16 | 64 KiB | 2 MiB | 120 | 0.084 ms | 0.116 ms | 0.141 ms | 0.149 ms | 1,839 | 3 | 9.35 MiB |
+
+Reference budgets for a supported desktop workload of this shape are **p99 ≤ 2 ms for 2/4
+players and ≤ 4 ms for 16 players**, enforced only when `FORTRESS_PERF_ENFORCE=1` is set. These are
+qualification thresholds for the recorded workload, not portable latency guarantees; re-run them
+on the deployment hardware and state cost. The row deliberately sets input delay to zero and uses
+instant transport so it isolates snapshot/simulation cost; the network-latency tiers in the
+measured baseline above remain the source for mobile/4-player/16-player transport cost. A
+performance change is retained only when the same correctness smoke stays green and its improvement
+exceeds measured run variance on the target workload.
+
 ## Transport bound evidence
 
 Built-in adapters cap each receive poll at 256 raw attempts and 256 decoded messages, and
