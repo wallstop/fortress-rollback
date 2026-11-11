@@ -117,10 +117,11 @@ move silently.
 ## Representative-state qualification
 
 `tests/representative_perf.rs` runs real `P2PSession` meshes over an in-memory fabric with
-configurable snapshot payloads, per-frame simulation work, input loss, input delay, prediction
-window, and player count. It records frame-service percentiles, rollback work, allocations,
-bandwidth, and confirmation progress. The normal suite runs a small smoke row; the full ledger is a
-release-mode manual/nightly run:
+configurable snapshot payloads, a small deterministic 2D reference game, per-frame simulation work,
+latency/jitter/loss through the adapter, input delay, prediction window, and player count. It
+records frame-service percentiles, rollback and presentation-replay work, adapter queue depth/age,
+allocations, bandwidth, and confirmation progress. The normal suite runs a small smoke row; the full
+ledger is a release-mode manual/nightly run:
 
 ```bash
 FORTRESS_PERF_ENFORCE=1 FORTRESS_PERF_OUT=/tmp/representative-perf.jsonl \
@@ -129,24 +130,23 @@ cargo nextest run --release --features tokio,json --run-ignored ignored-only \
 ```
 
 Reference release measurements on the development host (state bytes / per-frame work bytes,
-zero configured input delay, deterministic protocol-message drops of 20% for the 2/4-player rows
-and 5% for the 16-player row, chosen to exercise visible corrections rather than to model a
-specific network):
+configured adapter latency/jitter/loss, input delay, and prediction window as shown):
 
-| Tier | Players | State | Work | Frames | p50 | p95 | p99 | p99.9 | Rollbacks | Max depth | Net bytes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2p-rep-64k | 2 | 64 KiB | 1 MiB | 300 | 0.035 ms | 0.060 ms | 0.076 ms | 0.105 ms | 294 | 2 | 1.13 MiB |
-| 4p-rep-256k | 4 | 256 KiB | 4 MiB | 240 | 0.181 ms | 0.348 ms | 0.499 ms | 0.625 ms | 729 | 6 | 9.02 MiB |
-| 16p-rep-64k | 16 | 64 KiB | 2 MiB | 120 | 0.084 ms | 0.116 ms | 0.141 ms | 0.149 ms | 1,839 | 3 | 9.35 MiB |
+| Tier | Players | State | Work | Net latency/jitter/loss | Delay/predict | p50 | p95 | p99 | p99.9 | Rollbacks | Visible/duplicated | Queue max/age | Net bytes |
+| --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2p-mobile | 2 | 64 KiB | 1 MiB | 50/10 ms / 3% | 3/12 | 0.038 ms | 0.055 ms | 0.063 ms | 0.186 ms | 347 | 347/374 | 11/48 ms | 1.64 MiB |
+| 4p-wifi | 4 | 256 KiB | 4 MiB | 25/10 ms / 1% | 2/8 | 0.101 ms | 0.235 ms | 0.514 ms | 0.628 ms | 353 | 353/385 | 22/32 ms | 9.05 MiB |
+| 4p-severe | 4 | 256 KiB | 4 MiB | 100/10 ms / 7% | 3/12 | 0.164 ms | 0.713 ms | 1.011 ms | 3.303 ms | 346 | 346/1,398 | 39/96 ms | 13.09 MiB |
+| 16p-regional | 16 | 64 KiB | 2 MiB | 50/10 ms / 1% | 2/8 | 0.086 ms | 0.238 ms | 0.294 ms | 0.309 ms | 981 | 981/2,687 | 137/48 ms | 10.21 MiB |
 
-Reference budgets for a supported desktop workload of this shape are **p99 ≤ 2 ms for 2/4
-players and ≤ 4 ms for 16 players**, enforced only when `FORTRESS_PERF_ENFORCE=1` is set. These are
-qualification thresholds for the recorded workload, not portable latency guarantees; re-run them
-on the deployment hardware and state cost. The row deliberately sets input delay to zero and uses
-instant transport so it isolates snapshot/simulation cost; the network-latency tiers in the
-measured baseline above remain the source for mobile/4-player/16-player transport cost. A
-performance change is retained only when the same correctness smoke stays green and its improvement
-exceeds measured run variance on the target workload.
+Reference budgets for these workloads are **p99 ≤ 2 ms for 2/4 players and ≤ 6 ms for 16
+players**, plus an adapter queue-age ceiling of configured latency + 2× jitter + 3 frames + 100 ms.
+They are enforced only with `FORTRESS_PERF_ENFORCE=1` and are qualification thresholds for the
+recorded workload, not portable latency guarantees; re-run on deployment hardware and state cost.
+Visible corrections count rollback loads; duplicated frames count already-presented frames
+re-simulated, so the audio/presentation replay budget is bounded by resimulated work. A performance
+change is retained only when the same correctness smoke stays green and its improvement exceeds
+measured run variance on the target workload.
 
 ## Transport bound evidence
 
