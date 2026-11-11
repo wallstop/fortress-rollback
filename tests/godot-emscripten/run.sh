@@ -77,7 +77,14 @@ cp "${FIXTURE_ROOT}/target-nothreads/${TARGET}/debug/${LIBRARY_NAME}.wasm" \
 cd "${FIXTURE_ROOT}"
 npm ci
 if [[ "${INSTALL_PLAYWRIGHT:-0}" == "1" ]]; then
-    npx --no-install playwright install --with-deps chromium
+    # Prefer the full dependency install, but do not let a transient runner
+    # apt/DNS outage fail the browser test: GitHub's Ubuntu image already
+    # carries the Chromium runtime libraries, and the font packages pulled by
+    # `--with-deps` are not required for the WebGL2 fixture.
+    if ! npx --no-install playwright install --with-deps chromium; then
+        printf 'warning: Playwright dependency install failed; retrying browser-only install\n' >&2
+        npx --no-install playwright install chromium
+    fi
 fi
 if ! command -v xvfb-run >/dev/null 2>&1; then
     printf 'error: xvfb-run is required for Godot WebGL2 browser tests\n' >&2
