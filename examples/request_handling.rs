@@ -28,12 +28,50 @@
 )]
 
 use fortress_rollback::{
-    compute_checksum, handle_requests, Config, DesyncDetection, FortressRequest, Frame,
-    GameStateCell, InputStatus, InputVec, PlayerHandle, PlayerType, RequestVec, SessionBuilder,
-    SessionState, UdpNonBlockingSocket,
+    checksum::ChecksumError, compute_checksum, try_handle_requests, Config, DesyncDetection,
+    FortressRequest, Frame, GameStateCell, InputStatus, InputVec, PlayerHandle, PlayerType,
+    RequestVec, SessionBuilder, SessionState, UdpNonBlockingSocket,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::SocketAddr;
+
+/// Application error for canonical request handling.
+#[derive(Debug)]
+enum RequestHandlingError {
+    MissingSavedState(Frame),
+    Checksum(ChecksumError),
+}
+
+impl fmt::Display for RequestHandlingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingSavedState(frame) => {
+                write!(
+                    f,
+                    "missing saved state for rollback frame {}",
+                    frame.as_i32()
+                )
+            },
+            Self::Checksum(error) => write!(f, "checksum serialization failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestHandlingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MissingSavedState(_) => None,
+            Self::Checksum(error) => Some(error),
+        }
+    }
+}
+
+impl From<ChecksumError> for RequestHandlingError {
+    fn from(error: ChecksumError) -> Self {
+        Self::Checksum(error)
+    }
+}
 
 // ============================================================================
 // Game Types
@@ -106,8 +144,12 @@ impl Config for GameConfig {
 ///   Do not sort, filter, or reorder them.
 ///
 /// - **`compute_checksum`**: Enables desync detection by computing a
-///   deterministic hash of your game state.
-fn handle_requests_manual(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
+///   deterministic hash of your game state. A serialization failure aborts the
+///   request loop instead of silently storing a checksum-less state.
+fn handle_requests_manual(
+    requests: RequestVec<GameConfig>,
+    game_state: &mut GameState,
+) -> Result<(), RequestHandlingError> {
     for request in requests {
         // No wildcard `_ =>` arm needed — all variants are covered
         match request {
@@ -117,35 +159,31 @@ fn handle_requests_manual(requests: RequestVec<GameConfig>, game_state: &mut Gam
 
                 // Compute a checksum for desync detection.
                 // compute_checksum() uses bincode + FNV-1a for deterministic hashing.
-                // Returns Result — use .ok() to convert to Option for cell.save().
-                let checksum = compute_checksum(game_state).ok();
+                // A failure aborts the loop: never save a silently checksum-less state.
+                let checksum = compute_checksum(game_state)?;
 
                 // Save the state with its checksum
-                cell.save(frame, Some(state_copy), checksum);
+                cell.save(frame, Some(state_copy), Some(checksum));
 
                 println!(
-                    "Saved state at frame {} with checksum {}",
+                    "Saved state at frame {} with checksum {:#034x}",
                     frame.as_i32(),
-                    checksum.map_or("None".to_string(), |c| format!("{:#034x}", c))
+                    checksum
                 );
             },
 
             FortressRequest::LoadGameState { cell, frame } => {
                 // LoadGameState is only requested for previously saved frames.
-                // A missing state would indicate a library bug, but we handle gracefully.
-                if let Some(loaded) = cell.load() {
-                    *game_state = loaded;
-                    println!(
-                        "Loaded state from frame {} (rollback occurred)",
-                        frame.as_i32()
-                    );
-                } else {
-                    // This should never happen in normal operation
-                    eprintln!(
-                        "WARNING: LoadGameState for frame {:?} but no state found",
-                        frame
-                    );
-                }
+                // A missing state is a hard error: rolling back from a stale or
+                // missing snapshot would silently corrupt deterministic history.
+                let loaded = cell
+                    .load()
+                    .ok_or(RequestHandlingError::MissingSavedState(frame))?;
+                *game_state = loaded;
+                println!(
+                    "Loaded state from frame {} (rollback occurred)",
+                    frame.as_i32()
+                );
             },
 
             FortressRequest::AdvanceFrame { inputs } => {
@@ -155,10 +193,11 @@ fn handle_requests_manual(requests: RequestVec<GameConfig>, game_state: &mut Gam
             },
         }
     }
+    Ok(())
 }
 
 // ============================================================================
-// Request Handling — Method 2: Using handle_requests! Macro
+// Request Handling — Method 2: Using try_handle_requests! Macro
 // ============================================================================
 
 /// Handle requests using the `handle_requests!` macro.
@@ -176,28 +215,31 @@ fn handle_requests_manual(requests: RequestVec<GameConfig>, game_state: &mut Gam
 ///
 /// - **Exhaustive**: The macro handles all `FortressRequest` variants.
 #[allow(unused)]
-fn handle_requests_with_macro(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
-    handle_requests!(
+fn handle_requests_with_macro(
+    requests: RequestVec<GameConfig>,
+    game_state: &mut GameState,
+) -> Result<(), RequestHandlingError> {
+    try_handle_requests!(
         requests,
-        save: |cell: GameStateCell<GameState>, frame: Frame| {
-            // Use compute_checksum for desync detection
-            let checksum = compute_checksum(game_state).ok();
-            cell.save(frame, Some(game_state.clone()), checksum);
+        save: |cell: GameStateCell<GameState>, frame: Frame| -> Result<(), RequestHandlingError> {
+            let checksum = compute_checksum(game_state)?;
+            cell.save(frame, Some(game_state.clone()), Some(checksum));
             println!("Saved state at frame {} (via macro)", frame.as_i32());
+            Ok(())
         },
-        load: |cell: GameStateCell<GameState>, frame: Frame| {
-            if let Some(loaded) = cell.load() {
-                *game_state = loaded;
-                println!("Loaded state from frame {} (via macro)", frame.as_i32());
-            } else {
-                eprintln!("WARNING: LoadGameState for frame {:?} but no state found", frame);
-            }
+        load: |cell: GameStateCell<GameState>, frame: Frame| -> Result<(), RequestHandlingError> {
+            *game_state = cell
+                .load()
+                .ok_or(RequestHandlingError::MissingSavedState(frame))?;
+            println!("Loaded state from frame {} (via macro)", frame.as_i32());
+            Ok(())
         },
-        advance: |inputs: InputVec<GameInput>| {
+        advance: |inputs: InputVec<GameInput>| -> Result<(), RequestHandlingError> {
             game_state.update(inputs.as_slice());
             println!("Advanced to frame {} (via macro)", game_state.frame);
+            Ok(())
         }
-    );
+    )
 }
 
 // ============================================================================
@@ -209,19 +251,25 @@ fn handle_requests_with_macro(requests: RequestVec<GameConfig>, game_state: &mut
 /// When `max_prediction_window` is 0, the session operates in lockstep mode.
 /// You'll never receive `SaveGameState` or `LoadGameState` requests.
 #[allow(unused)]
-fn handle_requests_lockstep(requests: RequestVec<GameConfig>, game_state: &mut GameState) {
-    handle_requests!(
+fn handle_requests_lockstep(
+    requests: RequestVec<GameConfig>,
+    game_state: &mut GameState,
+) -> Result<(), RequestHandlingError> {
+    try_handle_requests!(
         requests,
-        save: |_, _| {
+        save: |_, _| -> Result<(), RequestHandlingError> {
             // Never called in lockstep mode — no rollbacks
+            Ok(())
         },
-        load: |_, _| {
+        load: |_, _| -> Result<(), RequestHandlingError> {
             // Never called in lockstep mode — no rollbacks
+            Ok(())
         },
-        advance: |inputs: InputVec<GameInput>| {
+        advance: |inputs: InputVec<GameInput>| -> Result<(), RequestHandlingError> {
             game_state.update(inputs.as_slice());
+            Ok(())
         }
-    );
+    )
 }
 
 // ============================================================================
@@ -239,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - No wildcard `_ =>` needed (exhaustive enum)");
     println!("  - Good for complex logic or debugging\n");
 
-    println!("Method 2: handle_requests! Macro");
+    println!("Method 2: try_handle_requests! Macro");
     println!("  - Less boilerplate, same semantics");
     println!("  - Processes requests in order automatically");
     println!("  - Good for typical game loops\n");
@@ -248,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  1. FortressRequest is NOT #[non_exhaustive]");
     println!("     → No wildcard arm needed; compiler warns on new variants");
     println!("  2. Use compute_checksum() for desync detection");
-    println!("     → Returns Result; use .ok() for cell.save()");
+    println!("     → Propagate serialization errors; never save a checksum-less state");
     println!("  3. Always process requests in order\n");
 
     // Create a minimal session to show the API (won't actually run network)
@@ -290,8 +338,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Advance and get requests
             let requests = session.advance_frame()?;
 
-            // Handle requests using manual matching
-            handle_requests_manual(requests, &mut game_state);
+            // Handle requests using manual matching, aborting on a bad load or checksum.
+            handle_requests_manual(requests, &mut game_state)?;
         }
     }
 

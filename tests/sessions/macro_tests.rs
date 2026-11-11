@@ -266,3 +266,43 @@ fn test_handle_requests_with_request_vec() {
 
     assert_eq!(advance_count, 2);
 }
+
+/// The fallible macro must abort before later requests after the first error.
+#[test]
+fn test_try_handle_requests_stops_on_first_error() {
+    use fortress_rollback::{try_handle_requests, InputStatus, SmallVec};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct HandlerError;
+
+    let inputs: InputVec<MacroTestInput> =
+        SmallVec::from_vec(vec![(MacroTestInput(1), InputStatus::Confirmed)]);
+    let requests: Vec<FortressRequest<MacroTestConfig>> = vec![
+        FortressRequest::LoadGameState {
+            cell: GameStateCell::default(),
+            frame: Frame::new(1),
+        },
+        FortressRequest::AdvanceFrame { inputs },
+    ];
+    let mut advanced = false;
+
+    let result: Result<(), HandlerError> = try_handle_requests!(
+        requests,
+        save: |_cell: GameStateCell<MacroTestState>, _frame: Frame| -> Result<(), HandlerError> {
+            Ok(())
+        },
+        load: |_cell: GameStateCell<MacroTestState>, _frame: Frame| -> Result<(), HandlerError> {
+            Err(HandlerError)
+        },
+        advance: |_inputs: InputVec<MacroTestInput>| -> Result<(), HandlerError> {
+            advanced = true;
+            Ok(())
+        }
+    );
+
+    assert_eq!(result, Err(HandlerError));
+    assert!(
+        !advanced,
+        "the macro must not process requests after an error"
+    );
+}

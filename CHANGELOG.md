@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `try_handle_requests!` is the fallible companion to `handle_requests!`: each save/load/advance
+  closure returns a `Result`, and the first error aborts the request loop. Canonical examples now
+  propagate missing rollback saves and checksum serialization failures instead of warning and
+  continuing, and runnable misuse counterexamples cover missing state, erased checksums, and
+  omitted local input.
 - `SessionMetrics::socket` exposes cumulative adapter-level transport counters: receive polls, raw
   datagrams/bytes, decoded messages, decode rejections, receive-cap saturations, accepted
   sends/bytes, send failures, and adapter queue depth/oldest wait. Built-in UDP and Tokio adapters

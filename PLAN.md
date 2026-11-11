@@ -10,22 +10,14 @@ _None._
 
 ## Future
 
-1. **P1 — Make the safest integration the easiest integration.** Exercise the public package as an external consumer,
-   then mutate the getting-started/request-handling paths: missing or wrong-frame loads, checksum serialization failure,
-   omitted local input, undrained events, ignored WaitRecommendation, variable-width input, and mismatched lifecycle
-   configuration. Current examples silently continue on missing loads and often erase checksum errors. **Exit:** every
-   preventable misuse fails early; every remaining responsibility has a runnable counterexample and explicit diagnostic,
-   never silent corruption. Canonical examples return errors rather than warn-and-continue, cover rollback-sensitive side
-   effects, and a clean two-process quickstart reaches confirmed play with enough telemetry to diagnose each failure.
-
-2. **P1 — Verify portability and long-session determinism.** Replay identical captured corpora across supported native
+1. **P1 — Verify portability and long-session determinism.** Replay identical captured corpora across supported native
    architectures, WASM/browser and Emscripten adapters, release/safe-release profiles, and mixed transport paths; include
    background-tab resume and extended frame/ring operation. **Exit:** under one captured replay/schedule, requests and
    artifacts are byte-identical; live mixed transports agree on confirmed checkpoints despite legal speculative timing
    differences. No panic or unexpected violation occurs; any platform limitation has a compatibility regression and narrowed
    support documentation. A simulator-only pass is not cross-platform evidence.
 
-3. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
+2. **P2 — Improve search only after the preceding oracle is calibrated.** Start with the existing sometimes-state census:
    evaluate its multi-night stability before any ratchet. Then use the
    [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare violation-site coverage, PCT,
    prefix branching, and LDFI-lite against fresh-seed search at equal compute. **Exit:**

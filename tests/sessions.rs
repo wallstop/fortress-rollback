@@ -18,6 +18,7 @@ mod sessions {
     pub mod hot_join;
     pub mod input_delay;
     pub mod macro_tests;
+    pub mod misuse;
     pub mod p2p;
     pub mod p2p_enum;
     pub mod peer_drop;

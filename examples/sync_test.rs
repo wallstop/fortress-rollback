@@ -209,10 +209,11 @@ fn basic_sync_test() -> Result<(), FortressError> {
                     cell.save(frame, Some(game_state.clone()), Some(checksum));
                 },
                 FortressRequest::LoadGameState { cell, .. } => {
-                    // Load a previously saved state (during rollback)
-                    if let Some(loaded_state) = cell.load() {
-                        game_state = loaded_state;
-                    }
+                    // Load a previously saved state (during rollback). Missing
+                    // state is a hard error; continuing would corrupt history.
+                    game_state = cell.load().ok_or(FortressError::InternalErrorStructured {
+                        kind: InternalErrorKind::Custom("missing saved state during rollback"),
+                    })?;
                 },
                 FortressRequest::AdvanceFrame { inputs } => {
                     // Advance game state with the provided inputs
@@ -291,9 +292,12 @@ fn non_deterministic_test() -> Result<(), FortressError> {
                             cell.save(frame, Some(game_state.clone()), Some(bad_checksum));
                         },
                         FortressRequest::LoadGameState { cell, .. } => {
-                            if let Some(loaded) = cell.load() {
-                                game_state = loaded;
-                            }
+                            game_state =
+                                cell.load().ok_or(FortressError::InternalErrorStructured {
+                                    kind: InternalErrorKind::Custom(
+                                        "missing saved state during rollback",
+                                    ),
+                                })?;
                         },
                         FortressRequest::AdvanceFrame { inputs } => {
                             game_state.advance(&inputs);
