@@ -348,6 +348,15 @@ pub struct SocketMetrics {
     /// Send calls that failed or were dropped by the adapter (`WouldBlock`,
     /// closed socket, or another adapter error).
     pub send_failures: u64,
+    /// **Gauge.** Packets currently held in an adapter-side shaping, delay, or
+    /// send queue. Built-in UDP and Tokio adapters submit directly and report
+    /// zero; queuing adapters (including [`ChaosSocket`](crate::ChaosSocket))
+    /// opt in.
+    pub queue_depth: u64,
+    /// **Gauge.** Age in milliseconds of the oldest packet held in an
+    /// adapter-side queue, or zero when the queue is empty. Built-in UDP and
+    /// Tokio adapters report zero because they submit immediately.
+    pub oldest_queued_ms: u64,
 }
 
 impl SocketMetrics {

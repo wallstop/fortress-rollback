@@ -12961,6 +12961,8 @@ mod tests {
                 datagrams_sent: 17,
                 bytes_sent: 18,
                 send_failures: 19,
+                queue_depth: 20,
+                oldest_queued_ms: 21,
             }
         }
     }
@@ -13129,6 +13131,8 @@ mod tests {
         assert_eq!(metrics.socket.datagrams_sent, 17);
         assert_eq!(metrics.socket.bytes_sent, 18);
         assert_eq!(metrics.socket.send_failures, 19);
+        assert_eq!(metrics.socket.queue_depth, 20);
+        assert_eq!(metrics.socket.oldest_queued_ms, 21);
     }
 
     fn create_multi_handle_remote_session() -> P2PSession<TestConfig> {

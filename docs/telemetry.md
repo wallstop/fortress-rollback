@@ -192,6 +192,7 @@ with the `json` feature.
 | `socket.receive_cap_saturations` | Receive polls that hit the per-poll raw-attempt or decoded-message cap |
 | `socket.datagrams_rejected` | Raw datagrams rejected during framing or protocol decoding |
 | `socket.datagrams_received` / `bytes_received` | Raw datagrams and payload bytes returned by the adapter, before decoding |
+| `socket.queue_depth` / `oldest_queued_ms` | Packets held in an adapter-side queue and the oldest wait; zero for direct-submit adapters |
 
 `PeerMetrics::bytes_sent` and `bytes_received` are exact encoded Fortress payload sizes. Sent
 values count protocol enqueue demand rather than observed transport throughput. Both exclude

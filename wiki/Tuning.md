@@ -114,6 +114,30 @@ The PR gate also records `stalls_per_min` and `confirmation_lag_mean`; regressio
 two stalls per minute, and 10% plus 0.25 frames respectively, fail the sweep so this cliff cannot
 move silently.
 
+## Transport bound evidence
+
+Built-in adapters cap each receive poll at 256 raw attempts and 256 decoded messages, and
+`SessionMetrics::socket` reports the actual adapter accepted sends, failures, raw receives,
+decode rejects, cap saturation, queue depth, and oldest queue wait. Deterministic and real-path
+tests pin the bound:
+
+- The receive-cap test offers 256 malformed datagrams followed by one valid datagram. The first
+  poll reports 256 raw receives, 256 rejects, no decoded messages, and exactly one cap saturation;
+  the valid datagram decodes on the next poll.
+- A real loopback sampler offers 100 datagrams through a seeded 25% `ChaosSocket` send loss. The
+  sender's accepted sends plus adapter drops equal 100, and the receiver's decoded count never
+  exceeds accepted sends. `SessionMetrics::socket` therefore separates offered, adapter-accepted,
+  and delivered traffic instead of inferring all three from enqueue demand.
+- A 200 ms queued adapter path reports one held packet with a 0 ms oldest wait immediately, a 75 ms
+  oldest wait after 75 ms of virtual time, and a zero-depth/zero-age queue after delivery.
+- A 150-step (2.4 s) peer suspension under an explicit five-second disconnect timeout resumes; both
+  peers confirm more than 500 frames, stay within the prediction window of each other, and replay
+  exactly. This is the deterministic acceptance side of the browser-suspension checklist item.
+
+The bandwidth, MTU/fragmentation, and NAT-rebinding rows remain in the partition and census
+evidence below; unsupported rebinding still follows the fail-closed replacement flow in the
+[reconnect playbook](Reconnect-Playbook).
+
 ## Partition and directed-fault consistency evidence
 
 At commit `ba28701`, a separate, expectation-aware schema-v6 ledger records 66 fixed-budget rows using

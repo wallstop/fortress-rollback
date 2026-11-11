@@ -4123,6 +4123,50 @@ fn schema_v15_skew_progress_preserves_legacy_trace_shape() {
     assert!(!encoded.contains("link_queues"));
 }
 
+/// Browser-tab suspension can exceed the default disconnect timeout. With an
+/// explicitly extended timeout, a 150-step (2.4s) peer freeze must resume and
+/// keep confirmed history consistent; the trace must replay exactly. This is
+/// the deterministic acceptance half of the production-checklist suspension
+/// requirement.
+#[test]
+fn long_peer_suspension_resumes_under_extended_timeout() {
+    let mut schedule = clock_skew_schedule(2, Vec::new());
+    schedule.events = vec![(
+        200,
+        ScheduleEvent::PeerStall {
+            peer: 1,
+            steps: 150,
+        },
+    )];
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        ..RunOptions::default()
+    };
+
+    let first = run(&schedule, &options);
+    first.expect_pass(&schedule);
+    let replay = run(&schedule, &options);
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.final_confirmed, replay.final_confirmed);
+    assert_eq!(first.progress_samples, replay.progress_samples);
+
+    let confirmed = &first.final_confirmed;
+    assert!(
+        confirmed.iter().all(|frame| *frame > 500),
+        "both peers must resume and confirm after the suspension: {confirmed:?}"
+    );
+    assert!(
+        confirmed.iter().all(|frame| *frame < 880),
+        "the 150-step suspension must remain visible in final progress: {confirmed:?}"
+    );
+    let min = confirmed.iter().copied().min().unwrap_or(i32::MIN);
+    let max = confirmed.iter().copied().max().unwrap_or(i32::MAX);
+    assert!(
+        (max - min) <= schedule.config.max_prediction as i32,
+        "peers must not diverge past the prediction window after suspension: {confirmed:?}"
+    );
+}
+
 /// H-SKEW hour-equivalent experiment: +0.1% produces exactly 216 additional
 /// 60 Hz opportunities over one virtual hour. Nightly records both the bounded
 /// lag/correction result and the currently-red work-amplification observation.
