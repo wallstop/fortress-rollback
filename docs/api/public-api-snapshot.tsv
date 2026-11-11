@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2742
-# textual-paths=2736
+# symbols=2746
+# textual-paths=2740
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -813,6 +813,8 @@ fortress_rollback::SocketMetrics::datagrams_received	struct_field	no-default+all
 fortress_rollback::SocketMetrics::datagrams_rejected	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SocketMetrics::datagrams_sent	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SocketMetrics::messages_decoded	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::oldest_queued_ms	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::queue_depth	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SocketMetrics::receive_cap_saturations	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SocketMetrics::receive_polls	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SocketMetrics::send_failures	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
@@ -1494,6 +1496,8 @@ fortress_rollback::metrics::SocketMetrics::datagrams_received	struct_field	no-de
 fortress_rollback::metrics::SocketMetrics::datagrams_rejected	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::datagrams_rejected	src/metrics.rs
 fortress_rollback::metrics::SocketMetrics::datagrams_sent	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::datagrams_sent	src/metrics.rs
 fortress_rollback::metrics::SocketMetrics::messages_decoded	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::messages_decoded	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::oldest_queued_ms	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::oldest_queued_ms	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::queue_depth	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::queue_depth	src/metrics.rs
 fortress_rollback::metrics::SocketMetrics::receive_cap_saturations	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::receive_cap_saturations	src/metrics.rs
 fortress_rollback::metrics::SocketMetrics::receive_polls	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::receive_polls	src/metrics.rs
 fortress_rollback::metrics::SocketMetrics::send_failures	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::send_failures	src/metrics.rs

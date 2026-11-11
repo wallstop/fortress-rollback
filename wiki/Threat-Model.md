@@ -33,8 +33,9 @@ spoofing or on-path attackers are in scope.
   messages. They also publish cumulative adapter counters through
   `SessionMetrics::socket`: receive polls, raw datagrams/bytes, decoded
   messages, decode rejections, receive-cap saturations, accepted sends/bytes,
-  and send failures. A custom `NonBlockingSocket` opts in by overriding
-  `socket_metrics`; the default reports zeros. Persistent pending-output,
+  send failures, and adapter queue depth/oldest wait. A custom
+  `NonBlockingSocket` opts in by overriding `socket_metrics`; the default
+  reports zeros. Persistent pending-output,
   pending-checksum, input/recovery, drop-mailbox, and session-event structures
   have explicit caps. The transient protocol send queue relies on bounded
   ingress and poll behavior rather than an independent queue limit.

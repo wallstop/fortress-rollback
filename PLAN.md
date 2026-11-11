@@ -6,15 +6,7 @@
 
 ## In progress
 
-- **P1 — Bound transport work and validate real-path delivery.** Test receive-cap starvation followed by valid traffic,
-  retransmission storms, bounded link bandwidth/queueing, MTU/fragmentation, malformed floods, NAT rebinding, and browser
-  suspension using deterministic acceptance tests plus real-transport smoke tests. **Exit:** memory and per-poll work have
-  measured bounds; under each supported finite load useful traffic recovers without silent queue growth, while overload
-  is visibly refused or degraded; unsupported rebinding has an explicit replacement flow. Record actual socket
-  throughput/loss and queue age, not only enqueued bytes. Replay protocol-valid lies from `docs/threat-model.md`; require
-  only documented detection/fail-closed behavior, not unsupported prevention or attribution. The adapter-level
-  `SessionMetrics::socket` counters now expose accepted sends, failures, raw ingress, rejects, and cap saturation;
-  real-path throughput/loss sampling and queue-age evidence remain.
+_None._
 
 ## Future
 

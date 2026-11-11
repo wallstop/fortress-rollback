@@ -561,6 +561,17 @@ where
         self.in_flight.len()
     }
 
+    /// Returns the inner adapter's metrics plus this wrapper's queue gauges.
+    fn socket_metrics_impl(&self) -> crate::SocketMetrics {
+        let mut metrics = self.inner.socket_metrics();
+        metrics.queue_depth = u64::try_from(self.in_flight.len()).unwrap_or(u64::MAX);
+        metrics.oldest_queued_ms = self.in_flight.front().map_or(0, |packet| {
+            let age = self.now().saturating_duration_since(packet.queued_at);
+            u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
+        });
+        metrics
+    }
+
     /// Sets a custom clock function for deterministic time control.
     ///
     /// When set, the chaos socket uses this function instead of
@@ -927,7 +938,7 @@ where
     }
 
     fn socket_metrics(&self) -> crate::SocketMetrics {
-        self.inner.socket_metrics()
+        self.socket_metrics_impl()
     }
 }
 
@@ -947,7 +958,7 @@ where
     }
 
     fn socket_metrics(&self) -> crate::SocketMetrics {
-        self.inner.socket_metrics()
+        self.socket_metrics_impl()
     }
 }
 
@@ -1352,6 +1363,102 @@ mod tests {
             socket.packets_in_flight()
         );
         assert_eq!(socket.packets_in_flight(), 0, "No more packets in flight");
+    }
+
+    #[test]
+    fn socket_metrics_reports_oldest_queue_age() {
+        let mut inner = TestSocket::default();
+        inner.to_receive.push((test_addr(), test_message()));
+        let clock = TestClock::new();
+        let config = ChaosConfig::builder().latency_ms(200).seed(42).build();
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
+
+        assert_eq!(
+            socket.receive_all_messages(),
+            Vec::<(SocketAddr, Message)>::new()
+        );
+        let queued = socket.socket_metrics();
+        assert_eq!(queued.queue_depth, 1);
+        assert_eq!(queued.oldest_queued_ms, 0);
+
+        clock.advance(Duration::from_millis(75));
+        let aged = socket.socket_metrics();
+        assert_eq!(aged.queue_depth, 1);
+        assert_eq!(aged.oldest_queued_ms, 75);
+
+        clock.advance(Duration::from_millis(150));
+        let delivered = socket.receive_all_messages();
+        assert_eq!(delivered.len(), 1);
+        let drained = socket.socket_metrics();
+        assert_eq!(drained.queue_depth, 0);
+        assert_eq!(drained.oldest_queued_ms, 0);
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn real_udp_send_loss_samples_accepted_against_delivered() {
+        use crate::UdpNonBlockingSocket;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let inner = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let mut receiver = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let receiver_local = receiver.local_addr().unwrap();
+        let receiver_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), receiver_local.port());
+        let config = ChaosConfig::builder().send_loss_rate(0.25).seed(42).build();
+        let mut sender = ChaosSocket::new(inner, config);
+
+        const TOTAL: u64 = 100;
+        let msg = Message {
+            header: crate::network::messages::MessageHeader::new(0x7777),
+            body: crate::network::messages::MessageBody::KeepAlive,
+        };
+        let mut received = 0usize;
+        for index in 0..TOTAL {
+            sender.send_to(&msg, &receiver_addr);
+            if index % 10 == 9 {
+                received = received.saturating_add(receiver.receive_all_messages().len());
+            }
+        }
+        for _ in 0..20 {
+            let remaining = usize::try_from(TOTAL)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(received);
+            if remaining == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            received = received.saturating_add(receiver.receive_all_messages().len());
+        }
+
+        let accepted = sender.socket_metrics();
+        let delivered = receiver.socket_metrics();
+        let dropped = sender.stats().packets_dropped_send;
+        assert!(
+            dropped > 0,
+            "seeded send loss must drop at least one packet"
+        );
+        assert_eq!(
+            accepted.datagrams_sent.saturating_add(dropped),
+            TOTAL,
+            "accepted sends plus adapter drops must equal offered datagrams: {accepted:?}"
+        );
+        assert!(
+            accepted.datagrams_sent < TOTAL,
+            "the sampler must observe adapter-level loss: {accepted:?}"
+        );
+        assert!(
+            delivered.datagrams_received > 0
+                && delivered.datagrams_received <= accepted.datagrams_sent,
+            "delivered datagrams must be a positive subset of accepted sends: \
+             accepted={accepted:?} delivered={delivered:?}"
+        );
+        assert_eq!(
+            u64::try_from(received).unwrap_or(u64::MAX),
+            delivered.datagrams_received,
+            "the loop's decoded count must match the receiver's adapter counter: \
+             received={received} delivered={delivered:?} accepted={accepted:?}"
+        );
+        assert_eq!(accepted.queue_depth, 0, "zero-latency sends are not queued");
     }
 
     #[test]
