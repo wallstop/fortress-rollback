@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794401938716,
+  "lastUpdate": 1794407122947,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "a9908b85000029e8116c60abd0df38cc7e62efad",
-          "message": "Harden scheduled simulation fleet and CI pin contracts (#262)\n\n## Summary\n\n- plant Reliable FIFO HOL windows before generated lifecycle faults so\nthe sender remains active\n- serialize and propagate a test-only disconnect-timeout override\nthrough peers, spectators, hot-join replacements, artifacts, and\nshrinking\n- keep non-clean nightly transport rows free of implicit terminal\nmembership changes while retaining production timeouts for clean\nlifecycle coverage\n- pin both July 2026 scheduled CI failure seeds as an ignored long\nregression\n- synchronize workflow contract tests and version comments with the\naction pins already merged by #261\n\nThis repairs the two failures that reset A8's scheduled-history gate; it\ndoes not promote A8 before seven consecutive scheduled `main` runs\nexist. The CI-pin follow-up repairs a pre-existing `main` mismatch\nexposed by this PR's Documentation run and does not change workflow\nbehavior.\n\n## Incident evidence\n\n- scheduled run 29718845598, seed `29718845598175`: the planted peer-7\nHOL link overlapped a peer-7 stall, so no retransmission could occur\n- scheduled run 30068604101, seed `30068604101890`: Rough loss caused an\nimplicit timeout and expected fail-closed membership split inside the\ntransport-only green tier\n- both exact seeds now pass the full oracle; the Reliable FIFO seed\nrecords positive `retransmit_delayed` evidence\n- Documentation run 30186497038: three assertions still expected the\npre-#261 `setup-python` and `rust-toolchain` pins; the complete contract\naudit also found and corrected the stale `setup-node@v6` assertion\n\n## Review readiness\n\n- Build/tests: PASS — 2,878 default tests and 222 doctests\n- Script tests: PASS — all 1,968 tests\n- Strict Clippy: PASS — default and `hot-join` configurations, warnings\ndenied\n- Exact historical seeds: PASS — ignored focused regression, 31.96s\ndebug\n- Workflow lint: PASS — actionlint on all workflows\n- Agent preflight: PASS — all checks, including release automation and\nCI toolchain contracts\n- Zero-panic/determinism: PASS — test-only simulation change; no\nproduction paths modified\n- Error handling: PASS — zero timeout rejected and covered\n- Tests breadth: PASS — premise, clean/non-clean split, serde, shrinker,\nhot-join propagation, exact seeds, exact action pins\n- Design log: N/A — no production architecture or public behavior change\n- CHANGELOG: N/A — test/CI contract repair only\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Changes are confined to simulation tests/harness and CI pin\nassertions; production session APIs are only invoked via existing\nbuilder hooks in tests.\n> \n> **Overview**\n> **Simulation fleet** fixes two scheduled CI failures by reshaping\n**Reliable FIFO** head-of-line (HOL) injection and how long nightly\ntransport runs wait before disconnect.\n> \n> HOL windows are planted **before step 100** (lifecycle faults cannot\nstart earlier), so the chosen sender stays active instead of overlapping\nstalls/kills. A test-only **`RunOptions::disconnect_timeout`** is\nthreaded through session, spectator, and hot-join builders (plus shrink\nremapping) so **non-clean** nightly rows use a timeout longer than the\nmodeled run—avoiding implicit membership splits from random loss while\n**clean** rows keep default options.\n> \n> New unit tests lock the HOL premise, timeout behavior, serde/shrink\npropagation, and an ignored long regression over the two July 2026\nfailure seeds.\n> \n> **CI contracts** align workflow YAML and Python contract tests with\npins already on `main`: `actions/setup-python` v7 SHA,\n`dtolnay/rust-toolchain` and `actions/setup-node@v7` expectations—no\nintended workflow behavior change beyond those pin comments/versions.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nfa68bef60420a418273e085c5c8e3176a617e7fb. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-26T09:09:19-07:00",
-          "tree_id": "d76e77b6ccaf36437dbe3fb59866d92bb84aebcb",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/a9908b85000029e8116c60abd0df38cc7e62efad"
-        },
-        "date": 1785082679926,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 117558,
-            "range": "± 3308",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 39923,
-            "range": "± 450",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 761,
-            "range": "± 18",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 991,
-            "range": "± 10",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 7621,
-            "range": "± 176",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2760,
             "range": "± 159",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ffe6c52d5ffd0208b18c41d77ac6ebedb4f7b1ea",
+          "message": "fix(examples): propagate request errors instead of warning (#397)\n\n## Summary\n\nCompletes the P1 safe-integration item. Canonical request loops now fail\nearly on missing rollback\nstate and checksum serialization errors instead of warning and\ncontinuing.\n\n### Changes\n\n- New public `try_handle_requests!`: each save/load/advance closure\nreturns a `Result`, and the\nfirst error aborts the request loop. `handle_requests!` remains the\ninfallible convenience form.\n- `examples/request_handling.rs` returns `Result<(),\nRequestHandlingError>` from both manual and\nmacro paths; missing `LoadGameState` state and `ChecksumError`\npropagate.\n- `examples/sync_test.rs` returns a structured internal error for a\nmissing rollback save.\n- `docs/getting-started.md` and `docs/user-guide.md` canonical loops\npropagate errors; macro\n  guidance uses `try_handle_requests!`.\n- New `tests/sessions/misuse.rs` counterexamples: missing saved state,\nchecksum serialization\n  failure, omitted local input (`MissingLocalInput`).\n- New macro regression test proves later requests are not processed\nafter an error.\n- Production checklist maps event starvation, variable-width input,\nconfig mismatch, and NAT\n  rebinding to their deterministic suites.\n- Changelog Added entry; public API census refreshed (2,750 symbols).\n- P1 safe-integration item removed from `PLAN.md`; two future items\nremain.\n\n## Testing\n\n- `cargo nextest run --features tokio,json`: 3,119 passed, 74 skipped, 0\nfailed\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean\n- `cargo run --example request_handling`: completes with checksums and\nno warn-and-continue path\n- `agent-preflight.py --auto-fix`, markdownlint, typos,\nchangelog/version/plan hooks: clean\n- `cargo update --workspace --dry-run`: 0 compatible updates",
+          "timestamp": "2026-11-11T06:17:46-08:00",
+          "tree_id": "47be49114991b630a2c5db0bbf782e19864d3ba8",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ffe6c52d5ffd0208b18c41d77ac6ebedb4f7b1ea"
+        },
+        "date": 1794407121888,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39547,
+            "range": "± 160",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 26773,
+            "range": "± 2149",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2773,
+            "range": "± 164",
             "unit": "ns/iter"
           }
         ]
