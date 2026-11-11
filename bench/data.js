@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794391169168,
+  "lastUpdate": 1794397183887,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "9ae76e1cbce0a47e8bd1da734c4bbefdb1ced4b3",
-          "message": "Harden release and publish automation (#254)\n\n## Summary\n\nHardens the complete release path after PR #253 and Actions job\n88030023204 exposed two independent failure classes:\nrelease-state-dependent tests after preparation and floating Rust\nchannel manifest races.\n\n- derives the minimum SemVer bump from curated changelog categories (the\ncurrent release is correctly planned as 0.11.0, not 0.10.1);\n- reconstructs generated release PRs from trusted base code and compares\nthe exact tracked tree;\n- makes preparation reruns/stale branches recoverable with exact leases\nand an atomic main/release-branch CAS;\n- records a reviewed source manifest and resolves first publication from\nthe unique valid prepared commit, even after main advances or the prior\ntag is older than 256 commits;\n- creates/revalidates exact annotated-tag checkpoints before crates.io\nand GitHub mutations;\n- reconciles ambiguous Cargo failures against the crates.io checksum for\nidempotent retries;\n- pins stable, nightly, Miri, Python, actions, and hash-locked Python\ntest dependencies;\n- runs trusted release-state checks on every PR and on merge-group\nprospective trees;\n- adds executable regressions, agent preflight coverage, LLM/skill\npolicy, and an architectural decision trail.\n\n## Evidence\n\n- 1,955 complete Python/script tests pass.\n- Agent preflight passes: 275 release tests, 66 toolchain contracts, 49\nskills, actionlint, changelog, 5,138-file/1,392-link validation,\nfallback-import and spelling gates.\n- Full Rust fmt, workspace Clippy with `-D warnings`, and\nworkspace/all-targets tests and benchmarks pass with `tokio,json`.\n- A `--bump minor` dry run deterministically produces 0.10.0 → 0.11.0\nacross all locks/docs/wiki.\n- Cursor Bugbot reviewed exact final commit `596a162` with no new\nissues; all four earlier actionable threads are fixed and resolved.\nCopilot was requested after every push but reports an account quota\nlimit.\n\n## Required repository rollout\n\nBefore merging a generated `release/v*` PR, an administrator must\nrequire the stable **Verify prepared release state** check on `main` and\nenable merge queue (preferred) or strict “require branches to be up to\ndate” checks. GitHub owns this repository setting; the workflow now\nsupplies both PR and `merge_group` checks but repository code cannot\nactivate the protection itself.\n\n## Follow-up\n\nOnce this hardening PR is merged, close/supersede #253 and run **Release\n- Prepare PR** with a minor bump to generate the reviewed v0.11.0\nrelease PR.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **High Risk**\n> Changes irreversible release and publish automation, annotated-tag\ntrust boundaries, and semver classification; misconfiguration could\nblock releases or allow publishing the wrong tree without the required\n**Verify prepared release state** branch protection.\n> \n> **Overview**\n> Hardens the full **prepare → review → publish** path so the merged\ntree is the only source of truth for crates.io and GitHub releases, with\nstricter semver and reproducible CI toolchains.\n> \n> **Release policy and changelog:** Preparation now derives a **minimum\nSemVer bump** from `[Unreleased]` categories (`release_policy.py`,\nenforced in `prepare_release.py` and agent skills). Wire-protocol v2 is\ndocumented under `### Changed` with `**Breaking:**` instead of a `Fixed`\nentry. Release dates and issue-template versions are finalized in the\npreparation PR; post-publish default-branch metadata commits are\nremoved.\n> \n> **Immutable prepared state:** New `release-state.json` / digest\nverification, `ci-release-state.yml` (trusted base + candidate checkout\non PRs and merge groups), branch recovery (`release_branch.py`), and\npublish-time candidate resolution (`release_checkpoint.py`) with\nannotated-tag checkpoints revalidated before registry and GitHub\nmutations. `publish_state.py` reconciles crates.io by checksum for\nidempotent retries. `publish.yml` no longer auto-fixes changelog or\npushes tags from `main` alone.\n> \n> **Tooling pins:** Composite actions install **dated nightly**,\nseparate Miri nightly, and **pinned stable** release Rust with bounded\nretries; required workflows switch off floating\n`dtolnay/rust-toolchain@nightly`. Release workflows use Python 3.13.5\nand hash-locked `requirements.txt`.\n> \n> **Docs and preflight:** Publishing/changelog/fortress-development\nskills and `agent-preflight.py` expand release and toolchain contract\ntests.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n596a162c12f24dbcb2233dbc6efac6e1cb5591fd. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-18T09:20:04-07:00",
-          "tree_id": "d8bab669f11681637798bdf78062ee70620e695b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/9ae76e1cbce0a47e8bd1da734c4bbefdb1ced4b3"
-        },
-        "date": 1784392097828,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 131494,
-            "range": "± 2230",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 50908,
-            "range": "± 387",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1603,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3125,
-            "range": "± 356",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2827,
             "range": "± 285",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d6be05cc2ab494c9a80d5f8c6474672a6d884209",
+          "message": "test(perf): qualify representative-state tiers and publish budgets (#394)\n\n## Summary\n\nStarts the representative-state gameplay/performance qualification with\na real release workload\nledger. No production behavior changes.\n\n### Harness\n\n`tests/representative_perf.rs` runs real `P2PSession` meshes over an\nin-memory fabric with\nconfigurable snapshot payload, per-frame simulation bytes, player count,\ninput delay, prediction\nwindow, and deterministic message loss. It records:\n\n- frame-service p50/p95/p99/p99.9\n- rollback count, resimulated frames, max depth\n- allocation count and net allocated bytes\n- per-player protocol sent/received bytes\n- minimum final confirmed frame\n\nA 48-frame 2-player smoke row runs in the normal suite. The full\n2/4/16-player ledger is a\nrelease-only ignored test that emits JSONL via `FORTRESS_PERF_OUT` and\nenforces reference p99\nbudgets only with `FORTRESS_PERF_ENFORCE=1`.\n\n### Reference measurements\n\n| Tier | Players | State | Work | p50 | p99 | p99.9 | Rollbacks | Max\ndepth |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| 2p-rep-64k | 2 | 64 KiB | 1 MiB | 0.035 ms | 0.076 ms | 0.105 ms | 294\n| 2 |\n| 4p-rep-256k | 4 | 256 KiB | 4 MiB | 0.181 ms | 0.499 ms | 0.625 ms |\n729 | 6 |\n| 16p-rep-64k | 16 | 64 KiB | 2 MiB | 0.084 ms | 0.141 ms | 0.149 ms |\n1,839 | 3 |\n\nReference budgets: p99 ≤ 2 ms for 2/4 players and ≤ 4 ms for 16 players\nat the recorded workloads.\nThe row uses instant transport and zero configured input delay to\nisolate snapshot/simulation cost;\nthe existing baseline sweep remains the source for\nmobile/4-player/16-player network-latency cost.\n\n`docs/tuning.md` publishes the command, table, thresholds, and\ninterpretation. The P1 item stays in\nprogress for the playable workload, visible correction/audio\nduplication, queue behavior, and\ntarget-hardware profiling.\n\n## Testing\n\n- `cargo nextest run --features tokio,json`: 3,115 passed, 74 skipped, 0\nfailed\n- Release ledger with `FORTRESS_PERF_ENFORCE=1`: all 3 tiers pass\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`: clean\n- `agent-preflight.py --auto-fix`, markdownlint, typos, version/plan\nhooks: clean\n- Dependencies: `cargo update --workspace --dry-run` selects zero\npackages; only MSRV-held majors\n  remain",
+          "timestamp": "2026-11-11T03:31:20-08:00",
+          "tree_id": "0e917a07090e4ced70eda0415826fda529285b1a",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/d6be05cc2ab494c9a80d5f8c6474672a6d884209"
+        },
+        "date": 1794397182653,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60595,
+            "range": "± 951",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31933,
+            "range": "± 129",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1672,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1553,
+            "range": "± 95",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3144,
+            "range": "± 179",
             "unit": "ns/iter"
           }
         ]
