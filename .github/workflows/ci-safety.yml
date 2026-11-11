@@ -181,6 +181,15 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
 
+      - name: Replay checked corpus under safe release
+        if: matrix.check == 'overflow-checks'
+        run: |
+          set -o pipefail
+          RUSTFLAGS="-C overflow-checks=on -C debug-assertions=on" \
+            cargo test --release --features tokio,json,hot-join \
+            --test simulation checked_in_ -- --nocapture 2>&1 \
+            | tee safe-release-replay.txt
+
       - name: Upload build report
         uses: actions/upload-artifact@v7
         if: always()
@@ -189,6 +198,7 @@ jobs:
           path: |
             build-${{ matrix.check }}.txt
             test-${{ matrix.check }}.txt
+            safe-release-replay.txt
           retention-days: 30
 
   # ============================================================================

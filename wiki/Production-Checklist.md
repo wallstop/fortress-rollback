@@ -140,6 +140,8 @@ abort on the first request error.
   production endorsement. Full meshes above eight players exceed attested industry practice;
   measure your own game, topology, input width, state cost, bandwidth, stalls, and hardware.
 - Run the deterministic baseline sweep and compare encoded byte/message demand, rollback depth,
-  confirmation lag, and stalls against the checked-in ledger.
+  confirmation lag, and stalls against the checked-in ledger. The strict-build CI lane also replays
+  the checked-in corpus under `-C overflow-checks=on -C debug-assertions=on`, so release-safety
+  profiles must preserve artifact and trace identity.
 - Run release-mode nightly chaos/soak lanes on every supported OS and keep their artifacts.
 - Verify that every changelog behavior claim points to a regression test or measured artifact.
