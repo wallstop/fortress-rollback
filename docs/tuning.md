@@ -57,6 +57,63 @@ confirmed through frame 3,292, but its stalls and encoded demand are a capacity 
 endorsement of 16-player full mesh. Keep network inputs fixed-width and as small as the game
 permits.
 
+## Pacing and liveness cliffs (measured)
+
+The mobile 2-player and severe 4-player baseline rows sit at a prediction-window boundary. A
+deterministic ablation (`tests/simulation/pacing_cliff.rs`, the same gate cells, seed 1, 1,000
+steps, input delay 1 unless noted) separates the mechanisms. Advance stalls count every
+`advance_frame` refused because the prediction window was full; resimulated frames measure the
+rollback work that a wider window exposes.
+
+| Cell | Max prediction | Input delay | Advance stalls / 16 s | Resimulated frames | Mean confirmation lag | Final confirmed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 / mobile | 8 | 1 | 8 | 5,011 | 4.33 | 947 |
+| 2 / mobile | 12 | 1 | 2 | 4,970 | 4.35 | 950 |
+| 2 / mobile | 16 | 1 | 0 | 4,993 | 4.36 | 951 |
+| 4 / severe | 8 | 1 | 2,202 | 3,815 | 6.69 | 309 |
+| 4 / severe | 12 | 1 | 1,436 | 10,077 | 10.38 | 501 |
+| 4 / severe | 16 | 1 | 664 | 18,028 | 14.12 | 690 |
+| 4 / severe | 24 | 1 | 102 | 24,776 | 16.98 | 828 |
+| 4 / severe | 8 | 3 | 1,755 | 2,647 | 6.65 | 423 |
+| 4 / lossless 200 ms RTT | 8 | 1 | 1,948 | 5,318 | 6.90 | 430 |
+| 4 / 10 ms RTT, 15% loss | 8 | 1 | 138 | 4,448 | 4.54 | 891 |
+| 4 / 10 ms RTT, lossless | 8 | 1 | 0 | 3,721 | 3.77 | 980 |
+
+The dominant mechanism is confirmation headroom: the confirmed prefix trails by roughly the
+slowest one-way path (plus loss and jitter recovery), and no controller can confirm a frame whose
+inputs have not arrived. The isolation rows separate the terms: 15% loss on a 10 ms path cost 138
+stalls, while a **lossless** 200 ms path cost 1,948, nearly the severe row's 2,202. Loss adds
+recovery time on top of the one-way path but cannot explain the severe cliff.
+
+On the mobile row, the default window is marginal but the rollback work is already at its plateau,
+so widening it to 12–16 removes the residual stalls without measurable extra resimulation. On the
+severe row the session fills every extra window frame and resimulation grows faster than the stall
+reduction; that row is a capacity boundary, not a default to raise blindly.
+
+`WaitRecommendation` does not substitute for window sizing under uniform high RTT. An application
+that obeys every recommendation (`AppModel::Obey`) still saw zero recommendations on the severe row
+and the same 2,202 advance stalls; on the mobile row two recommendations produced three obeyed
+frames and reduced stalls only from 8 to 7. The symmetric `RTT/2` frame-age estimate removes most
+of the transport offset from the *frame-advantage* signal, so the advisory stays near zero even
+while confirmation is a one-way trip behind. Continue polling and draining while obeying it, but
+size the prediction window from the measured path.
+
+Raising input delay is a separate lever. At a fixed eight-frame window, delay 3 cut severe stalls
+by 20% and resimulation by 31% while adding 33 ms of local input latency; it does not remove the
+window boundary. This ablation retains no session-controller change: transport headroom explains
+the measured effects, and the input-latency and simulation-cost tradeoffs stay with the
+application.
+
+The clock-skew correction sawtooth and H-BLOAT drain behavior have their own deterministic probes.
+The H-SKEW phase experiment pins every obeyed wait to the three-frame dead band, repeats the lag
+range without creep across quarters, and tracks correction duty to the injected drift; the H-BLOAT
+treatment reduces work without changing the sampled queue. Neither is a stall mechanism, so this
+ablation retains no controller change for them either.
+
+The PR gate also records `stalls_per_min` and `confirmation_lag_mean`; regressions beyond 25% plus
+two stalls per minute, and 10% plus 0.25 frames respectively, fail the sweep so this cliff cannot
+move silently.
+
 ## Partition and directed-fault consistency evidence
 
 At commit `ba28701`, a separate, expectation-aware schema-v6 ledger records 66 fixed-budget rows using

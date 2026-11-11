@@ -30,6 +30,7 @@ mod simulation {
     pub mod differential;
     pub mod fleet;
     pub mod harness;
+    pub mod pacing_cliff;
     pub mod partition_sweep;
     pub mod sometimes_state;
     #[cfg(feature = "trace-validation")]
