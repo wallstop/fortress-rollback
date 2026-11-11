@@ -925,6 +925,10 @@ where
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
         self.receive_all_messages_impl()
     }
+
+    fn socket_metrics(&self) -> crate::SocketMetrics {
+        self.inner.socket_metrics()
+    }
 }
 
 // Implementation for non sync-send feature
@@ -940,6 +944,10 @@ where
 
     fn receive_all_messages(&mut self) -> Vec<(A, Message)> {
         self.receive_all_messages_impl()
+    }
+
+    fn socket_metrics(&self) -> crate::SocketMetrics {
+        self.inner.socket_metrics()
     }
 }
 

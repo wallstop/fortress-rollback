@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::io::{self, ErrorKind};
 
+use crate::metrics::SocketMetrics;
 use crate::network::codec;
 use crate::network::messages::Message;
 use crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
@@ -10,11 +11,14 @@ use crate::telemetry::{ViolationKind, ViolationSeverity};
 pub(super) fn receive_all_messages_from<A: Debug>(
     recv_buffer: &mut [u8],
     adapter_name: &str,
+    metrics: &mut SocketMetrics,
     mut receive_next: impl FnMut(&mut [u8]) -> io::Result<(usize, A)>,
 ) -> Vec<(A, Message)> {
     if recv_buffer.is_empty() {
         return Vec::new();
     }
+
+    metrics.record_receive_poll();
 
     // Pre-allocate for typical case of 1-4 messages per poll.
     let mut received_messages = Vec::new();
@@ -32,6 +36,7 @@ pub(super) fn receive_all_messages_from<A: Debug>(
     let mut reported_wire_rejects = 0u8;
     loop {
         if receive_attempts >= MAX_RECEIVE_MESSAGES_PER_POLL {
+            metrics.record_receive_cap_saturation();
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -45,9 +50,11 @@ pub(super) fn receive_all_messages_from<A: Debug>(
 
         match receive_next(recv_buffer) {
             Ok((number_of_bytes, src_addr)) => {
+                metrics.record_datagram_received(number_of_bytes);
                 // Defensive check: if we received more bytes than buffer allows,
                 // something is seriously wrong - skip this packet.
                 if number_of_bytes > recv_buffer.len() {
+                    metrics.record_datagram_rejected();
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::NetworkProtocol,
@@ -63,6 +70,7 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                     match codec::decode_message(buf_slice) {
                         Ok((msg, _consumed)) => {
                             if received_messages.len() >= MAX_RECEIVE_MESSAGES_PER_POLL {
+                                metrics.record_receive_cap_saturation();
                                 report_violation!(
                                     ViolationSeverity::Warning,
                                     ViolationKind::NetworkProtocol,
@@ -82,9 +90,11 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                                 );
                                 return received_messages;
                             }
+                            metrics.record_message_decoded();
                             received_messages.push((src_addr, msg));
                         },
                         Err(_err) => {
+                            metrics.record_datagram_rejected();
                             let reject = codec::classify_wire_bytes(buf_slice);
                             let bit = reject.rate_limit_bit();
                             if reported_wire_rejects & bit == 0 {
@@ -101,6 +111,7 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                         },
                     }
                 } else {
+                    metrics.record_datagram_rejected();
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::NetworkProtocol,
@@ -152,7 +163,8 @@ mod tests {
         addr: SocketAddr,
     ) -> Vec<(SocketAddr, Message)> {
         let mut recv_buffer = vec![0; 64];
-        receive_all_messages_from(&mut recv_buffer, "test", |buffer| {
+        let mut metrics = SocketMetrics::default();
+        receive_all_messages_from(&mut recv_buffer, "test", &mut metrics, |buffer| {
             let packet = packets
                 .pop_front()
                 .ok_or_else(|| io::Error::from(ErrorKind::WouldBlock))?;
@@ -186,14 +198,27 @@ mod tests {
             Ok((len, addr))
         };
 
-        let first_poll = receive_all_messages_from(&mut recv_buffer, "test", &mut receive_next);
+        let mut metrics = SocketMetrics::default();
+        let first_poll =
+            receive_all_messages_from(&mut recv_buffer, "test", &mut metrics, &mut receive_next);
         assert!(
             first_poll.is_empty(),
             "malformed datagrams should count toward the raw receive-attempt cap without decoding"
         );
+        assert_eq!(metrics.receive_polls, 1);
+        assert_eq!(metrics.datagrams_received, 256);
+        assert_eq!(metrics.datagrams_rejected, 256);
+        assert_eq!(metrics.messages_decoded, 0);
+        assert_eq!(metrics.receive_cap_saturations, 1);
 
-        let second_poll = receive_all_messages_from(&mut recv_buffer, "test", &mut receive_next);
+        let second_poll =
+            receive_all_messages_from(&mut recv_buffer, "test", &mut metrics, &mut receive_next);
         assert_eq!(second_poll, vec![(addr, msg)]);
+        assert_eq!(metrics.receive_polls, 2);
+        assert_eq!(metrics.datagrams_received, 257);
+        assert_eq!(metrics.datagrams_rejected, 256);
+        assert_eq!(metrics.messages_decoded, 1);
+        assert_eq!(metrics.receive_cap_saturations, 1);
     }
 
     #[test]

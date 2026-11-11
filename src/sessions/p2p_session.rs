@@ -8373,7 +8373,9 @@ impl<T: Config> P2PSession<T> {
     /// }
     /// ```
     pub fn metrics(&self) -> SessionMetrics {
-        self.metrics
+        let mut metrics = self.metrics;
+        metrics.socket = self.socket.socket_metrics();
+        metrics
     }
 
     /// Returns current bounded-container lengths for integration diagnostics.
@@ -12939,6 +12941,30 @@ mod tests {
         }
     }
 
+    struct DiagnosticSocket;
+
+    impl NonBlockingSocket<SocketAddr> for DiagnosticSocket {
+        fn send_to(&mut self, _msg: &Message, _addr: &SocketAddr) {}
+
+        fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
+            Vec::new()
+        }
+
+        fn socket_metrics(&self) -> crate::SocketMetrics {
+            crate::SocketMetrics {
+                receive_polls: 11,
+                datagrams_received: 12,
+                bytes_received: 13,
+                messages_decoded: 14,
+                datagrams_rejected: 15,
+                receive_cap_saturations: 16,
+                datagrams_sent: 17,
+                bytes_sent: 18,
+                send_failures: 19,
+            }
+        }
+    }
+
     struct QueuedReceiveSocket {
         messages: Arc<std::sync::Mutex<Vec<(SocketAddr, Message)>>>,
     }
@@ -13086,6 +13112,23 @@ mod tests {
             .expect("Failed to add remote player")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
+    }
+
+    #[test]
+    fn metrics_snapshot_includes_adapter_transport_counters() {
+        let mut session = create_local_only_session();
+        session.socket = Box::new(DiagnosticSocket);
+
+        let metrics = session.metrics();
+        assert_eq!(metrics.socket.receive_polls, 11);
+        assert_eq!(metrics.socket.datagrams_received, 12);
+        assert_eq!(metrics.socket.bytes_received, 13);
+        assert_eq!(metrics.socket.messages_decoded, 14);
+        assert_eq!(metrics.socket.datagrams_rejected, 15);
+        assert_eq!(metrics.socket.receive_cap_saturations, 16);
+        assert_eq!(metrics.socket.datagrams_sent, 17);
+        assert_eq!(metrics.socket.bytes_sent, 18);
+        assert_eq!(metrics.socket.send_failures, 19);
     }
 
     fn create_multi_handle_remote_session() -> P2PSession<TestConfig> {

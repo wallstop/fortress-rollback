@@ -30,10 +30,14 @@ spoofing or on-path attackers are in scope.
   a 64 MiB decoded-byte ceiling, configured frame/depth limits, and fallible
   allocation.
 - Built-in sockets cap each poll at 256 raw receive attempts and 256 decoded
-  messages. Persistent pending-output, pending-checksum, input/recovery,
-  drop-mailbox, and session-event structures have explicit caps. The transient
-  protocol send queue relies on bounded ingress and poll behavior rather than
-  an independent queue limit.
+  messages. They also publish cumulative adapter counters through
+  `SessionMetrics::socket`: receive polls, raw datagrams/bytes, decoded
+  messages, decode rejections, receive-cap saturations, accepted sends/bytes,
+  and send failures. A custom `NonBlockingSocket` opts in by overriding
+  `socket_metrics`; the default reports zeros. Persistent pending-output,
+  pending-checksum, input/recovery, drop-mailbox, and session-event structures
+  have explicit caps. The transient protocol send queue relies on bounded
+  ingress and poll behavior rather than an independent queue limit.
 - Raw byte-stream adapters can use `codec::FrameDecoder`, which rejects zero or
   over-64-MiB length declarations before payload allocation, buffers at most one
   incomplete frame, and remains poisoned after malformed input until the
@@ -190,7 +194,10 @@ distributed flood.
 
 Keep polling and draining events under load, alert on sustained cap saturation,
 unknown-source traffic, queue high-water marks, and packet loss, and rate-limit
-before the `NonBlockingSocket` boundary. Prefer an authenticated transport or
+before the `NonBlockingSocket` boundary. `SessionMetrics::socket` separates
+adapter acceptance from protocol enqueue demand: rising `send_failures` means
+the adapter drops writes, and rising `receive_cap_saturations` means ingress
+reached the per-poll bound. Prefer an authenticated transport or
 front-end that drops unauthenticated traffic cheaply. Apply OS and network-edge
 controls for raw UDP deployments. Raising Fortress queue or receive limits is
 capacity tuning, not DDoS mitigation, and can increase the attacker's resource

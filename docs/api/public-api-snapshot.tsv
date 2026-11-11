@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2718
-# textual-paths=2712
+# symbols=2742
+# textual-paths=2736
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -506,6 +506,7 @@ fortress_rollback::NetworkStats::send_queue_len	struct_field	no-default+all-feat
 fortress_rollback::NonBlockingSocket	trait	no-default+all-features	yes	core	implementor-contract	downstream-implementation-contract	keep-supported	-	src/lib.rs
 fortress_rollback::NonBlockingSocket::receive_all_messages	function	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::NonBlockingSocket::send_to	function	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
+fortress_rollback::NonBlockingSocket::socket_metrics	function	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::P2PSession	struct	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::add_local_input	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::advance_frame	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
@@ -783,6 +784,7 @@ fortress_rollback::SessionMetrics::prediction_miss_count	struct_field	no-default
 fortress_rollback::SessionMetrics::resimulated_frames	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SessionMetrics::rollback_count	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SessionMetrics::rollback_depth_histogram	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SessionMetrics::socket	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SessionMetrics::stall_count	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SessionMetrics::to_json	function	all-features	yes	observability	rustdoc-contract	supported-public-contract	keep-supported	-	src/metrics.rs
 fortress_rollback::SessionMetrics::to_json_pretty	function	all-features	yes	observability	rustdoc-contract	supported-public-contract	keep-supported	-	src/metrics.rs
@@ -804,6 +806,16 @@ fortress_rollback::SocketErrorKind::BindFailedAfterRetries::attempts	struct_fiel
 fortress_rollback::SocketErrorKind::BindFailedAfterRetries::port	struct_field	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::SocketErrorKind::Custom	variant	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::SocketErrorKind::Custom::0	struct_field	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
+fortress_rollback::SocketMetrics	struct	no-default+all-features	yes	observability	rustdoc-contract	supported-public-contract	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::bytes_received	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::bytes_sent	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::datagrams_received	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::datagrams_rejected	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::datagrams_sent	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::messages_decoded	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::receive_cap_saturations	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::receive_polls	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
+fortress_rollback::SocketMetrics::send_failures	struct_field	no-default+all-features	yes	observability	public-data-shape	exhaustive-data-shape	keep-supported	-	src/metrics.rs
 fortress_rollback::SpectatorConfig	struct	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/config.rs
 fortress_rollback::SpectatorConfig::broadcast	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/config.rs
 fortress_rollback::SpectatorConfig::buffer_size	struct_field	no-default+all-features	yes	sessions	public-data-shape	exhaustive-data-shape	keep-supported	-	src/sessions/config.rs
@@ -1466,6 +1478,7 @@ fortress_rollback::metrics::SessionMetrics::prediction_miss_count	struct_field	n
 fortress_rollback::metrics::SessionMetrics::resimulated_frames	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::resimulated_frames	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::rollback_count	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::rollback_count	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::rollback_depth_histogram	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::rollback_depth_histogram	src/metrics.rs
+fortress_rollback::metrics::SessionMetrics::socket	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::socket	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::stall_count	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::stall_count	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::to_json	function	all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::to_json	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::to_json_pretty	function	all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::to_json_pretty	src/metrics.rs
@@ -1474,6 +1487,16 @@ fortress_rollback::metrics::SessionMetrics::try_to_json_pretty	function	all-feat
 fortress_rollback::metrics::SessionMetrics::unknown_source_packets	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::unknown_source_packets	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::visual_frames	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::visual_frames	src/metrics.rs
 fortress_rollback::metrics::SessionMetrics::wait_recommendations	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SessionMetrics::wait_recommendations	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics	alias	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::bytes_received	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::bytes_received	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::bytes_sent	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::bytes_sent	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::datagrams_received	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::datagrams_received	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::datagrams_rejected	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::datagrams_rejected	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::datagrams_sent	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::datagrams_sent	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::messages_decoded	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::messages_decoded	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::receive_cap_saturations	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::receive_cap_saturations	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::receive_polls	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::receive_polls	src/metrics.rs
+fortress_rollback::metrics::SocketMetrics::send_failures	struct_field	no-default+all-features	yes	observability	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::SocketMetrics::send_failures	src/metrics.rs
 fortress_rollback::network	module	no-default+all-features	no	core	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/lib.rs
 fortress_rollback::network::chaos_socket	module	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/chaos_socket.rs
 fortress_rollback::network::chaos_socket::ChaosConfig	alias	no-default+all-features	no	transport	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::ChaosConfig	src/network/chaos_socket.rs
@@ -1922,6 +1945,7 @@ fortress_rollback::prelude::NetworkStats::send_queue_len	struct_field	no-default
 fortress_rollback::prelude::NonBlockingSocket	alias	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::NonBlockingSocket	src/prelude.rs
 fortress_rollback::prelude::NonBlockingSocket::receive_all_messages	function	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::NonBlockingSocket::receive_all_messages	src/lib.rs
 fortress_rollback::prelude::NonBlockingSocket::send_to	function	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::NonBlockingSocket::send_to	src/lib.rs
+fortress_rollback::prelude::NonBlockingSocket::socket_metrics	function	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::NonBlockingSocket::socket_metrics	src/lib.rs
 fortress_rollback::prelude::P2PSession	alias	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession	src/prelude.rs
 fortress_rollback::prelude::P2PSession::add_local_input	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::add_local_input	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::advance_frame	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::advance_frame	src/sessions/p2p_session.rs

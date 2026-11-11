@@ -641,7 +641,9 @@ impl<T: Config> SpectatorSession<T> {
     /// per-kind categories a spectator never emits (for example
     /// `wait_recommendation`) stay at zero here.
     pub fn metrics(&self) -> SessionMetrics {
-        self.metrics
+        let mut metrics = self.metrics;
+        metrics.socket = self.socket.socket_metrics();
+        metrics
     }
 
     /// Returns an exact encoded [`PeerMetrics`] snapshot for the host at

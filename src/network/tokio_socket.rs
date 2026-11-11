@@ -108,6 +108,7 @@ use std::net::SocketAddr;
 
 use tokio::net::UdpSocket;
 
+use crate::metrics::SocketMetrics;
 use crate::network::buffer::{report_send_buffer_too_small, zeroed_buffer};
 use crate::network::codec;
 use crate::network::socket_receive;
@@ -162,6 +163,8 @@ pub struct TokioUdpSocket {
     recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
     send_buffer: Vec<u8>,
+    /// Adapter-level transport counters exposed through the session metrics.
+    metrics: SocketMetrics,
 }
 
 impl TokioUdpSocket {
@@ -196,6 +199,7 @@ impl TokioUdpSocket {
                 IDEAL_MAX_UDP_PACKET_SIZE,
                 "tokio udp send buffer",
             ),
+            metrics: SocketMetrics::default(),
         }
     }
 
@@ -219,6 +223,7 @@ impl TokioUdpSocket {
             socket,
             recv_buffer: zeroed_buffer(recv_buffer_size, "tokio udp recv buffer")?,
             send_buffer: zeroed_buffer(send_buffer_size, "tokio udp send buffer")?,
+            metrics: SocketMetrics::default(),
         })
     }
 
@@ -515,7 +520,12 @@ impl TokioUdpSocket {
     /// This uses `try_send_to` which may fail with `WouldBlock` if the socket
     /// isn't ready. In async contexts, call [`wait_writable()`](Self::wait_writable)
     /// first or use [`send_to_async()`](Self::send_to_async) instead.
-    fn send_encoded_packet(&self, buf: &[u8], addr: &SocketAddr) {
+    fn send_encoded_packet(
+        socket: &UdpSocket,
+        metrics: &mut SocketMetrics,
+        buf: &[u8],
+        addr: &SocketAddr,
+    ) {
         if buf.len() > IDEAL_MAX_UDP_PACKET_SIZE {
             report_violation!(
                 ViolationSeverity::Warning,
@@ -527,9 +537,10 @@ impl TokioUdpSocket {
         }
 
         // Use try_send_to for non-blocking send
-        match self.socket.try_send_to(buf, *addr) {
-            Ok(_) => {},
+        match socket.try_send_to(buf, *addr) {
+            Ok(_) => metrics.record_datagram_sent(buf.len()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                metrics.record_send_failure();
                 // Socket not ready - this is expected in non-blocking mode.
                 // Report as warning since the packet will be dropped.
                 // Users should call wait_writable() first or use send_to_async().
@@ -542,6 +553,7 @@ impl TokioUdpSocket {
                 );
             },
             Err(e) => {
+                metrics.record_send_failure();
                 report_violation!(
                     ViolationSeverity::Error,
                     ViolationKind::NetworkProtocol,
@@ -564,7 +576,7 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
                 // Fall back to allocating encode
                 match codec::encode(msg) {
                     Ok(buf) => {
-                        self.send_encoded_packet(&buf, addr);
+                        Self::send_encoded_packet(&self.socket, &mut self.metrics, &buf, addr);
                         return;
                     },
                     Err(e) => {
@@ -599,14 +611,21 @@ impl NonBlockingSocket<SocketAddr> for TokioUdpSocket {
             );
             return;
         };
-        self.send_encoded_packet(buf, addr);
+        Self::send_encoded_packet(&self.socket, &mut self.metrics, buf, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
         let socket = &self.socket;
-        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "Tokio UDP", |buffer| {
-            socket.try_recv_from(buffer)
-        })
+        socket_receive::receive_all_messages_from(
+            &mut self.recv_buffer,
+            "Tokio UDP",
+            &mut self.metrics,
+            |buffer| socket.try_recv_from(buffer),
+        )
+    }
+
+    fn socket_metrics(&self) -> SocketMetrics {
+        self.metrics
     }
 }
 
@@ -809,6 +828,47 @@ mod tests {
         // Check port matches (IP may differ between 0.0.0.0 and 127.0.0.1)
         assert_eq!(received[0].0.port(), addr1.port());
         assert_eq!(received[0].1, msg);
+    }
+
+    #[tokio::test]
+    async fn tokio_socket_metrics_track_accepted_sends_receives_and_rejects() {
+        let mut receiver = TokioUdpSocket::bind_to_port(0).await.unwrap();
+        let mut sender = TokioUdpSocket::bind_to_port(0).await.unwrap();
+        let addr = to_loopback_addr(&receiver);
+
+        assert_eq!(sender.socket_metrics().datagrams_sent, 0);
+        let msg = Message {
+            header: MessageHeader::new(0x5678),
+            body: MessageBody::KeepAlive,
+        };
+        sender.wait_writable().await.expect("socket writable");
+        sender.send_to(&msg, &addr);
+        let sent = sender.socket_metrics();
+        assert_eq!(sent.datagrams_sent, 1);
+        assert!(sent.bytes_sent > 0);
+        assert_eq!(sent.send_failures, 0);
+
+        let received = wait_for_messages(&mut receiver, 1, std::time::Duration::from_secs(1)).await;
+        assert_eq!(received.len(), 1, "expected one decoded datagram");
+        assert_eq!(received[0].1, msg);
+        let received_metrics = receiver.socket_metrics();
+        assert!(received_metrics.receive_polls >= 1);
+        assert_eq!(received_metrics.datagrams_received, 1);
+        assert_eq!(received_metrics.messages_decoded, 1);
+        assert_eq!(received_metrics.datagrams_rejected, 0);
+
+        let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        raw.send_to(&[0xF5], addr).expect("send malformed");
+        for _ in 0..20 {
+            let _ = receiver.receive_all_messages();
+            if receiver.socket_metrics().datagrams_rejected == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let after_reject = receiver.socket_metrics();
+        assert_eq!(after_reject.datagrams_rejected, 1);
+        assert_eq!(after_reject.messages_decoded, 1);
     }
 
     #[tokio::test]

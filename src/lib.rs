@@ -114,7 +114,7 @@ pub type FortressResult<T, E = FortressError> = std::result::Result<T, E>;
 pub use metrics::HotJoinMetrics;
 pub use metrics::{
     EventKind, EventKindCounts, MessageKind, MessageKindCounts, PeerMetrics,
-    RollbackDepthHistogram, SessionMetrics,
+    RollbackDepthHistogram, SessionMetrics, SocketMetrics,
 };
 pub use network::chaos_socket::{ChaosConfig, ChaosConfigBuilder, ChaosSocket, ChaosStats};
 pub use network::messages::Message;
@@ -2487,6 +2487,18 @@ where
     /// redesign should add bounded draining so socket adapters can stream packets
     /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
+
+    /// Returns this adapter's cumulative transport counters.
+    ///
+    /// The default implementation reports all zeros so existing adapters keep
+    /// compiling. Built-in adapters override it and expose actual accepted
+    /// sends, send failures, raw receives, decode rejections, and receive-cap
+    /// saturation through [`SessionMetrics::socket`](crate::SessionMetrics::socket).
+    /// Overriding this method is advisory: counters must remain bounded and must
+    /// not perform I/O.
+    fn socket_metrics(&self) -> SocketMetrics {
+        SocketMetrics::default()
+    }
 }
 
 /// Compile time parameterization for sessions.
@@ -2595,6 +2607,18 @@ where
     /// redesign should add bounded draining so socket adapters can stream packets
     /// without building an unbounded collection first.
     fn receive_all_messages(&mut self) -> Vec<(A, Message)>;
+
+    /// Returns this adapter's cumulative transport counters.
+    ///
+    /// The default implementation reports all zeros so existing adapters keep
+    /// compiling. Built-in adapters override it and expose actual accepted
+    /// sends, send failures, raw receives, decode rejections, and receive-cap
+    /// saturation through [`SessionMetrics::socket`](crate::SessionMetrics::socket).
+    /// Overriding this method is advisory: counters must remain bounded and must
+    /// not perform I/O.
+    fn socket_metrics(&self) -> SocketMetrics {
+        SocketMetrics::default()
+    }
 }
 
 // ###################

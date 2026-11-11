@@ -45,7 +45,9 @@ The [telemetry guide](Telemetry) explains the counters and the
   peer's report alone.
 - Put flood controls before the socket: rate-limit unauthenticated traffic, monitor kernel drops
   and unknown-source/cap/queue telemetry, and keep polling and draining events. Do not treat larger
-  receive or queue limits as DDoS protection.
+  receive or queue limits as DDoS protection. Compare `SessionMetrics::socket` accepted
+  sends/failures and cap saturations against protocol enqueue demand in `PeerMetrics`; the socket
+  counters describe adapter acceptance, not network delivery.
 - With `hot-join`, authenticate and record the coordinator that serves each snapshot. Capture the
   snapshot frame, the optional peer-supplied checksum, and an application-computed loaded-state
   fingerprint when available. These preserve evidence but do not prove provenance; abort and
