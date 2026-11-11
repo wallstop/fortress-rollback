@@ -36,6 +36,14 @@ majority component running, while components without a majority stop rather than
 complementary one-sided certificates. Explicit `remove_player(handle)` retains its one-survivor
 path for an application-directed match decision.
 
+An asymmetric (one-way) partition is terminal for the isolated peer. Its outbound traffic stops
+while the majority's inputs keep arriving, so it can confirm up to its prediction window past the
+majority's certified cut before the dead path fails it closed. The contract discards that **bounded
+tail**: the majority's certified history is authoritative, and the isolated peer's post-cut frames
+are not match results. The prediction window bounds the tail to its own length plus one frame of
+cut-observation slack; reconciliation requires rebuilding the isolated session, not replaying its
+tail.
+
 ## Timeout presets
 
 Start from measured conditions and the presets in the

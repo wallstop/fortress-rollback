@@ -6,19 +6,7 @@
 
 ## In progress
 
-1. **P0 — Close the partition/membership CAP matrix ([#382](https://github.com/wallstop/fortress-rollback/issues/382)).** Using [the reconnect contract](docs/reconnect-playbook.md),
-   test symmetric/asymmetric partitions, majority and minority components, concurrent drops, timeout-versus-slow-peer
-   ambiguity, coordinator/origin loss, repeated heal/reflap, and rejoin during another membership change. Include Halt,
-   ContinueWithout, redundant spectators, and hot-join. Add component-scoped confirmed-state comparison before making
-   majority/minority progress claims; the global live-peer minimum cannot cover states beyond a minority that failed
-   closed.
-   **Exit:** no two components rewrite or fork an exposed confirmed
-   prefix; each scenario either converges to one survivor history within a measured post-heal bound, emits the documented
-   terminal/fail-closed outcome, or exposes an explicit split-match decision—never two silent histories presented as one
-   session. Any quorum, split-brain, or recovery limitation becomes an explicit contract, not an inferred guarantee.
-   Remaining row: an asymmetric one-way partition exposes a divergent confirmed prefix before the isolated peer fails closed
-   ([#386](https://github.com/wallstop/fortress-rollback/issues/386)); the rejoin-during-membership-change row is now covered by
-   [#384](https://github.com/wallstop/fortress-rollback/issues/384).
+_None — the P0 CAP matrix is closed; the next queued work is the P1 items below._
 
 ## Future
 

@@ -93,6 +93,19 @@ pub enum ComponentOutcome {
         shared_prefix: i32,
         continued: Vec<usize>,
     },
+    /// A component that failed closed exposed a bounded tail of its own live
+    /// inputs after the last frame every component agreed on. When `continued`
+    /// is non-empty, those components are the survivor branch and the tail is
+    /// discarded with it; when it is empty, every component failed closed and
+    /// the tail is discarded by the documented terminal (Halt) outcome. This is
+    /// an explicit one-way-partition split decision, never a silent fork.
+    /// Reconciliation requires rebuilding the failed component.
+    SplitTail {
+        shared_prefix: i32,
+        continued: Vec<usize>,
+        /// Frames the failed component confirmed past `shared_prefix`.
+        tail: i32,
+    },
     /// Two components exposed different confirmed values for the same frame.
     Forked {
         frame: i32,
@@ -111,7 +124,10 @@ impl ComponentOutcome {
     pub fn is_legal(&self) -> bool {
         matches!(
             self,
-            Self::FailedClosed { .. } | Self::ContinuedTogether { .. } | Self::SplitMatch { .. }
+            Self::FailedClosed { .. }
+                | Self::ContinuedTogether { .. }
+                | Self::SplitMatch { .. }
+                | Self::SplitTail { .. }
         )
     }
 }
@@ -124,13 +140,49 @@ impl ComponentOutcome {
 /// they all confirmed; components must agree on every frame they both
 /// confirmed. A component whose last confirmed frame exceeds
 /// `partition_cut + allowance` is reported as having continued.
+///
+/// A divergence is always reported as [`ComponentOutcome::Forked`]: a failed
+/// closed component's post-cut tail is only accepted by
+/// [`classify_component_scope_with_tail`].
 #[must_use]
 pub fn classify_component_scope(
     evidence: &ComponentScopeEvidence,
     allowance: i32,
 ) -> ComponentOutcome {
+    classify_component_scope_with_tail(evidence, allowance, 0)
+}
+
+/// Compares the declared components' exposed confirmed prefixes, accepting a
+/// bounded terminal tail from a failed-closed component.
+///
+/// A one-way (asymmetric) partition is terminal for the isolated peer: it keeps
+/// receiving the majority's traffic while none of its own inputs arrive, so it
+/// can confirm its prediction window past the majority's certified cut before
+/// it detects the dead outbound path and fails closed. That tail is not part of
+/// the survivor history. Divergence is therefore legal only when all of the
+/// following hold:
+///
+/// - the first divergent frame is strictly after `partition_cut + allowance`
+///   (the shared prefix is untouched);
+/// - exactly one side of the divergence is a continued component, the other is
+///   a component that ended every member in `Synchronizing`;
+/// - every failed-closed component's floor is within `tail_allowance` frames of
+///   the last shared frame.
+///
+/// Everything else remains a fork. A zero `tail_allowance` makes this identical
+/// to [`classify_component_scope`].
+#[must_use]
+pub fn classify_component_scope_with_tail(
+    evidence: &ComponentScopeEvidence,
+    allowance: i32,
+    tail_allowance: i32,
+) -> ComponentOutcome {
     let n = evidence.component.len();
-    if n < 2 || evidence.confirmed_inputs.len() != n || evidence.cut_confirmed.len() != n {
+    if n < 2
+        || evidence.confirmed_inputs.len() != n
+        || evidence.cut_confirmed.len() != n
+        || evidence.final_states.len() != n
+    {
         return ComponentOutcome::Invalid {
             reason: "component evidence is incomplete",
         };
@@ -200,10 +252,49 @@ pub fn classify_component_scope(
         }
     }
 
+    let shared = floors.iter().copied().min().unwrap_or(0);
+    // A component that confirmed beyond the cut continued on its own.
+    let cut = evidence
+        .cut_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(shared)
+        .saturating_add(allowance.max(0));
+    let component_floor = |component: usize| {
+        component_ids
+            .iter()
+            .position(|candidate| *candidate == component)
+            .and_then(|position| floors.get(position).copied())
+            .unwrap_or(shared)
+    };
+    let component_all_in = |component: usize, state: TraceSessionState| {
+        members.get(&component).is_some_and(|peers| {
+            peers.iter().all(|peer| {
+                evidence
+                    .final_states
+                    .get(*peer)
+                    .is_some_and(|observed| *observed == state)
+            })
+        })
+    };
+    // A continued component must have confirmed past the cut and still be
+    // running at the end of the run. A failed-closed component whose floor is
+    // above the cut is carrying a terminal tail, not a survivor branch.
+    let running_components: Vec<usize> = component_ids
+        .iter()
+        .copied()
+        .filter(|component| {
+            component_all_in(*component, TraceSessionState::Running)
+                && component_floor(*component) > cut
+        })
+        .collect();
+
     // Cross-component agreement over every frame any pair of peers in
     // different components both confirmed. Comparing only the common floor
     // would miss the post-heal shape where one member of each component
     // resumed past a stopped peer and their continued tails disagree.
+    let mut first_divergence: Option<(i32, usize, usize)> = None;
     for i in 0..component_ids.len() {
         for j in (i + 1)..component_ids.len() {
             let Some(left_peers) = members.get(&component_ids[i]) else {
@@ -232,11 +323,13 @@ pub fn classify_component_scope(
                         let left = evidence.confirmed_inputs[*left_peer].get(&frame);
                         let right = evidence.confirmed_inputs[*right_peer].get(&frame);
                         if left != right {
-                            return ComponentOutcome::Forked {
-                                frame,
-                                component: component_ids[i],
-                                other_component: component_ids[j],
-                            };
+                            let replace =
+                                first_divergence.is_none_or(|(earliest, _, _)| frame < earliest);
+                            if replace {
+                                first_divergence =
+                                    Some((frame, component_ids[i], component_ids[j]));
+                            }
+                            break;
                         }
                     }
                 }
@@ -244,34 +337,153 @@ pub fn classify_component_scope(
         }
     }
 
-    let shared = floors.iter().copied().min().unwrap_or(0);
-    // A component that confirmed beyond the cut continued on its own.
-    let cut = evidence
-        .cut_confirmed
+    let Some((frame, left_component, right_component)) = first_divergence else {
+        // No frame was confirmed by both a survivor and the failed component
+        // past the shared prefix. A failed component may still have advanced a
+        // terminal tail (Halt, or a one-way partition whose majority stopped
+        // before the isolated peer did); it is discarded like the divergent
+        // case below.
+        let max_terminal_floor = component_ids
+            .iter()
+            .copied()
+            .filter(|component| !running_components.contains(component))
+            .map(component_floor)
+            .max()
+            .unwrap_or(shared);
+        let tail = max_terminal_floor.saturating_sub(shared);
+        let terminal_tail = component_ids
+            .iter()
+            .copied()
+            .filter(|component| !running_components.contains(component))
+            .all(|component| component_all_in(component, TraceSessionState::Synchronizing));
+        if tail > 0 {
+            if tail <= tail_allowance.max(0) && terminal_tail {
+                return ComponentOutcome::SplitTail {
+                    shared_prefix: shared,
+                    continued: running_components,
+                    tail,
+                };
+            }
+            if tail_allowance > 0 {
+                let other = component_ids
+                    .iter()
+                    .copied()
+                    .find(|component| !running_components.contains(component))
+                    .unwrap_or(component_ids[0]);
+                let component = running_components
+                    .first()
+                    .copied()
+                    .or_else(|| component_ids.iter().copied().find(|c| *c != other))
+                    .unwrap_or(other);
+                return ComponentOutcome::Forked {
+                    frame: shared.saturating_add(1),
+                    component,
+                    other_component: other,
+                };
+            }
+            // A zero tail allowance keeps the legacy classification: a
+            // one-frame delivery-slack tail is not a defect unless the caller
+            // explicitly opted into bounding terminal tails.
+        }
+        if running_components.is_empty() {
+            return ComponentOutcome::FailedClosed {
+                shared_prefix: shared,
+            };
+        }
+        if running_components.len() == component_ids.len() {
+            return ComponentOutcome::ContinuedTogether {
+                shared_prefix: shared,
+            };
+        }
+        return ComponentOutcome::SplitMatch {
+            shared_prefix: shared,
+            continued: running_components,
+        };
+    };
+
+    // A divergence inside the delivery-ambiguity window rewrites the shared
+    // prefix and is never a legal split.
+    if frame <= cut {
+        return ComponentOutcome::Forked {
+            frame,
+            component: left_component,
+            other_component: right_component,
+        };
+    }
+    // A diverging component is terminal only when every member ended
+    // `Synchronizing`; a continued component must have ended `Running` past the
+    // cut. Two running components (or two terminal ones) that disagree are a
+    // fork.
+    let left_running = component_all_in(left_component, TraceSessionState::Running)
+        && component_floor(left_component) > cut;
+    let right_running = component_all_in(right_component, TraceSessionState::Running)
+        && component_floor(right_component) > cut;
+    let left_terminal = component_all_in(left_component, TraceSessionState::Synchronizing);
+    let right_terminal = component_all_in(right_component, TraceSessionState::Synchronizing);
+    let split_shape = (left_running && right_terminal) || (left_terminal && right_running);
+    if !split_shape {
+        return ComponentOutcome::Forked {
+            frame,
+            component: left_component,
+            other_component: right_component,
+        };
+    }
+    // The first divergent pair being a survivor/terminal pair is not enough:
+    // two surviving components can also disagree on a later frame. Compare
+    // every survivor pair over their full shared range before accepting the
+    // split.
+    let last_shared = frame.saturating_sub(1);
+    for (index, left) in running_components.iter().enumerate() {
+        for right in running_components.iter().skip(index.saturating_add(1)) {
+            let (Some(left_peers), Some(right_peers)) = (members.get(left), members.get(right))
+            else {
+                return ComponentOutcome::Invalid {
+                    reason: "component membership vanished",
+                };
+            };
+            for left_peer in left_peers {
+                for right_peer in right_peers {
+                    let (Some(left_last), Some(right_last)) =
+                        (last_confirmed[*left_peer], last_confirmed[*right_peer])
+                    else {
+                        return ComponentOutcome::Invalid {
+                            reason: "missing peer history",
+                        };
+                    };
+                    for frame in (last_shared + 1)..=left_last.min(right_last) {
+                        let left_value = evidence.confirmed_inputs[*left_peer].get(&frame);
+                        let right_value = evidence.confirmed_inputs[*right_peer].get(&frame);
+                        if left_value != right_value {
+                            return ComponentOutcome::Forked {
+                                frame,
+                                component: *left,
+                                other_component: *right,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let max_terminal_floor = component_ids
         .iter()
         .copied()
-        .min()
-        .unwrap_or(shared)
-        .saturating_add(allowance.max(0));
-    let continued: Vec<usize> = component_ids
-        .iter()
-        .zip(&floors)
-        .filter(|(_, floor)| **floor > cut)
-        .map(|(component, _)| *component)
-        .collect();
-    if continued.is_empty() {
-        ComponentOutcome::FailedClosed {
-            shared_prefix: shared,
-        }
-    } else if continued.len() == component_ids.len() {
-        ComponentOutcome::ContinuedTogether {
-            shared_prefix: shared,
-        }
-    } else {
-        ComponentOutcome::SplitMatch {
-            shared_prefix: shared,
-            continued,
-        }
+        .filter(|component| !running_components.contains(component))
+        .map(component_floor)
+        .max()
+        .unwrap_or(last_shared);
+    let tail = max_terminal_floor.saturating_sub(last_shared);
+    if tail <= tail_allowance.max(0) {
+        return ComponentOutcome::SplitTail {
+            shared_prefix: last_shared,
+            continued: running_components,
+            tail,
+        };
+    }
+    ComponentOutcome::Forked {
+        frame,
+        component: left_component,
+        other_component: right_component,
     }
 }
 
@@ -299,11 +511,20 @@ mod tests {
         histories: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
         cut_confirmed: Vec<i32>,
     ) -> ComponentScopeEvidence {
+        let states = vec![TraceSessionState::Synchronizing; histories.len()];
+        build_evidence_with_states(component, histories, cut_confirmed, states)
+    }
+
+    fn build_evidence_with_states(
+        component: Vec<usize>,
+        histories: Vec<BTreeMap<i32, Vec<InputFingerprint>>>,
+        cut_confirmed: Vec<i32>,
+        final_states: Vec<TraceSessionState>,
+    ) -> ComponentScopeEvidence {
         let final_confirmed = histories
             .iter()
             .map(|history| history.keys().next_back().copied().unwrap_or(-1))
             .collect();
-        let final_states = vec![TraceSessionState::Synchronizing; histories.len()];
         ComponentScopeEvidence {
             component,
             confirmed_inputs: histories,
@@ -372,7 +593,12 @@ mod tests {
         for frame in 3..=6 {
             shared.insert(frame, vec![InputFingerprint::from_bytes(7, &[7, 7])]);
         }
-        let evidence = build_evidence(vec![0, 1], vec![shared.clone(), shared], vec![2, 2]);
+        let evidence = build_evidence_with_states(
+            vec![0, 1],
+            vec![shared.clone(), shared],
+            vec![2, 2],
+            vec![TraceSessionState::Running, TraceSessionState::Running],
+        );
         assert_eq!(
             classify_component_scope(&evidence, 0),
             ComponentOutcome::ContinuedTogether { shared_prefix: 6 }
@@ -429,7 +655,12 @@ mod tests {
         for frame in 3..=6 {
             continued.insert(frame, vec![InputFingerprint::from_bytes(7, &[7, 7])]);
         }
-        let evidence = build_evidence(vec![0, 1], vec![shared, continued], vec![2, 2]);
+        let evidence = build_evidence_with_states(
+            vec![0, 1],
+            vec![shared, continued],
+            vec![2, 2],
+            vec![TraceSessionState::Synchronizing, TraceSessionState::Running],
+        );
         assert_eq!(
             classify_component_scope(&evidence, 0),
             ComponentOutcome::SplitMatch {
@@ -457,5 +688,87 @@ mod tests {
         }
         .validate(3)
         .is_err());
+    }
+
+    fn split_tail_evidence(
+        terminal_states: [TraceSessionState; 2],
+        tail_frames: i32,
+    ) -> ComponentScopeEvidence {
+        let shared = history([(0, 7), (1, 7), (2, 7), (3, 7)]);
+        let mut continued = shared.clone();
+        let mut terminal = shared;
+        for frame in 4..=(3 + tail_frames) {
+            continued.insert(frame, vec![InputFingerprint::from_bytes(7, &[7, 8])]);
+            terminal.insert(frame, vec![InputFingerprint::from_bytes(9, &[9, 8])]);
+        }
+        build_evidence_with_states(
+            vec![0, 1],
+            vec![continued, terminal],
+            vec![3, 3],
+            terminal_states.to_vec(),
+        )
+    }
+
+    #[test]
+    fn bounded_failed_closed_tail_after_the_cut_is_an_explicit_split() {
+        let evidence = split_tail_evidence(
+            [TraceSessionState::Running, TraceSessionState::Synchronizing],
+            2,
+        );
+        assert_eq!(
+            classify_component_scope_with_tail(&evidence, 0, 2),
+            ComponentOutcome::SplitTail {
+                shared_prefix: 3,
+                continued: vec![0],
+                tail: 2,
+            }
+        );
+        assert!(classify_component_scope_with_tail(&evidence, 0, 2).is_legal());
+    }
+
+    #[test]
+    fn tail_beyond_the_allowance_is_still_a_fork() {
+        let evidence = split_tail_evidence(
+            [TraceSessionState::Running, TraceSessionState::Synchronizing],
+            3,
+        );
+        assert_eq!(
+            classify_component_scope_with_tail(&evidence, 0, 2),
+            ComponentOutcome::Forked {
+                frame: 4,
+                component: 0,
+                other_component: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_diverging_tail_requires_the_failed_closed_state() {
+        let evidence =
+            split_tail_evidence([TraceSessionState::Running, TraceSessionState::Running], 2);
+        assert_eq!(
+            classify_component_scope_with_tail(&evidence, 0, 2),
+            ComponentOutcome::Forked {
+                frame: 4,
+                component: 0,
+                other_component: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_divergence_inside_the_cut_window_is_a_fork() {
+        let shared = history([(0, 7), (1, 7), (2, 7)]);
+        let mut divergent = shared.clone();
+        divergent.insert(2, vec![InputFingerprint::from_bytes(9, &[9])]);
+        let evidence = build_evidence(vec![0, 1], vec![shared, divergent], vec![2, 2]);
+        assert_eq!(
+            classify_component_scope_with_tail(&evidence, 0, 8),
+            ComponentOutcome::Forked {
+                frame: 2,
+                component: 0,
+                other_component: 1,
+            }
+        );
     }
 }
