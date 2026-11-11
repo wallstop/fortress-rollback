@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794332074195,
+  "lastUpdate": 1794355649541,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "94f33a86fc9b20bb59977e7247029b3163372ee6",
-          "message": "Validate runtime handshake traces (#240)\n\n## Summary\n\n- add a hidden, semantically capped handshake trace recorder option and\nsession trace accessor under `trace-validation`\n- produce deterministic matching, mismatch, and timeout traces from two\nreal `P2PSession` peers over SimNet\n- normalize raw request IDs into the finite TLA+ domain and validate\nruntime-derived accept/reject cases with TLC\n- make trace generation a hard-fail verification boundary and wire its\nRust dependency into CI\n- document the runtime refinement boundary, remaining abstractions, and\ndesign rationale\n\n## Why\n\nThe existing SyncHandshakeV1 trace gate only replayed hand-authored\nfixtures. That proved the checker, but not that the Rust handshake\nimplementation's observable behavior refines the model. This change adds\nan ephemeral runtime producer and independently projects recorded\npost-state into strict NDJSON before TLC replay.\n\n## Impact\n\nThe runtime APIs are hidden and feature-gated. Production behavior is\nunchanged unless `trace-validation` is explicitly enabled, and recorder\ncapacity is bounded to 64 events.\n\n## Verification\n\n- `cargo fmt --all`\n- `cargo clippy --workspace --all-targets --features\ntokio,json,trace-validation,hot-join -- -D warnings`\n- full nextest suites: default (2869), hot-join (3125), trace-validation\n(2879)\n- `python3 -m pytest -q\nscripts/tests/test_verify_sync_handshake_traces.py` (29)\n- `python3 scripts/verification/verify-sync-handshake-traces.py` (8 TLC\ntrace cases)\n- `./scripts/verification/verify-tla.sh SyncHandshakeV1`\n- `cargo doc --no-deps --features trace-validation`\n- `python3 scripts/ci/agent-preflight.py --auto-fix`\n- `actionlint .github/workflows/ci-verification.yml`\n\n## Review readiness\n\n| Area | Evidence |\n| --- | --- |\n| Correctness | runtime matching/mismatch/timeout scenarios plus model\naccept/reject replay |\n| Determinism | TestClock, seeded SimNet, ordered maps/sets, monotonic\nID normalization |\n| Safety | bounded recorder, structured errors, no production panics |\n| CI portability | stable Rust installed in TLA job; producer failures\nand incomplete manifests hard-fail |\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches the handshake verification boundary and adds hidden\nsession/protocol hooks, but they are feature-gated and default builds\nstay unchanged; CI TLA runs now depend on a successful Rust trace\nproducer.\n> \n> **Overview**\n> Extends the **SyncHandshakeV1** NDJSON trace gate so CI no longer\nrelies only on hand-authored fixtures: on the default manifest it now\nruns a feature-gated **`cargo test`** producer, checks a four-file\nephemeral runtime manifest, normalizes events, and runs **TLC** on eight\ncases (four static + four runtime).\n> \n> **Rust (behind `trace-validation`):** hidden\n**`SessionBuilder::with_handshake_trace_capacity`** (1–64 records per\nendpoint) and **`P2PSession::handshake_trace`** expose the existing\nbounded recorder. **`tests/simulation/trace_validation.rs`** drives\ntwo-peer **`P2PSession`** over **SimNet** (matching with duplicate reply\n/ delayed B, mismatch, timeout), merges events in deterministic poll\norder, maps raw request IDs to trace-local ordinals, writes NDJSON when\n**`FORTRESS_RUNTIME_TRACE_DIR`** is set, and derives the negative\nmutation from the observed duplicate row.\n> \n> **Python:** **`generate_runtime_traces`** /\n**`validate_runtime_manifest`** hard-fail on producer exit, timeout, or\nincomplete output; unit tests cover those paths.\n> \n> **CI:** the TLA verification job installs **stable Rust** and caches\nbuilds for the producer; workflow path filters include the trace script.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n61ab4f9314aaebf0818eb1ef666b7d452781517c. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-07-14T13:35:27-07:00",
-          "tree_id": "6e6247f42acb492dc48d0c806d84e9d481493ec4",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/94f33a86fc9b20bb59977e7247029b3163372ee6"
-        },
-        "date": 1784061854453,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 123483,
-            "range": "± 1282",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46605,
-            "range": "± 271",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 88",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3145,
-            "range": "± 212",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3001,
             "range": "± 245",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "84161e7692628c1773630835f6856be604ca1d26",
+          "message": "fix: survivor quorum for automatic drops + N-peer hot-join serve shape (close #383, #384) (#385)\n\n## Summary\n\nCloses the #383 red case and the #384 rejoin-during-membership-change\nrow. Leaves #382 open for the new asymmetric-partition finding (#386).\n\n### 1. Survivor quorum for automatic graceful drops (#383)\n\nA symmetric partition that outlives the disconnect timeout let each\ncomponent commit a complementary automatic drop certificate: every side\nhad an independent witness (its same-component partner), so both peers\nresumed on divergent confirmed histories after the link healed.\n\n- Automatic `ContinueWithout` timeouts now require both an independent\nwitness **and** a strict majority of the agreed membership epoch to\nremain locally reachable.\n- `UdpProtocol::has_reported_disconnect` exposes the latched\nsilence-timeout verdict so a timed-out (or recovered) endpoint cannot\ncount as a witness it never answered.\n- The quorum is re-checked when a queued automatic intent starts, not\nonly when it is enqueued.\n- Explicit `remove_player` keeps its application-directed one-survivor\npath.\n\nBefore (issue #383 schedule, 4 peers, cross-component block steps\n100-300):\n\n```\ntrace_hash=cdc59fcbac88641f\nfinal_confirmed=[94, 696, 94, 695]\nfinal_states=[Synchronizing, Running, Synchronizing, Running]\nForked { frame: 96, component: 0, other_component: 1 }\n```\n\nAfter:\n\n```\ntrace_hash=8ada5925d2449f99\nfinal_confirmed=[94, 94, 94, 94]\nfinal_states=[Synchronizing, Synchronizing, Synchronizing, Synchronizing]\nFailedClosed { shared_prefix: 94 }\nevents: zero Disconnected/PeerDropped, NetworkResumed observed\n```\n\nMajority shapes: N=3 2/1 → `final_confirmed=[774, 774, 94]`, `SplitMatch\n{ shared_prefix: 94, continued: [0] }`; N=8 6/2 → `[498 × 6, 94, 94]`,\nsame split match.\n\nMutation control: forcing the quorum helper to `true` fails the new\neven-split row, so it is load-bearing. Rewriting a component's value on\nthe shared frame flips both new rows to `Forked`.\n\n### 2. Hot-join rejoin during another removal certificate (#384, last\n#382 row)\n\nA 3+-machine joiner always builds as an N-peer joiner and requires\nbridge inputs. The host chose its serve arm by the currently reachable\nsurvivor set, so once the last other survivor left it fell back to the\n2-peer frame rewrite and every snapshot was rejected as \"the 2-peer\nserve shape\". The arm is now selected by the registered remote-machine\ncount; two-machine meshes keep the 2-peer flow.\n\nNew bounded differential row: three peers, `GracefulRemove { by: 0,\ntarget: 2 }` and `HotJoin { slot: 1 }` at step 100, `ContinueWithout`,\n`EveryFrame`. Both certificates commit independently (explicit removal\ncut 48 at commit step 108; hot-join removal 52, snapshot 95), the\ntrajectory is drive-order identical and exactly replayable, and a\nfrozen-slot lie plus a wrong post-activation state are both detected.\nMutation control: restoring the old `survivors.is_empty()` arm selection\nfails the row with the exact snapshot-shape violation.\n\nHarness modeling needed for the composition: the old generation keeps\npolling until its own removal commits (it may witness another\ncertificate); the offline replacement no longer consumes the live slot's\ninbox; the pending hot-join commit bounds only the sampled history by\nthe freeze cut; and the freeze-frame oracle compares only the freeze\nvalue for a replacement generation.\n\n## Verification\n\n- `cargo fmt --check`: clean.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`: clean.\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean.\n- Full `cargo nextest run` (default features): 3061 tests, zero failures\n(73 intentional skips).\n- Full `cargo nextest run --features hot-join`: 3324 tests, zero\nfailures (74 intentional skips).\n- `check-changelog-unreleased.py`, `check-plan-hygiene.py`,\n`sync-version.sh --check`: pass.\n- `markdownlint` and `typos` on every changed documentation file: clean.\n\n## Notes and follow-up\n\n- No wire-format or public API changes.\n- Docs/changelog cover both pre-existing behavior fixes.\n- A one-way partition sweep found a new red case: the isolated peer can\nstill receive, so it confirms ~8 frames past the majority's certified\ndrop before failing closed, exposing a divergent prefix. Filed as #386\nwith the exact schedule, measured evidence, and suggested directions;\nPLAN.md now records it as the remaining #382 row.\n\nCloses #383, #384. Refs #382, #386.",
+          "timestamp": "2026-11-10T15:59:55-08:00",
+          "tree_id": "1d9b67a711f0e984e7b6ed5d0907dbcdb7336217",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/84161e7692628c1773630835f6856be604ca1d26"
+        },
+        "date": 1794355648432,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39235,
+            "range": "± 2704",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 17505,
+            "range": "± 165",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 535,
+            "range": "± 71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 720,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5522,
+            "range": "± 294",
             "unit": "ns/iter"
           }
         ]
