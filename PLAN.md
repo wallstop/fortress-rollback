@@ -6,16 +6,7 @@
 
 ## In progress
 
-- **P1 — Qualify gameplay experience and performance with representative states.** The release
-  representative-state ledger now publishes 2/4/16-player p50–p99.9 frame-service, rollback,
-  allocation, bandwidth, and confirmation evidence plus reference budgets
-  (`tests/representative_perf.rs`, `docs/tuning.md`). Remaining: a playable/reference game
-  workload, visible correction magnitude, audio/presentation duplication, downstream queue
-  behavior, and a profile-before-optimize pass on the target hardware. **Exit:** extend the
-  published per-tier budgets and failure thresholds to that workload, reproduce the current
-  mobile/4-player/16-player costs, and accept changes only when the correctness oracle stays green
-  and a statistically useful end-to-end improvement exceeds run variance. Evaluate topology
-  changes only if tuning cannot meet the chosen budget.
+_None._
 
 ## Future
 

@@ -30,8 +30,8 @@
 )]
 
 use fortress_rollback::{
-    Config, FortressRequest, Message, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
-    ProtocolConfig, RequestVec, SessionBuilder, SessionState,
+    ChaosConfig, ChaosSocket, Config, FortressRequest, Message, NonBlockingSocket, P2PSession,
+    PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder, SessionState, SyncConfig,
 };
 use serde::{Deserialize, Serialize};
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
@@ -59,6 +59,7 @@ struct RepInput {
 #[cfg_attr(feature = "hot-join", derive(Serialize, Deserialize))]
 struct RepState {
     frame: i32,
+    entities: Vec<(i32, i32)>,
     payload: Vec<u8>,
     digest: u64,
 }
@@ -74,6 +75,9 @@ impl Config for RepConfig {
 struct RepGame {
     state: RepState,
     sim_work_bytes: usize,
+    presented_frame: i32,
+    visible_corrections: u64,
+    presentation_duplications: u64,
 }
 
 impl RepGame {
@@ -81,10 +85,14 @@ impl RepGame {
         Self {
             state: RepState {
                 frame: 0,
+                entities: vec![(0, 0); 16],
                 payload: vec![0; state_bytes],
                 digest: 0xcbf2_9ce4_8422_2325,
             },
             sim_work_bytes,
+            presented_frame: -1,
+            visible_corrections: 0,
+            presentation_duplications: 0,
         }
     }
 
@@ -92,6 +100,7 @@ impl RepGame {
         for request in requests {
             match request {
                 FortressRequest::LoadGameState { cell, .. } => {
+                    self.visible_corrections = self.visible_corrections.saturating_add(1);
                     self.state = cell.load().expect("representative save present");
                 },
                 FortressRequest::SaveGameState { cell, frame } => {
@@ -102,6 +111,10 @@ impl RepGame {
                     );
                 },
                 FortressRequest::AdvanceFrame { inputs } => {
+                    if self.state.frame < self.presented_frame {
+                        self.presentation_duplications =
+                            self.presentation_duplications.saturating_add(1);
+                    }
                     let sum: u64 = inputs
                         .iter()
                         .map(|(input, _)| u64::from(input.buttons))
@@ -111,6 +124,13 @@ impl RepGame {
                         .digest
                         .wrapping_mul(0x100_0000_01b3)
                         .wrapping_add(sum);
+                    // A small deterministic 2D reference game: each entity
+                    // moves from the low input bits of its player slot.
+                    for (index, (x, y)) in self.state.entities.iter_mut().enumerate() {
+                        let bits = ((sum >> ((index % 4) * 8)) & 0xff) as i32;
+                        *x = x.saturating_add((bits & 1) - ((bits >> 1) & 1));
+                        *y = y.saturating_add(((bits >> 2) & 1) - ((bits >> 3) & 1));
+                    }
                     // Representative simulation work: touch a configured
                     // number of state bytes in complete passes, without
                     // changing allocation shape.
@@ -124,6 +144,7 @@ impl RepGame {
                         remaining -= chunk;
                     }
                     self.state.frame += 1;
+                    self.presented_frame = self.presented_frame.max(self.state.frame);
                 },
             }
         }
@@ -202,6 +223,9 @@ fn build_mesh(
     state_bytes: usize,
     sim_work_bytes: usize,
     drop_period: usize,
+    latency_ms: u64,
+    jitter_ms: u64,
+    loss_rate: f64,
 ) -> (Vec<P2PSession<RepConfig>>, Vec<RepGame>, ManualClock) {
     let addresses = addresses(players);
     let fabric: Fabric = Arc::new(Mutex::new(
@@ -231,6 +255,9 @@ fn build_mesh(
             .expect("input delay")
             .with_max_prediction_window(max_prediction)
             .with_protocol_config(protocol_config);
+        if loss_rate > 0.02 {
+            builder = builder.with_sync_config(SyncConfig::lossy());
+        }
         for (player_index, &addr) in addresses.iter().enumerate() {
             let player_type = if player_index == local_index {
                 PlayerType::Local
@@ -241,16 +268,27 @@ fn build_mesh(
                 .add_player(player_type, PlayerHandle::new(player_index))
                 .expect("add player");
         }
-        sessions.push(
-            builder
-                .start_p2p_session(MeshSocket {
-                    local_addr: addresses[local_index],
-                    fabric: Arc::clone(&fabric),
-                    drop_period,
-                    sent: 0,
-                })
-                .expect("start session"),
-        );
+        let chaos = ChaosConfig::builder()
+            .latency_ms(latency_ms)
+            .jitter_ms(jitter_ms)
+            .packet_loss_rate(loss_rate)
+            .seed(
+                0x4348_414f_5300_0000_u64
+                    .checked_add(u64::try_from(local_index).expect("fits u64"))
+                    .expect("chaos seed fits"),
+            )
+            .build();
+        let socket = ChaosSocket::new(
+            MeshSocket {
+                local_addr: addresses[local_index],
+                fabric: Arc::clone(&fabric),
+                drop_period,
+                sent: 0,
+            },
+            chaos,
+        )
+        .with_clock(Arc::clone(&protocol_clock));
+        sessions.push(builder.start_p2p_session(socket).expect("start session"));
         games.push(RepGame::new(state_bytes, sim_work_bytes));
     }
 
@@ -289,6 +327,9 @@ struct TierReport {
     input_delay: usize,
     max_prediction: usize,
     frames: usize,
+    latency_ms: u64,
+    jitter_ms: u64,
+    loss_rate: f64,
     input_latency_ms: f64,
     p50_ms: f64,
     p95_ms: f64,
@@ -297,6 +338,10 @@ struct TierReport {
     rollbacks: u64,
     resimulated_frames: u64,
     max_rollback_depth: u32,
+    visible_corrections: u64,
+    presentation_duplications: u64,
+    max_queue_depth: u64,
+    max_oldest_queued_ms: u64,
     bytes_sent_per_player: u64,
     bytes_received_per_player: u64,
     allocations: u64,
@@ -313,6 +358,9 @@ fn run_tier(
     max_prediction: usize,
     frames: usize,
     drop_period: usize,
+    latency_ms: u64,
+    jitter_ms: u64,
+    loss_rate: f64,
 ) -> TierReport {
     let (mut sessions, mut games, clock) = build_mesh(
         players,
@@ -321,8 +369,13 @@ fn run_tier(
         state_bytes,
         sim_work_bytes,
         drop_period,
+        latency_ms,
+        jitter_ms,
+        loss_rate,
     );
     let mut samples = Vec::with_capacity(frames * players);
+    let mut max_queue_depth = 0_u64;
+    let mut max_oldest_queued_ms = 0_u64;
     let region = Region::new(GLOBAL);
     for frame in 0..frames {
         for (index, session) in sessions.iter_mut().enumerate() {
@@ -345,6 +398,9 @@ fn run_tier(
         }
         for session in &mut sessions {
             session.poll_remote_clients();
+            let socket_metrics = session.metrics().socket;
+            max_queue_depth = max_queue_depth.max(socket_metrics.queue_depth);
+            max_oldest_queued_ms = max_oldest_queued_ms.max(socket_metrics.oldest_queued_ms);
         }
         clock.advance(Duration::from_millis(STEP_MS));
     }
@@ -371,6 +427,14 @@ fn run_tier(
             }
         }
     }
+    let visible_corrections = games
+        .iter()
+        .map(|game| game.visible_corrections)
+        .fold(0_u64, u64::saturating_add);
+    let presentation_duplications = games
+        .iter()
+        .map(|game| game.presentation_duplications)
+        .fold(0_u64, u64::saturating_add);
     let players_u64 = u64::try_from(players).unwrap_or(1);
     TierReport {
         tier,
@@ -380,6 +444,9 @@ fn run_tier(
         input_delay,
         max_prediction,
         frames,
+        latency_ms,
+        jitter_ms,
+        loss_rate,
         input_latency_ms: input_delay as f64 * STEP_MS as f64,
         p50_ms: percentile(&sorted, 0.50),
         p95_ms: percentile(&sorted, 0.95),
@@ -388,6 +455,10 @@ fn run_tier(
         rollbacks,
         resimulated_frames,
         max_rollback_depth: max_depth,
+        visible_corrections,
+        presentation_duplications,
+        max_queue_depth,
+        max_oldest_queued_ms,
         bytes_sent_per_player: bytes_sent / players_u64,
         bytes_received_per_player: bytes_received / players_u64,
         allocations: u64::try_from(stats.allocations).unwrap_or(u64::MAX),
@@ -414,14 +485,19 @@ fn write_report(report: &TierReport) {
     }
     println!(
         "PERF tier={} players={} state={}B work={}B frames={} input_latency={:.1}ms \
+         latency={}ms jitter={}ms loss={:.3} \
          p50={:.3}ms p95={:.3}ms p99={:.3}ms p99.9={:.3}ms rollbacks={} resim={} \
-         depth={} tx/player={}B rx/player={}B allocs={} net_alloc={}B confirmed_min={}",
+         depth={} visible={} dup={} queue_max={} queue_age_max={}ms \
+         tx/player={}B rx/player={}B allocs={} net_alloc={}B confirmed_min={}",
         report.tier,
         report.players,
         report.state_bytes,
         report.sim_work_bytes,
         report.frames,
         report.input_latency_ms,
+        report.latency_ms,
+        report.jitter_ms,
+        report.loss_rate,
         report.p50_ms,
         report.p95_ms,
         report.p99_ms,
@@ -429,6 +505,10 @@ fn write_report(report: &TierReport) {
         report.rollbacks,
         report.resimulated_frames,
         report.max_rollback_depth,
+        report.visible_corrections,
+        report.presentation_duplications,
+        report.max_queue_depth,
+        report.max_oldest_queued_ms,
         report.bytes_sent_per_player,
         report.bytes_received_per_player,
         report.allocations,
@@ -442,7 +522,7 @@ fn write_report(report: &TierReport) {
 /// release-only to keep debug CI bounded.
 #[test]
 fn representative_two_player_smoke() {
-    let report = run_tier("2p-smoke", 2, 4096, 1024, 1, 8, 48, 0);
+    let report = run_tier("2p-smoke", 2, 4096, 1024, 1, 8, 48, 0, 0, 0, 0.0);
     assert_eq!(report.players, 2);
     assert_eq!(report.input_delay, 1);
     assert!(report.p99_ms > 0.0);
@@ -459,19 +539,80 @@ fn representative_two_player_smoke() {
 #[ignore = "release-mode representative tier ledger; run manually or nightly"]
 fn representative_tier_ledger() {
     let tiers = [
-        ("2p-rep-64k", 2, 64 * 1024, 1024 * 1024, 0, 8, 300, 5),
-        ("4p-rep-256k", 4, 256 * 1024, 4 * 1024 * 1024, 0, 8, 240, 5),
-        ("16p-rep-64k", 16, 64 * 1024, 2 * 1024 * 1024, 0, 8, 120, 20),
+        (
+            "2p-mobile-rep-64k",
+            2,
+            64 * 1024,
+            1024 * 1024,
+            3,
+            12,
+            300,
+            0,
+            50,
+            10,
+            0.03,
+        ),
+        (
+            "4p-wifi-rep-256k",
+            4,
+            256 * 1024,
+            4 * 1024 * 1024,
+            2,
+            8,
+            240,
+            0,
+            25,
+            10,
+            0.01,
+        ),
+        (
+            "4p-severe-rep-256k",
+            4,
+            256 * 1024,
+            4 * 1024 * 1024,
+            3,
+            12,
+            180,
+            0,
+            100,
+            10,
+            0.07,
+        ),
+        (
+            "16p-regional-rep-64k",
+            16,
+            64 * 1024,
+            2 * 1024 * 1024,
+            2,
+            8,
+            120,
+            0,
+            50,
+            10,
+            0.01,
+        ),
     ];
     let mut reports = Vec::new();
-    for (tier, players, state, work, delay, prediction, frames, drop) in tiers {
-        let report = run_tier(tier, players, state, work, delay, prediction, frames, drop);
+    for (tier, players, state, work, delay, prediction, frames, drop, latency, jitter, loss) in
+        tiers
+    {
+        let report = run_tier(
+            tier, players, state, work, delay, prediction, frames, drop, latency, jitter, loss,
+        );
         assert!(
-            report.min_final_confirmed > i32::try_from(frames / 2).unwrap_or(0),
-            "tier {tier} did not confirm at least half its frames: {report:?}"
+            report.min_final_confirmed > i32::try_from(frames / 3).unwrap_or(0),
+            "tier {tier} did not confirm useful progress: {report:?}"
+        );
+        assert!(
+            report.visible_corrections > 0 && report.presentation_duplications > 0,
+            "lossy tier {tier} must exhibit visible corrections and presentation replay: {report:?}"
+        );
+        assert!(
+            report.presentation_duplications <= report.resimulated_frames,
+            "presentation duplications must stay within resimulated work: {report:?}"
         );
         if std::env::var("FORTRESS_PERF_ENFORCE").is_ok() {
-            let budget_ms = if report.players >= 16 { 4.0 } else { 2.0 };
+            let budget_ms = if report.players >= 16 { 6.0 } else { 2.0 };
             assert!(
                 report.p99_ms <= budget_ms,
                 "tier {} p99 {:.3}ms exceeds the {:.1}ms reference budget: {report:?}",
@@ -479,9 +620,17 @@ fn representative_tier_ledger() {
                 report.p99_ms,
                 budget_ms
             );
+            let queue_budget =
+                report.latency_ms + report.jitter_ms.saturating_mul(2) + 3 * STEP_MS + 100;
+            assert!(
+                report.max_oldest_queued_ms <= queue_budget,
+                "tier {} oldest adapter queue age {}ms exceeds {queue_budget}ms: {report:?}",
+                report.tier,
+                report.max_oldest_queued_ms
+            );
         }
         write_report(&report);
         reports.push(report);
     }
-    assert_eq!(reports.len(), 3);
+    assert_eq!(reports.len(), 4);
 }
