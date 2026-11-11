@@ -72,7 +72,7 @@ impl CellParams {
     /// policy on every directed link and an empty event list (no fault events,
     /// no `HealAll`). The `heal_at` field is present in the struct but inert —
     /// it has no effect without a corresponding `HealAll` in `events`.
-    fn schedule(self) -> Schedule {
+    pub(crate) fn schedule(self) -> Schedule {
         let config = SimConfig {
             n_players: self.n_players,
             steps: self.steps,
@@ -490,6 +490,30 @@ fn assert_close(cell: &str, field: &str, actual: f64, expected: f64, rel: f64, a
     );
 }
 
+/// Asserts `actual` has not become worse (larger) than `expected` beyond the
+/// same tolerance shape as [`assert_close`]. Liveness pressure is one-sided:
+/// fewer stalls or a shallower confirmation lag is always an improvement and
+/// must not fail the gate. The checked-in severe row is a capacity warning, so
+/// this catches a controller or protocol change that silently doubles its
+/// stall pressure without forcing a re-bless for genuine improvements.
+fn assert_no_regression(
+    cell: &str,
+    field: &str,
+    actual: f64,
+    expected: f64,
+    rel: f64,
+    abs_floor: f64,
+) {
+    let allowed = expected.abs().mul_add(rel, abs_floor);
+    assert!(
+        actual <= expected + allowed,
+        "liveness regression in cell {cell}: {field} = {actual}, baseline {expected} \
+         (allowed ≤{:.3}). If intended, refresh with \
+         `FORTRESS_SWEEP_BLESS=1 cargo test --test simulation sweep_pr_gate`.",
+        expected + allowed
+    );
+}
+
 /// Compares the gate cells to the checked-in [`baseline_path`] ledger, or
 /// regenerates it when `FORTRESS_SWEEP_BLESS` is set. Correctness columns
 /// (`desync_incidents`) are exact; cost/behavior columns compare within
@@ -587,6 +611,24 @@ fn check_or_bless_baseline(reports: &[CellReport]) {
             base.rollbacks_per_100_frames,
             0.10,
             0.05,
+        );
+        // The baseline ledger records pacing/liveness too; gate it so a future
+        // controller change cannot silently move the mobile/severe cliffs.
+        assert_no_regression(
+            &cur.label,
+            "stalls_per_min",
+            cur.stalls_per_min,
+            base.stalls_per_min,
+            0.25,
+            2.0,
+        );
+        assert_no_regression(
+            &cur.label,
+            "confirmation_lag_mean",
+            cur.confirmation_lag_mean,
+            base.confirmation_lag_mean,
+            0.10,
+            0.25,
         );
     }
 }
