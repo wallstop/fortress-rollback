@@ -189,10 +189,16 @@ with the `json` feature.
 | `average_frame_advantage` | Exact per-endpoint rolling average used by the session's max-aggregated wait controller |
 | `portability_risk_messages_sent` | Messages at or above the conservative 1,200-byte path budget |
 | `fragmentation_risk_messages_sent` | Messages at or above the common 1,472-byte IPv4/UDP payload ceiling |
+| `socket.send_failures` | Adapter send calls that failed or dropped the packet (`WouldBlock`, closed socket, other adapter error) |
+| `socket.receive_cap_saturations` | Receive polls that hit the per-poll raw-attempt or decoded-message cap |
+| `socket.datagrams_rejected` | Raw datagrams rejected during framing or protocol decoding |
+| `socket.datagrams_received` / `bytes_received` | Raw datagrams and payload bytes returned by the adapter, before decoding |
 
 `PeerMetrics::bytes_sent` and `bytes_received` are exact encoded Fortress payload sizes. Sent
 values count protocol enqueue demand rather than observed transport throughput. Both exclude
-IP/UDP headers. `NetworkStats::kbps_sent` uses those serialized sizes plus an estimated header and
+IP/UDP headers. `SessionMetrics::socket` reports actual adapter acceptance and rejection instead:
+a successful UDP send is still best-effort and proves no delivery. A custom
+`NonBlockingSocket` that does not override `socket_metrics` reports zeros for these fields. `NetworkStats::kbps_sent` uses those serialized sizes plus an estimated header and
 reports UDP-equivalent offered demand in decimal kilobits per second, not adapter acceptance or
 observed transport throughput. Its ping and latest remote frame-advantage gauges refresh on the
 configured `ProtocolConfig::quality_report_interval` (200 ms by default). The rolling-average

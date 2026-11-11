@@ -306,6 +306,93 @@ impl Serialize for RollbackDepthHistogram {
     }
 }
 
+/// Cumulative adapter-level transport counters for the socket supplied to a
+/// session.
+///
+/// These counters describe what the adapter itself accepted or observed, not
+/// what the kernel or network delivered. For built-in adapters,
+/// [`datagrams_sent`](Self::datagrams_sent) counts successful `send_to` calls
+/// (a successful UDP send is still best-effort and proves no delivery), while
+/// [`datagrams_received`](Self::datagrams_received) counts raw datagrams
+/// returned by the socket before decoding. A custom [`NonBlockingSocket`] that
+/// does not override `socket_metrics` reports all zeros.
+///
+/// [`unknown_source_packets`](SessionMetrics::unknown_source_packets) remains a
+/// separate session-level counter for decoded messages ignored by address;
+/// [`datagrams_rejected`](Self::datagrams_rejected) counts bytes the adapter
+/// rejected before yielding a [`Message`](crate::Message).
+///
+/// [`NonBlockingSocket`]: crate::NonBlockingSocket
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[must_use = "SocketMetrics should be inspected after being queried"]
+pub struct SocketMetrics {
+    /// Receive polls performed by the adapter.
+    pub receive_polls: u64,
+    /// Raw datagrams returned by the adapter's receive call, including
+    /// datagrams it later rejected.
+    pub datagrams_received: u64,
+    /// Raw payload bytes returned by the adapter's receive call.
+    pub bytes_received: u64,
+    /// Datagrams that decoded into a protocol [`Message`](crate::Message).
+    pub messages_decoded: u64,
+    /// Datagrams rejected during framing or protocol decoding.
+    pub datagrams_rejected: u64,
+    /// Receive polls that reached the adapter's raw-attempt or decoded-message
+    /// cap. A rising value means ingress saturated the per-poll work bound and
+    /// later traffic may wait for a subsequent poll.
+    pub receive_cap_saturations: u64,
+    /// Datagrams the adapter accepted for sending.
+    pub datagrams_sent: u64,
+    /// Encoded payload bytes the adapter accepted for sending.
+    pub bytes_sent: u64,
+    /// Send calls that failed or were dropped by the adapter (`WouldBlock`,
+    /// closed socket, or another adapter error).
+    pub send_failures: u64,
+}
+
+impl SocketMetrics {
+    /// Records one completed receive poll.
+    pub(crate) fn record_receive_poll(&mut self) {
+        self.receive_polls = self.receive_polls.saturating_add(1);
+    }
+
+    /// Records one raw datagram returned by the adapter.
+    pub(crate) fn record_datagram_received(&mut self, bytes: usize) {
+        self.datagrams_received = self.datagrams_received.saturating_add(1);
+        self.bytes_received = self
+            .bytes_received
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    /// Records one datagram that decoded into a protocol message.
+    pub(crate) fn record_message_decoded(&mut self) {
+        self.messages_decoded = self.messages_decoded.saturating_add(1);
+    }
+
+    /// Records one datagram rejected by framing or protocol decoding.
+    pub(crate) fn record_datagram_rejected(&mut self) {
+        self.datagrams_rejected = self.datagrams_rejected.saturating_add(1);
+    }
+
+    /// Records one receive poll that reached a per-poll cap.
+    pub(crate) fn record_receive_cap_saturation(&mut self) {
+        self.receive_cap_saturations = self.receive_cap_saturations.saturating_add(1);
+    }
+
+    /// Records one datagram accepted by the adapter for sending.
+    pub(crate) fn record_datagram_sent(&mut self, bytes: usize) {
+        self.datagrams_sent = self.datagrams_sent.saturating_add(1);
+        self.bytes_sent = self
+            .bytes_sent
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    /// Records one adapter send failure.
+    pub(crate) fn record_send_failure(&mut self) {
+        self.send_failures = self.send_failures.saturating_add(1);
+    }
+}
+
 /// A cumulative snapshot of session-level metrics.
 ///
 /// In normal use you read a snapshot from [`P2PSession::metrics`],
@@ -322,9 +409,10 @@ impl Serialize for RollbackDepthHistogram {
 ///
 /// Rollback, pacing, checksum, and checksum-history counters are populated by
 /// [`P2PSession`]. [`SpectatorSession`] and [`ReplaySession`] populate
-/// `event_queue_high_water` plus the `events_discarded_*` counters; their other
-/// fields stay at the default `0`. Spectators expose `frames_behind_host`
-/// separately.
+/// `event_queue_high_water` plus the `events_discarded_*` counters.
+/// `P2PSession` and `SpectatorSession` also populate `socket`; replay has no
+/// network socket, and every unpopulated field stays at the default `0`.
+/// Spectators expose `frames_behind_host` separately.
 ///
 /// [`P2PSession`]: crate::P2PSession
 /// [`ReplaySession`]: crate::ReplaySession
@@ -472,6 +560,16 @@ pub struct SessionMetrics {
     /// and sync-test sessions have no receive socket, so this remains zero for
     /// them.
     pub unknown_source_packets: u64,
+
+    /// Cumulative adapter-level transport counters from the socket supplied to
+    /// this session.
+    ///
+    /// This separates actual adapter acceptance/rejection from the protocol
+    /// enqueue demand in [`PeerMetrics`]. A custom
+    /// [`NonBlockingSocket`](crate::NonBlockingSocket) that does not override
+    /// `socket_metrics` reports all zeros. Replay and sync-test sessions have no
+    /// network socket, so this remains the default value for them.
+    pub socket: SocketMetrics,
 }
 
 impl SessionMetrics {
@@ -1395,6 +1493,23 @@ mod tests {
         assert!(json.contains(r#""1":1"#), "{json}");
         assert!(json.contains(r#""17_plus":1"#), "{json}");
         assert!(json.contains(r#""frames_advanced":18"#), "{json}");
+    }
+
+    #[test]
+    fn socket_metrics_record_send_and_failure_counters() {
+        let mut metrics = SocketMetrics::default();
+        metrics.record_datagram_sent(7);
+        assert_eq!(metrics.datagrams_sent, 1);
+        assert_eq!(metrics.bytes_sent, 7);
+        assert_eq!(metrics.send_failures, 0);
+
+        metrics.record_send_failure();
+        assert_eq!(metrics.send_failures, 1);
+        assert_eq!(
+            metrics.datagrams_sent, 1,
+            "a failure is not a sent datagram"
+        );
+        assert_eq!(metrics.bytes_sent, 7, "a failure adds no accepted bytes");
     }
 
     #[cfg(feature = "json")]

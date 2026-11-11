@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+use crate::metrics::SocketMetrics;
 use crate::network::buffer::{report_send_buffer_too_small, zeroed_buffer};
 use crate::network::codec;
 use crate::network::socket_receive;
@@ -32,6 +33,8 @@ pub struct UdpNonBlockingSocket {
     recv_buffer: Vec<u8>,
     /// Send buffer - reused across send_to calls to avoid allocation
     send_buffer: Vec<u8>,
+    /// Adapter-level transport counters exposed through the session metrics.
+    metrics: SocketMetrics,
 }
 
 impl UdpNonBlockingSocket {
@@ -78,6 +81,7 @@ impl UdpNonBlockingSocket {
             socket,
             recv_buffer: zeroed_buffer(recv_buffer_size, "udp recv buffer")?,
             send_buffer: zeroed_buffer(send_buffer_size, "udp send buffer")?,
+            metrics: SocketMetrics::default(),
         })
     }
 
@@ -116,7 +120,7 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
                 // Fall back to allocating encode
                 match codec::encode(msg) {
                     Ok(buf) => {
-                        self.send_encoded_packet(&buf, addr);
+                        Self::send_encoded_packet(&self.socket, &mut self.metrics, &buf, addr);
                         return;
                     },
                     Err(e) => {
@@ -151,14 +155,21 @@ impl NonBlockingSocket<SocketAddr> for UdpNonBlockingSocket {
             );
             &[]
         });
-        self.send_encoded_packet(buf_slice, addr);
+        Self::send_encoded_packet(&self.socket, &mut self.metrics, buf_slice, addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(SocketAddr, Message)> {
         let socket = &self.socket;
-        socket_receive::receive_all_messages_from(&mut self.recv_buffer, "UDP", |buffer| {
-            socket.recv_from(buffer)
-        })
+        socket_receive::receive_all_messages_from(
+            &mut self.recv_buffer,
+            "UDP",
+            &mut self.metrics,
+            |buffer| socket.recv_from(buffer),
+        )
+    }
+
+    fn socket_metrics(&self) -> SocketMetrics {
+        self.metrics
     }
 }
 
@@ -166,7 +177,12 @@ impl UdpNonBlockingSocket {
     /// Sends an already-encoded packet to the given address.
     ///
     /// This is a helper that handles packet size warnings and send errors.
-    fn send_encoded_packet(&self, buf: &[u8], addr: &SocketAddr) {
+    fn send_encoded_packet(
+        socket: &UdpSocket,
+        metrics: &mut SocketMetrics,
+        buf: &[u8],
+        addr: &SocketAddr,
+    ) {
         // Overly large packets risk being fragmented, which can increase packet loss (any fragment
         // of a packet getting lost will cause the whole fragment to be lost), or increase latency
         // to be delayed (have to wait for all fragments to arrive).
@@ -192,14 +208,18 @@ impl UdpNonBlockingSocket {
 
         // Send the packet; if this fails, log an error but don't panic.
         // UDP is best-effort, so dropped packets are expected behavior.
-        if let Err(e) = self.socket.send_to(buf, addr) {
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::NetworkProtocol,
-                "Failed to send UDP packet to {}: {}",
-                addr,
-                e
-            );
+        match socket.send_to(buf, addr) {
+            Ok(_len) => metrics.record_datagram_sent(buf.len()),
+            Err(e) => {
+                metrics.record_send_failure();
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::NetworkProtocol,
+                    "Failed to send UDP packet to {}: {}",
+                    addr,
+                    e
+                );
+            },
         }
     }
 }
@@ -335,6 +355,54 @@ mod tests {
         // Check port matches (IP may differ between 0.0.0.0 and 127.0.0.1)
         assert_eq!(received[0].0.port(), addr1.port());
         assert_eq!(received[0].1, msg);
+    }
+
+    #[test]
+    #[cfg(not(miri))] // Miri cannot execute foreign functions like socket()
+    fn test_udp_socket_reports_accepted_sends_and_decoded_receives() {
+        let mut receiver = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let mut sender = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let addr = to_loopback_addr(&receiver);
+        let sender_addr = to_loopback_addr(&sender);
+
+        assert_eq!(sender.socket_metrics(), SocketMetrics::default());
+        assert_eq!(receiver.socket_metrics(), SocketMetrics::default());
+
+        let msg = Message {
+            header: MessageHeader::new(0x3456),
+            body: MessageBody::KeepAlive,
+        };
+        sender.send_to(&msg, &addr);
+        let sent = sender.socket_metrics();
+        assert_eq!(sent.datagrams_sent, 1);
+        assert!(sent.bytes_sent > 0);
+        assert_eq!(sent.send_failures, 0);
+
+        let received = wait_for_messages(&mut receiver, 1, 20);
+        assert_eq!(received.len(), 1, "expected one decoded datagram");
+        assert_eq!(received[0].0.port(), sender_addr.port());
+        assert_eq!(received[0].1, msg);
+        let received_metrics = receiver.socket_metrics();
+        assert!(received_metrics.receive_polls >= 1);
+        assert_eq!(received_metrics.datagrams_received, 1);
+        assert_eq!(received_metrics.messages_decoded, 1);
+        assert_eq!(received_metrics.datagrams_rejected, 0);
+        assert_eq!(received_metrics.receive_cap_saturations, 0);
+        assert!(received_metrics.bytes_received > 0);
+
+        let raw = UdpSocket::bind("127.0.0.1:0").unwrap();
+        raw.send_to(&[0xF5], addr).expect("send malformed");
+        for _ in 0..20 {
+            let _ = receiver.receive_all_messages();
+            if receiver.socket_metrics().datagrams_rejected == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let after_reject = receiver.socket_metrics();
+        assert_eq!(after_reject.datagrams_rejected, 1);
+        assert_eq!(after_reject.messages_decoded, 1);
+        assert_eq!(after_reject.receive_cap_saturations, 0);
     }
 
     #[test]

@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SessionMetrics::socket` exposes cumulative adapter-level transport counters: receive polls, raw
+  datagrams/bytes, decoded messages, decode rejections, receive-cap saturations, accepted
+  sends/bytes, and send failures. Built-in UDP and Tokio adapters populate them; custom
+  `NonBlockingSocket` implementations opt in by overriding `socket_metrics` (the default reports
+  zeros). These counters separate actual adapter acceptance/rejection from the protocol enqueue
+  demand in `PeerMetrics` and make per-poll ingress saturation visible during overload.
 - A doc-hidden `P2PSession::diagnostic_sometimes_state_vector` compatibility surface records five
   fixed-order, monotonic observations for the deterministic nightly simulation census. The census
   publishes bounded, domain-separated organic and targeted evidence without changing simulation,
