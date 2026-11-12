@@ -37,6 +37,9 @@ func _error_result(message: String) -> Dictionary:
 		"real_clock_send_delta": 0,
 		"ping_a_ms": -1,
 		"ping_b_ms": -1,
+		"replay_frames": 0,
+		"replay_digest": "",
+		"replay_desyncs": -1,
 		"error": message,
 	}
 

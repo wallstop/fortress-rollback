@@ -1,16 +1,20 @@
 #[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
 mod tests {
+    use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES};
     use fortress_rollback::network::codec;
     use fortress_rollback::{
         ChaosConfig, ChaosSocket, Config, FortressRequest, Frame, InputVec, Message,
-        NonBlockingSocket, PlayerHandle, PlayerType, ProtocolConfig, RequestVec, SessionBuilder,
-        SessionState,
+        NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
+        SessionBuilder, SessionState,
     };
     use serde::{Deserialize, Serialize};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    use web_time::{Duration, Instant};
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -28,6 +32,287 @@ mod tests {
 
         fn receive_all_messages(&mut self) -> Vec<(u8, Message)> {
             Vec::new()
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn captured_native_replay_replays_identically_in_browser() {
+        let evidence = fortress_replay_fixture::replay_fixture()
+            .expect("checked-in captured schedule must replay in the browser");
+        assert_eq!(
+            evidence.frames, EXPECTED_FRAMES,
+            "browser replay frame count changed"
+        );
+        assert_eq!(evidence.desyncs, 0, "browser replay reported a desync");
+        assert_eq!(
+            evidence.digest, EXPECTED_DIGEST,
+            "browser replay state/request digest differs from native"
+        );
+        assert_eq!(evidence.requests, u64::from(EXPECTED_FRAMES) * 2);
+    }
+
+    fn virtual_clock() -> (fortress_rollback::ClockFn, Arc<AtomicU64>) {
+        let base = Instant::now();
+        let offset_ms = Arc::new(AtomicU64::new(0));
+        let clock_offset = Arc::clone(&offset_ms);
+        let clock: fortress_rollback::ClockFn =
+            Arc::new(move || base + Duration::from_millis(clock_offset.load(Ordering::Relaxed)));
+        (clock, offset_ms)
+    }
+
+    fn build_virtual_clock_sessions(
+        clock: fortress_rollback::ClockFn,
+    ) -> (P2PSession<BrowserConfig>, P2PSession<BrowserConfig>) {
+        let (socket1, socket2, _bus) = RawBus::pair();
+        let first = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(ProtocolConfig {
+                protocol_rng_seed: Some(0xB101),
+                clock: Some(clock.clone()),
+                ..ProtocolConfig::default()
+            })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .and_then(|builder| {
+                builder.add_player(PlayerType::Remote(BrowserPeer(1)), PlayerHandle::new(1))
+            })
+            .and_then(|builder| builder.start_p2p_session(socket1))
+            .expect("first browser suspension session must build");
+        let second = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(ProtocolConfig {
+                protocol_rng_seed: Some(0xB102),
+                clock: Some(clock),
+                ..ProtocolConfig::default()
+            })
+            .add_player(PlayerType::Remote(BrowserPeer(0)), PlayerHandle::new(0))
+            .and_then(|builder| builder.add_player(PlayerType::Local, PlayerHandle::new(1)))
+            .and_then(|builder| builder.start_p2p_session(socket2))
+            .expect("second browser suspension session must build");
+        (first, second)
+    }
+
+    fn poll_pair_with_clock(
+        session1: &mut P2PSession<BrowserConfig>,
+        session2: &mut P2PSession<BrowserConfig>,
+        offset_ms: &Arc<AtomicU64>,
+    ) {
+        session1.poll_remote_clients();
+        session2.poll_remote_clients();
+        offset_ms.fetch_add(16, Ordering::Relaxed);
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct LinkEvents {
+        interrupted: bool,
+        resumed: bool,
+        disconnected: bool,
+    }
+
+    impl LinkEvents {
+        fn merge(&mut self, other: Self) {
+            self.interrupted |= other.interrupted;
+            self.resumed |= other.resumed;
+            self.disconnected |= other.disconnected;
+        }
+    }
+
+    fn drain_link_events(session: &mut P2PSession<BrowserConfig>) -> LinkEvents {
+        let mut events = LinkEvents::default();
+        for event in session.events() {
+            match event {
+                fortress_rollback::FortressEvent::NetworkInterrupted { .. } => {
+                    events.interrupted = true;
+                },
+                fortress_rollback::FortressEvent::NetworkResumed { .. } => {
+                    events.resumed = true;
+                },
+                fortress_rollback::FortressEvent::Disconnected { .. } => {
+                    events.disconnected = true;
+                },
+                _ => {},
+            }
+        }
+        events
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_tab_suspension_within_timeout_resumes_and_advances() {
+        let (clock, offset_ms) = virtual_clock();
+        let (mut session1, mut session2) = build_virtual_clock_sessions(clock);
+
+        let mut sync_polls = 0usize;
+        while sync_polls < SYNC_POLL_BUDGET
+            && (session1.current_state() != SessionState::Running
+                || session2.current_state() != SessionState::Running)
+        {
+            poll_pair_with_clock(&mut session1, &mut session2, &offset_ms);
+            sync_polls = sync_polls.saturating_add(1);
+        }
+        assert!(
+            session1.current_state() == SessionState::Running
+                && session2.current_state() == SessionState::Running,
+            "virtual-clock sessions failed to synchronize"
+        );
+        let _ = session1.events().count();
+        let _ = session2.events().count();
+
+        let mut state1 = BrowserState::default();
+        let mut state2 = BrowserState::default();
+        for frame_index in 0..6u32 {
+            session1
+                .add_local_input(PlayerHandle::new(0), BrowserInput { value: frame_index })
+                .expect("first suspended-tab input must be accepted");
+            session2
+                .add_local_input(PlayerHandle::new(1), BrowserInput { value: frame_index })
+                .expect("second suspended-tab input must be accepted");
+            apply_requests(
+                &mut state1,
+                session1
+                    .advance_frame()
+                    .expect("first suspended-tab session must advance"),
+            );
+            apply_requests(
+                &mut state2,
+                session2
+                    .advance_frame()
+                    .expect("second suspended-tab session must advance"),
+            );
+            poll_pair_with_clock(&mut session1, &mut session2, &offset_ms);
+        }
+
+        // A throttled background tab performs no polls while wall time passes.
+        // Stay above the 500ms interruption notice and below the 2s timeout.
+        offset_ms.fetch_add(1_000, Ordering::Relaxed);
+
+        let mut events1 = LinkEvents::default();
+        let mut events2 = LinkEvents::default();
+        for _ in 0..64 {
+            poll_pair_with_clock(&mut session1, &mut session2, &offset_ms);
+            events1.merge(drain_link_events(&mut session1));
+            events2.merge(drain_link_events(&mut session2));
+            if (events1.interrupted && events1.resumed) || (events2.interrupted && events2.resumed)
+            {
+                break;
+            }
+        }
+        assert!(
+            events1.interrupted || events2.interrupted,
+            "suspended tabs must observe NetworkInterrupted: {events1:?}/{events2:?}"
+        );
+        assert!(
+            events1.resumed || events2.resumed,
+            "suspended tabs must observe NetworkResumed after polling resumes: \
+             {events1:?}/{events2:?}"
+        );
+        assert!(
+            !events1.disconnected && !events2.disconnected,
+            "a sub-timeout suspension must not disconnect: {events1:?}/{events2:?}"
+        );
+
+        let drive_frame = |session1: &mut P2PSession<BrowserConfig>,
+                           session2: &mut P2PSession<BrowserConfig>,
+                           state1: &mut BrowserState,
+                           state2: &mut BrowserState,
+                           frame_index: u32,
+                           input: BrowserInput| {
+            session1
+                .add_local_input(PlayerHandle::new(0), input)
+                .expect("post-resume first input must be accepted");
+            session2
+                .add_local_input(PlayerHandle::new(1), input)
+                .expect("post-resume second input must be accepted");
+            apply_requests(
+                state1,
+                session1
+                    .advance_frame()
+                    .expect("post-resume first session must advance"),
+            );
+            apply_requests(
+                state2,
+                session2
+                    .advance_frame()
+                    .expect("post-resume second session must advance"),
+            );
+            let target = Frame::new(frame_index as i32);
+            let mut confirm_polls = 0usize;
+            while confirm_polls < INPUT_POLL_BUDGET
+                && (session1.confirmed_frame() < target || session2.confirmed_frame() < target)
+            {
+                poll_pair_with_clock(session1, session2, &offset_ms);
+                confirm_polls = confirm_polls.saturating_add(1);
+            }
+            assert!(
+                session1.confirmed_frame() >= target && session2.confirmed_frame() >= target,
+                "post-resume frame {frame_index} failed to confirm within \
+                 {INPUT_POLL_BUDGET} polls"
+            );
+        };
+
+        // The same post-resume input on every frame makes repeat-last
+        // prediction exact after the first correction, so the final state is a
+        // confirmed checkpoint rather than a speculative tail.
+        let post_resume_input = BrowserInput { value: 9 };
+        for frame_index in 6..9u32 {
+            drive_frame(
+                &mut session1,
+                &mut session2,
+                &mut state1,
+                &mut state2,
+                frame_index,
+                post_resume_input,
+            );
+        }
+        assert_eq!(state1, state2, "post-resume states must agree");
+        assert_eq!(state1.frame, 9, "post-resume advances must move the frame");
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_tab_suspension_past_timeout_disconnects_fail_closed() {
+        let (clock, offset_ms) = virtual_clock();
+        let (mut session1, mut session2) = build_virtual_clock_sessions(clock);
+
+        let mut sync_polls = 0usize;
+        while sync_polls < SYNC_POLL_BUDGET
+            && (session1.current_state() != SessionState::Running
+                || session2.current_state() != SessionState::Running)
+        {
+            poll_pair_with_clock(&mut session1, &mut session2, &offset_ms);
+            sync_polls = sync_polls.saturating_add(1);
+        }
+        assert!(
+            session1.current_state() == SessionState::Running
+                && session2.current_state() == SessionState::Running,
+            "virtual-clock sessions failed to synchronize"
+        );
+        let _ = session1.events().count();
+        let _ = session2.events().count();
+
+        // One tab keeps polling while the other is throttled past the 2s default
+        // disconnect timeout. The live tab must report interruption and then
+        // fail closed instead of silently blocking.
+        offset_ms.fetch_add(3_000, Ordering::Relaxed);
+        let mut live_events = LinkEvents::default();
+        for _ in 0..32 {
+            session1.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+            live_events.merge(drain_link_events(&mut session1));
+            if live_events.disconnected {
+                break;
+            }
+        }
+        assert!(
+            live_events.interrupted,
+            "a timed-out suspension must first report interruption: {live_events:?}"
+        );
+        assert!(
+            live_events.disconnected,
+            "a suspension past the disconnect timeout must fail closed: {live_events:?}"
+        );
+
+        // The throttled tab resumes with the live peer's keepalives still
+        // buffered. It must drain them without panicking.
+        for _ in 0..32 {
+            poll_pair_with_clock(&mut session1, &mut session2, &offset_ms);
+            let _ = drain_link_events(&mut session1);
+            let _ = drain_link_events(&mut session2);
         }
     }
 

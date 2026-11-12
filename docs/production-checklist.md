@@ -13,7 +13,10 @@ transport, or session configuration changes.
 - Audit enabled dependency features with `cargo tree -e features`. In particular, investigate
   `ahash` or `const-random` in code that can influence simulation order or state.
 - Test every supported target. Floating-point and platform APIs can differ even when native tests
-  agree.
+  agree. Replay the checked-in portable fixture
+  (`tests/replay-fixture/fixtures/portable-replay.bin`) on native, browser
+  `wasm32-unknown-unknown`, and Godot `wasm32-unknown-emscripten`; all three lanes must report the
+  same frame count, request count, and request/state digest with zero replay desyncs.
 
 See the [determinism model](specs/determinism-model.md) for the complete contract.
 
@@ -130,7 +133,10 @@ abort on the first request error.
   `wasm-bindgen` test dependencies behind the full browser target predicate so the Emscripten graph
   stays separate.
 - Browsers can throttle or suspend background tabs. Treat a suspension as a network interruption and
-  test resume, timeout, and graceful-drop behavior explicitly.
+  test resume, timeout, and graceful-drop behavior explicitly. The browser runtime lane injects a
+  virtual clock, then verifies `NetworkInterrupted`/`NetworkResumed` and continued confirmed play
+  after a sub-timeout suspension, and a fail-closed `Disconnected` after a suspension longer than
+  the disconnect timeout.
 
 ## Release evidence
 
@@ -142,6 +148,7 @@ abort on the first request error.
 - Run the deterministic baseline sweep and compare encoded byte/message demand, rollback depth,
   confirmation lag, and stalls against the checked-in ledger. The strict-build CI lane also replays
   the checked-in corpus under `-C overflow-checks=on -C debug-assertions=on`, so release-safety
-  profiles must preserve artifact and trace identity.
+  profiles must preserve artifact and trace identity. The corpus includes a mixed-transport schedule
+  whose unreliable and reliable-retransmission links must still agree on every confirmed prefix.
 - Run release-mode nightly chaos/soak lanes on every supported OS and keep their artifacts.
 - Verify that every changelog behavior claim points to a regression test or measured artifact.

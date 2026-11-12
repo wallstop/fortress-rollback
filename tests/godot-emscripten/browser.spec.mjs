@@ -185,6 +185,9 @@ for (const mode of MODES) {
         real_clock_smoke: true,
         ping_a_ms: 50,
         ping_b_ms: 50,
+        replay_frames: 149,
+        replay_digest: "0xb3535a3db29da7784abaacf609fec42b",
+        replay_desyncs: 0,
         error: "",
       });
       expect(result.real_clock_send_delta).toBeGreaterThanOrEqual(2);

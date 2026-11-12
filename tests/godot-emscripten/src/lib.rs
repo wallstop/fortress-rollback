@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES};
 use fortress_rollback::{
     ClockFn, Config, Message, NetworkStats, NonBlockingSocket, P2PSession, PlayerHandle,
     PlayerType, ProtocolConfig, SessionBuilder, SessionState,
@@ -257,6 +258,33 @@ fn mode() -> &'static str {
     }
 }
 
+fn replay_evidence() -> Result<(u32, String, u32), String> {
+    let evidence = fortress_replay_fixture::replay_fixture()?;
+    if evidence.frames != EXPECTED_FRAMES {
+        return Err(format!(
+            "captured replay played {} frames, expected {EXPECTED_FRAMES}",
+            evidence.frames
+        ));
+    }
+    if evidence.digest != EXPECTED_DIGEST {
+        return Err(format!(
+            "captured replay digest {:#034x} differs from native {EXPECTED_DIGEST:#034x}",
+            evidence.digest
+        ));
+    }
+    if evidence.desyncs != 0 {
+        return Err(format!(
+            "captured replay reported {} checksum desync(s) under Emscripten",
+            evidence.desyncs
+        ));
+    }
+    Ok((
+        evidence.frames,
+        format!("{:#034x}", evidence.digest),
+        evidence.desyncs,
+    ))
+}
+
 fn dictionary_int(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -276,10 +304,14 @@ impl FortressEmscriptenProbe {
         result.set("mode", mode());
         result.set("target_os", std::env::consts::OS);
 
-        match run_real_clock_probe().and_then(|real_clock_send_delta| {
-            run_virtual_clock_probe().map(|pings| (real_clock_send_delta, pings))
-        }) {
-            Ok((real_clock_send_delta, (first_ping, second_ping))) => {
+        match run_real_clock_probe()
+            .and_then(|real_clock_send_delta| {
+                run_virtual_clock_probe().map(|pings| (real_clock_send_delta, pings))
+            })
+            .and_then(|(real_clock_send_delta, pings)| {
+                replay_evidence().map(|replay| (real_clock_send_delta, pings, replay))
+            }) {
+            Ok((real_clock_send_delta, (first_ping, second_ping), replay)) => {
                 result.set("ok", true);
                 result.set("real_clock_smoke", true);
                 result.set(
@@ -288,6 +320,9 @@ impl FortressEmscriptenProbe {
                 );
                 result.set("ping_a_ms", dictionary_int(first_ping));
                 result.set("ping_b_ms", dictionary_int(second_ping));
+                result.set("replay_frames", i64::from(replay.0));
+                result.set("replay_digest", replay.1.as_str());
+                result.set("replay_desyncs", i64::from(replay.2));
                 result.set("error", "");
             },
             Err(error) => {
@@ -296,6 +331,9 @@ impl FortressEmscriptenProbe {
                 result.set("real_clock_send_delta", 0);
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);
+                result.set("replay_frames", 0);
+                result.set("replay_digest", "");
+                result.set("replay_desyncs", -1);
                 result.set("error", error.as_str());
             },
         }

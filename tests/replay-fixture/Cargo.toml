@@ -1,0 +1,21 @@
+[package]
+name = "fortress-replay-fixture"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.86"
+publish = false
+description = "Cross-platform replay fixture shared by native, browser WASM, and Emscripten tests"
+
+[lib]
+doctest = false
+
+[features]
+# Capture support links the fixture to a live P2P session and a virtual clock.
+# Platform replay lanes only need the checked-in artifact, so capture stays off
+# there.
+capture = ["dep:web-time"]
+
+[dependencies]
+fortress-rollback = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+web-time = { version = "1.1", optional = true }

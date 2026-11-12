@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tests/network-peer", "tests/wasm-browser-smoke"]
+members = [".", "tests/network-peer", "tests/replay-fixture", "tests/wasm-browser-smoke"]
 # Note: loom-tests is intentionally NOT in the workspace because it requires
 # special cfg flags (--cfg loom) that conflict with normal builds
 
