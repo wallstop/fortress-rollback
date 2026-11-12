@@ -17,10 +17,14 @@
 
 use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::rng::{Pcg32, SeedableRng};
-use fortress_rollback::{DisconnectBehavior, SaveMode, __internal::MAX_FRAME_DELAY};
+use fortress_rollback::{DisconnectBehavior, SaveMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::time::Duration;
+
+/// Delay bound re-exported through the test harness so rustfmt versions agree on
+/// the crate-internal import order.
+const MAX_FRAME_DELAY: usize = fortress_rollback::__internal::MAX_FRAME_DELAY;
 
 /// Serializable mirror of [`DisconnectBehavior`] (the production enum does
 /// not derive serde; schedules must round-trip as corpus artifacts).
