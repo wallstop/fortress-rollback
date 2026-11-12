@@ -2193,6 +2193,10 @@ fn start_hot_join_for_slot<I: SimInput>(slot: usize, step: u32, ctx: &mut HotJoi
         .with_disconnect_behavior(ctx.schedule.config.disconnect_behavior.into())
         .with_protocol_config(protocol_config)
         .with_violation_observer(observer as Arc<_>);
+    if let Some(queue_length) = ctx.schedule.config.input_queue_length {
+        builder =
+            builder.with_input_queue_config(fortress_rollback::InputQueueConfig { queue_length });
+    }
     if let Some(timeout) = ctx.options.disconnect_timeout {
         builder = builder.with_disconnect_timeout(timeout);
     }
@@ -3593,6 +3597,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .with_disconnect_behavior(schedule.config.disconnect_behavior.into())
                 .with_protocol_config(protocol_config)
                 .with_violation_observer(Arc::clone(&observer) as Arc<_>);
+            if let Some(queue_length) = schedule.config.input_queue_length {
+                builder = builder
+                    .with_input_queue_config(fortress_rollback::InputQueueConfig { queue_length });
+            }
             if let Some(timeout) = options.disconnect_timeout {
                 builder = builder.with_disconnect_timeout(timeout);
             }

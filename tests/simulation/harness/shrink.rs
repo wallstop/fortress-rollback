@@ -2148,6 +2148,7 @@ mod tests {
     #[test]
     fn legacy_delay_shrinking_to_zero_survives_maximum_initial_delay() {
         let mut schedule = clean_schedule(2, 2);
+        schedule.config.max_prediction = 0;
         schedule.config.input_delay = fortress_rollback::__internal::MAX_FRAME_DELAY;
         schedule.events = vec![(
             1,
