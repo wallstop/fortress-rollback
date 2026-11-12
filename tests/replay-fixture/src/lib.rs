@@ -4,7 +4,13 @@
 //! [`Replay`] recorded from a two-peer P2P session with rollback corrections.
 //! Native, browser `wasm32-unknown-unknown`, and Godot `wasm32-unknown-emscripten`
 //! tests all load the exact same bytes, run the same integer-only application
-//! model, and assert the same frame count, request count, and digest.
+//! model, and assert the same frame count, request count, and digests.
+//!
+//! The captured session is deliberately long enough to recycle the documented
+//! runtime rings many times: the 128-frame input queue and the
+//! `max_prediction + 1` saved-state ring. It therefore proves extended
+//! frame/ring operation stays byte-identical across targets instead of only
+//! covering a first ring pass.
 //!
 //! Replay playback runs with checksum validation enabled, so the platform also
 //! recomputes every recorded application checksum. A platform-specific replay
@@ -29,11 +35,21 @@ use serde::{Deserialize, Serialize};
 /// Checked-in replay bytes captured from a real two-peer session.
 pub const FIXTURE_BYTES: &[u8] = include_bytes!("../fixtures/portable-replay.bin");
 
+/// Captured session length. At 60 Hz this is 68.3 seconds of play: the
+/// 128-frame input queue recycles 32 times and the default nine-cell
+/// saved-state ring recycles more than 450 times.
+pub const CAPTURED_FRAMES: u32 = 4_097;
+/// Prediction window used while capturing the fixture.
+pub const CAPTURED_MAX_PREDICTION: usize = 8;
+
 /// Frames the fixture must play back.
-pub const EXPECTED_FRAMES: u32 = 149;
+pub const EXPECTED_FRAMES: u32 = 4_096;
+/// Digest of the replayed request stream. Captured natively; browser and
+/// Emscripten lanes assert the same value.
+pub const EXPECTED_REQUEST_DIGEST: u128 = 0xb195_35aa_fcc4_16fe_df10_56f7_8eca_cf18;
 /// Digest of the replayed input/state/request stream. Captured natively; browser
 /// and Emscripten lanes assert the same value.
-pub const EXPECTED_DIGEST: u128 = 0xb353_5a3d_b29d_a778_4aba_acf6_09fe_c42b;
+pub const EXPECTED_DIGEST: u128 = 0x56cc_01bd_3e28_a54e_0956_a2fc_e302_6d0b;
 
 /// Fixed-width input used by the captured schedule.
 #[repr(C)]
@@ -129,6 +145,8 @@ pub struct ReplayEvidence {
     pub requests: u64,
     /// Replay desync events reported by checksum validation.
     pub desyncs: u32,
+    /// Digest of the ordered request stream (kind, frame, inputs, status).
+    pub request_digest: u128,
     /// Digest of each played-back frame's post-advance application checksum.
     pub digest: u128,
     /// Final application checksum.
@@ -154,6 +172,15 @@ pub fn replay_fixture() -> Result<ReplayEvidence, String> {
 pub fn replay_bytes(bytes: &[u8]) -> Result<ReplayEvidence, String> {
     let replay = Replay::<FixtureInput>::from_bytes(bytes)
         .map_err(|error| format!("fixture replay decode failed: {error}"))?;
+    let resealed = replay
+        .to_bytes()
+        .map_err(|error| format!("fixture replay re-encode failed: {error}"))?;
+    if resealed.as_slice() != bytes {
+        return Err(
+            "fixture artifact is not canonical: re-encoded bytes differ from the checked-in artifact"
+                .to_owned(),
+        );
+    }
     replay_captured(replay)
 }
 
@@ -170,6 +197,7 @@ pub fn replay_captured(replay: Replay<FixtureInput>) -> Result<ReplayEvidence, S
     let mut frames = 0u32;
     let mut requests = 0u64;
     let mut desyncs = 0u32;
+    let mut request_digest = digest_bytes(0, b"fortress-portable-replay-requests");
     let mut digest = digest_bytes(0, b"fortress-portable-replay");
 
     while !session.is_complete() {
@@ -178,6 +206,7 @@ pub fn replay_captured(replay: Replay<FixtureInput>) -> Result<ReplayEvidence, S
             .map_err(|error| format!("fixture advance failed at frame {frames}: {error}"))?;
         requests = requests.saturating_add(u64::try_from(frame_requests.len()).unwrap_or(u64::MAX));
         for request in frame_requests {
+            request_digest = digest_request(request_digest, &request);
             process_request(&mut state, request)?;
         }
         digest = digest_bytes(digest, &state_checksum(&state).to_le_bytes());
@@ -200,9 +229,36 @@ pub fn replay_captured(replay: Replay<FixtureInput>) -> Result<ReplayEvidence, S
         frames,
         requests,
         desyncs,
+        request_digest,
         digest,
         final_checksum: state_checksum(&state),
     })
+}
+
+/// Folds one request into the ordered request-stream digest.
+fn digest_request(mut hash: u128, request: &FortressRequest<FixtureConfig>) -> u128 {
+    match request {
+        FortressRequest::SaveGameState { frame, .. } => {
+            digest_bytes(digest_bytes(hash, &[1]), &frame.as_i32().to_le_bytes())
+        },
+        FortressRequest::LoadGameState { frame, .. } => {
+            digest_bytes(digest_bytes(hash, &[2]), &frame.as_i32().to_le_bytes())
+        },
+        FortressRequest::AdvanceFrame { inputs } => {
+            hash = digest_bytes(hash, &[3]);
+            for (input, status) in inputs.iter() {
+                let status = match status {
+                    InputStatus::Confirmed => 0u8,
+                    InputStatus::Predicted => 1,
+                    InputStatus::Disconnected => 2,
+                };
+                hash = digest_bytes(hash, &input.axis.to_le_bytes());
+                hash = digest_bytes(hash, &input.buttons.to_le_bytes());
+                hash = digest_bytes(hash, &[status]);
+            }
+            hash
+        },
+    }
 }
 
 fn process_request(
@@ -237,7 +293,10 @@ mod capture {
     // Capture helpers are exercised by the ignored regeneration tests only.
     #![allow(dead_code)]
 
-    use super::{input_for, state_checksum, FixtureConfig, FixtureInput, FixtureState};
+    use super::{
+        input_for, state_checksum, FixtureConfig, FixtureInput, FixtureState, CAPTURED_FRAMES,
+        CAPTURED_MAX_PREDICTION,
+    };
     use fortress_rollback::replay::Replay;
     use fortress_rollback::{
         ClockFn, FortressRequest, Message, NonBlockingSocket, PlayerHandle, PlayerType,
@@ -254,7 +313,6 @@ mod capture {
     const SECOND_ADDRESS: u8 = 2;
     const MAX_QUEUED_MESSAGES: usize = 4_096;
     const STEP_MILLIS: u64 = 16;
-    const TARGET_FRAMES: u32 = 150;
     const SYNC_POLL_LIMIT: usize = 10_000;
     const DRAIN_POLLS: usize = 2_000;
 
@@ -346,6 +404,7 @@ mod capture {
 
         let mut first = SessionBuilder::<FixtureConfig>::new()
             .with_protocol_config(protocol_config(0x00c0_ffee))
+            .with_max_prediction_window(CAPTURED_MAX_PREDICTION)
             .with_recording(true)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .map_err(|error| format!("first fixture player: {error}"))?
@@ -355,6 +414,7 @@ mod capture {
             .map_err(|error| format!("first fixture session: {error}"))?;
         let mut second = SessionBuilder::<FixtureConfig>::new()
             .with_protocol_config(protocol_config(0x00c0_ffef))
+            .with_max_prediction_window(CAPTURED_MAX_PREDICTION)
             .with_recording(true)
             .add_player(PlayerType::Remote(FIRST_ADDRESS), PlayerHandle::new(0))
             .map_err(|error| format!("second fixture remote: {error}"))?
@@ -383,7 +443,7 @@ mod capture {
         first.events().for_each(drop);
         second.events().for_each(drop);
 
-        for frame in 0..TARGET_FRAMES {
+        for frame in 0..CAPTURED_FRAMES {
             first
                 .add_local_input(PlayerHandle::new(0), input_for(frame, 0))
                 .map_err(|error| format!("first fixture input at {frame}: {error}"))?;
@@ -466,6 +526,7 @@ mod capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fortress_rollback::__internal::INPUT_QUEUE_LENGTH;
 
     #[test]
     fn checked_in_fixture_replays_with_expected_evidence() {
@@ -477,7 +538,40 @@ mod tests {
             "validating playback emits one save and one advance per frame"
         );
         assert_eq!(evidence.desyncs, 0, "checked-in fixture must not desync");
+        assert_eq!(evidence.request_digest, EXPECTED_REQUEST_DIGEST);
         assert_eq!(evidence.digest, EXPECTED_DIGEST);
+    }
+
+    #[test]
+    fn checked_in_fixture_covers_extended_ring_recycling() {
+        let input_queue_wraps =
+            usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX) / INPUT_QUEUE_LENGTH;
+        let saved_state_ring = CAPTURED_MAX_PREDICTION.saturating_add(1);
+        let saved_state_wraps =
+            usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX) / saved_state_ring;
+        assert!(
+            input_queue_wraps >= 32,
+            "fixture must recycle the {INPUT_QUEUE_LENGTH}-frame input queue at least 32 times, \
+             got {input_queue_wraps}"
+        );
+        assert!(
+            saved_state_wraps >= 450,
+            "fixture must recycle the {saved_state_ring}-cell saved-state ring at least 450 times, \
+             got {saved_state_wraps}"
+        );
+
+        let replay =
+            Replay::<FixtureInput>::from_bytes(FIXTURE_BYTES).expect("checked-in fixture decodes");
+        let checksummed_frames = replay
+            .checksums
+            .iter()
+            .filter(|checksum| checksum.is_some())
+            .count();
+        assert_eq!(
+            checksummed_frames,
+            usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX),
+            "every replayed frame must carry a recorded checksum"
+        );
     }
 
     #[test]
@@ -502,7 +596,7 @@ mod tests {
 #[cfg(test)]
 mod capture_tests {
     use super::capture::capture;
-    use super::{replay_captured, EXPECTED_DIGEST, EXPECTED_FRAMES};
+    use super::{replay_captured, EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
     use std::path::Path;
 
     #[test]
@@ -517,10 +611,12 @@ mod capture_tests {
         let evidence = replay_captured(replay).expect("captured replay plays back");
         assert_eq!(evidence.desyncs, 0, "captured replay must not desync");
         eprintln!(
-            "frames={} expected={} requests={} digest={:#034x} expected_digest={:#034x} final={:#034x} bytes={}",
+            "frames={} expected={} requests={} request_digest={:#034x} expected_request_digest={:#034x} digest={:#034x} expected_digest={:#034x} final={:#034x} bytes={}",
             evidence.frames,
             EXPECTED_FRAMES,
             evidence.requests,
+            evidence.request_digest,
+            EXPECTED_REQUEST_DIGEST,
             evidence.digest,
             EXPECTED_DIGEST,
             evidence.final_checksum,
@@ -535,8 +631,8 @@ mod capture_tests {
         let second = capture().expect("second capture succeeds");
         assert_eq!(first, second, "capture must be fully deterministic");
         assert!(
-            first.frames.len() >= 100,
-            "capture must record a useful prefix"
+            first.frames.len() >= usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX),
+            "capture must record the full extended session"
         );
         assert!(
             first

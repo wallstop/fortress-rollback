@@ -39,6 +39,7 @@ func _error_result(message: String) -> Dictionary:
 		"ping_b_ms": -1,
 		"replay_frames": 0,
 		"replay_digest": "",
+		"replay_request_digest": "",
 		"replay_desyncs": -1,
 		"error": message,
 	}

@@ -1,6 +1,6 @@
 #[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
 mod tests {
-    use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES};
+    use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
     use fortress_rollback::network::codec;
     use fortress_rollback::{
         ChaosConfig, ChaosSocket, Config, FortressRequest, Frame, InputVec, Message,
@@ -47,6 +47,10 @@ mod tests {
         assert_eq!(
             evidence.digest, EXPECTED_DIGEST,
             "browser replay state/request digest differs from native"
+        );
+        assert_eq!(
+            evidence.request_digest, EXPECTED_REQUEST_DIGEST,
+            "browser replay request stream differs from native"
         );
         assert_eq!(evidence.requests, u64::from(EXPECTED_FRAMES) * 2);
     }

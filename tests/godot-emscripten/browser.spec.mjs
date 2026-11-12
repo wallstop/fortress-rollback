@@ -185,8 +185,9 @@ for (const mode of MODES) {
         real_clock_smoke: true,
         ping_a_ms: 50,
         ping_b_ms: 50,
-        replay_frames: 149,
-        replay_digest: "0xb3535a3db29da7784abaacf609fec42b",
+        replay_frames: 4096,
+        replay_digest: "0x56cc01bd3e28a54e0956a2fce3026d0b",
+        replay_request_digest: "0xb19535aafcc416fedf1056f78ecacf18",
         replay_desyncs: 0,
         error: "",
       });
