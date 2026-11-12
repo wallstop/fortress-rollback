@@ -46,7 +46,7 @@ mod tests {
         assert_eq!(evidence.desyncs, 0, "browser replay reported a desync");
         assert_eq!(
             evidence.digest, EXPECTED_DIGEST,
-            "browser replay state/request digest differs from native"
+            "browser replay state-checksum digest differs from native"
         );
         assert_eq!(
             evidence.request_digest, EXPECTED_REQUEST_DIGEST,

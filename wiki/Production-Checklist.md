@@ -16,10 +16,8 @@ transport, or session configuration changes.
   agree. Replay the checked-in portable fixture
   (`tests/replay-fixture/fixtures/portable-replay.bin`) on native, browser
   `wasm32-unknown-unknown`, and Godot `wasm32-unknown-emscripten`; all three lanes must report the
-  same 4,096-frame count, request count, ordered request-stream digest, and request/state digest
-  with zero replay desyncs. The captured session recycles the documented 128-frame input queue
-  and the `max_prediction + 1` saved-state ring many times, so a first-ring-pass-only difference
-  cannot hide.
+  same 4,096-frame count, request count, ordered request-stream digest, and state-checksum
+  digest with zero replay desyncs.
 
 See the [determinism model](Determinism-Model) for the complete contract.
 
@@ -153,9 +151,9 @@ abort on the first request error.
   the checked-in corpus under `-C overflow-checks=on -C debug-assertions=on`, so release-safety
   profiles must preserve artifact and trace identity. The corpus includes a mixed-transport schedule
   whose unreliable and reliable-retransmission links must still agree on every confirmed prefix, and
-  an extended schedule that confirms past 12,000 frames through the minimum prediction window while
-  repeatedly recycling the input-queue and saved-state rings under holds, blocks, stalls, and runtime
-  input-delay increases. Replaying the extended schedule must reproduce the identical trace hash and
-  confirmed prefixes.
+  an extended live schedule that confirms past 12,000 frames at the default prediction window under
+  mixed reliable/unreliable links, repeatedly recycling the input-queue and saved-state rings under
+  holds, blocks, stalls, and runtime input-delay increases. Replaying the extended schedule must
+  reproduce the identical trace hash and confirmed prefixes.
 - Run release-mode nightly chaos/soak lanes on every supported OS and keep their artifacts.
 - Verify that every changelog behavior claim points to a regression test or measured artifact.

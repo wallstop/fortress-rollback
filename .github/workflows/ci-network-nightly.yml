@@ -15,11 +15,12 @@ permissions:
 # also captures the deterministic full baseline sweep artifact on Linux so M5's
 # wire-format cost deltas have a nightly ledger.
 #
-# Nightly peers opt into a wider test-only session disconnect timeout because a
-# hosted runner can fail to schedule a child process for longer than the
-# production two-second window. That host-stall gap is not adversarial loss:
-# production-timeout semantics stay covered by the deterministic in-process
-# suites, and the per-PR smoke tier keeps the production default.
+# Loss-bearing nightly peers opt into a wider test-only session disconnect
+# timeout because a hosted runner can fail to schedule a child process for
+# longer than the production two-second window. That host-stall gap is not
+# adversarial loss: production-timeout semantics stay covered by the
+# deterministic in-process suites, loss-free nightly rows keep the production
+# timeout, and the per-PR smoke tier keeps the production default.
 
 on:
   # Daily at 3 AM UTC

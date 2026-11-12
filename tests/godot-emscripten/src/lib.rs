@@ -258,7 +258,7 @@ fn mode() -> &'static str {
     }
 }
 
-fn replay_evidence() -> Result<(u32, String, String, u32), String> {
+fn replay_evidence() -> Result<(u32, u64, String, String, u32), String> {
     let evidence = fortress_replay_fixture::replay_fixture()?;
     if evidence.frames != EXPECTED_FRAMES {
         return Err(format!(
@@ -287,6 +287,7 @@ fn replay_evidence() -> Result<(u32, String, String, u32), String> {
     }
     Ok((
         evidence.frames,
+        evidence.requests,
         format!("{:#034x}", evidence.digest),
         format!("{:#034x}", evidence.request_digest),
         evidence.desyncs,
@@ -329,9 +330,13 @@ impl FortressEmscriptenProbe {
                 result.set("ping_a_ms", dictionary_int(first_ping));
                 result.set("ping_b_ms", dictionary_int(second_ping));
                 result.set("replay_frames", i64::from(replay.0));
-                result.set("replay_digest", replay.1.as_str());
-                result.set("replay_request_digest", replay.2.as_str());
-                result.set("replay_desyncs", i64::from(replay.3));
+                result.set(
+                    "replay_requests",
+                    i64::try_from(replay.1).unwrap_or(i64::MAX),
+                );
+                result.set("replay_digest", replay.2.as_str());
+                result.set("replay_request_digest", replay.3.as_str());
+                result.set("replay_desyncs", i64::from(replay.4));
                 result.set("error", "");
             },
             Err(error) => {
@@ -341,6 +346,7 @@ impl FortressEmscriptenProbe {
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);
                 result.set("replay_frames", 0);
+                result.set("replay_requests", 0);
                 result.set("replay_digest", "");
                 result.set("replay_request_digest", "");
                 result.set("replay_desyncs", -1);

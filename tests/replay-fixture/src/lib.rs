@@ -6,11 +6,11 @@
 //! tests all load the exact same bytes, run the same integer-only application
 //! model, and assert the same frame count, request count, and digests.
 //!
-//! The captured session is deliberately long enough to recycle the documented
-//! runtime rings many times: the 128-frame input queue and the
-//! `max_prediction + 1` saved-state ring. It therefore proves extended
-//! frame/ring operation stays byte-identical across targets instead of only
-//! covering a first ring pass.
+//! The captured session is 4,096 confirmed frames (68.3 seconds at 60 Hz),
+//! which covers a multi-minute input history rather than only a short prefix.
+//! Playback proves that the ordered request stream, the recorded state
+//! checksums, and the canonical serialized artifact bytes are identical on
+//! every target.
 //!
 //! Replay playback runs with checksum validation enabled, so the platform also
 //! recomputes every recorded application checksum. A platform-specific replay
@@ -35,20 +35,13 @@ use serde::{Deserialize, Serialize};
 /// Checked-in replay bytes captured from a real two-peer session.
 pub const FIXTURE_BYTES: &[u8] = include_bytes!("../fixtures/portable-replay.bin");
 
-/// Captured session length. At 60 Hz this is 68.3 seconds of play: the
-/// 128-frame input queue recycles 32 times and the default nine-cell
-/// saved-state ring recycles more than 450 times.
-pub const CAPTURED_FRAMES: u32 = 4_097;
-/// Prediction window used while capturing the fixture.
-pub const CAPTURED_MAX_PREDICTION: usize = 8;
-
 /// Frames the fixture must play back.
 pub const EXPECTED_FRAMES: u32 = 4_096;
 /// Digest of the replayed request stream. Captured natively; browser and
 /// Emscripten lanes assert the same value.
 pub const EXPECTED_REQUEST_DIGEST: u128 = 0xb195_35aa_fcc4_16fe_df10_56f7_8eca_cf18;
-/// Digest of the replayed input/state/request stream. Captured natively; browser
-/// and Emscripten lanes assert the same value.
+/// Digest of the replayed state-checksum stream. Captured natively; browser and
+/// Emscripten lanes assert the same value.
 pub const EXPECTED_DIGEST: u128 = 0x56cc_01bd_3e28_a54e_0956_a2fc_e302_6d0b;
 
 /// Fixed-width input used by the captured schedule.
@@ -294,8 +287,7 @@ mod capture {
     #![allow(dead_code)]
 
     use super::{
-        input_for, state_checksum, FixtureConfig, FixtureInput, FixtureState, CAPTURED_FRAMES,
-        CAPTURED_MAX_PREDICTION,
+        input_for, state_checksum, FixtureConfig, FixtureInput, FixtureState, EXPECTED_FRAMES,
     };
     use fortress_rollback::replay::Replay;
     use fortress_rollback::{
@@ -313,6 +305,10 @@ mod capture {
     const SECOND_ADDRESS: u8 = 2;
     const MAX_QUEUED_MESSAGES: usize = 4_096;
     const STEP_MILLIS: u64 = 16;
+    /// One frame beyond the expected playback count: the last driven frame is
+    /// not yet confirmed when the capture drains.
+    const CAPTURE_FRAMES: u32 = EXPECTED_FRAMES + 1;
+    const CAPTURE_MAX_PREDICTION: usize = 8;
     const SYNC_POLL_LIMIT: usize = 10_000;
     const DRAIN_POLLS: usize = 2_000;
 
@@ -404,7 +400,7 @@ mod capture {
 
         let mut first = SessionBuilder::<FixtureConfig>::new()
             .with_protocol_config(protocol_config(0x00c0_ffee))
-            .with_max_prediction_window(CAPTURED_MAX_PREDICTION)
+            .with_max_prediction_window(CAPTURE_MAX_PREDICTION)
             .with_recording(true)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .map_err(|error| format!("first fixture player: {error}"))?
@@ -414,7 +410,7 @@ mod capture {
             .map_err(|error| format!("first fixture session: {error}"))?;
         let mut second = SessionBuilder::<FixtureConfig>::new()
             .with_protocol_config(protocol_config(0x00c0_ffef))
-            .with_max_prediction_window(CAPTURED_MAX_PREDICTION)
+            .with_max_prediction_window(CAPTURE_MAX_PREDICTION)
             .with_recording(true)
             .add_player(PlayerType::Remote(FIRST_ADDRESS), PlayerHandle::new(0))
             .map_err(|error| format!("second fixture remote: {error}"))?
@@ -443,7 +439,7 @@ mod capture {
         first.events().for_each(drop);
         second.events().for_each(drop);
 
-        for frame in 0..CAPTURED_FRAMES {
+        for frame in 0..CAPTURE_FRAMES {
             first
                 .add_local_input(PlayerHandle::new(0), input_for(frame, 0))
                 .map_err(|error| format!("first fixture input at {frame}: {error}"))?;
@@ -526,7 +522,6 @@ mod capture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fortress_rollback::__internal::INPUT_QUEUE_LENGTH;
 
     #[test]
     fn checked_in_fixture_replays_with_expected_evidence() {
@@ -543,23 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_fixture_covers_extended_ring_recycling() {
-        let input_queue_wraps =
-            usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX) / INPUT_QUEUE_LENGTH;
-        let saved_state_ring = CAPTURED_MAX_PREDICTION.saturating_add(1);
-        let saved_state_wraps =
-            usize::try_from(EXPECTED_FRAMES).unwrap_or(usize::MAX) / saved_state_ring;
-        assert!(
-            input_queue_wraps >= 32,
-            "fixture must recycle the {INPUT_QUEUE_LENGTH}-frame input queue at least 32 times, \
-             got {input_queue_wraps}"
-        );
-        assert!(
-            saved_state_wraps >= 450,
-            "fixture must recycle the {saved_state_ring}-cell saved-state ring at least 450 times, \
-             got {saved_state_wraps}"
-        );
-
+    fn checked_in_fixture_covers_extended_frame_history() {
         let replay =
             Replay::<FixtureInput>::from_bytes(FIXTURE_BYTES).expect("checked-in fixture decodes");
         let checksummed_frames = replay

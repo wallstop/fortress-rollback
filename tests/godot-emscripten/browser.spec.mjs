@@ -186,6 +186,7 @@ for (const mode of MODES) {
         ping_a_ms: 50,
         ping_b_ms: 50,
         replay_frames: 4096,
+        replay_requests: 8192,
         replay_digest: "0x56cc01bd3e28a54e0956a2fce3026d0b",
         replay_request_digest: "0xb19535aafcc416fedf1056f78ecacf18",
         replay_desyncs: 0,

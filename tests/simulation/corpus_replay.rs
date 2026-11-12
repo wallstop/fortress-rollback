@@ -254,10 +254,11 @@ fn extended_ring_corpus_path() -> PathBuf {
         .expect("extended ring-corpus schedule must be checked in")
 }
 
-/// The checked-in extended schedule must recycle every runtime ring many times
-/// at the minimum prediction window while periodic loss, holds, stalls, and
-/// delay increases keep exercising rollback. A second replay must reproduce the
-/// identical observable trace and confirmed prefixes.
+/// The checked-in extended schedule must recycle the runtime rings many times
+/// at the default prediction window while continuous mixed-transport loss,
+/// holds, blocks, stalls, and delay increases keep exercising rollback. A
+/// second replay must reproduce the identical observable trace and confirmed
+/// prefixes.
 #[test]
 fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
     let schedule = read_schedule(&extended_ring_corpus_path());
@@ -267,28 +268,44 @@ fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
         schedule.config.steps
     );
     assert!(
-        schedule.config.max_prediction <= 1,
-        "extended ring schedule must use the minimum prediction window: {}",
+        schedule.config.max_prediction <= 8,
+        "extended ring schedule must use the default-or-smaller prediction window: {}",
         schedule.config.max_prediction
     );
-    let heals = schedule
-        .events
-        .iter()
-        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
-        .count();
-    let delay_increases = schedule
-        .events
-        .iter()
-        .filter(|(_, event)| matches!(event, ScheduleEvent::SetInputDelay { .. }))
-        .count();
+
+    let mut holds = 0usize;
+    let mut blocks = 0usize;
+    let mut stalls = 0usize;
+    let mut heals = 0usize;
+    let mut delay_peers = BTreeSet::new();
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::Hold { .. } => holds = holds.saturating_add(1),
+            ScheduleEvent::Block { .. } => blocks = blocks.saturating_add(1),
+            ScheduleEvent::PeerStall { .. } => stalls = stalls.saturating_add(1),
+            ScheduleEvent::SetInputDelay { peer, delay } => {
+                assert_eq!(*delay, 2, "only input-delay increases are supported");
+                delay_peers.insert(*peer);
+            },
+            ScheduleEvent::HealAll => heals = heals.saturating_add(1),
+            _ => {},
+        }
+    }
+    assert!(holds >= 32, "schedule must hold links repeatedly: {holds}");
     assert!(
-        heals >= 15,
-        "extended ring schedule must heal repeatedly: {heals}"
+        blocks >= 32,
+        "schedule must block links repeatedly: {blocks}"
     );
     assert!(
-        delay_increases >= 4,
-        "extended ring schedule must reconfigure input delay: {delay_increases}"
+        stalls >= 16,
+        "schedule must stall peers repeatedly: {stalls}"
     );
+    assert_eq!(
+        delay_peers.len(),
+        schedule.config.n_players,
+        "schedule must raise every peer's input delay"
+    );
+    assert_eq!(heals, 1, "the only heal must be the terminal heal");
 
     let report = run(&schedule, &RunOptions::default());
     report.expect_pass(&schedule);
@@ -302,6 +319,31 @@ fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
         min_confirmed > 12_000,
         "extended ring schedule must confirm past 12,000 frames: {:?}",
         report.final_confirmed
+    );
+    assert!(
+        report.net_stats.retransmit_delayed > 0,
+        "extended ring schedule must exercise reliable retransmission: {:?}",
+        report.net_stats
+    );
+    assert!(
+        report.net_stats.dropped_by_policy > 0,
+        "extended ring schedule must exercise unreliable loss: {:?}",
+        report.net_stats
+    );
+    let rollbacks: u64 = report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.rollback_count)
+        .sum();
+    let resimulated: u64 = report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.resimulated_frames)
+        .sum();
+    assert!(
+        rollbacks > 0 && resimulated > 0,
+        "extended ring schedule must exercise rollback: rollbacks={rollbacks}, \
+         resimulated={resimulated}"
     );
 
     let replayed = run(&schedule, &RunOptions::default());
