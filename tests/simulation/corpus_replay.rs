@@ -243,6 +243,79 @@ fn checked_in_default_corpus_replays_with_full_oracle() {
     replay_paths(paths);
 }
 
+fn extended_ring_corpus_path() -> PathBuf {
+    default_corpus_paths()
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("extended-ring"))
+        })
+        .expect("extended ring-corpus schedule must be checked in")
+}
+
+/// The checked-in extended schedule must recycle every runtime ring many times
+/// at the minimum prediction window while periodic loss, holds, stalls, and
+/// delay increases keep exercising rollback. A second replay must reproduce the
+/// identical observable trace and confirmed prefixes.
+#[test]
+fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
+    let schedule = read_schedule(&extended_ring_corpus_path());
+    assert!(
+        schedule.config.steps >= 16_384,
+        "extended ring schedule must run at least 16,384 steps: {}",
+        schedule.config.steps
+    );
+    assert!(
+        schedule.config.max_prediction <= 1,
+        "extended ring schedule must use the minimum prediction window: {}",
+        schedule.config.max_prediction
+    );
+    let heals = schedule
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, ScheduleEvent::HealAll))
+        .count();
+    let delay_increases = schedule
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, ScheduleEvent::SetInputDelay { .. }))
+        .count();
+    assert!(
+        heals >= 15,
+        "extended ring schedule must heal repeatedly: {heals}"
+    );
+    assert!(
+        delay_increases >= 4,
+        "extended ring schedule must reconfigure input delay: {delay_increases}"
+    );
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    let min_confirmed = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(i32::MIN);
+    assert!(
+        min_confirmed > 12_000,
+        "extended ring schedule must confirm past 12,000 frames: {:?}",
+        report.final_confirmed
+    );
+
+    let replayed = run(&schedule, &RunOptions::default());
+    replayed.expect_pass(&schedule);
+    assert_eq!(
+        report.trace_hash, replayed.trace_hash,
+        "extended ring replay must preserve full trace identity"
+    );
+    assert_eq!(
+        report.final_confirmed, replayed.final_confirmed,
+        "extended ring replay must preserve every peer's confirmed prefix"
+    );
+}
+
 #[cfg(feature = "hot-join")]
 #[test]
 fn checked_in_hot_join_corpus_replays_with_full_oracle() {
