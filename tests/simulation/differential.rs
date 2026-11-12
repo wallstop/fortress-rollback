@@ -393,8 +393,7 @@ fn assert_dynamic_confirmed_boundaries(report: &RunReport) {
         .as_ref()
         .expect("differential trajectory retained");
 
-    for observer in 0..2 {
-        let history = &trajectory.confirmed_inputs[observer];
+    for (observer, history) in trajectory.confirmed_inputs.iter().enumerate().take(2) {
         for frame in 0..=resume {
             let inputs = history.get(&frame).unwrap_or_else(|| {
                 panic!("observer {observer} never confirmed boundary-prefix frame {frame}")
@@ -878,7 +877,7 @@ fn save_delay_and_drive_order_matrix_matches_nominal_confirmed_history() {
                         "confirmed trajectory changed for {save_mode:?}, delay {input_delay}, {order:?}"
                     );
                 } else {
-                    canonical = report.differential_trajectory.clone();
+                    canonical = report.differential_trajectory;
                 }
             }
         }
@@ -2269,7 +2268,7 @@ fn spectator_matrix_matches_nominal_history_across_delivery_and_drive_order() {
                         "spectator trajectory changed for {save_mode:?}, {delivery:?}, {order:?}"
                     );
                 } else {
-                    canonical = report.differential_trajectory.clone();
+                    canonical = report.differential_trajectory;
                 }
             }
         }
@@ -2501,8 +2500,8 @@ fn shared_input_mutation_covers_dynamic_gap_and_resume_boundaries() {
         let ordinal = u32::try_from(ordinal).expect("boundary ordinal non-negative");
         let expected = actual_differential_input(stub_input(ordinal, 1), ordinal, Some(mutation))
             .fingerprint();
-        for observer in 0..2 {
-            let inputs = trajectory.confirmed_inputs[observer]
+        for (observer, history) in trajectory.confirmed_inputs.iter().enumerate().take(2) {
+            let inputs = history
                 .get(&frame)
                 .unwrap_or_else(|| panic!("observer {observer} did not confirm frame {frame}"));
             assert_eq!(

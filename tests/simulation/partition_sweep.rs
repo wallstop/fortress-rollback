@@ -995,12 +995,9 @@ fn common_premise_violations(
     {
         violations.push("pre-cut Synchronized evidence has the wrong shape".to_owned());
     } else {
-        for from in 0..n {
-            for to in 0..n {
-                if from != to
-                    && evidence.first_synchronized_step[from][to]
-                        .is_none_or(|step| step > PRE_CUT_PROBE_STEP)
-                {
+        for (from, row) in evidence.first_synchronized_step.iter().enumerate().take(n) {
+            for (to, entry) in row.iter().enumerate().take(n) {
+                if from != to && entry.is_none_or(|step| step > PRE_CUT_PROBE_STEP) {
                     violations.push(format!("directed pair {from}->{to} did not sync pre-cut"));
                 }
             }
