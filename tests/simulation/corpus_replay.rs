@@ -175,6 +175,64 @@ fn replay_paths(paths: Vec<PathBuf>) {
     }
 }
 
+fn mixed_transport_corpus_path() -> PathBuf {
+    default_corpus_paths()
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("mixed-transport"))
+        })
+        .expect("mixed-transport corpus schedule must be checked in")
+}
+
+/// The checked-in mixed-transport schedule must keep exercising both
+/// transport classes and keep every peer's confirmed prefix and post-state
+/// identical. Replaying the same materialized schedule twice must produce the
+/// same observable trace.
+#[test]
+fn checked_in_mixed_transport_schedule_replays_with_both_transport_classes() {
+    let path = mixed_transport_corpus_path();
+    let schedule = read_schedule(&path);
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+
+    let mut reliable_links = 0usize;
+    let mut unreliable_links = 0usize;
+    for (_, _, policy) in &schedule.initial_links {
+        if policy.retransmit_delay.is_zero() {
+            unreliable_links = unreliable_links.saturating_add(1);
+        } else {
+            reliable_links = reliable_links.saturating_add(1);
+        }
+    }
+    assert!(
+        report.net_stats.retransmit_delayed > 0,
+        "mixed-transport schedule never exercised reliable retransmission: {:?}",
+        report.net_stats
+    );
+    assert!(
+        report.net_stats.dropped_by_policy > 0,
+        "mixed-transport schedule never exercised unreliable loss: {:?}",
+        report.net_stats
+    );
+    assert!(
+        reliable_links > 0 && unreliable_links > 0,
+        "mixed-transport schedule must exercise both classes on distinct directed links: \
+         reliable={reliable_links}, unreliable={unreliable_links}"
+    );
+
+    let replayed = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, replayed.trace_hash,
+        "mixed-transport replay must preserve full trace identity"
+    );
+    assert_eq!(
+        report.final_confirmed, replayed.final_confirmed,
+        "mixed-transport replay must preserve every peer's confirmed prefix"
+    );
+}
+
 #[test]
 fn checked_in_default_corpus_replays_with_full_oracle() {
     let paths = default_corpus_paths();
