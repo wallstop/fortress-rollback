@@ -17,7 +17,7 @@
 
 use crate::common::sim_net::{GilbertElliottPolicy, LinkPolicy};
 use fortress_rollback::rng::{Pcg32, SeedableRng};
-use fortress_rollback::{__internal::MAX_FRAME_DELAY, DisconnectBehavior, SaveMode};
+use fortress_rollback::{DisconnectBehavior, SaveMode, __internal::MAX_FRAME_DELAY};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -217,8 +217,9 @@ pub enum ScenarioMix {
 ///   are drawn from the schedule seed before individual directed links are
 ///   materialized.
 /// - `20`: includes the fixed five-element sometimes-state observation vector
-///   in deterministic final-summary trace identity. Older schemas retain their
-///   original trace hashes.
+///   in deterministic final-summary trace identity and admits an explicit
+///   `SimConfig::input_queue_length` override. Older schemas retain their
+///   original trace hashes and cannot declare a custom ring capacity.
 pub const SCHEDULE_SCHEMA_VERSION: u32 = 20;
 /// Hard execution bound for one materialized harness schedule.
 ///
@@ -234,6 +235,10 @@ const MAX_SKEW_GATED_LOCAL_MS_PER_STEP: u128 = 16;
 pub const MAX_SIMULATION_STEP_DT_MS: u64 = 1_000;
 /// Maximum virtual CPU cost assigned to one simulated frame.
 pub const MAX_CPU_FRAME_COST_US: u32 = 1_000_000;
+/// Maximum input-ring capacity accepted from a corpus schedule. The production
+/// default is 128; the extra headroom covers `InputQueueConfig::high_latency`
+/// without letting an untrusted artifact request an unbounded allocation.
+pub const MAX_SIMULATION_INPUT_QUEUE_LENGTH: usize = 256;
 /// Maximum delay accepted on any materialized simulated link.
 pub const MAX_SIMULATION_LINK_DELAY: Duration = Duration::from_secs(60);
 /// Maximum number of timed operations in one materialized schedule.
@@ -339,6 +344,15 @@ pub struct SimConfig {
     /// (D9) reachable within a short schedule.
     #[serde(default)]
     pub event_queue_size: Option<usize>,
+    /// Optional override for every session's input-ring capacity
+    /// (`SessionBuilder::with_input_queue_config`). `None` keeps the library
+    /// default of 128 and preserves pre-existing corpus artifacts byte for
+    /// byte. A ring whose capacity sits just above the retained
+    /// `input_delay + max_prediction` window makes the
+    /// `input_ring.within_one_slot_of_capacity.v1` sometimes-state reachable
+    /// organically instead of only through a focused session test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_queue_length: Option<usize>,
     /// P2P peer indices that should serve one pre-planned redundant spectator.
     /// Empty disables spectator driving. The generator leaves this empty so
     /// existing random schedules stay byte-identical; hand-authored schedules
@@ -373,6 +387,7 @@ impl SimConfig {
             clock_skew_ppm: Vec::new(),
             starve_events: Vec::new(),
             event_queue_size: None,
+            input_queue_length: None,
             spectator_hosts: Vec::new(),
         }
     }
@@ -651,6 +666,9 @@ fn required_schema_version(schedule: &Schedule) -> u32 {
     if schedule.config.noise == BackgroundNoise::Swarm {
         required = required.max(19);
     }
+    if schedule.config.input_queue_length.is_some() {
+        required = required.max(20);
+    }
     for (_, _, policy) in &schedule.initial_links {
         required = required.max(link_policy_required_schema(policy));
     }
@@ -849,6 +867,33 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
         }
     }
 
+    if let Some(queue_length) = schedule.config.input_queue_length {
+        if !(2..=MAX_SIMULATION_INPUT_QUEUE_LENGTH).contains(&queue_length) {
+            return Err(format!(
+                "input_queue_length must be within 2..={MAX_SIMULATION_INPUT_QUEUE_LENGTH} \
+                 (got {queue_length})"
+            ));
+        }
+    }
+    // SessionBuilder requires the complete rollback window plus delayed-input
+    // lead to fit the ring minus its one recovery slot. Validate it up front for
+    // the library default as well as for an explicit override, so a corpus
+    // schedule cannot pass validation and then panic at session construction.
+    let input_queue_length = schedule
+        .config
+        .input_queue_length
+        .unwrap_or(fortress_rollback::__internal::INPUT_QUEUE_LENGTH);
+    let retained = schedule
+        .config
+        .input_delay
+        .saturating_add(schedule.config.max_prediction);
+    if retained > input_queue_length - 1 {
+        return Err(format!(
+            "input_delay + max_prediction ({retained}) must fit an input_queue_length of \
+             {input_queue_length} minus its recovery slot"
+        ));
+    }
+
     if schedule.events.len() > MAX_SIMULATION_EVENTS {
         return Err(format!(
             "schedule has {} events (maximum {MAX_SIMULATION_EVENTS})",
@@ -1012,6 +1057,13 @@ pub fn validate_schedule(schedule: &Schedule) -> Result<(), String> {
                 if *delay > MAX_FRAME_DELAY {
                     return Err(format!(
                         "SetInputDelay delay must be <= {MAX_FRAME_DELAY} (got {delay})"
+                    ));
+                }
+                if schedule.config.max_prediction.saturating_add(*delay) > input_queue_length - 1 {
+                    return Err(format!(
+                        "SetInputDelay delay {delay} plus max_prediction {} exceeds the \
+                         input_queue_length of {input_queue_length} minus its recovery slot",
+                        schedule.config.max_prediction
                     ));
                 }
             },
@@ -2334,6 +2386,7 @@ mod tests {
                 seed,
                 SimConfig {
                     input_delay: MAX_FRAME_DELAY,
+                    max_prediction: 0,
                     scenario_mix: ScenarioMix::Lifecycle,
                     ..SimConfig::smoke(4)
                 },
@@ -2994,6 +3047,78 @@ mod tests {
         small_event_queue.config.event_queue_size = Some(9);
         cases.push((small_event_queue, "event_queue_size must be >= 10"));
 
+        let mut undersized_input_ring = valid.clone();
+        undersized_input_ring.config.input_queue_length = Some(1);
+        cases.push((undersized_input_ring, "input_queue_length must be within"));
+
+        let mut oversized_input_ring = valid.clone();
+        oversized_input_ring.config.input_queue_length =
+            Some(MAX_SIMULATION_INPUT_QUEUE_LENGTH + 1);
+        cases.push((oversized_input_ring, "input_queue_length must be within"));
+
+        let mut too_small_for_window = valid.clone();
+        too_small_for_window.config.input_queue_length = Some(8);
+        cases.push((
+            too_small_for_window,
+            "must fit an input_queue_length of 8 minus its recovery slot",
+        ));
+
+        let mut delayed_ring = generate(
+            7,
+            SimConfig {
+                max_prediction: 1,
+                input_delay: 0,
+                input_queue_length: Some(2),
+                ..SimConfig::smoke(3)
+            },
+        );
+        delayed_ring
+            .events
+            .push((100, ScheduleEvent::SetInputDelay { peer: 0, delay: 1 }));
+        delayed_ring.events.sort_by_key(|(step, _)| *step);
+        cases.push((
+            delayed_ring,
+            "SetInputDelay delay 1 plus max_prediction 1 exceeds",
+        ));
+
+        let mut under_declared_ring = generate(
+            7,
+            SimConfig {
+                max_prediction: 1,
+                input_delay: 0,
+                input_queue_length: Some(2),
+                ..SimConfig::smoke(3)
+            },
+        );
+        under_declared_ring.schema_version = 19;
+        cases.push((
+            under_declared_ring,
+            "under-declares capability requiring schema_version 20",
+        ));
+
+        let mut default_ring_too_small = valid.clone();
+        default_ring_too_small.config.input_delay = 120;
+        cases.push((
+            default_ring_too_small,
+            "input_delay + max_prediction (128) must fit an input_queue_length of 128",
+        ));
+
+        let mut default_ring_delay_event = valid.clone();
+        default_ring_delay_event.events.push((
+            100,
+            ScheduleEvent::SetInputDelay {
+                peer: 0,
+                delay: 120,
+            },
+        ));
+        default_ring_delay_event
+            .events
+            .sort_by_key(|(step, _)| *step);
+        cases.push((
+            default_ring_delay_event,
+            "SetInputDelay delay 120 plus max_prediction 8 exceeds",
+        ));
+
         let mut zero_step_duration = valid;
         zero_step_duration.config.step_dt_ms = 0;
         cases.push((zero_step_duration, "step_dt_ms must be within"));
@@ -3384,6 +3509,10 @@ mod tests {
             config.remove("spectator_hosts").is_some(),
             "config must serialize a `spectator_hosts` field for this test to remove"
         );
+        assert!(
+            !config.contains_key("input_queue_length"),
+            "the default input-ring capacity must stay omitted for legacy byte stability"
+        );
         let back: Schedule = serde_json::from_value(value).unwrap();
         assert_eq!(
             back.config.save_mode,
@@ -3430,6 +3559,10 @@ mod tests {
             back.config.spectator_hosts.is_empty(),
             "a pre-axis config (no spectator_hosts) must default to no spectator"
         );
+        assert_eq!(
+            back.config.input_queue_length, None,
+            "a pre-axis config (no input_queue_length) must default to the library ring"
+        );
     }
 
     #[test]
@@ -3445,6 +3578,31 @@ mod tests {
         assert_eq!(validate_schedule(&schedule), Ok(()));
         let value = serde_json::to_value(&schedule).expect("schedule serializes");
         assert!(value["config"].get("wait_recommendation_policy").is_some());
+        let decoded: Schedule = serde_json::from_value(value).expect("schedule deserializes");
+        assert_eq!(decoded, schedule);
+    }
+
+    #[test]
+    fn non_default_input_queue_length_round_trips_and_omits_when_unset() {
+        let baseline = generate(42, SimConfig::smoke(2));
+        let baseline_value = serde_json::to_value(&baseline).expect("baseline serializes");
+        assert!(
+            baseline_value["config"].get("input_queue_length").is_none(),
+            "the library-default ring must not add a serialized field"
+        );
+
+        let schedule = generate(
+            42,
+            SimConfig {
+                max_prediction: 1,
+                input_delay: 0,
+                input_queue_length: Some(2),
+                ..SimConfig::smoke(2)
+            },
+        );
+        assert_eq!(validate_schedule(&schedule), Ok(()));
+        let value = serde_json::to_value(&schedule).expect("schedule serializes");
+        assert_eq!(value["config"]["input_queue_length"], serde_json::json!(2));
         let decoded: Schedule = serde_json::from_value(value).expect("schedule deserializes");
         assert_eq!(decoded, schedule);
     }

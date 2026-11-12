@@ -33,6 +33,11 @@ const PR_SMOKE_SEEDS: [u64; 8] = [1, 2, 3, 5, 8, 13, 21, 34];
 const NIGHTLY_SHARDS: u64 = 8;
 const NIGHTLY_SEEDS_PER_SHARD: u64 = 125;
 const NIGHTLY_STEPS: u32 = 5_000;
+/// Four in every hundred nightly rows are deterministic small-ring coverage
+/// cells. The residues are chosen to span 2- through 16-player meshes, and all
+/// are historically `Clean` and never `Swarm`, so the noise-profile assignment
+/// is unchanged.
+const NIGHTLY_RARE_STATE_COVERAGE_RESIDUES: [u64; 4] = [20, 40, 44, 60];
 
 fn run_smoke_fleet(n_players: usize) {
     for seed in PR_SMOKE_SEEDS {
@@ -50,7 +55,7 @@ fn nightly_seed(run_id: u64, shard: u64, offset: u64) -> u64 {
         .wrapping_add(offset)
 }
 
-fn nightly_noise(seed: u64) -> BackgroundNoise {
+fn legacy_nightly_noise(seed: u64) -> BackgroundNoise {
     let swarm_residue = (seed / 20) % 5;
     if seed % 5 == swarm_residue {
         return BackgroundNoise::Swarm;
@@ -63,7 +68,41 @@ fn nightly_noise(seed: u64) -> BackgroundNoise {
     }
 }
 
+fn nightly_noise(seed: u64) -> BackgroundNoise {
+    if nightly_rare_state_coverage_seed(seed) {
+        return BackgroundNoise::Clean;
+    }
+    legacy_nightly_noise(seed)
+}
+
+/// Four of every hundred nightly rows run a deterministic small-ring coverage
+/// cell instead of the default session configuration. Every selected residue is
+/// historically `Clean` and never `Swarm`, so the noise-profile distribution is
+/// unchanged while the census gains a non-vacuous organic path to the
+/// prediction-limit and input-ring states.
+fn nightly_rare_state_coverage_seed(seed: u64) -> bool {
+    NIGHTLY_RARE_STATE_COVERAGE_RESIDUES.contains(&(seed % 100))
+}
+
 fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Schedule {
+    if nightly_rare_state_coverage_seed(seed) {
+        // A tiny input ring is the only organic way to reach
+        // `input_ring.within_one_slot_of_capacity.v1`; `max_prediction = 1`
+        // makes `rollback.at_prediction_limit.v1` reachable on the same row.
+        // Clean network-only schedules keep this boundary cell green while the
+        // rest of the fleet keeps its full fault/lifecycle mix.
+        let config = SimConfig {
+            steps: NIGHTLY_STEPS,
+            noise: BackgroundNoise::Clean,
+            input_delay: 0,
+            max_prediction: 1,
+            input_queue_length: Some(2),
+            scenario_mix: ScenarioMix::NetworkOnly,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(n_players)
+        };
+        return generate(seed, config);
+    }
     let config = SimConfig {
         steps: NIGHTLY_STEPS,
         noise,
@@ -4987,4 +5026,89 @@ fn post_heal_liveness_reports_non_recovery_under_halt() {
         Some(false),
         "a Halt-halted mesh healed but never recovered — (i) must say so"
     );
+}
+
+/// The nightly census needs at least three non-vacuous organic state IDs to
+/// earn a presence ratchet. The default 2..=16-peer fleet reaches the floor and
+/// nudge rows every night but has never organically filled a 128-slot input
+/// ring or hit an eight-frame prediction limit. Forty of every thousand rows
+/// therefore use a two-slot ring with a one-frame prediction window.
+#[test]
+fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction_states() {
+    let run_id = 41;
+    let mut coverage_seeds = Vec::new();
+    let mut player_counts = BTreeSet::new();
+    for shard in 0..NIGHTLY_SHARDS {
+        let mut shard_rows = 0;
+        for offset in 0..NIGHTLY_SEEDS_PER_SHARD {
+            let seed = nightly_seed(run_id, shard, offset);
+            if !nightly_rare_state_coverage_seed(seed) {
+                continue;
+            }
+            shard_rows += 1;
+            let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+            player_counts.insert(n_players);
+            let noise = nightly_noise(seed);
+            assert_eq!(
+                legacy_nightly_noise(seed),
+                BackgroundNoise::Clean,
+                "coverage seed {seed} must not relabel a non-Clean legacy row"
+            );
+            assert_eq!(noise, BackgroundNoise::Clean);
+            let schedule = nightly_schedule(seed, n_players, noise);
+            assert_eq!(schedule.config.input_queue_length, Some(2));
+            assert_eq!(schedule.config.input_delay, 0);
+            assert_eq!(schedule.config.max_prediction, 1);
+            assert_eq!(schedule.config.scenario_mix, ScenarioMix::NetworkOnly);
+            validate_schedule(&schedule).expect("coverage cell must validate");
+            coverage_seeds.push(seed);
+        }
+        assert!(
+            shard_rows >= 4,
+            "shard {shard} must contain a stable share of coverage rows"
+        );
+    }
+    assert_eq!(coverage_seeds.len(), 40);
+    assert!(
+        player_counts.contains(&2) && player_counts.contains(&16),
+        "coverage rows must span the mesh-size edges, got {player_counts:?}"
+    );
+
+    let mut sampled = Vec::new();
+    for wanted in [2, 16] {
+        let seed = coverage_seeds
+            .iter()
+            .copied()
+            .find(|seed| 2 + usize::try_from(seed % 15).expect("fits") == wanted)
+            .expect("coverage rows include both mesh-size edges");
+        sampled.push(seed);
+    }
+    let mut extras = 0;
+    for seed in &coverage_seeds {
+        if sampled.contains(seed) {
+            continue;
+        }
+        sampled.push(*seed);
+        extras += 1;
+        if extras == 2 {
+            break;
+        }
+    }
+    for seed in sampled {
+        let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+        let schedule = nightly_schedule(seed, n_players, BackgroundNoise::Clean);
+        let first = run(&schedule, &nightly_run_options(&schedule));
+        first.expect_pass(&schedule);
+        assert!(
+            first.sometimes_state[0],
+            "coverage seed {seed} must reach the prediction limit"
+        );
+        assert!(
+            first.sometimes_state[4],
+            "coverage seed {seed} must fill the input ring to one slot below capacity"
+        );
+        let replay = run(&schedule, &nightly_run_options(&schedule));
+        assert_eq!(first.trace_hash, replay.trace_hash);
+        assert_eq!(first.sometimes_state, replay.sometimes_state);
+    }
 }
