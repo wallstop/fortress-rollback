@@ -1141,6 +1141,16 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
     if let Some(ref preset) = config.sync_preset {
         cmd.arg("--sync-preset").arg(preset);
     }
+    // Nightly real-UDP rows opt into a wider test-only disconnect timeout:
+    // a hosted runner can fail to schedule a child process for longer than the
+    // production two-second window, and that host-stall gap must not be
+    // mistaken for adversarial loss. The per-PR smoke tier keeps the production
+    // default, and production-timeout semantics remain covered by the
+    // deterministic in-process suites.
+    if !smoke_tier_enforced() {
+        cmd.arg("--disconnect-timeout-ms")
+            .arg(NIGHTLY_HOST_STALL_TOLERANCE_MS.to_string());
+    }
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
 }
@@ -1164,6 +1174,16 @@ const PER_PR_MAX_PEER_TIMEOUT_SECS: u64 = 90;
 /// The `ci-network-nightly` nextest profile must cover this value after platform
 /// scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`].
 const NIGHTLY_MAX_PEER_TIMEOUT_SECS: u64 = 600;
+
+/// Test-only session disconnect timeout applied to nightly real-UDP chaos rows.
+///
+/// Production disconnects after two seconds without a packet, but a hosted
+/// macOS runner can fail to schedule a child process for longer than that.
+/// The nightly real-UDP lane exists to prove survival over real sockets, not to
+/// re-prove the production timeout (covered deterministically in-process), so
+/// those rows opt into this wider window instead of treating host starvation as
+/// adversarial loss.
+const NIGHTLY_HOST_STALL_TOLERANCE_MS: u64 = 10_000;
 
 /// macOS hosted runners need more real-time headroom for process-heavy UDP tests.
 #[cfg(target_os = "macos")]

@@ -978,6 +978,11 @@ fn parse_args() -> Args {
                 i += 1;
                 result.sync_preset = Some(args[i].clone());
             },
+            "--disconnect-timeout-ms" => {
+                i += 1;
+                result.disconnect_timeout_ms =
+                    Some(args[i].parse().expect("Invalid disconnect timeout"));
+            },
             "--completion-barrier" => {
                 result.completion_barrier = true;
             },
@@ -1019,6 +1024,9 @@ struct Args {
     burst_loss_len: usize,
     // Sync configuration preset
     sync_preset: Option<String>,
+    /// Test-only session disconnect timeout in milliseconds. When omitted the
+    /// production two-second default applies.
+    disconnect_timeout_ms: Option<u64>,
     /// Keep completed peers alive until every process reaches the same target.
     completion_barrier: bool,
 }
@@ -1186,6 +1194,10 @@ fn run_test(args: &Args) -> TestResult {
         .with_sync_config(sync_config)
         .with_protocol_config(protocol_config.clone())
         .with_time_sync_config(time_sync_config);
+
+    if let Some(timeout_ms) = args.disconnect_timeout_ms {
+        sess_builder = sess_builder.with_disconnect_timeout(Duration::from_millis(timeout_ms));
+    }
 
     // Add players based on our index.
     //
