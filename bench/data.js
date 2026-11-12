@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794503562623,
+  "lastUpdate": 1794508629189,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "fc22bc4af27e9e5d331632183b1be54494938ae0",
-          "message": "test: add deterministic allocation contracts (#270)\n\nEstablish an isolated, deterministic heap-allocation ledger for documented zero-allocation paths and warmed sync-test ceilings.\n\nProgresses #264.",
-          "timestamp": "2026-08-01T19:21:20-07:00",
-          "tree_id": "ed3c0306b69ae30b92cc28668e9198b899b7de6f",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/fc22bc4af27e9e5d331632183b1be54494938ae0"
-        },
-        "date": 1785637791937,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 131341,
-            "range": "± 2409",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 47751,
-            "range": "± 425",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 26",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 92",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2787,
-            "range": "± 267",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2952,
             "range": "± 406",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec9ac03fbe84acca7ea79bd727302ce4ef3a3c7a",
+          "message": "test(simulation): add seven-window organic presence ratchet (P2) (#405)\n\nRecord the sparse-earlier sometimes-state as targeted-only and add the checked-in seven-window evaluator required by #403. Validated against seven scheduled-main artifacts: pre-redesign baseline rejects at 2/3 required eligible IDs.",
+          "timestamp": "2026-11-12T10:27:50-08:00",
+          "tree_id": "ef3e9f081e05b8b2bfc628c35278597e9dc6ed6c",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/ec9ac03fbe84acca7ea79bd727302ce4ef3a3c7a"
+        },
+        "date": 1794508628185,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39297,
+            "range": "± 1961",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24613,
+            "range": "± 580",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2789,
+            "range": "± 226",
             "unit": "ns/iter"
           }
         ]
