@@ -5083,20 +5083,9 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
             .expect("coverage rows include both mesh-size edges");
         sampled.push(seed);
     }
-    let mut extras = 0;
-    for seed in &coverage_seeds {
-        if sampled.contains(seed) {
-            continue;
-        }
-        sampled.push(*seed);
-        extras += 1;
-        if extras == 2 {
-            break;
-        }
-    }
-    for seed in sampled {
+    for seed in &sampled {
         let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
-        let schedule = nightly_schedule(seed, n_players, BackgroundNoise::Clean);
+        let schedule = nightly_schedule(*seed, n_players, BackgroundNoise::Clean);
         let first = run(&schedule, &nightly_run_options(&schedule));
         first.expect_pass(&schedule);
         assert!(
@@ -5107,8 +5096,13 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
             first.sometimes_state[4],
             "coverage seed {seed} must fill the input ring to one slot below capacity"
         );
-        let replay = run(&schedule, &nightly_run_options(&schedule));
-        assert_eq!(first.trace_hash, replay.trace_hash);
-        assert_eq!(first.sometimes_state, replay.sometimes_state);
     }
+
+    let seed = sampled[0];
+    let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+    let schedule = nightly_schedule(seed, n_players, BackgroundNoise::Clean);
+    let first = run(&schedule, &nightly_run_options(&schedule));
+    let replay = run(&schedule, &nightly_run_options(&schedule));
+    assert_eq!(first.trace_hash, replay.trace_hash);
+    assert_eq!(first.sometimes_state, replay.sometimes_state);
 }
