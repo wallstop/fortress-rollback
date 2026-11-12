@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794454350439,
+  "lastUpdate": 1794464691297,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "158e85cac5456898b1dfa22813eab77917ce9c2a",
-          "message": "chore(deps): update serde in loom test lockfile (#259)\n\nBumps the cargo-loom-tests group with 1 update in the /loom-tests\ndirectory: [serde](https://github.com/serde-rs/serde).\n\nUpdates `serde` from 1.0.228 to 1.0.229\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/serde-rs/serde/releases\">serde's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.0.229</h2>\n<ul>\n<li>Update to syn 3</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/7fc3b4c30c94f73a96ebd1553f2b090d928fc3a8\"><code>7fc3b4c</code></a>\nRelease 1.0.229</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6d6e9a11101354ce769a3438a088b6b9305c1863\"><code>6d6e9a1</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/serde-rs/serde/issues/3085\">#3085</a>\nfrom dtolnay/syn3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6dec3b751126c8338cac0fe8085612d695e4ecf3\"><code>6dec3b7</code></a>\nUpdate to syn 3</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/cfe669241065984177ff63af8b45058e6e9b499d\"><code>cfe6692</code></a>\nResolve mut_mut pedantic clippy lint</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/1023d077510b4aef36a41ef56fdb7798568a2654\"><code>1023d07</code></a>\nUpdate actions/upload-artifact@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/dd682c2c86aa7629e77c1ccd93212d3729f4c66d\"><code>dd682c2</code></a>\nUpdate actions/checkout@v6 -&gt; v7</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/5f0f18b9211732f2d82f73b5a43e4f5ff3701251\"><code>5f0f18b</code></a>\nUpdate ui test suite to nightly-2026-06-01</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/63a1498f0e7be991ffac5939bdd202ca16e9a23f\"><code>63a1498</code></a>\nRegenerate stderr with trybuild normalization fixes</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/fa7da4a93567ed347ad0735c28e439fca688ef26\"><code>fa7da4a</code></a>\nFix unused_features warning</li>\n<li><a\nhref=\"https://github.com/serde-rs/serde/commit/6b1a17851ea3d86a56aa116ca1cbf428f8d5f22d\"><code>6b1a178</code></a>\nUnpin CI miri toolchain</li>\n<li>Additional commits viewable in <a\nhref=\"https://github.com/serde-rs/serde/compare/v1.0.228...v1.0.229\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Lockfile-only dependency patch with no changes to fortress-rollback or\nloom test code; serde 1.0.229 is a minor release updating serde_derive’s\nsyn dependency.\n> \n> **Overview**\n> Updates **`loom-tests/Cargo.lock`** only: **`serde`**,\n**`serde_core`**, and **`serde_derive`** move from **1.0.228** to\n**1.0.229**.\n> \n> The notable transitive change is that **`serde_derive`** now depends\non **`syn` 3.0.3** (added as a separate lockfile entry), while other\nproc-macro crates in the same lockfile keep **`syn` 2.0.111** via\nexplicit version pins. No application or test source files are modified.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n5389ad653105568c3a26ee765419bacdf6082db1. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-08-01T17:38:58-07:00",
-          "tree_id": "b8e096eb90d3d694f36980260b35db06d983f2e7",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/158e85cac5456898b1dfa22813eab77917ce9c2a"
-        },
-        "date": 1785631647855,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 134954,
-            "range": "± 315",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 50499,
-            "range": "± 355",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 22",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 8",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3111,
-            "range": "± 254",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2766,
             "range": "± 159",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0b76a47782d8a44e88ccab298536c60e85519438",
+          "message": "test(replay): extended frame/ring evidence and nightly host-stall tolerance (#401)\n\n## Description\n\nCompletes the final PLAN P1 item — extended frame/ring operation — and\nfixes the recurring macOS\nnightly real-UDP host-stall failure.\n\n- **Extended portable replay.** The checked-in two-peer capture grows\nfrom 149 to 4,096 replayed\nframes (68.3 s at 60 Hz). It recycles the 128-frame input queue 32 times\nand the default\nnine-cell saved-state ring more than 450 times. Playback now records an\nordered request-stream\ndigest and re-encodes the decoded replay to assert the checked-in\nartifact is canonical, so\nnative, browser `wasm32-unknown-unknown`, and Godot\n`wasm32-unknown-emscripten` lanes prove both\nthe request sequence and the serialized artifact are byte-identical.\nNon-vacuity tests assert\nthe ring-cycle counts and that every replayed frame carries a recorded\nchecksum; the existing\n  corrupted-checksum control still detects a mutated checksum.\n- **Extended live corpus schedule.** New\n`tests/simulation/corpus/003-extended-ring-recycling.json` runs 4 peers\nfor 16,384 steps at the\nminimum prediction window over mixed reliable-retransmission and\nunreliable links. Sixteen\nhold/block/stall/delay-increase cycles keep rollback and ring recycling\nactive, and the\ndedicated replay test asserts the full oracle, final confirmed prefixes\npast 12,000 frames, and\n  identical trace identity on a second run.\n- **Nightly host-stall RCA (closes #390).** The scheduled nightly run on\n`4a84892` failed only\nmacOS `test_extended_chaos_bursty_survivable` after 180 s with both\npeers in `Synchronizing`\n(`current=8 confirmed=NULL_FRAME`, `synced=1 interrupted=1\ndisconnected=1`) — the same signature\nas #390. A hosted runner can lose the CPU for longer than the production\ntwo-second disconnect\ntimeout, so loss-bearing nightly real-UDP peers now opt into a test-only\n10 s session timeout\nvia `--disconnect-timeout-ms`. Loss-free nightly rows (including the\ndeliberate 2 s\nstaggered-startup disconnect/retry test) and the per-PR smoke tier keep\nthe production default,\nand production-timeout semantics remain covered by deterministic\nin-process suites.\n- `PLAN.md` drops the completed P1 item, leaving only the future P2\nsearch experiment.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change\n- [x] 📚 Documentation\n- [ ] ♻️ Refactor\n- [x] 🧪 Test\n- [x] 🔧 CI/Build\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] Zero-panic policy: no production code added; fixture helpers\nreturn `Result`, and test-only\n      peer parsing uses the existing harness conventions.\n- [x] Added tests that prove the evidence is real (ring-cycle counts,\nrequest/state digests,\ncanonical artifact bytes, full oracle replay identity,\ncorrupted-checksum control).\n- [x] `cargo fmt` and `cargo clippy --workspace --all-targets --features\ntokio,json -- -D warnings`\n      pass.\n- [x] `cargo nextest run --features tokio,json` passes (3,121 passed, 74\nskipped).\n\n### If Applicable\n\n- [x] Documentation updated (production checklist + wiki mirror + PLAN).\n- [ ] `CHANGELOG.md`: no public API or user-observable behavior changed;\ntest/CI/docs only.\n- [ ] Examples: not affected.\n- [x] No new compiler warnings.\n\n## Testing\n\n**Tests added/modified:**\n\n- `fortress-replay-fixture`: extended capture/playback evidence,\nrequest-stream digest,\ncanonical-artifact check, ring-coverage and checksum-coverage\nassertions.\n- Browser smoke and Godot probes assert the new request digest and\n4,096-frame evidence.\n-\n`simulation::corpus_replay::checked_in_extended_ring_schedule_recycles_rings_and_replays_identically`.\n- Nightly peer binary `--disconnect-timeout-ms` parsing and session\napplication.\n\n**Manual testing performed:**\n\n- `cargo nextest run --features tokio,json --no-capture` — 3,121 passed,\n74 skipped.\n- `cargo nextest run --features hot-join,tokio,json --no-capture` —\n3,385 passed, 75 skipped.\n- Browser lane locally against Chrome for Testing 157.0.8103.78 — 5/5\npassed, including the\n  extended replay and both tab-suspension tests.\n- Safe-release corpus replay with `-C overflow-checks=on -C\ndebug-assertions=on` — 12 passed.\n- Full 47-test nightly real-UDP suite in release with the host-stall\ntolerance applied — passed.\n- Capture determinism: two captures are byte-identical; artifact is\n167,998 bytes and replays with\n  zero desyncs.\n- Agent preflight, links, doc claims, wiki consistency, plan hygiene,\ntypos, markdownlint,\n  actionlint, shell portability, and network timing invariants pass.\n\n## Related Issues\n\nCloses #390.",
+          "timestamp": "2026-11-11T22:17:01-08:00",
+          "tree_id": "9c6bf70a9edc272bd3c4c29a56cdb22184ef07ff",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/0b76a47782d8a44e88ccab298536c60e85519438"
+        },
+        "date": 1794464690497,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39660,
+            "range": "± 852",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 26010,
+            "range": "± 190",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2853,
+            "range": "± 301",
             "unit": "ns/iter"
           }
         ]
