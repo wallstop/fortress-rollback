@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES};
+use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
 use fortress_rollback::{
     ClockFn, Config, Message, NetworkStats, NonBlockingSocket, P2PSession, PlayerHandle,
     PlayerType, ProtocolConfig, SessionBuilder, SessionState,
@@ -258,7 +258,7 @@ fn mode() -> &'static str {
     }
 }
 
-fn replay_evidence() -> Result<(u32, String, u32), String> {
+fn replay_evidence() -> Result<(u32, u64, String, String, u32), String> {
     let evidence = fortress_replay_fixture::replay_fixture()?;
     if evidence.frames != EXPECTED_FRAMES {
         return Err(format!(
@@ -272,6 +272,13 @@ fn replay_evidence() -> Result<(u32, String, u32), String> {
             evidence.digest
         ));
     }
+    if evidence.request_digest != EXPECTED_REQUEST_DIGEST {
+        return Err(format!(
+            "captured replay request digest {:#034x} differs from native \
+             {EXPECTED_REQUEST_DIGEST:#034x}",
+            evidence.request_digest
+        ));
+    }
     if evidence.desyncs != 0 {
         return Err(format!(
             "captured replay reported {} checksum desync(s) under Emscripten",
@@ -280,7 +287,9 @@ fn replay_evidence() -> Result<(u32, String, u32), String> {
     }
     Ok((
         evidence.frames,
+        evidence.requests,
         format!("{:#034x}", evidence.digest),
+        format!("{:#034x}", evidence.request_digest),
         evidence.desyncs,
     ))
 }
@@ -321,8 +330,13 @@ impl FortressEmscriptenProbe {
                 result.set("ping_a_ms", dictionary_int(first_ping));
                 result.set("ping_b_ms", dictionary_int(second_ping));
                 result.set("replay_frames", i64::from(replay.0));
-                result.set("replay_digest", replay.1.as_str());
-                result.set("replay_desyncs", i64::from(replay.2));
+                result.set(
+                    "replay_requests",
+                    i64::try_from(replay.1).unwrap_or(i64::MAX),
+                );
+                result.set("replay_digest", replay.2.as_str());
+                result.set("replay_request_digest", replay.3.as_str());
+                result.set("replay_desyncs", i64::from(replay.4));
                 result.set("error", "");
             },
             Err(error) => {
@@ -332,7 +346,9 @@ impl FortressEmscriptenProbe {
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);
                 result.set("replay_frames", 0);
+                result.set("replay_requests", 0);
                 result.set("replay_digest", "");
+                result.set("replay_request_digest", "");
                 result.set("replay_desyncs", -1);
                 result.set("error", error.as_str());
             },

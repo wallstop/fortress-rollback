@@ -1141,6 +1141,16 @@ fn spawn_peer(config: &PeerConfig) -> std::io::Result<Child> {
     if let Some(ref preset) = config.sync_preset {
         cmd.arg("--sync-preset").arg(preset);
     }
+    // Loss-bearing nightly real-UDP rows opt into a wider test-only disconnect
+    // timeout: a hosted runner can fail to schedule a child process for longer
+    // than the production two-second window, and that host-stall gap must not be
+    // mistaken for adversarial loss. Loss-free nightly rows (including the
+    // deliberate disconnect-retry startup tests) and the per-PR smoke tier keep
+    // the production default, so production-timeout semantics stay exercised.
+    if loss_bearing_nightly_host_stall_tolerance(config, smoke_tier_enforced()) {
+        cmd.arg("--disconnect-timeout-ms")
+            .arg(NIGHTLY_HOST_STALL_TOLERANCE_MS.to_string());
+    }
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
 }
@@ -1164,6 +1174,26 @@ const PER_PR_MAX_PEER_TIMEOUT_SECS: u64 = 90;
 /// The `ci-network-nightly` nextest profile must cover this value after platform
 /// scaling plus [`PROCESS_TIMEOUT_OVERHEAD_SECS`].
 const NIGHTLY_MAX_PEER_TIMEOUT_SECS: u64 = 600;
+
+/// Test-only session disconnect timeout applied to loss-bearing nightly
+/// real-UDP chaos rows.
+///
+/// Production disconnects after two seconds without a packet, but a hosted
+/// macOS runner can fail to schedule a child process for longer than that.
+/// The nightly real-UDP lane exists to prove survival over real sockets, not to
+/// re-prove the production timeout (covered deterministically in-process), so
+/// loss-bearing rows opt into this wider window instead of treating host
+/// starvation as adversarial loss. Loss-free rows keep the production timeout.
+const NIGHTLY_HOST_STALL_TOLERANCE_MS: u64 = 10_000;
+
+/// Whether a peer should receive the nightly host-stall tolerance.
+///
+/// Only loss-bearing scenarios in the nightly tier opt in. Loss-free rows keep
+/// the production timeout so deliberate connection-timeout and retry behavior
+/// stays exercised, and the per-PR smoke tier never opts in.
+fn loss_bearing_nightly_host_stall_tolerance(config: &PeerConfig, smoke_tier: bool) -> bool {
+    !smoke_tier && config.adversarial_reason().is_some()
+}
 
 /// macOS hosted runners need more real-time headroom for process-heavy UDP tests.
 #[cfg(target_os = "macos")]
@@ -1436,6 +1466,28 @@ fn adversarial_reason_allows_pure_timing_conditions() {
         ..Default::default()
     };
     assert_eq!(config.adversarial_reason(), None);
+}
+
+#[test]
+fn nightly_host_stall_tolerance_applies_only_to_loss_bearing_rows() {
+    let lossy = PeerConfig {
+        packet_loss: 0.05,
+        ..Default::default()
+    };
+    let loss_free = PeerConfig {
+        latency_ms: 100,
+        jitter_ms: 50,
+        reorder_rate: 0.20,
+        reorder_buffer_size: 5,
+        duplicate_rate: 0.15,
+        ..Default::default()
+    };
+    assert!(loss_bearing_nightly_host_stall_tolerance(&lossy, false));
+    assert!(!loss_bearing_nightly_host_stall_tolerance(&lossy, true));
+    assert!(!loss_bearing_nightly_host_stall_tolerance(
+        &loss_free, false
+    ));
+    assert!(!loss_bearing_nightly_host_stall_tolerance(&loss_free, true));
 }
 
 #[test]

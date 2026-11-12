@@ -243,6 +243,121 @@ fn checked_in_default_corpus_replays_with_full_oracle() {
     replay_paths(paths);
 }
 
+fn extended_ring_corpus_path() -> PathBuf {
+    default_corpus_paths()
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("extended-ring"))
+        })
+        .expect("extended ring-corpus schedule must be checked in")
+}
+
+/// The checked-in extended schedule must recycle the runtime rings many times
+/// at the default prediction window while continuous mixed-transport loss,
+/// holds, blocks, stalls, and delay increases keep exercising rollback. A
+/// second replay must reproduce the identical observable trace and confirmed
+/// prefixes.
+#[test]
+fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
+    let schedule = read_schedule(&extended_ring_corpus_path());
+    assert!(
+        schedule.config.steps >= 16_384,
+        "extended ring schedule must run at least 16,384 steps: {}",
+        schedule.config.steps
+    );
+    assert!(
+        schedule.config.max_prediction <= 8,
+        "extended ring schedule must use the default-or-smaller prediction window: {}",
+        schedule.config.max_prediction
+    );
+
+    let mut holds = 0usize;
+    let mut blocks = 0usize;
+    let mut stalls = 0usize;
+    let mut heals = 0usize;
+    let mut delay_peers = BTreeSet::new();
+    for (_, event) in &schedule.events {
+        match event {
+            ScheduleEvent::Hold { .. } => holds = holds.saturating_add(1),
+            ScheduleEvent::Block { .. } => blocks = blocks.saturating_add(1),
+            ScheduleEvent::PeerStall { .. } => stalls = stalls.saturating_add(1),
+            ScheduleEvent::SetInputDelay { peer, delay } => {
+                assert_eq!(*delay, 2, "only input-delay increases are supported");
+                delay_peers.insert(*peer);
+            },
+            ScheduleEvent::HealAll => heals = heals.saturating_add(1),
+            _ => {},
+        }
+    }
+    assert!(holds >= 32, "schedule must hold links repeatedly: {holds}");
+    assert!(
+        blocks >= 32,
+        "schedule must block links repeatedly: {blocks}"
+    );
+    assert!(
+        stalls >= 16,
+        "schedule must stall peers repeatedly: {stalls}"
+    );
+    assert_eq!(
+        delay_peers.len(),
+        schedule.config.n_players,
+        "schedule must raise every peer's input delay"
+    );
+    assert_eq!(heals, 1, "the only heal must be the terminal heal");
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    let min_confirmed = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(i32::MIN);
+    assert!(
+        min_confirmed > 12_000,
+        "extended ring schedule must confirm past 12,000 frames: {:?}",
+        report.final_confirmed
+    );
+    assert!(
+        report.net_stats.retransmit_delayed > 0,
+        "extended ring schedule must exercise reliable retransmission: {:?}",
+        report.net_stats
+    );
+    assert!(
+        report.net_stats.dropped_by_policy > 0,
+        "extended ring schedule must exercise unreliable loss: {:?}",
+        report.net_stats
+    );
+    let rollbacks: u64 = report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.rollback_count)
+        .sum();
+    let resimulated: u64 = report
+        .metrics
+        .iter()
+        .map(|metrics| metrics.resimulated_frames)
+        .sum();
+    assert!(
+        rollbacks > 0 && resimulated > 0,
+        "extended ring schedule must exercise rollback: rollbacks={rollbacks}, \
+         resimulated={resimulated}"
+    );
+
+    let replayed = run(&schedule, &RunOptions::default());
+    replayed.expect_pass(&schedule);
+    assert_eq!(
+        report.trace_hash, replayed.trace_hash,
+        "extended ring replay must preserve full trace identity"
+    );
+    assert_eq!(
+        report.final_confirmed, replayed.final_confirmed,
+        "extended ring replay must preserve every peer's confirmed prefix"
+    );
+}
+
 #[cfg(feature = "hot-join")]
 #[test]
 fn checked_in_hot_join_corpus_replays_with_full_oracle() {

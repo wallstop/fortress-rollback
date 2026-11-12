@@ -1,0 +1,1116 @@
+{
+  "schema_version": 20,
+  "seed": 90210,
+  "link_seed": 112233445566778899,
+  "config": {
+    "n_players": 4,
+    "steps": 16384,
+    "step_dt_ms": 16,
+    "input_delay": 1,
+    "max_prediction": 8,
+    "desync_interval": 30,
+    "noise": "Mild",
+    "scenario_mix": "NetworkOnly",
+    "disconnect_behavior": "Halt",
+    "save_mode": "EveryFrame",
+    "app_model": "Ignore",
+    "frame_model": "Lockstep",
+    "clock_skew_ppm": [],
+    "starve_events": [],
+    "event_queue_size": null,
+    "spectator_hosts": []
+  },
+  "initial_links": [
+    [
+      0,
+      1,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      0,
+      2,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      0,
+      3,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      1,
+      0,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      2,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      1,
+      3,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      2,
+      0,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      2,
+      1,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      2,
+      3,
+      {
+        "drop_rate": 1.0,
+        "dup_rate": 0.0,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 0
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 40000000
+        }
+      }
+    ],
+    [
+      3,
+      0,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      1,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ],
+    [
+      3,
+      2,
+      {
+        "drop_rate": 0.02,
+        "dup_rate": 0.01,
+        "base_delay": {
+          "secs": 0,
+          "nanos": 25000000
+        },
+        "jitter": {
+          "secs": 0,
+          "nanos": 10000000
+        },
+        "burst_rate": 0.0,
+        "burst_len": 0,
+        "retransmit_delay": {
+          "secs": 0,
+          "nanos": 0
+        }
+      }
+    ]
+  ],
+  "events": [
+    [
+      100,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      160,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      300,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      360,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      500,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      700,
+      {
+        "SetInputDelay": {
+          "peer": 0,
+          "delay": 2
+        }
+      }
+    ],
+    [
+      1124,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      1184,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      1324,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      1384,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      1524,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      1724,
+      {
+        "SetInputDelay": {
+          "peer": 1,
+          "delay": 2
+        }
+      }
+    ],
+    [
+      2148,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      2208,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      2348,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      2408,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      2548,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      2748,
+      {
+        "SetInputDelay": {
+          "peer": 2,
+          "delay": 2
+        }
+      }
+    ],
+    [
+      3172,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      3232,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      3372,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      3432,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      3572,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      3772,
+      {
+        "SetInputDelay": {
+          "peer": 3,
+          "delay": 2
+        }
+      }
+    ],
+    [
+      4196,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      4256,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      4396,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      4456,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      4596,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      5220,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      5280,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      5420,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      5480,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      5620,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      6244,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      6304,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      6444,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      6504,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      6644,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      7268,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      7328,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      7468,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      7528,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      7668,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      8292,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      8352,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      8492,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      8552,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      8692,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      9316,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      9376,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      9516,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      9576,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      9716,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      10340,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      10400,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      10540,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      10600,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      10740,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      11364,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      11424,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      11564,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      11624,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      11764,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      12388,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      12448,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      12588,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      12648,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      12788,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      13412,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      13472,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      13612,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      13672,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      13812,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      14436,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      14496,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      14636,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      14696,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      14836,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      15460,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": true
+        }
+      }
+    ],
+    [
+      15520,
+      {
+        "Hold": {
+          "from": 0,
+          "to": 1,
+          "holding": false
+        }
+      }
+    ],
+    [
+      15660,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": true
+        }
+      }
+    ],
+    [
+      15720,
+      {
+        "Block": {
+          "from": 2,
+          "to": 3,
+          "blocked": false
+        }
+      }
+    ],
+    [
+      15860,
+      {
+        "PeerStall": {
+          "peer": 1,
+          "steps": 20
+        }
+      }
+    ],
+    [
+      16383,
+      "HealAll"
+    ]
+  ],
+  "heal_at": 16383
+}

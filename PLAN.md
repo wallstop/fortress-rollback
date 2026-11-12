@@ -6,18 +6,7 @@
 
 ## In progress
 
-- **P1 — Verify portability and long-session determinism.** The strict-build CI lane now replays the
-  checked-in corpus under `-C overflow-checks=on -C debug-assertions=on` and compares the full
-  trace/artifact identity; native OS matrix runs already replay the same corpus. A checked-in
-  mixed-transport corpus schedule proves unreliable and reliable-retransmission links agree on
-  confirmed prefixes. One captured replay artifact (`tests/replay-fixture/`) replays to the same
-  request/state digest on native, browser `wasm32-unknown-unknown`, and Godot
-  `wasm32-unknown-emscripten`; the browser lane also verifies background-tab interruption,
-  resume, and timeout. Remaining: extended frame/ring operation. **Exit:** under one captured
-  replay/schedule, requests and artifacts are byte-identical; live mixed transports agree on
-  confirmed checkpoints despite legal speculative timing differences. No panic or unexpected
-  violation occurs; any platform limitation has a compatibility regression and narrowed support
-  documentation. A simulator-only pass is not cross-platform evidence.
+_None._
 
 ## Future
 
