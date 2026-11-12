@@ -6,14 +6,12 @@
 
 ## In progress
 
-1. **P2 — Add a presence-only sometimes-state ratchet after seven post-redesign nightly windows.**
-   The original organic census was stable but only 2/5 IDs were non-vacuous at the default session
-   configuration. The nightly fleet now reserves 40/1,000 rows for a two-slot input-ring and
-   one-frame prediction cell; a local 1,000-schedule window covers 4/5 IDs. The remaining
-   sparse-earlier row is tracked in [#402](https://github.com/wallstop/fortress-rollback/issues/402).
-   Publish seven consecutive scheduled-main windows, then add a `schedules_hit >= 1` ratchet only
-   for IDs present in all seven and retain it only if at least 3/5 qualify. **Exit:** checked-in
-   ratchet evaluator plus seven-window artifact evidence, or a recorded rejection. Scope:
+1. **P2 — Publish seven post-redesign nightly windows and enable the organic presence ratchet.**
+   The small-ring coverage cell makes 4/5 IDs organic-eligible. The sparse-earlier row is
+   targeted-only (`SOMETIMES_STATE_ORGANIC_ELIGIBLE`, #402). The checked-in
+   `evaluate_seven_window_ratchet` validates seven merged artifacts, counts only organic
+   `schedules_hit >= 1` presence, and retains at least three qualifying IDs. **Exit:** seven-window
+   artifact evidence evaluated by the ratchet and enabled, or a recorded rejection. Scope:
    [#403](https://github.com/wallstop/fortress-rollback/issues/403).
 
 ## Future

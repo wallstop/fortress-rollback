@@ -18,6 +18,25 @@ pub const SOMETIMES_STATE_IDS: [&str; SOMETIMES_STATE_COUNT] = [
     "input_ring.within_one_slot_of_capacity.v1",
 ];
 
+/// IDs whose organic presence may back the nightly ratchet.
+///
+/// `rollback.sparse_earlier_checkpoint_selected.v1` is targeted-only. It needs
+/// a sparse-save checkpoint ABOVE a gossip-lowered freeze frame, but organic
+/// sparse saves occur at confirmed frames and every rollback lowers
+/// `last_saved_frame` to the frame it loaded, so the fleet cannot manufacture
+/// that pre-adjust ordering. The focused session regression
+/// `sparse_disconnect_rollback_loading_earlier_checkpoint_reestablishes_last_saved_frame`
+/// covers the production branch. Excluding it here keeps the ratchet
+/// attainable and records the reason next to the registry (#402).
+pub const SOMETIMES_STATE_ORGANIC_ELIGIBLE: [bool; SOMETIMES_STATE_COUNT] =
+    [true, true, true, false, true];
+
+/// Consecutive nightly windows required before a presence ratchet may retain
+/// an ID, and the minimum number of qualifying IDs that makes the ratchet
+/// worthwhile.
+pub const RATCHET_WINDOW_COUNT: usize = 7;
+pub const RATCHET_MIN_QUALIFYING_STATES: usize = 3;
+
 pub const ORGANIC_SHARDS: u32 = 8;
 pub const ORGANIC_SCHEDULES_PER_SHARD: u64 = 125;
 pub const ORGANIC_STEPS_PER_SCHEDULE: u64 = 5_000;
@@ -882,22 +901,122 @@ fn missing_presence_ids(vector: &SometimesStateVector) -> Vec<&'static str> {
         .collect()
 }
 
-pub fn missing_organic_presence_ids(summary: &OrganicSummary) -> Vec<&'static str> {
-    let vector = summary
+pub fn missing_organic_ratchet_ids(summary: &OrganicSummary) -> Vec<&'static str> {
+    summary
         .0
         .states
-        .each_ref()
-        .map(|state| state.schedules_hit > 0);
-    missing_presence_ids(&vector)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            (SOMETIMES_STATE_ORGANIC_ELIGIBLE[index] && state.schedules_hit == 0)
+                .then_some(SOMETIMES_STATE_IDS[index])
+        })
+        .collect()
 }
 
-pub fn evaluate_organic_presence(summary: &OrganicSummary) -> Result<(), Vec<&'static str>> {
-    let missing = missing_organic_presence_ids(summary);
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(missing)
+/// One ID's organic presence across the ratchet windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RatchetStateReport {
+    pub id: &'static str,
+    pub organic_eligible: bool,
+    pub windows_hit: usize,
+}
+
+/// Outcome of evaluating the checked-in seven-window presence ratchet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresenceRatchetReport {
+    pub states: Vec<RatchetStateReport>,
+    /// IDs present in every window, retaining only eligible IDs.
+    pub retained: Vec<&'static str>,
+    /// Whether at least [`RATCHET_MIN_QUALIFYING_STATES`] IDs qualified.
+    pub accepted: bool,
+}
+
+/// Evaluates organic `schedules_hit >= 1` presence across exactly
+/// [`RATCHET_WINDOW_COUNT`] merged nightly artifacts.
+///
+/// A window counts an ID as present only when its organic
+/// `schedules_hit` is non-zero; targeted, planted, and negative evidence are
+/// deliberately outside this denominator. The ratchet is accepted only when
+/// at least [`RATCHET_MIN_QUALIFYING_STATES`] organic-eligible IDs appear in
+/// all seven windows.
+///
+/// # Errors
+/// Returns a description when the window count, run IDs, registry, or organic
+/// denominators do not match the checked-in census contract.
+pub fn evaluate_seven_window_ratchet(
+    windows: &[MergedCensusReport],
+) -> Result<PresenceRatchetReport, String> {
+    if windows.len() != RATCHET_WINDOW_COUNT {
+        return Err(format!(
+            "presence ratchet requires {RATCHET_WINDOW_COUNT} windows, found {}",
+            windows.len()
+        ));
     }
+    let mut run_ids = BTreeSet::new();
+    for window in windows {
+        if window.schema_version != CENSUS_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported census schema {} in window {}",
+                window.schema_version, window.run_id
+            ));
+        }
+        if window.registry != SOMETIMES_STATE_IDS.map(str::to_owned) {
+            return Err(format!(
+                "window {} registry does not match the checked-in registry",
+                window.run_id
+            ));
+        }
+        window.organic.validate()?;
+        if !run_ids.insert(window.run_id) {
+            return Err(format!("duplicate ratchet window run_id {}", window.run_id));
+        }
+    }
+
+    let states = SOMETIMES_STATE_IDS
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| RatchetStateReport {
+            id,
+            organic_eligible: SOMETIMES_STATE_ORGANIC_ELIGIBLE[index],
+            windows_hit: windows
+                .iter()
+                .filter(|window| window.organic.0.states[index].schedules_hit > 0)
+                .count(),
+        })
+        .collect::<Vec<_>>();
+    let mut retained = states
+        .iter()
+        .filter(|state| state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT)
+        .map(|state| state.id)
+        .collect::<Vec<_>>();
+    let accepted = retained.len() >= RATCHET_MIN_QUALIFYING_STATES;
+    if !accepted {
+        retained.clear();
+    }
+    Ok(PresenceRatchetReport {
+        states,
+        retained,
+        accepted,
+    })
+}
+
+fn read_merged_windows(directory: &Path) -> Result<Vec<MergedCensusReport>, String> {
+    let paths = json_files_bounded(directory, RATCHET_WINDOW_COUNT)?;
+    if paths.len() != RATCHET_WINDOW_COUNT {
+        return Err(format!(
+            "expected {RATCHET_WINDOW_COUNT} merged nightly windows, found {}",
+            paths.len()
+        ));
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = read_bounded(path)?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid merged window {}: {error}", path.display()))
+        })
+        .collect()
 }
 
 #[test]
@@ -910,6 +1029,43 @@ fn merge_nightly_sometimes_state_census() {
     );
     let root = census_root_from_env().expect("nightly census root is configured");
     let _merged = merge_nightly_at(&root).expect("nightly census merges and validates");
+}
+
+/// Run after collecting seven consecutive scheduled-main windows:
+///
+/// ```text
+/// FORTRESS_SIM_CENSUS_WINDOWS_DIR=/path/to/windows \
+///   cargo test --release --test simulation --features hot-join \
+///   simulation::sometimes_state::evaluate_nightly_sometimes_state_ratchet \
+///   -- --ignored --exact --nocapture
+/// ```
+#[test]
+#[allow(clippy::print_stdout, clippy::disallowed_macros)]
+#[ignore = "seven-window ratchet evidence; run after collecting merged nightly artifacts"]
+fn evaluate_nightly_sometimes_state_ratchet() {
+    let directory = std::env::var("FORTRESS_SIM_CENSUS_WINDOWS_DIR")
+        .expect("FORTRESS_SIM_CENSUS_WINDOWS_DIR points at seven merged window artifacts");
+    let windows = read_merged_windows(Path::new(&directory))
+        .expect("seven merged nightly windows decode and validate");
+    let report = evaluate_seven_window_ratchet(&windows).expect("ratchet windows satisfy contract");
+    for state in &report.states {
+        println!(
+            "{}: {}/{} windows (eligible={})",
+            state.id, state.windows_hit, RATCHET_WINDOW_COUNT, state.organic_eligible
+        );
+    }
+    if report.accepted {
+        println!("retained: {:?}", report.retained);
+    } else {
+        println!(
+            "ratchet rejected: {} of {RATCHET_MIN_QUALIFYING_STATES} required eligible IDs qualify",
+            report
+                .states
+                .iter()
+                .filter(|state| state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT)
+                .count()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1365,6 +1521,24 @@ mod tests {
     fn all_zero_vector_lists_every_missing_registry_id() {
         let negative = NegativeControlEvidence::from_vector([false; SOMETIMES_STATE_COUNT]);
         assert_eq!(missing_presence_ids(&negative.0), SOMETIMES_STATE_IDS);
+    }
+
+    #[test]
+    fn organic_ratchet_eligibility_is_exactly_the_four_reachable_ids() {
+        let eligible = SOMETIMES_STATE_IDS
+            .into_iter()
+            .zip(SOMETIMES_STATE_ORGANIC_ELIGIBLE)
+            .filter_map(|(id, eligible)| eligible.then_some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            eligible,
+            vec![
+                "rollback.at_prediction_limit.v1",
+                "floor_round.lower_floor_consumable.v1",
+                "connect_status.nudge_sent.v1",
+                "input_ring.within_one_slot_of_capacity.v1",
+            ]
+        );
 
         let organic = OrganicSummary(DomainSummary {
             schedule_count: 1,
@@ -1378,9 +1552,116 @@ mod tests {
             }),
         });
         assert_eq!(
-            evaluate_organic_presence(&organic).expect_err("zero organic evidence rejects"),
-            SOMETIMES_STATE_IDS
+            missing_organic_ratchet_ids(&organic),
+            eligible,
+            "only organic-eligible IDs can block the presence ratchet"
         );
+    }
+
+    fn merged_window(run_id: u64, present: [bool; SOMETIMES_STATE_COUNT]) -> MergedCensusReport {
+        let states = std::array::from_fn(|index| StateCount {
+            id: SOMETIMES_STATE_IDS[index].to_owned(),
+            schedules_hit: u64::from(present[index]),
+            peer_sessions_hit: u64::from(present[index]) * 2,
+        });
+        let empty_totals = || DomainSummary {
+            schedule_count: 0,
+            scheduled_steps: 0,
+            execution_count: 0,
+            peer_session_count: 0,
+            states: std::array::from_fn(|index| StateCount {
+                id: SOMETIMES_STATE_IDS[index].to_owned(),
+                schedules_hit: 0,
+                peer_sessions_hit: 0,
+            }),
+        };
+        MergedCensusReport {
+            schema_version: CENSUS_SCHEMA_VERSION,
+            run_id,
+            registry: SOMETIMES_STATE_IDS.map(str::to_owned),
+            organic: OrganicSummary(DomainSummary {
+                schedule_count: ORGANIC_SCHEDULES,
+                scheduled_steps: ORGANIC_STEPS,
+                execution_count: ORGANIC_SCHEDULES,
+                peer_session_count: ORGANIC_SCHEDULES * 9,
+                states,
+            }),
+            targeted: TargetedSummary {
+                probes: Vec::new(),
+                totals: empty_totals(),
+            },
+        }
+    }
+
+    #[test]
+    fn seven_window_ratchet_retains_only_eligible_ids_present_in_every_window() {
+        let windows = (0..RATCHET_WINDOW_COUNT)
+            .map(|index| merged_window(100 + index as u64, [true; SOMETIMES_STATE_COUNT]))
+            .collect::<Vec<_>>();
+        let report =
+            evaluate_seven_window_ratchet(&windows).expect("complete seven-window set evaluates");
+        assert!(report.accepted);
+        assert_eq!(
+            report.retained,
+            vec![
+                "rollback.at_prediction_limit.v1",
+                "floor_round.lower_floor_consumable.v1",
+                "connect_status.nudge_sent.v1",
+                "input_ring.within_one_slot_of_capacity.v1",
+            ],
+            "the targeted-only sparse-earlier ID must never be retained"
+        );
+        assert!(report
+            .states
+            .iter()
+            .any(|state| !state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT));
+    }
+
+    #[test]
+    fn seven_window_ratchet_rejects_fewer_than_three_qualifying_ids() {
+        let windows = (0..RATCHET_WINDOW_COUNT)
+            .map(|index| merged_window(200 + index as u64, [true, true, false, true, false]))
+            .collect::<Vec<_>>();
+        let report =
+            evaluate_seven_window_ratchet(&windows).expect("complete seven-window set evaluates");
+        assert!(!report.accepted);
+        assert_eq!(report.retained, Vec::<&str>::new());
+        assert_eq!(
+            report
+                .states
+                .iter()
+                .filter(|state| state.windows_hit == RATCHET_WINDOW_COUNT)
+                .count(),
+            3,
+            "rejected report still records the raw per-window presence"
+        );
+    }
+
+    #[test]
+    fn seven_window_ratchet_rejects_missing_duplicate_and_drifted_windows() {
+        let build = || {
+            (0..RATCHET_WINDOW_COUNT)
+                .map(|index| merged_window(300 + index as u64, [false; SOMETIMES_STATE_COUNT]))
+                .collect::<Vec<_>>()
+        };
+
+        let mut short = build();
+        short.pop();
+        assert!(evaluate_seven_window_ratchet(&short)
+            .expect_err("six windows reject")
+            .contains("requires 7"));
+
+        let mut duplicate = build();
+        duplicate[1].run_id = duplicate[0].run_id;
+        assert!(evaluate_seven_window_ratchet(&duplicate)
+            .expect_err("duplicate run id rejects")
+            .contains("duplicate ratchet window"));
+
+        let mut drifted = build();
+        drifted[2].registry[0] = "drifted.v1".to_owned();
+        assert!(evaluate_seven_window_ratchet(&drifted)
+            .expect_err("registry drift rejects")
+            .contains("registry"));
     }
 
     #[test]
