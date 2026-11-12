@@ -1148,7 +1148,7 @@ proptest! {
                     frame: frame.as_i32(),
                 };
                 cell.save(frame, Some(state), Some(*checksum));
-                saved_cells.push((frame, cell.clone(), *checksum));
+                saved_cells.push((frame, cell, *checksum));
             }
             if i < num_frames - 1 {
                 sync_layer.advance_frame();

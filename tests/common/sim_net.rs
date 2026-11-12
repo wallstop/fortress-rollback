@@ -4022,8 +4022,9 @@ mod tests {
             noisy_other.send_payload(
                 addr(4),
                 SizedPayload {
+                    id: target.id,
+                    encoded_len: target.encoded_len,
                     is_input: false,
-                    ..target.clone()
                 },
             );
             isolated_target.send_payload(addr(2), target.clone());
