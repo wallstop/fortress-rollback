@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794407122947,
+  "lastUpdate": 1794454350439,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "88b6c3040482e05118caf56279b638dbd8ad3982",
-          "message": "Promote N=16 controls and refresh dependency CI (#267)\n\n## What\n\nPromotes the four coordinated A8 N=16 simulation controls into the\nnormal PR test suite:\n\n- smoke-fleet invariants\n- reliable-FIFO/TCP invariants\n- seeded-divergence oracle coverage\n- bit-identical trace determinism\n\nThe N=12 smoke probe and 5,000-step N=16 budget diagnostic remain manual\nand ignored.\n\nThis PR also closes the dependency-maintenance work exposed by the\npromotion:\n\n- aligns `wasm-bindgen-cli` with locked `wasm-bindgen 0.2.126`\n- preserves Rust 1.86 compatibility with `serial_test 3.5.0` and a\nDependabot semver-major guard\n- refreshes all 65 compatible Cargo packages (`cargo update --dry-run`\nnow locks 0 packages)\n- pins `taiki-e/install-action@v2.85.6` and `docker/login-action@v4.6.0`\n- gives the promoted smoke control an evidence-backed 180-second local\nNextest ceiling, with retries still disabled\n- gives tarpaulin a 300-second response timeout inside the existing\n30-minute job cap\n\n## Why\n\nA8 required both an approximately 10-second PR budget and seven\nconsecutive scheduled `main` successes. The release-mode promotion set\nruns in 4.250 seconds locally, and the scheduled simulation fleet\ncompleted eight uninterrupted successful runs from 2026-07-25 through\n2026-08-01.\n\nThe initial PR runs then exposed three pre-existing CI incompatibilities\nfrom the preceding dependency update: a wasm-bindgen schema mismatch, an\nMSRV-incompatible serial_test major, and tarpaulin's 60-second\ninstrumented-response default. Each was reproduced before repair.\n\n## Impact\n\nNo production, public API, wire-format, allocation, or session-runtime\nbehavior changes. Changes are limited to test promotion, CI/tool\nconfiguration, dependency resolution, and regression contracts. No\nchangelog entry is required.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS\n- Agent preflight: PASS\n- MSRV and supply-chain checks: PASS\n- Error handling: N/A\n- Changelog: N/A\n\n## Validation\n\n- release-mode promotion set: 4/4 passed in 4.250 seconds\n- default Nextest: 2,882/2,882 passed\n- hot-join Nextest: 3,138/3,138 passed\n- focused loaded N=16 smoke: passed in 60.624 seconds on its first\nattempt under the new 180-second ceiling\n- `cargo +1.86 check --all-targets`\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- `cargo deny check`\n- `cargo fmt --check`\n- warning-denied docs with `hot-join,tokio,json`\n- 1,969/1,969 script tests\n- actionlint and agent preflight, including 66 CI toolchain contract\ntests\n- real wasm browser smoke with CLI 0.2.126: 1/1 passed\n- exact tarpaulin command: 53.54% line coverage (7,034/13,139)\n- two-round main-thread adversarial review; repeat sweep clean\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> No production code changes, but PR CI now depends on longer simulation\nruns and a large lockfile refresh; serial_test 3.x and refreshed\ntransitive deps could affect test ordering/isolation if misused.\n> \n> **Overview**\n> Promotes **four A8 N=16 simulation controls** from ignored/manual runs\ninto the normal PR suite: smoke-fleet invariants, TCP reliable-FIFO\ninvariants, seeded oracle divergence, and bit-identical trace\ndeterminism. The N=12 smoke probe and other large-mesh diagnostics stay\n**`#[ignore]`**.\n> \n> **CI and tooling** are adjusted so those tests and the dependency\nrefresh stay green: a **180s** Nextest slow-timeout override for the\npromoted smoke probe, **300s** tarpaulin `--timeout` for instrumented\nN=16 work, **`wasm-bindgen-cli` pinned to locked 0.2.126** (with\n**`taiki-e/install-action@v2.85.6`**), **`serial_test` held at 3.5** for\nRust **1.86** MSRV plus a Dependabot ignore for `serial_test`\nsemver-major bumps, and a broad **`Cargo.lock`** refresh with\n**`docker/login-action@v4.6.0`**. Workflow regression tests assert\ntarpaulin timeout and wasm-bindgen lock alignment.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n2855d350eeaa818d518e3ea85dd4a62d339d9807. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-01T15:56:54-07:00",
-          "tree_id": "7ff864f4c78d16393dabc944a3b64b1651e14682",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/88b6c3040482e05118caf56279b638dbd8ad3982"
-        },
-        "date": 1785625533747,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 131421,
-            "range": "± 494",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 47798,
-            "range": "± 130",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 90",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3147,
-            "range": "± 250",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2773,
             "range": "± 164",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8294aeadcbfa61356c84a716499de6470f778b66",
+          "message": "test(replay): cross-platform replay, mixed transports, and tab suspension (P1) (#400)\n\n## Description\n\nAdvances PLAN P1 (portability and long-session determinism) with three\nevidence classes:\n\n- **Mixed transport replay.** Adds\n`tests/simulation/corpus/002-mixed-transport-quorum.json`, a\nchecked-in 4-peer, 1000-step schedule whose 12 directed links split\nevenly between a reliable\nretransmission transport (every would-drop is converted to a 40ms\nhead-of-line retransmit delay)\nand unreliable UDP-like loss (2% drop, 1% duplication, 25ms base + 10ms\njitter). A hold/release\nand a temporary block cross both classes before the final heal. The\ncorpus replay and strict\nsafe-release lanes run the full oracle and a second replay asserts an\nidentical trace hash and\n  final confirmed frames.\n- **One captured replay on every target.** Adds the\n`fortress-replay-fixture` test-support crate\nwith a 6171-byte replay captured from a real two-peer session with\nrollback corrections. Native,\nbrowser `wasm32-unknown-unknown`, and Godot `wasm32-unknown-emscripten`\nlanes load the same bytes,\nreplay with checksum validation, and assert frames=149, requests=298,\nzero `ReplayDesync`\nevents, and request/state digest `0xb3535a3db29da7784abaacf609fec42b`. A\ncorrupted-checksum\n  negative control proves the validation path has teeth.\n- **Background-tab suspension.** The browser runtime test now injects a\nvirtual clock. A 1s\nsuspension (above the 500ms interruption notice, below the 2s timeout)\nmust emit\n`NetworkInterrupted` then `NetworkResumed`, must not disconnect, and\nmust keep peer states\nidentical after resuming. A suspension past 2s must emit `Disconnected`\nfail-closed.\n\nPLAN now records extended frame/ring operation as the remaining P1 item.\nThe production checklist\nand its wiki mirror document the new cross-platform and mixed-transport\nevidence.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix\n- [ ] ✨ New feature\n- [ ] 💥 Breaking change\n- [x] 📚 Documentation\n- [ ] ♻️ Refactor\n- [x] 🧪 Test\n- [x] 🔧 CI/Build\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] Zero-panic policy: no new production code, and the test-support\ncrate returns `Result` for all\n      fallible replay operations.\n- [x] Added tests that prove the evidence is real (mixed-class counters,\nfull oracle, replay digest,\ncorrupted-checksum negative control, suspension resume and timeout).\n- [x] `cargo fmt` and `cargo clippy --workspace --all-targets --features\ntokio,json -- -D warnings`\n      pass.\n- [x] `cargo nextest run --features tokio,json` passes.\n\n### If Applicable\n\n- [x] Documentation updated (production checklist + wiki mirror + PLAN).\n- [ ] `CHANGELOG.md`: no public API or user-observable behavior changed;\ntest/CI/docs only.\n- [ ] Examples: not affected.\n- [x] No new compiler warnings.\n\n## Testing\n\n**Tests added/modified:**\n\n-\n`simulation::corpus_replay::checked_in_mixed_transport_schedule_replays_with_both_transport_classes`\n-\n`fortress-replay-fixture::tests::checked_in_fixture_replays_with_expected_evidence`\n-\n`fortress-replay-fixture::tests::mutated_recorded_checksum_is_detected`\n-\n`wasm-browser-smoke::captured_native_replay_replays_identically_in_browser`\n-\n`wasm-browser-smoke::browser_tab_suspension_within_timeout_resumes_and_advances`\n-\n`wasm-browser-smoke::browser_tab_suspension_past_timeout_disconnects_fail_closed`\n- Godot Emscripten probe + Playwright assertions for the same replay\nevidence.\n\n**Local evidence:**\n\n```\ncargo nextest run --features tokio,json\n  Summary [167.933s] 3120 tests run: 3120 passed, 74 skipped\n\ncargo nextest run -p fortress-replay-fixture\n  Summary 2 tests run: 2 passed\n\ncargo nextest run --test simulation -E 'test(simulation::corpus_replay)'\n  Summary 10 tests run: 10 passed\n  (mixed schedule: retransmit_delayed=6940, dropped_by_policy=137,\n   final confirmed=[813, 813, 813, 813])\n\ncargo clippy --workspace --all-targets --features tokio,json -- -D warnings\ncargo clippy -p wasm-browser-smoke --target wasm32-unknown-unknown --all-targets -- -D warnings\ncargo clippy --manifest-path tests/godot-emscripten/Cargo.toml --locked --all-targets --all-features -- -D warnings\ncargo shear, actionlint, agent-preflight, markdownlint, typos, doc links, doc claims: clean\n```\n\nBrowser and Emscripten execution evidence is produced by the hosted\n`WASM Build Check` and\n`Godot Emscripten Browser` jobs on this PR; the local container has no\nChrome or emsdk. The\nsuspension/resume/timeout semantics were pre-validated natively through\nthe same virtual-clock\nsequence (interrupted+resumed under 1s, interrupted+disconnected past\n2s).\n\n## Related Issues\n\nRelates to PLAN P1 (portability and long-session determinism). No open\nissues at session start.",
+          "timestamp": "2026-11-11T19:24:48-08:00",
+          "tree_id": "6132f26d0516163200c55089d42821d9ae90cdf0",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/8294aeadcbfa61356c84a716499de6470f778b66"
+        },
+        "date": 1794454349450,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39581,
+            "range": "± 491",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25635,
+            "range": "± 458",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2766,
+            "range": "± 159",
             "unit": "ns/iter"
           }
         ]
