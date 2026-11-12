@@ -207,27 +207,61 @@ mod tests {
             "a sub-timeout suspension must not disconnect: {events1:?}/{events2:?}"
         );
 
-        let frame = 6u32;
-        session1
-            .add_local_input(PlayerHandle::new(0), BrowserInput { value: frame })
-            .expect("post-resume first input must be accepted");
-        session2
-            .add_local_input(PlayerHandle::new(1), BrowserInput { value: frame })
-            .expect("post-resume second input must be accepted");
-        apply_requests(
-            &mut state1,
+        let drive_frame = |session1: &mut P2PSession<BrowserConfig>,
+                           session2: &mut P2PSession<BrowserConfig>,
+                           state1: &mut BrowserState,
+                           state2: &mut BrowserState,
+                           frame_index: u32,
+                           input: BrowserInput| {
             session1
-                .advance_frame()
-                .expect("post-resume first session must advance"),
-        );
-        apply_requests(
-            &mut state2,
+                .add_local_input(PlayerHandle::new(0), input)
+                .expect("post-resume first input must be accepted");
             session2
-                .advance_frame()
-                .expect("post-resume second session must advance"),
-        );
+                .add_local_input(PlayerHandle::new(1), input)
+                .expect("post-resume second input must be accepted");
+            apply_requests(
+                state1,
+                session1
+                    .advance_frame()
+                    .expect("post-resume first session must advance"),
+            );
+            apply_requests(
+                state2,
+                session2
+                    .advance_frame()
+                    .expect("post-resume second session must advance"),
+            );
+            let target = Frame::new(frame_index as i32);
+            let mut confirm_polls = 0usize;
+            while confirm_polls < INPUT_POLL_BUDGET
+                && (session1.confirmed_frame() < target || session2.confirmed_frame() < target)
+            {
+                poll_pair_with_clock(session1, session2, &offset_ms);
+                confirm_polls = confirm_polls.saturating_add(1);
+            }
+            assert!(
+                session1.confirmed_frame() >= target && session2.confirmed_frame() >= target,
+                "post-resume frame {frame_index} failed to confirm within \
+                 {INPUT_POLL_BUDGET} polls"
+            );
+        };
+
+        // The same post-resume input on every frame makes repeat-last
+        // prediction exact after the first correction, so the final state is a
+        // confirmed checkpoint rather than a speculative tail.
+        let post_resume_input = BrowserInput { value: 9 };
+        for frame_index in 6..9u32 {
+            drive_frame(
+                &mut session1,
+                &mut session2,
+                &mut state1,
+                &mut state2,
+                frame_index,
+                post_resume_input,
+            );
+        }
         assert_eq!(state1, state2, "post-resume states must agree");
-        assert_eq!(state1.frame, 7, "post-resume advance must move the frame");
+        assert_eq!(state1.frame, 9, "post-resume advances must move the frame");
     }
 
     #[wasm_bindgen_test]

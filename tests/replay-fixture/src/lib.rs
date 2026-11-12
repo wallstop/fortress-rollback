@@ -47,7 +47,7 @@ pub struct FixtureInput {
 
 /// Integer-only application state. No float, wall-clock, or platform-dependent
 /// operation participates in the checksum.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureState {
     /// Completed frames.
     pub frame: i32,
