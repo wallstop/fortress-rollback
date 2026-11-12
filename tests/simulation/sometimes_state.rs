@@ -1619,7 +1619,7 @@ mod tests {
         let report =
             evaluate_seven_window_ratchet(&windows).expect("complete seven-window set evaluates");
         assert!(!report.accepted);
-        assert!(report.retained.is_empty());
+        assert_eq!(report.retained, Vec::<&str>::new());
         assert_eq!(
             report
                 .states
