@@ -3856,13 +3856,14 @@ mod tests {
         let mut observed = std::collections::BTreeSet::new();
         observed.insert("src/network/compression.rs:282");
         observed.insert("src/a\"b.rs:1");
+        observed.insert("src/a\u{1}b.rs:1");
         super::violation_census::write_snapshot(&directory, &observed, false, None)
             .expect("census snapshot writes");
 
         assert_eq!(
             std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
             format!(
-                "{{\"schema_version\":1,\"run_id\":null,\"process_id\":{},\"locations\":[\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"],\"truncated\":false}}\n",
+                "{{\"schema_version\":1,\"run_id\":null,\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"],\"truncated\":false}}\n",
                 std::process::id()
             ),
             "the snapshot must be sorted, JSON-escaped, and hold every location"
@@ -3874,7 +3875,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
             format!(
-                "{{\"schema_version\":1,\"run_id\":\"run-7\",\"process_id\":{},\"locations\":[\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\",\"src/z.rs:1\"],\"truncated\":true}}\n",
+                "{{\"schema_version\":1,\"run_id\":\"run-7\",\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\",\"src/z.rs:1\"],\"truncated\":true}}\n",
                 std::process::id()
             ),
             "replacement must retain old locations and record the truncation flag"
@@ -3926,9 +3927,47 @@ mod tests {
             "the byte-budget snapshot must retain the earliest locations"
         );
         assert!(
+            artifact.contains("\"src/generated/100/"),
+            "the byte budget must retain a substantial prefix, not a tiny set"
+        );
+        assert!(
             !artifact.contains("\"src/generated/299/"),
             "the byte budget must omit later locations"
         );
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
+    }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_bounds_control_character_expansion() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "fortress-census-escape-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+
+        let mut observed = std::collections::BTreeSet::new();
+        let expandable: &'static str = Box::leak("\u{1}".repeat(6_000).into_boxed_str());
+        observed.insert(expandable);
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("bounded census snapshot writes");
+        let artifact = std::fs::read_to_string(
+            directory.join(format!("observations-{}.json", std::process::id())),
+        )
+        .expect("census artifact is readable");
+
+        assert!(
+            artifact.len() <= 32 * 1024,
+            "control-character escaping must respect the byte budget"
+        );
+        assert!(
+            artifact.contains("\"locations\":[]"),
+            "an over-budget escaped location must be omitted"
+        );
+        assert!(artifact.contains("\"truncated\":true"));
         std::fs::remove_dir_all(directory).expect("census directory cleanup");
     }
 }
