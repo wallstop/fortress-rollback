@@ -258,7 +258,9 @@ jobs:
             fleet_args=(--fleet-dir "$RUNNER_TEMP/violation-sites")
           fi
           observation_args=()
-          if [ -d "$RUNNER_TEMP/violation-observations" ]; then
+          if [ -d "$RUNNER_TEMP/violation-observations" ] \
+            && [ -n "$(find "$RUNNER_TEMP/violation-observations" \
+              -maxdepth 1 -name '*.json' -print -quit)" ]; then
             observation_args=(--observations-dir "$RUNNER_TEMP/violation-observations")
           fi
           if [ "${#coverage_args[@]}" -eq 0 ] && [ "${#fleet_args[@]}" -eq 0 ] \

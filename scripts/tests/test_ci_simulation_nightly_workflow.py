@@ -141,6 +141,7 @@ def test_violation_site_census_joins_all_exact_sources() -> None:
     assert "scripts/simulation/violation_census.py" in report
     assert "--fleet-dir" in report
     assert "--observations-dir" in report
+    assert "-name '*.json'" in report
     assert "--coverage-xml" in report
     assert census_job["steps"][-1]["with"]["name"] == (
         "violation-site-census-${{ github.run_id }}"
