@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-simulation-nightly.yml"
@@ -12,6 +14,14 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-simulation-nightly.yml"
 
 def workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def workflow() -> dict:
+    return yaml.safe_load(workflow_text())
+
+
+def job_steps(job: dict) -> dict[str, dict]:
+    return {step.get("name", ""): step for step in job["steps"]}
 
 
 def named_step(text: str, name: str) -> str:
@@ -22,13 +32,22 @@ def named_step(text: str, name: str) -> str:
 
 
 def test_nightly_workload_and_schedule_remain_fixed() -> None:
-    text = workflow_text()
-    fleet = named_step(text, "Run sharded fleet and targeted probes")
+    data = workflow()
+    fleet_step = job_steps(data["jobs"]["simulation-nightly"])[
+        "Run sharded fleet and targeted probes"
+    ]
+    fleet = fleet_step["run"]
+    run_commands = [
+        step.get("run", "")
+        for job in data["jobs"].values()
+        for step in job["steps"]
+        if isinstance(step.get("run", ""), str)
+    ]
 
-    assert text.count("cron: '0 4 * * *'") == 1
-    assert text.count("workflow_dispatch:") == 1
-    assert "timeout-minutes: 60" in text
-    assert text.count("cargo nextest run") == 2
+    assert workflow_text().count("cron: '0 4 * * *'") == 1
+    assert workflow_text().count("workflow_dispatch:") == 1
+    assert data["jobs"]["simulation-nightly"]["timeout-minutes"] == 60
+    assert sum(command.count("cargo nextest run") for command in run_commands) == 2
     assert "test(simulation::fleet::nightly_seed_shard_)" in fleet
     for test_name in (
         "h_skew_hour_equivalent_measures_lag_correction_and_cost",
@@ -38,7 +57,9 @@ def test_nightly_workload_and_schedule_remain_fixed() -> None:
     ):
         assert fleet.count(test_name) == 1
     assert "--features hot-join" in fleet
-    assert "FORTRESS_SIM_CENSUS_DIR: ${{ runner.temp }}/simulation-census" in fleet
+    assert fleet_step["env"]["FORTRESS_SIM_CENSUS_DIR"] == (
+        "${{ runner.temp }}/simulation-census"
+    )
 
 
 def test_merge_is_sequential_and_does_not_replay_fleet_schedules() -> None:
@@ -63,33 +84,67 @@ def test_merge_is_sequential_and_does_not_replay_fleet_schedules() -> None:
 
 
 def test_violation_site_census_joins_all_exact_sources() -> None:
-    text = workflow_text()
-    observations = named_step(text, "Upload violation-site observations")
-    exact_start = text.index("  violation-site-observations:")
-    job_start = text.index("  violation-site-census:")
-    exact_job = text[exact_start:job_start]
-    census_job = text[job_start:]
+    data = workflow()
+    jobs = data["jobs"]
+    exact = job_steps(jobs["violation-site-observations"])
+    census = job_steps(jobs["violation-site-census"])
+    upload = job_steps(jobs["simulation-nightly"])["Upload violation-site observations"]
 
-    assert "actions: read" in text
-    assert "name: simulation-violation-sites-${{ github.run_id }}" in observations
-    assert "path: ${{ runner.temp }}/simulation-census/violation-sites/" in observations
-    assert (
+    assert data["permissions"]["actions"] == "read"
+    assert upload["with"]["name"] == ("simulation-violation-sites-${{ github.run_id }}")
+    assert upload["with"]["path"] == (
+        "${{ runner.temp }}/simulation-census/violation-sites/"
+    )
+
+    run_step = exact["Run the full suite with the census hook"]
+    assert run_step["run"] == (
         "cargo nextest run --profile ci --features tokio,json,hot-join,violation-census"
-        in exact_job
+    )
+    assert run_step["env"]["FORTRESS_VIOLATION_CENSUS_DIR"] == (
+        "${{ runner.temp }}/violation-observations"
+    )
+    assert run_step["env"]["FORTRESS_VIOLATION_CENSUS_RUN_ID"] == (
+        "${{ github.run_id }}"
+    )
+    exact_upload = exact["Upload exact observations"]
+    assert exact_upload["if"] == "always()"
+    assert exact_upload["with"] == {
+        "name": "violation-site-observations-${{ github.run_id }}",
+        "path": "${{ runner.temp }}/violation-observations/",
+        "if-no-files-found": "error",
+        "retention-days": 30,
+    }
+
+    census_job = jobs["violation-site-census"]
+    assert census_job["needs"] == [
+        "simulation-nightly",
+        "violation-site-observations",
+    ]
+    assert census_job["if"] == "always()"
+    download = census["Download exact test-suite observations"]
+    assert download["continue-on-error"] is True
+    assert download["with"] == {
+        "name": "violation-site-observations-${{ github.run_id }}",
+        "path": "${{ runner.temp }}/violation-observations",
+    }
+    fleet_download = census["Download fleet observations"]
+    assert fleet_download["continue-on-error"] is True
+    report = census["Generate violation-site exercise report"]["run"]
+    assert (
+        "gh run list --workflow=ci-coverage.yml"
+        in census["Download latest main test coverage (best effort)"]["run"]
     )
     assert (
-        "FORTRESS_VIOLATION_CENSUS_DIR: ${{ runner.temp }}/violation-observations"
-        in exact_job
+        "gh run download"
+        in census["Download latest main test coverage (best effort)"]["run"]
     )
-    assert "name: violation-site-observations-${{ github.run_id }}" in exact_job
-    assert "needs: [simulation-nightly, violation-site-observations]" in census_job
-    assert "gh run list --workflow=ci-coverage.yml" in census_job
-    assert "gh run download" in census_job
-    assert "scripts/simulation/violation_census.py" in census_job
-    assert "--fleet-dir" in census_job
-    assert "--observations-dir" in census_job
-    assert "--coverage-xml" in census_job
-    assert "name: violation-site-census-${{ github.run_id }}" in census_job
+    assert "scripts/simulation/violation_census.py" in report
+    assert "--fleet-dir" in report
+    assert "--observations-dir" in report
+    assert "--coverage-xml" in report
+    assert census_job["steps"][-1]["with"]["name"] == (
+        "violation-site-census-${{ github.run_id }}"
+    )
 
 
 def test_census_upload_is_always_retained_and_separate_from_failures() -> None:

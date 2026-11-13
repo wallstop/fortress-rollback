@@ -94,14 +94,23 @@ def _write_fleet(path: Path, shard: int, locations: list[str], run_id: int = 7) 
     )
 
 
-def _write_observations(path: Path, process_id: int, locations: list[str]) -> None:
+def _write_observations(
+    path: Path,
+    process_id: int,
+    locations: list[str],
+    *,
+    truncated: bool = False,
+    run_id: str | None = None,
+) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / f"observations-{process_id}.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
+                "run_id": run_id,
                 "process_id": process_id,
                 "locations": locations,
+                "truncated": truncated,
             }
         ),
         encoding="utf-8",
@@ -152,10 +161,12 @@ def test_report_counts_exact_observations_and_ignores_test_only_locations(
         41,
         sorted([f"src/sample.rs:{first.line}", f"src\\sample.rs:{third.line}"]),
     )
-    _write_observations(observations_dir, 42, ["src/test-only/assertion.rs:1"])
+    _write_observations(
+        observations_dir, 42, ["src/test-only/assertion.rs:1"], truncated=True
+    )
 
-    observations, artifact_count = violation_census.parse_observation_artifacts(
-        observations_dir
+    observations, artifact_count, truncated_artifacts = (
+        violation_census.parse_observation_artifacts(observations_dir)
     )
     report = violation_census.build_report(
         sites,
@@ -164,15 +175,18 @@ def test_report_counts_exact_observations_and_ignores_test_only_locations(
         None,
         observations,
         artifact_count,
+        truncated_artifacts,
     )
 
     assert report["exercised_sites"] == 2
     source = report["sources"]["observations"]
     assert source == {
         "artifact_count": 2,
+        "truncated_artifacts": 1,
         "observed_locations": 3,
         "matched_locations": 2,
         "unmatched_locations": 1,
+        "unmatched_source_locations": ["src/test-only/assertion.rs:1"],
     }
 
 
@@ -235,6 +249,79 @@ def test_observation_artifacts_validate_schema_and_order(tmp_path: Path) -> None
 
     _write_observations(observations, 7, ["src/sample.rs:2", "src/sample.rs:1"])
     with pytest.raises(ValueError, match="sorted and unique"):
+        violation_census.parse_observation_artifacts(observations)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("schema_version", True, "invalid schema version"),
+        ("schema_version", 1.0, "invalid schema version"),
+        ("process_id", True, "invalid process id"),
+        ("process_id", 0, "invalid process id"),
+        ("locations", "src/sample.rs:1", "invalid locations"),
+        ("locations", [1], "non-string location"),
+        ("locations", ["src/sample.rs:not-a-line"], "malformed location"),
+        ("truncated", "yes", "invalid truncated flag"),
+    ],
+)
+def test_observation_artifacts_reject_invalid_fields(
+    tmp_path: Path, field: str, value: object, match: str
+) -> None:
+    observations = tmp_path / "observations"
+    _write_observations(observations, 7, ["src/sample.rs:1"])
+    artifact = observations / "observations-7.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    payload[field] = value
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        violation_census.parse_observation_artifacts(observations)
+
+
+def test_observation_artifacts_require_artifacts_and_matching_process_ids(
+    tmp_path: Path,
+) -> None:
+    observations = tmp_path / "observations"
+    observations.mkdir()
+    with pytest.raises(ValueError, match="contains no observation"):
+        violation_census.parse_observation_artifacts(observations)
+
+    _write_observations(observations, 7, ["src/sample.rs:1"])
+    (observations / "observations-7.json").rename(observations / "observations-8.json")
+    with pytest.raises(ValueError, match="does not match its process id"):
+        violation_census.parse_observation_artifacts(observations)
+
+    _write_observations(observations, 7, ["src/sample.rs:1"], run_id="run-a")
+    _write_observations(observations, 8, ["src/sample.rs:2"], run_id="run-b")
+    with pytest.raises(ValueError, match="mixes observation run ids"):
+        violation_census.parse_observation_artifacts(observations)
+
+
+def test_observation_artifacts_enforce_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observations = tmp_path / "observations"
+    _write_observations(observations, 7, ["src/sample.rs:1"])
+
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_ARTIFACT_BYTES", 10)
+    with pytest.raises(ValueError, match="bytes"):
+        violation_census.parse_observation_artifacts(observations)
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_ARTIFACT_BYTES", 65_536)
+
+    _write_observations(observations, 8, ["src/sample.rs:2"])
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_ARTIFACTS", 1)
+    with pytest.raises(ValueError, match="observation artifacts"):
+        violation_census.parse_observation_artifacts(observations)
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_ARTIFACTS", 4_096)
+
+    _write_observations(observations, 9, ["src/sample.rs:2", "src/sample.rs:3"])
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_LOCATIONS", 1)
+    with pytest.raises(ValueError, match="invalid locations"):
+        violation_census.parse_observation_artifacts(observations)
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_LOCATIONS", 256)
+
+    monkeypatch.setattr(violation_census, "MAX_OBSERVATION_TOTAL_LOCATIONS", 1)
+    with pytest.raises(ValueError, match="more than 1"):
         violation_census.parse_observation_artifacts(observations)
 
 

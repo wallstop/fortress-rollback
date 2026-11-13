@@ -2230,8 +2230,10 @@ verification surface compiles out of normal builds and is not intended for appli
 
 Enables the exact violation-site exercise hook used by the nightly census. When
 `FORTRESS_VIOLATION_CENSUS_DIR` names a directory, every newly reported
-`report_violation!` location is written to a bounded per-process artifact. The hook compiles out
-of normal builds and is diagnostic only: an unwritable directory never changes violation handling.
+`report_violation!` location is written to a bounded per-process artifact. Each artifact holds at
+most 256 locations or 32 KiB and sets a `truncated` flag when either limit applies. The hook
+compiles out of normal builds and is diagnostic only: an unwritable directory never changes
+violation handling. Loom builds compile the hook out.
 
 #### `z3-verification`
 

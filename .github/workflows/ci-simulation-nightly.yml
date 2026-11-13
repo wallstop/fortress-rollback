@@ -185,6 +185,7 @@ jobs:
       - name: Run the full suite with the census hook
         env:
           FORTRESS_VIOLATION_CENSUS_DIR: ${{ runner.temp }}/violation-observations
+          FORTRESS_VIOLATION_CENSUS_RUN_ID: ${{ github.run_id }}
         run: cargo nextest run --profile ci --features tokio,json,hot-join,violation-census
 
       - name: Upload exact observations
@@ -205,6 +206,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [simulation-nightly, violation-site-observations]
+    # Publish a partial report even when a producer job fails; each source is
+    # joined only when its artifact is present.
+    if: always()
 
     steps:
       - uses: actions/checkout@v7
@@ -215,12 +219,14 @@ jobs:
           python-version: "3.12"
 
       - name: Download fleet observations
+        continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           name: simulation-violation-sites-${{ github.run_id }}
           path: ${{ runner.temp }}/violation-sites
 
       - name: Download exact test-suite observations
+        continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           name: violation-site-observations-${{ github.run_id }}
@@ -247,10 +253,22 @@ jobs:
           if [ -f "$RUNNER_TEMP/coverage/cobertura.xml" ]; then
             coverage_args=(--coverage-xml "$RUNNER_TEMP/coverage/cobertura.xml")
           fi
+          fleet_args=()
+          if [ -d "$RUNNER_TEMP/violation-sites" ]; then
+            fleet_args=(--fleet-dir "$RUNNER_TEMP/violation-sites")
+          fi
+          observation_args=()
+          if [ -d "$RUNNER_TEMP/violation-observations" ]; then
+            observation_args=(--observations-dir "$RUNNER_TEMP/violation-observations")
+          fi
+          if [ "${#coverage_args[@]}" -eq 0 ] && [ "${#fleet_args[@]}" -eq 0 ] \
+            && [ "${#observation_args[@]}" -eq 0 ]; then
+            echo "::warning::no exercise sources available; publishing baseline-only report"
+          fi
           python3 scripts/simulation/violation_census.py \
             "${coverage_args[@]}" \
-            --fleet-dir "$RUNNER_TEMP/violation-sites" \
-            --observations-dir "$RUNNER_TEMP/violation-observations" \
+            "${fleet_args[@]}" \
+            "${observation_args[@]}" \
             --output "$RUNNER_TEMP/violation-site-census.json"
 
       - name: Upload violation-site exercise report
