@@ -26,7 +26,6 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
 from pathlib import Path
 
 import violation_sites
@@ -37,21 +36,11 @@ DEFAULT_SOURCE_ROOT = violation_sites.DEFAULT_SOURCE_ROOT
 CENSUS_SCHEMA_VERSION = 1
 FLEET_SCHEMA_VERSION = 1
 MAX_FLEET_SHARDS = 8
-MAX_FLEET_LOCATIONS = 4096
+MAX_FLEET_LOCATIONS = 512
 MAX_FLEET_ARTIFACT_BYTES = 65_536
 MAX_COVERAGE_BYTES = 64 * 1024 * 1024
 _LOCATION = re.compile(r"(?P<path>[^:\n]+):(?P<line>[0-9]+)")
 _SOURCE_MARKER = "src/"
-
-
-@dataclass(frozen=True)
-class SiteReport:
-    """One baseline site's exercise status."""
-
-    site_id: str
-    kind: str
-    message: str
-    exercised: bool
 
 
 def _read_bounded(path: Path, maximum: int) -> bytes:
@@ -203,15 +192,11 @@ def build_report(
             f"exercise sources reference sites outside the baseline: {sorted(unknown)}"
         )
 
-    reports = [
-        SiteReport(site.site_id, site.kind, site.message, site.site_id in exercised)
-        for site in sites
-    ]
-    unexercised = [report for report in reports if not report.exercised]
+    unexercised = [site for site in sites if site.site_id not in exercised]
     return {
         "schema_version": CENSUS_SCHEMA_VERSION,
-        "baseline_sites": len(reports),
-        "exercised_sites": len(reports) - len(unexercised),
+        "baseline_sites": len(sites),
+        "exercised_sites": len(sites) - len(unexercised),
         "unexercised_sites": len(unexercised),
         "sources": {
             "coverage": (
@@ -233,11 +218,11 @@ def build_report(
         },
         "unexercised": [
             {
-                "site_id": report.site_id,
-                "kind": report.kind,
-                "message": report.message,
+                "site_id": site.site_id,
+                "kind": site.kind,
+                "message": site.message,
             }
-            for report in unexercised
+            for site in unexercised
         ],
     }
 
