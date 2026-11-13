@@ -9,14 +9,19 @@ line-independent ID. This report joins two exercise sources onto that baseline:
 - ``--fleet-dir``: bounded ``violation-sites-*.json`` shards emitted by the
   simulation fleet. Each shard lists the ``file:line`` locations that actually
   reported a violation at runtime.
+- ``--observations-dir``: bounded per-process ``observations-*.json`` artifacts
+  emitted by the ``violation-census`` feature hook while the standard test suite
+  runs. These are exact runtime observations from unit and integration tests.
 
 Line numbers are only a join key. Identity always comes from the checked-in
 baseline, so moving a site between lines or files does not reset coverage.
 
 Coverage is a conservative lower bound: LLVM can attribute a macro expansion to
 the surrounding lines, so a site absent from coverage is not proof that its
-branch never runs. Fleet shard observations are exact runtime hits and should be
-preferred whenever a site appears there.
+branch never runs. Fleet and observation artifacts are exact runtime hits and
+should be preferred whenever a site appears there. Observation artifacts can
+also contain test-only assertions that are not production sites; those are
+counted as unmatched and do not fail the report.
 """
 
 from __future__ import annotations
@@ -33,11 +38,16 @@ import violation_sites
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = violation_sites.DEFAULT_BASELINE
 DEFAULT_SOURCE_ROOT = violation_sites.DEFAULT_SOURCE_ROOT
-CENSUS_SCHEMA_VERSION = 1
+CENSUS_SCHEMA_VERSION = 2
 FLEET_SCHEMA_VERSION = 1
+OBSERVATION_SCHEMA_VERSION = 1
 MAX_FLEET_SHARDS = 8
 MAX_FLEET_LOCATIONS = 512
 MAX_FLEET_ARTIFACT_BYTES = 65_536
+MAX_OBSERVATION_ARTIFACTS = 4_096
+MAX_OBSERVATION_LOCATIONS = 256
+MAX_OBSERVATION_TOTAL_LOCATIONS = 4_096
+MAX_OBSERVATION_ARTIFACT_BYTES = 65_536
 MAX_COVERAGE_BYTES = 64 * 1024 * 1024
 _LOCATION = re.compile(r"(?P<path>[^:\n]+):(?P<line>[0-9]+)")
 _SOURCE_MARKER = "src/"
@@ -98,7 +108,7 @@ def parse_coverage(path: Path) -> dict[str, set[int]]:
 
 
 def _parse_location(location: str) -> tuple[str, int]:
-    match = _LOCATION.fullmatch(location)
+    match = _LOCATION.fullmatch(location.replace("\\", "/"))
     if match is None:
         raise ValueError(f"malformed violation location {location!r}")
     return match.group("path"), int(match.group("line"))
@@ -131,7 +141,9 @@ def parse_fleet_shards(directory: Path) -> set[tuple[str, int]]:
         if run_id is None:
             run_id = artifact_run_id
         elif artifact_run_id != run_id:
-            raise ValueError(f"{path} mixes fleet run ids {run_id} and {artifact_run_id}")
+            raise ValueError(
+                f"{path} mixes fleet run ids {run_id} and {artifact_run_id}"
+            )
         shard_index = artifact.get("shard_index")
         if not isinstance(shard_index, int) or not 0 <= shard_index < MAX_FLEET_SHARDS:
             raise ValueError(f"{path} has an invalid shard index")
@@ -151,11 +163,67 @@ def parse_fleet_shards(directory: Path) -> set[tuple[str, int]]:
     return observed
 
 
+def parse_observation_artifacts(
+    directory: Path,
+) -> tuple[set[tuple[str, int]], int]:
+    """Return exact test-suite observations and the artifact count."""
+    if not directory.is_dir():
+        raise ValueError(f"{directory} is not a directory")
+    paths = sorted(directory.glob("*.json"))
+    if len(paths) > MAX_OBSERVATION_ARTIFACTS:
+        raise ValueError(
+            f"{directory} has {len(paths)} observation artifacts "
+            f"(max {MAX_OBSERVATION_ARTIFACTS})"
+        )
+    observed: set[tuple[str, int]] = set()
+    for path in paths:
+        try:
+            artifact = json.loads(_read_bounded(path, MAX_OBSERVATION_ARTIFACT_BYTES))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{path} is not valid JSON: {error}") from error
+        if not isinstance(artifact, dict):
+            raise ValueError(f"{path} must contain a JSON object")
+        if artifact.get("schema_version") != OBSERVATION_SCHEMA_VERSION:
+            raise ValueError(f"{path} has an unsupported schema version")
+        process_id = artifact.get("process_id")
+        if not isinstance(process_id, int) or process_id <= 0:
+            raise ValueError(f"{path} has an invalid process id")
+        locations = artifact.get("locations")
+        if (
+            not isinstance(locations, list)
+            or len(locations) > MAX_OBSERVATION_LOCATIONS
+        ):
+            raise ValueError(f"{path} has invalid locations")
+        if not all(isinstance(location, str) for location in locations):
+            raise ValueError(f"{path} has a non-string location")
+        if locations != sorted(set(locations)):
+            raise ValueError(f"{path} locations are not sorted and unique")
+        for location in locations:
+            try:
+                observed.add(_parse_location(location))
+            except ValueError as error:
+                # Unit tests may construct SpecViolation directly with
+                # test-local labels. A malformed production path still fails
+                # loudly because only inventory locations live under src/.
+                if location.startswith(_SOURCE_MARKER):
+                    raise ValueError(
+                        f"{path} has a malformed location: {error}"
+                    ) from error
+        if len(observed) > MAX_OBSERVATION_TOTAL_LOCATIONS:
+            raise ValueError(
+                f"{directory} has more than {MAX_OBSERVATION_TOTAL_LOCATIONS} "
+                "observed locations"
+            )
+    return observed, len(paths)
+
+
 def build_report(
     sites: list[violation_sites.Site],
     locations: list[violation_sites.SiteLocation],
     covered: dict[str, set[int]] | None,
     fleet: set[tuple[str, int]] | None,
+    observations: set[tuple[str, int]] | None = None,
+    observation_artifacts: int = 0,
 ) -> dict[str, object]:
     """Join exercise sources onto the baseline and render a deterministic report."""
     by_location: dict[tuple[str, int], set[str]] = {}
@@ -183,6 +251,20 @@ def build_report(
                     f"fleet reported an unknown source location {observed!r}"
                 )
             fleet_locations += 1
+            exercised.update(ids)
+
+    observation_locations = 0
+    unmatched_observations = 0
+    if observations is not None:
+        for observed in observations:
+            ids = by_location.get(observed)
+            if ids is None:
+                # Unit tests can report violations from test-only assertions or
+                # construct SpecViolation directly; only inventory locations
+                # contribute to the exercise set.
+                unmatched_observations += 1
+                continue
+            observation_locations += 1
             exercised.update(ids)
 
     baseline_ids = {site.site_id for site in sites}
@@ -215,6 +297,16 @@ def build_report(
                     "matched_locations": fleet_locations,
                 }
             ),
+            "observations": (
+                None
+                if observations is None
+                else {
+                    "artifact_count": observation_artifacts,
+                    "observed_locations": len(observations),
+                    "matched_locations": observation_locations,
+                    "unmatched_locations": unmatched_observations,
+                }
+            ),
         },
         "unexercised": [
             {
@@ -241,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--coverage-xml", type=Path)
     parser.add_argument("--fleet-dir", type=Path)
+    parser.add_argument("--observations-dir", type=Path)
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
@@ -273,7 +366,19 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.fleet_dir is None
             else parse_fleet_shards(arguments.fleet_dir)
         )
-        report = build_report(sites, locations, covered, fleet)
+        observations, artifact_count = (
+            (None, 0)
+            if arguments.observations_dir is None
+            else parse_observation_artifacts(arguments.observations_dir)
+        )
+        report = build_report(
+            sites,
+            locations,
+            covered,
+            fleet,
+            observations,
+            artifact_count,
+        )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

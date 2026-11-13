@@ -28,7 +28,7 @@ def test_nightly_workload_and_schedule_remain_fixed() -> None:
     assert text.count("cron: '0 4 * * *'") == 1
     assert text.count("workflow_dispatch:") == 1
     assert "timeout-minutes: 60" in text
-    assert text.count("cargo nextest run") == 1
+    assert text.count("cargo nextest run") == 2
     assert "test(simulation::fleet::nightly_seed_shard_)" in fleet
     for test_name in (
         "h_skew_hour_equivalent_measures_lag_correction_and_cost",
@@ -62,20 +62,32 @@ def test_merge_is_sequential_and_does_not_replay_fleet_schedules() -> None:
     assert "nightly_seed_shard" not in merge
 
 
-def test_violation_site_census_joins_fleet_and_main_coverage() -> None:
+def test_violation_site_census_joins_all_exact_sources() -> None:
     text = workflow_text()
     observations = named_step(text, "Upload violation-site observations")
+    exact_start = text.index("  violation-site-observations:")
     job_start = text.index("  violation-site-census:")
+    exact_job = text[exact_start:job_start]
     census_job = text[job_start:]
 
     assert "actions: read" in text
     assert "name: simulation-violation-sites-${{ github.run_id }}" in observations
     assert "path: ${{ runner.temp }}/simulation-census/violation-sites/" in observations
-    assert "needs: simulation-nightly" in census_job
+    assert (
+        "cargo nextest run --profile ci --features tokio,json,hot-join,violation-census"
+        in exact_job
+    )
+    assert (
+        "FORTRESS_VIOLATION_CENSUS_DIR: ${{ runner.temp }}/violation-observations"
+        in exact_job
+    )
+    assert "name: violation-site-observations-${{ github.run_id }}" in exact_job
+    assert "needs: [simulation-nightly, violation-site-observations]" in census_job
     assert "gh run list --workflow=ci-coverage.yml" in census_job
     assert "gh run download" in census_job
     assert "scripts/simulation/violation_census.py" in census_job
     assert "--fleet-dir" in census_job
+    assert "--observations-dir" in census_job
     assert "--coverage-xml" in census_job
     assert "name: violation-site-census-${{ github.run_id }}" in census_job
 

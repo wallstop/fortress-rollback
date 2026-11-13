@@ -79,9 +79,7 @@ def _write_coverage(path: Path, filename: str, lines: dict[int, int]) -> None:
     )
 
 
-def _write_fleet(
-    path: Path, shard: int, locations: list[str], run_id: int = 7
-) -> None:
+def _write_fleet(path: Path, shard: int, locations: list[str], run_id: int = 7) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / f"shard-{shard}.json").write_text(
         json.dumps(
@@ -89,6 +87,20 @@ def _write_fleet(
                 "schema_version": 1,
                 "run_id": run_id,
                 "shard_index": shard,
+                "locations": locations,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_observations(path: Path, process_id: int, locations: list[str]) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / f"observations-{process_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "process_id": process_id,
                 "locations": locations,
             }
         ),
@@ -125,6 +137,45 @@ def test_report_joins_coverage_and_fleet_locations(tmp_path: Path) -> None:
     assert report["sources"]["fleet"]["matched_locations"] == 1
 
 
+def test_report_counts_exact_observations_and_ignores_test_only_locations(
+    tmp_path: Path,
+) -> None:
+    source_root, _, locations = _write_fixture(tmp_path)
+    first, _, third = locations
+    sites, locations_now, issues = violation_sites.inventory_locations(
+        source_root, tmp_path
+    )
+    assert issues == []
+    observations_dir = tmp_path / "observations"
+    _write_observations(
+        observations_dir,
+        41,
+        sorted([f"src/sample.rs:{first.line}", f"src\\sample.rs:{third.line}"]),
+    )
+    _write_observations(observations_dir, 42, ["src/test-only/assertion.rs:1"])
+
+    observations, artifact_count = violation_census.parse_observation_artifacts(
+        observations_dir
+    )
+    report = violation_census.build_report(
+        sites,
+        locations_now,
+        None,
+        None,
+        observations,
+        artifact_count,
+    )
+
+    assert report["exercised_sites"] == 2
+    source = report["sources"]["observations"]
+    assert source == {
+        "artifact_count": 2,
+        "observed_locations": 3,
+        "matched_locations": 2,
+        "unmatched_locations": 1,
+    }
+
+
 def test_report_without_exercise_sources_marks_every_site_unexercised(
     tmp_path: Path,
 ) -> None:
@@ -136,7 +187,11 @@ def test_report_without_exercise_sources_marks_every_site_unexercised(
     report = violation_census.build_report(sites, locations, None, None)
     assert report["exercised_sites"] == 0
     assert len(report["unexercised"]) == 3
-    assert report["sources"] == {"coverage": None, "fleet": None}
+    assert report["sources"] == {
+        "coverage": None,
+        "fleet": None,
+        "observations": None,
+    }
 
 
 def test_unknown_fleet_location_is_rejected(tmp_path: Path) -> None:
@@ -166,6 +221,21 @@ def test_fleet_shards_must_share_a_run_id(tmp_path: Path) -> None:
     _write_fleet(fleet, 1, ["src/sample.rs:2"], run_id=8)
     with pytest.raises(ValueError, match="mixes fleet run ids"):
         violation_census.parse_fleet_shards(fleet)
+
+
+def test_observation_artifacts_validate_schema_and_order(tmp_path: Path) -> None:
+    observations = tmp_path / "observations"
+    _write_observations(observations, 7, ["src/sample.rs:1"])
+    artifact = observations / "observations-7.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    payload["schema_version"] = 99
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported schema"):
+        violation_census.parse_observation_artifacts(observations)
+
+    _write_observations(observations, 7, ["src/sample.rs:2", "src/sample.rs:1"])
+    with pytest.raises(ValueError, match="sorted and unique"):
+        violation_census.parse_observation_artifacts(observations)
 
 
 def test_coverage_without_covered_source_is_rejected(tmp_path: Path) -> None:

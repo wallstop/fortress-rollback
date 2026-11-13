@@ -162,7 +162,7 @@ jobs:
           # source: cold native builds repeatedly exhausted this job's 20-minute budget.
           rm -f geiger-report.complete
           set +e
-          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json" --lib 2>&1 | tee geiger-report.txt
+          cargo geiger --locked --features "sync-send graphical-examples trace-validation hot-join paranoid loom z3-verification tokio json violation-census" --lib 2>&1 | tee geiger-report.txt
           pipeline_status=("${PIPESTATUS[@]}")
           geiger_status="${pipeline_status[0]}"
           tee_status="${pipeline_status[1]}"
