@@ -37,7 +37,9 @@ no_default_features = false
 
 # Test core features plus hot-join while excluding slow Z3 verification.
 # HotJoinMetrics is mutation-tested only when its feature-gated API is compiled.
-features = ["tokio", "json", "hot-join"]
+# The violation-census hook is feature-gated too; enabling it lets its pure
+# artifact writer stay mutation-tested.
+features = ["tokio", "json", "hot-join", "violation-census"]
 
 # ============================================================================
 # File Exclusion Patterns
@@ -88,6 +90,15 @@ exclude_re = [
     # cargo-mutants' "replace body with Default::default()" mutant is
     # semantically identical. Overrides are still mutation-tested by name.
     "NonBlockingSocket::socket_metrics",
+
+    # The census hook's environment gate and process-global OnceLock need a
+    # dedicated process environment; the parser and writer are covered by unit
+    # tests. Exclude only the env/global accessors from mutation.
+    "violation_census::(record|record_truncation|directory|run_id)",
+
+    # Drop-time fallback for a thread-local borrow failure. Ordinary tests
+    # cannot trigger it, and it only reports a diagnostic violation.
+    "report_scoped_observer_drop_failure",
 ]
 
 # ============================================================================

@@ -3914,6 +3914,10 @@ mod tests {
             artifact.len()
         );
         assert!(
+            artifact.len() > 16 * 1024,
+            "the byte budget must use most of its capacity, not a tiny artifact"
+        );
+        assert!(
             artifact.contains("\"truncated\":true"),
             "the byte-budget snapshot must set the truncation flag"
         );
