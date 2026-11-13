@@ -162,7 +162,7 @@ mod violation_census {
         let mut omitted = false;
         // alloc-bound: the loop stops once MAX_ARTIFACT_BYTES is reached.
         for location in observed {
-            let needed = json_escaped_len(location) + 4;
+            let needed = json_escaped_len(location).saturating_add(4);
             if artifact.len() + needed + FOOTER_BYTES > MAX_ARTIFACT_BYTES {
                 omitted = true;
                 break;
