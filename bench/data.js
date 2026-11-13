@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794511870327,
+  "lastUpdate": 1794552780090,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "48532d1f5613cc3a4528cffc0ba76199f16dd8bc",
-          "message": "Eliminate warmed sync-test input staging allocations (#272)\n\n## What\n\n- replace per-frame `BTreeMap` input staging in `SyncTestSession` with\nfallibly preallocated player-indexed slots\n- retain slot storage across frames while preserving duplicate\noverwrite, missing-input retry, and deterministic player ordering\n- tighten the deterministic allocation ledger to zero operations/bytes\nfor warmed N=2 and N=4 frames, and one exact 128-byte\nreturned-`InputVec` spill at N=16\n- document the observable performance improvement in the changelog\n\n## Why\n\nPR #270 established a deterministic allocation ledger and measured one\nallocation / 192 bytes per warmed frame at N=2 and N=4, plus four\noperations / 800 bytes at N=16. Those allocations came from rebuilding\nthe sync-test staging map every frame. Constructor-owned slots remove\nthat repeated work without changing the public API or wire behavior.\n\nProgresses #264.\n\n## Impact\n\nWarmed `SyncTestSession::advance_frame()` calls for one-to-four-player\nsessions are heap-allocation-free. Sixteen-player frames now allocate\nonly for the returned `InputVec` above its inline capacity. Construction\nremains fallible for arbitrary configured player counts, and an\nimpossible slot-length mismatch returns a structured internal error.\n\n## Validation\n\n- allocation contract: 10 consecutive debug runs and one release run\n- focused semantic/allocation tests: 3/3\n- sync-test unit suite: 49/49\n- sync-test determinism regression: 1/1\n- default Nextest matrix: 2,883/2,883\n- `hot-join` Nextest matrix: 3,139/3,139\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- warning-denied workspace documentation\n- changelog formatting, Unreleased policy, and version synchronization\n- agent preflight, including 286 release-automation tests and 1,393\nlinks\n- independent adversarial review: zero findings\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (private staging refactor)\n- CHANGELOG reviewed: YES\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Private sync-test staging only; semantics are covered by unit and\nallocation-contract tests with no public API or network wire changes.\n> \n> **Overview**\n> **`SyncTestSession`** no longer rebuilds per-frame input staging with\na **`BTreeMap`**. Construction fallibly reserves\n**`Vec<Option<PlayerInput>>`** indexed by player handle;\n**`add_local_input`** overwrites slots, and **`advance_frame`** clears\nslots to **`None`** while keeping that storage for the next frame.\n> \n> **Behavior preserved or tightened:** missing-input checks cover empty\nslots; player-index ordering in **`AdvanceFrame`** inputs is unchanged;\na failed **`advance_frame`** keeps already-staged inputs so callers can\nadd only missing players and retry.\n> \n> **Allocation impact:** warmed **`advance_frame()`** for 1–4 players is\nheap-free; 16-player frames are limited to the returned **`InputVec`**\nspill above inline capacity (allocation contract and changelog updated).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\ne75047918c901b6ab1d3efd941014a20544284f7. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-01T21:10:58-07:00",
-          "tree_id": "9ec5f320b3389a097eb8fdaa21a7fc088ad6c7a0",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/48532d1f5613cc3a4528cffc0ba76199f16dd8bc"
-        },
-        "date": 1785644432357,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 146309,
-            "range": "± 4246",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 54020,
-            "range": "± 367",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 47",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 105",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2775,
-            "range": "± 342",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3131,
             "range": "± 178",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fe0b935910de6d34abb062fd97ac3d9eb2aea440",
+          "message": "test(simulation): publish the violation-site exercise census (P2) (#412)\n\nJoin the checked-in report_violation! baseline with main coverage and exact nightly fleet observations, publish the unexercised set from a nightly job, and enable tokio,json,hot-join in coverage (recovering 12 hot-join sites; 13 -> 25 exercised). Also replace the hardcoded action-pin allowlist with immutable-SHA shape checks and fold in the dependabot action bumps.",
+          "timestamp": "2026-11-12T22:45:22-08:00",
+          "tree_id": "21e4c0661222ed57744ad3854c7b26384082830e",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/fe0b935910de6d34abb062fd97ac3d9eb2aea440"
+        },
+        "date": 1794552779317,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39543,
+            "range": "± 574",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25713,
+            "range": "± 182",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1243,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2810,
+            "range": "± 221",
             "unit": "ns/iter"
           }
         ]
