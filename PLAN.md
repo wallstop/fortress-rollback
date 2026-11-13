@@ -16,10 +16,12 @@
 
 2. **P2 — Violation-path coverage census.** The checked-in production `report_violation!`
    baseline assigns line-independent IDs and rejects unapproved site drift
-   (`scripts/simulation/violation_sites.py --check`, enforced in preflight and CI). Next: aggregate
-   exercised IDs across tests and the fleet and report the unexercised set. **Exit:** a nightly
-   report over the checked-in baseline with a reviewed unexercised-set reduction. Scope: stage 2 of
-   the [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md).
+   (`scripts/simulation/violation_sites.py --check`, enforced in preflight and CI). The nightly
+   `Violation-Site Exercise Census` joins the baseline with main test coverage and fleet
+   observations and publishes the unexercised set. Next: review the first published census and cut
+   the unexercised set with focused tests or deletion of unreachable assertions. **Exit:** a
+   reviewed unexercised-set reduction recorded against the nightly report. Scope: stage 2 of the
+   [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md).
 
 ## Future
 

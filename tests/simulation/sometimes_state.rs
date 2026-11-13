@@ -44,6 +44,8 @@ pub const ORGANIC_SCHEDULES: u64 = 1_000;
 pub const ORGANIC_STEPS: u64 = 5_000_000;
 pub const MAX_CENSUS_ARTIFACT_BYTES: usize = 65_536;
 pub const CENSUS_SCHEMA_VERSION: u32 = 1;
+pub const VIOLATION_SITES_SCHEMA_VERSION: u32 = 1;
+pub const MAX_VIOLATION_SITE_LOCATIONS: usize = 512;
 
 pub const H_SKEW_PROBE: &str =
     "simulation::fleet::h_skew_hour_equivalent_measures_lag_correction_and_cost";
@@ -389,6 +391,91 @@ impl TargetedProbeReport {
     }
 }
 
+/// Bounded list of production violation sites observed by one nightly shard.
+///
+/// Locations are `file!():line!()` strings emitted by `report_violation!`.
+/// The exercise census joins them onto the content-addressed baseline, so this
+/// artifact carries no site IDs and cannot drift from the inventory contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViolationSitesShardReport {
+    pub schema_version: u32,
+    pub run_id: u64,
+    pub shard_index: u32,
+    pub locations: Vec<String>,
+}
+
+impl ViolationSitesShardReport {
+    pub fn new(
+        run_id: u64,
+        shard_index: u32,
+        locations: &BTreeSet<String>,
+    ) -> Result<Self, String> {
+        let report = Self {
+            schema_version: VIOLATION_SITES_SCHEMA_VERSION,
+            run_id,
+            shard_index,
+            locations: locations
+                .iter()
+                .filter(|location| is_inventory_location(location))
+                .cloned()
+                .collect(),
+        };
+        report.validate()?;
+        Ok(report)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.schema_version != VIOLATION_SITES_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported violation-sites schema {}",
+                self.schema_version
+            ));
+        }
+        if self.shard_index >= ORGANIC_SHARDS {
+            return Err(format!(
+                "invalid violation-sites shard {}",
+                self.shard_index
+            ));
+        }
+        if self.locations.len() > MAX_VIOLATION_SITE_LOCATIONS {
+            return Err(format!(
+                "violation-sites shard {} has {} locations (max {MAX_VIOLATION_SITE_LOCATIONS})",
+                self.shard_index,
+                self.locations.len()
+            ));
+        }
+        if !self.locations.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(format!(
+                "violation-sites shard {} locations are not sorted and unique",
+                self.shard_index
+            ));
+        }
+        if let Some(location) = self
+            .locations
+            .iter()
+            .find(|location| !is_inventory_location(location))
+        {
+            return Err(format!(
+                "violation-sites shard {} has a non-inventory location {location:?}",
+                self.shard_index
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_inventory_location(location: &str) -> bool {
+    let Some((path, line)) = location.rsplit_once(':') else {
+        return false;
+    };
+    Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        && !line.is_empty()
+        && line.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainSummary {
@@ -683,6 +770,22 @@ fn census_root_from_env() -> Result<PathBuf, String> {
 
 pub fn write_organic_shard(report: &OrganicShardReport) -> Result<PathBuf, String> {
     write_organic_shard_at(&census_root_from_env()?, report)
+}
+
+pub fn write_violation_sites_shard(report: &ViolationSitesShardReport) -> Result<PathBuf, String> {
+    write_violation_sites_shard_at(&census_root_from_env()?, report)
+}
+
+fn write_violation_sites_shard_at(
+    root: &Path,
+    report: &ViolationSitesShardReport,
+) -> Result<PathBuf, String> {
+    report.validate()?;
+    let path = root
+        .join("violation-sites")
+        .join(format!("shard-{}.json", report.shard_index));
+    write_atomic(&path, &encode(report)?)?;
+    Ok(path)
 }
 
 fn write_organic_shard_at(root: &Path, report: &OrganicShardReport) -> Result<PathBuf, String> {
@@ -1662,6 +1765,68 @@ mod tests {
         assert!(evaluate_seven_window_ratchet(&drifted)
             .expect_err("registry drift rejects")
             .contains("registry"));
+    }
+
+    #[test]
+    fn violation_sites_shard_keeps_sorted_inventory_locations_only() {
+        let locations = BTreeSet::from([
+            "src/b.rs:7".to_owned(),
+            "src/a.rs:12".to_owned(),
+            "p2p_session.rs:441".to_owned(),
+            "src/a.rs:not-a-line".to_owned(),
+            "src/telemetry.rs:ScopedObserverGuard::drop".to_owned(),
+        ]);
+        let report = ViolationSitesShardReport::new(17, 3, &locations)
+            .expect("inventory locations form a valid shard");
+        assert_eq!(
+            report.locations,
+            vec!["p2p_session.rs:441", "src/a.rs:12", "src/b.rs:7"]
+        );
+    }
+
+    #[test]
+    fn violation_sites_shard_round_trips_through_the_bounded_writer() {
+        let root = temp_root("violation-sites");
+        let locations = BTreeSet::from(["src/a.rs:3".to_owned(), "src/b.rs:9".to_owned()]);
+        let report =
+            ViolationSitesShardReport::new(17, 2, &locations).expect("shard satisfies contract");
+        let path = write_violation_sites_shard_at(&root, &report).expect("shard writes");
+        let bytes = read_bounded(&path).expect("shard reads within its bound");
+        let decoded: ViolationSitesShardReport =
+            serde_json::from_slice(&bytes).expect("shard decodes");
+        assert_eq!(decoded, report);
+        assert!(path.starts_with(root.join("violation-sites")));
+        std::fs::remove_dir_all(&root).expect("temporary census root is removable");
+    }
+
+    #[test]
+    fn violation_sites_shard_rejects_drifted_shards() {
+        let mut report = ViolationSitesShardReport {
+            schema_version: VIOLATION_SITES_SCHEMA_VERSION,
+            run_id: 17,
+            shard_index: 0,
+            locations: vec!["src/b.rs:2".to_owned(), "src/a.rs:1".to_owned()],
+        };
+        assert!(report
+            .validate()
+            .expect_err("unsorted locations reject")
+            .contains("sorted and unique"));
+
+        report.locations = vec!["src/a.rs:1".to_owned(), "src/a.rs:1".to_owned()];
+        assert!(report.validate().is_err(), "duplicate locations reject");
+
+        report.locations = vec!["src/a.rs:1".to_owned(); MAX_VIOLATION_SITE_LOCATIONS + 1];
+        assert!(report
+            .validate()
+            .expect_err("oversized shard rejects")
+            .contains("max"));
+
+        report.locations.clear();
+        report.shard_index = ORGANIC_SHARDS;
+        assert!(report
+            .validate()
+            .expect_err("out-of-range shard rejects")
+            .contains("invalid violation-sites shard"));
     }
 
     #[test]

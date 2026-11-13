@@ -62,6 +62,24 @@ def test_merge_is_sequential_and_does_not_replay_fleet_schedules() -> None:
     assert "nightly_seed_shard" not in merge
 
 
+def test_violation_site_census_joins_fleet_and_main_coverage() -> None:
+    text = workflow_text()
+    observations = named_step(text, "Upload violation-site observations")
+    job_start = text.index("  violation-site-census:")
+    census_job = text[job_start:]
+
+    assert "actions: read" in text
+    assert "name: simulation-violation-sites-${{ github.run_id }}" in observations
+    assert "path: ${{ runner.temp }}/simulation-census/violation-sites/" in observations
+    assert "needs: simulation-nightly" in census_job
+    assert "gh run list --workflow=ci-coverage.yml" in census_job
+    assert "gh run download" in census_job
+    assert "scripts/simulation/violation_census.py" in census_job
+    assert "--fleet-dir" in census_job
+    assert "--coverage-xml" in census_job
+    assert "name: violation-site-census-${{ github.run_id }}" in census_job
+
+
 def test_census_upload_is_always_retained_and_separate_from_failures() -> None:
     text = workflow_text()
     upload = named_step(text, "Upload sometimes-state census")

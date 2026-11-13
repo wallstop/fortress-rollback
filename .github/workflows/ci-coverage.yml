@@ -71,8 +71,12 @@ jobs:
       #
       # --exclude-files removes code from coverage report
       # -- --skip multi_process passes skip argument to test executable
+      # Feature-gated surfaces (hot-join, tokio, json) own sizable session and
+      # transport code; leaving them off reported those modules as entirely
+      # uncovered and hid their production report_violation! sites from the
+      # nightly violation-site census. Match the local validation feature set.
       - name: Run coverage (tarpaulin)
-        run: cargo tarpaulin --timeout 300 --out Xml --exclude-files 'tests/network/multi_process.rs' -- --skip multi_process
+        run: cargo tarpaulin --timeout 300 --out Xml --features tokio,json,hot-join --exclude-files 'tests/network/multi_process.rs' -- --skip multi_process
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7

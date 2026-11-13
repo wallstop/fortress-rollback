@@ -26,48 +26,31 @@ DOCS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-docs.yml"
 DEVCONTAINER_DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 RUFF_CONFIG = REPO_ROOT / "ruff.toml"
-RUFF_ACTION = "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89"
+RUFF_ACTION = "astral-sh/ruff-action"
 SHELLCHECK_SHA256 = (
     "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
 )
 CARGO_SHEAR_SHA256 = (
     "21ba04662e0eaa6059ca7e1adf48f3bdf1c6656b613b926f3bda0dc6f5b38f82"
 )
-THIRD_PARTY_ACTION_PINS = {
-    "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
-    "astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89",
-    "benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc",
-    "codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5",
-    "crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85",
-    "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
-    "docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6",
-    "docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302",
-    "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069",
-    "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
-    "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984",
-    "lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8",
-    "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
-    "nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60",
-    "obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239",
-    "taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b",
-}
-FORBIDDEN_MUTABLE_ACTION_REFS = {
-    "Swatinem/rust-cache@v2",
-    "benchmark-action/github-action-benchmark@v1",
-    "codecov/codecov-action@v7",
-    "crate-ci/typos@v1.49.1",
-    "docker/build-push-action@v7",
-    "docker/login-action@v4.6.0",
-    "docker/metadata-action@v6",
-    "docker/setup-buildx-action@v4",
-    "dtolnay/rust-toolchain@master",
-    "dtolnay/rust-toolchain@stable",
-    "lycheeverse/lychee-action@v2",
-    "mozilla-actions/sccache-action@v0.0.11",
-    "nick-fields/retry@v4",
-    "obi1kenobi/cargo-semver-checks-action@v2",
-    "taiki-e/install-action@v2",
-}
+# Actions maintained by GitHub use moving major tags; every other third-party
+# action must reference a full commit SHA so a moved tag cannot change what CI
+# runs. Dependabot rewrites the SHA and keeps the trailing version comment, so
+# these checks intentionally validate shape instead of pinning exact commits.
+FIRST_PARTY_ACTION_PREFIXES = ("actions/", "github/")
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+_ACTION_REFERENCE = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*(?P<reference>[^\s#]+)"
+    r"(?:\s*#\s*(?P<comment>\S.*))?$",
+    re.MULTILINE,
+)
+
+
+def _assert_sha_pinned(reference: str, action: str) -> None:
+    """Require ``action`` to resolve through an immutable 40-hex commit pin."""
+    assert reference.startswith(f"{action}@"), reference
+    digest = reference.removeprefix(f"{action}@")
+    assert _FULL_SHA.fullmatch(digest), f"{action} is not SHA-pinned: {reference}"
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:
@@ -156,7 +139,7 @@ def test_every_workflow_declares_least_privilege_permissions() -> None:
         assert "permissions" in workflow, path
 
 
-def test_reported_third_party_actions_use_reviewed_immutable_pins() -> None:
+def test_third_party_actions_use_reviewed_immutable_pins() -> None:
     action_files = [
         *sorted((REPO_ROOT / ".github").rglob("*.yml")),
         *sorted((REPO_ROOT / ".github").rglob("*.yaml")),
@@ -165,21 +148,20 @@ def test_reported_third_party_actions_use_reviewed_immutable_pins() -> None:
         path.read_text(encoding="utf-8") for path in action_files
     )
 
-    for mutable_ref in FORBIDDEN_MUTABLE_ACTION_REFS:
-        assert mutable_ref not in action_source
-    for immutable_pin in THIRD_PARTY_ACTION_PINS:
-        assert immutable_pin in action_source
-
-    uses_references = re.findall(
-        r"^\s*(?:-\s*)?uses:\s*([^\s#]+)",
-        action_source,
-        flags=re.MULTILINE,
-    )
-    for reference in uses_references:
-        if reference.startswith(("./", "docker://", "actions/", "github/")):
+    references = [
+        (match.group("reference"), match.group("comment"))
+        for match in _ACTION_REFERENCE.finditer(action_source)
+    ]
+    assert references
+    for reference, comment in references:
+        if reference.startswith(("./", "docker://")):
             continue
-        assert reference in THIRD_PARTY_ACTION_PINS
-        assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", reference)
+        if reference.startswith(FIRST_PARTY_ACTION_PREFIXES):
+            continue
+        assert _FULL_SHA.fullmatch(reference.rpartition("@")[2]), (
+            f"third-party action must be SHA-pinned: {reference}"
+        )
+        assert comment, f"SHA pin must keep a readable version comment: {reference}"
 
 
 def test_quality_tools_are_immutable_and_version_pinned() -> None:
@@ -188,7 +170,7 @@ def test_quality_tools_are_immutable_and_version_pinned() -> None:
     ruff = _step_by_name(
         _steps(workflow, "python-static-analysis"), "Check Python scripts"
     )
-    assert ruff["uses"] == RUFF_ACTION
+    _assert_sha_pinned(ruff["uses"], RUFF_ACTION)
     assert ruff["with"]["version"] == "0.16.5"
     assert ruff.get("continue-on-error") is not True
 

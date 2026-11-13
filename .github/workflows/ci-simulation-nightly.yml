@@ -1,6 +1,7 @@
 name: CI - Simulation Tests (Nightly)
 permissions:
   contents: read
+  actions: read
 
 on:
   schedule:
@@ -125,6 +126,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Upload violation-site observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simulation-violation-sites-${{ github.run_id }}
+          path: ${{ runner.temp }}/simulation-census/violation-sites/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload simulation failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -133,3 +143,60 @@ jobs:
           path: target/sim-artifacts/
           if-no-files-found: warn
           retention-days: 7
+
+  # Joins the content-addressed production violation-site baseline against the
+  # test suite's latest main coverage and this run's fleet observations. The
+  # report is informational: it publishes the unexercised set for review without
+  # gating on a coverage threshold.
+  violation-site-census:
+    name: Violation-Site Exercise Census
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: simulation-nightly
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Download fleet observations
+        uses: actions/download-artifact@v7
+        with:
+          name: simulation-violation-sites-${{ github.run_id }}
+          path: ${{ runner.temp }}/violation-sites
+
+      - name: Download latest main test coverage (best effort)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/coverage"
+          if ! run_id="$(gh run list --workflow=ci-coverage.yml --branch=main \
+            --status=success --limit=1 --json databaseId --jq '.[0].databaseId')"; then
+            echo "::warning::could not locate a successful main coverage run"
+            exit 0
+          fi
+          if ! gh run download "$run_id" --name coverage-xml \
+            --dir "$RUNNER_TEMP/coverage"; then
+            echo "::warning::could not download coverage artifact from run $run_id"
+          fi
+
+      - name: Generate violation-site exercise report
+        run: |
+          coverage_args=()
+          if [ -f "$RUNNER_TEMP/coverage/cobertura.xml" ]; then
+            coverage_args=(--coverage-xml "$RUNNER_TEMP/coverage/cobertura.xml")
+          fi
+          python3 scripts/simulation/violation_census.py \
+            "${coverage_args[@]}" \
+            --fleet-dir "$RUNNER_TEMP/violation-sites" \
+            --output "$RUNNER_TEMP/violation-site-census.json"
+
+      - name: Upload violation-site exercise report
+        uses: actions/upload-artifact@v7
+        with:
+          name: violation-site-census-${{ github.run_id }}
+          path: ${{ runner.temp }}/violation-site-census.json
+          retention-days: 30

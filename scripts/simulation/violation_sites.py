@@ -50,6 +50,15 @@ class Site:
     message: str
 
 
+@dataclass(frozen=True, order=True)
+class SiteLocation:
+    """One source location that can emit a baseline assertion ID."""
+
+    path: str
+    line: int
+    site_id: str
+
+
 @dataclass(frozen=True)
 class ScanIssue:
     """A production invocation whose identity cannot be derived safely."""
@@ -454,10 +463,18 @@ def _is_string_literal(expression: str) -> bool:
 
 def scan_text(text: str, path: Path) -> tuple[list[Site], list[ScanIssue]]:
     """Extract production assertion sites from one Rust source file."""
+    entries, issues = _scan_entries(text, path)
+    return [site for site, _ in entries], issues
+
+
+def _scan_entries(
+    text: str, path: Path
+) -> tuple[list[tuple[Site, int]], list[ScanIssue]]:
+    """Extract assertion sites and their invocation lines from one source file."""
     stripped = strip_comments(text)
     skip_ranges = _attribute_ranges(stripped)
     literal_spans = _literal_spans(stripped)
-    sites: list[Site] = []
+    entries: list[tuple[Site, int]] = []
     issues: list[ScanIssue] = []
     index = 0
     while True:
@@ -505,9 +522,42 @@ def scan_text(text: str, path: Path) -> tuple[list[Site], list[ScanIssue]]:
         if not _has_static_prefix(message):
             continue
         kind = kind_match.group(1)
-        sites.append(Site(stable_site_id(kind, message), kind, message))
+        line = stripped.count("\n", 0, start) + 1
+        entries.append((Site(stable_site_id(kind, message), kind, message), line))
         index = end
-    return sites, issues
+    return entries, issues
+
+
+def inventory_locations(
+    source_root: Path, repo_root: Path = REPO_ROOT
+) -> tuple[list[Site], list[SiteLocation], list[ScanIssue]]:
+    """Return the current inventory plus one entry per emitted source location.
+
+    Paths are rendered exactly as ``file!()`` does at the macro call site so
+    runtime telemetry locations can be joined back to baseline IDs without
+    trusting line-number stability across edits.
+    """
+    sites: dict[str, Site] = {}
+    locations: list[SiteLocation] = []
+    issues: list[ScanIssue] = []
+    for path in sorted(source_root.rglob("*.rs")):
+        entries, file_issues = _scan_entries(path.read_text(encoding="utf-8"), path)
+        relative = path.relative_to(repo_root).as_posix()
+        for site, line in entries:
+            existing = sites.get(site.site_id)
+            if existing is not None and existing != site:
+                issues.append(
+                    ScanIssue(
+                        path,
+                        line,
+                        f"site ID collision with {existing.kind} {existing.message}",
+                    )
+                )
+                continue
+            sites[site.site_id] = site
+            locations.append(SiteLocation(relative, line, site.site_id))
+        issues.extend(file_issues)
+    return sorted(sites.values()), sorted(locations), issues
 
 
 def inventory(source_root: Path) -> tuple[list[Site], list[ScanIssue]]:
@@ -520,7 +570,11 @@ def inventory(source_root: Path) -> tuple[list[Site], list[ScanIssue]]:
             existing = sites.get(site.site_id)
             if existing is not None and existing != site:
                 issues.append(
-                    ScanIssue(path, 1, f"site ID collision with {existing.kind} {existing.message}")
+                    ScanIssue(
+                        path,
+                        1,
+                        f"site ID collision with {existing.kind} {existing.message}",
+                    )
                 )
                 continue
             sites[site.site_id] = site
@@ -558,7 +612,9 @@ def parse_baseline(text: str) -> list[Site]:
         try:
             message = json.loads(message_json)
         except json.JSONDecodeError as error:
-            raise ValueError(f"baseline line {line_number} has invalid JSON: {error}") from error
+            raise ValueError(
+                f"baseline line {line_number} has invalid JSON: {error}"
+            ) from error
         if not isinstance(message, str):
             raise ValueError(f"baseline line {line_number} message is not a string")
         if site_id in seen:
@@ -568,7 +624,7 @@ def parse_baseline(text: str) -> list[Site]:
     return sites
 
 
-def _print_issue(issue: ScanIssue) -> None:
+def print_issue(issue: ScanIssue) -> None:
     print(
         f"{issue.path.relative_to(REPO_ROOT)}:{issue.line}: {issue.detail}",
         file=sys.stderr,
@@ -591,7 +647,7 @@ def check(source_root: Path, baseline_path: Path) -> int:
     sites, issues = inventory(source_root)
     if issues:
         for issue in issues:
-            _print_issue(issue)
+            print_issue(issue)
         print(
             f"error: {len(issues)} production {_MACRO} invocation(s) cannot be inventoried",
             file=sys.stderr,
@@ -603,10 +659,15 @@ def check(source_root: Path, baseline_path: Path) -> int:
     added = sorted(set(current_by_id) - set(baseline_by_id))
     for site_id in removed:
         site = baseline_by_id[site_id]
-        print(f"removed violation site {site_id}: {site.kind} {site.message}", file=sys.stderr)
+        print(
+            f"removed violation site {site_id}: {site.kind} {site.message}",
+            file=sys.stderr,
+        )
     for site_id in added:
         site = current_by_id[site_id]
-        print(f"new violation site {site_id}: {site.kind} {site.message}", file=sys.stderr)
+        print(
+            f"new violation site {site_id}: {site.kind} {site.message}", file=sys.stderr
+        )
     if removed or added:
         print(
             "error: violation-site baseline is stale; run "
@@ -624,7 +685,7 @@ def write(source_root: Path, baseline_path: Path) -> int:
     sites, issues = inventory(source_root)
     if issues:
         for issue in issues:
-            _print_issue(issue)
+            print_issue(issue)
         print(
             f"error: {len(issues)} production {_MACRO} invocation(s) cannot be inventoried",
             file=sys.stderr,
@@ -640,7 +701,9 @@ def main(argv: list[str] | None = None) -> int:
     source_root = DEFAULT_SOURCE_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--check", action="store_true", help="verify the checked-in baseline")
+    mode.add_argument(
+        "--check", action="store_true", help="verify the checked-in baseline"
+    )
     mode.add_argument("--write", action="store_true", help="regenerate the baseline")
     parser.add_argument("--source-root", type=Path, default=source_root)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
