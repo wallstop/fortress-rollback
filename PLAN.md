@@ -14,11 +14,18 @@
    artifact evidence evaluated by the ratchet and enabled, or a recorded rejection. Scope:
    [#403](https://github.com/wallstop/fortress-rollback/issues/403).
 
+2. **P2 — Violation-path coverage census.** The checked-in production `report_violation!`
+   baseline assigns line-independent IDs and rejects unapproved site drift
+   (`scripts/simulation/violation_sites.py --check`, enforced in preflight and CI). Next: aggregate
+   exercised IDs across tests and the fleet and report the unexercised set. **Exit:** a nightly
+   report over the checked-in baseline with a reviewed unexercised-set reduction. Scope: stage 2 of
+   the [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md).
+
 ## Future
 
-1. **P2 — Compare fleet-search techniques against fresh-seed search.** Use the
-   [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare
-   violation-site coverage, PCT, prefix branching, and LDFI-lite at equal compute. **Exit:**
-   retain a technique only when it materially increases unique useful states or defect discovery
-   per compute, preserves exact replay and bounded artifacts, and contributes a minimized
-   regression; otherwise record the rejected experiment and keep the simpler fleet.
+1. **P2 — Compare remaining fleet-search techniques against fresh-seed search.** Use the
+   [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare PCT,
+   prefix branching, and LDFI-lite at equal compute. **Exit:** retain a technique only when it
+   materially increases unique useful states or defect discovery per compute, preserves exact
+   replay and bounded artifacts, and contributes a minimized regression; otherwise record the
+   rejected experiment and keep the simpler fleet.
