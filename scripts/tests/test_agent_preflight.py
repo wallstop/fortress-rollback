@@ -464,6 +464,24 @@ def test_plan_checks_skips_link_check_for_unrelated_files() -> None:
     assert "link-check" not in _ids(checks)
 
 
+def test_plan_checks_runs_violation_site_baseline_for_rust_and_tooling_changes() -> None:
+    for changed_file in [
+        "src/lib.rs",
+        "scripts/simulation/violation-site-baseline.tsv",
+        "scripts/simulation/violation_sites.py",
+    ]:
+        checks = plan_checks({changed_file})
+        baseline_check = next(
+            check for check in checks if check.check_id == "violation-site-baseline"
+        )
+        assert baseline_check.command == [
+            PYTHON_EXECUTABLE,
+            "scripts/simulation/violation_sites.py",
+            "--check",
+        ]
+        assert baseline_check.fix_hint is not None
+
+
 def test_plan_checks_passes_rust_files_to_advance_frame_check() -> None:
     checks = plan_checks({"tests/sessions/spectator.rs", "src/lib.rs"})
     advance_check = next(

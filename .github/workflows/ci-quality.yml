@@ -131,6 +131,9 @@ jobs:
       - name: Type-check production Python
         run: mypy --config-file mypy.ini
 
+      - name: Check production violation-site baseline
+        run: python3 scripts/simulation/violation_sites.py --check
+
   # ============================================================================
   # CARGO SHEAR - FAST UNUSED DEPENDENCY DETECTION
   # ============================================================================

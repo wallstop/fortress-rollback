@@ -54,4 +54,7 @@ extend-exclude = [
     "*.lock",
     "fuzz/corpus/",
     "fuzz/artifacts/",
+    # Generated site IDs and Rust message literals; hash substrings must not be
+    # treated as prose.
+    "scripts/simulation/violation-site-baseline.tsv",
 ]

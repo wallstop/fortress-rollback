@@ -12,7 +12,11 @@ existing oracle.
    only after the baseline proves the probes are stable and non-vacuous.
 2. **Violation-path coverage.** Inventory stable IDs for production `report_violation!` sites,
    aggregate exercised IDs across tests and the fleet, and report the unexercised set. Ratchet only
-   against a checked-in baseline; site moves must not silently reset identity.
+   against a checked-in baseline; site moves must not silently reset identity. The inventory is
+   `scripts/simulation/violation-site-baseline.tsv`: IDs are content hashes of `(kind, format
+   literal)`, so line/file moves do not reset identity; `violation_sites.py --check` (agent
+   preflight and `ci-quality.yml`) rejects unapproved drift. Regenerate with `--write` only when an
+   assertion changes intentionally.
 3. **Probabilistic concurrency testing (PCT).** Bias deterministic delivery order with a bounded
    number of priority changes. Compare unique abstract states and failures per unit of compute with
    the current seeded scheduler before retaining it.

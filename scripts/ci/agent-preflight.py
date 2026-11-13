@@ -332,6 +332,13 @@ def plan_checks(
     rust_source_files = sorted(
         path for path in extant_files if is_rust_source_file(path)
     )
+    violation_site_tooling_changed = bool(
+        changed_files
+        & {
+            "scripts/simulation/violation_sites.py",
+            "scripts/simulation/violation-site-baseline.tsv",
+        }
+    )
     link_check_changed = any(
         is_link_check_surface_file(path) for path in changed_files
     )
@@ -692,6 +699,29 @@ def plan_checks(
                 ),
             )
         )
+    if run_all or rust_source_changed or violation_site_tooling_changed:
+        checks.append(
+            PlannedCheck(
+                check_id="violation-site-baseline",
+                description=(
+                    "verify the checked-in production report_violation! "
+                    "site inventory matches the source"
+                ),
+                command=[
+                    PYTHON_EXECUTABLE,
+                    "scripts/simulation/violation_sites.py",
+                    "--check",
+                ],
+                fix_hint=(
+                    "If the change intentionally adds, removes, or renames a "
+                    "production report_violation! assertion, regenerate with "
+                    "`python3 scripts/simulation/violation_sites.py --write` and "
+                    "review the baseline diff."
+                ),
+            )
+        )
+
+    if run_all or rust_source_changed:
         checks.append(
             PlannedCheck(
                 check_id="kani-violation-cost",
