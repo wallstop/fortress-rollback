@@ -3857,13 +3857,14 @@ mod tests {
         observed.insert("src/network/compression.rs:282");
         observed.insert("src/a\"b.rs:1");
         observed.insert("src/a\u{1}b.rs:1");
+        observed.insert("src/a b.rs:1");
         super::violation_census::write_snapshot(&directory, &observed, false, None)
             .expect("census snapshot writes");
 
         assert_eq!(
             std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
             format!(
-                "{{\"schema_version\":1,\"run_id\":null,\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"],\"truncated\":false}}\n",
+                "{{\"schema_version\":1,\"run_id\":null,\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"],\"truncated\":false}}\n",
                 std::process::id()
             ),
             "the snapshot must be sorted, JSON-escaped, and hold every location"
@@ -3875,7 +3876,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
             format!(
-                "{{\"schema_version\":1,\"run_id\":\"run-7\",\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\",\"src/z.rs:1\"],\"truncated\":true}}\n",
+                "{{\"schema_version\":1,\"run_id\":\"run-7\",\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\",\"src/z.rs:1\"],\"truncated\":true}}\n",
                 std::process::id()
             ),
             "replacement must retain old locations and record the truncation flag"
