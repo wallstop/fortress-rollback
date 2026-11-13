@@ -159,30 +159,37 @@ def test_report_counts_exact_observations_and_ignores_test_only_locations(
     _write_observations(
         observations_dir,
         41,
-        sorted([f"src/sample.rs:{first.line}", f"src\\sample.rs:{third.line}"]),
+        sorted(
+            [
+                f"/build/repo/src/sample.rs:{first.line}",
+                f"src\\sample.rs:{third.line}",
+            ]
+        ),
     )
     _write_observations(
-        observations_dir, 42, ["src/test-only/assertion.rs:1"], truncated=True
+        observations_dir,
+        42,
+        ["not-a-location", "src/test-only/assertion.rs:1"],
+        truncated=True,
     )
 
-    observations, artifact_count, truncated_artifacts = (
-        violation_census.parse_observation_artifacts(observations_dir)
-    )
+    observations = violation_census.parse_observation_artifacts(observations_dir)
     report = violation_census.build_report(
         sites,
         locations_now,
         None,
         None,
         observations,
-        artifact_count,
-        truncated_artifacts,
     )
 
     assert report["exercised_sites"] == 2
+    assert report["partial"] is False
     source = report["sources"]["observations"]
     assert source == {
         "artifact_count": 2,
         "truncated_artifacts": 1,
+        "ignored_locations": 1,
+        "run_id": None,
         "observed_locations": 3,
         "matched_locations": 2,
         "unmatched_locations": 1,
@@ -295,6 +302,18 @@ def test_observation_artifacts_require_artifacts_and_matching_process_ids(
     _write_observations(observations, 8, ["src/sample.rs:2"], run_id="run-b")
     with pytest.raises(ValueError, match="mixes observation run ids"):
         violation_census.parse_observation_artifacts(observations)
+
+    with pytest.raises(ValueError, match="belongs to run"):
+        violation_census.parse_observation_artifacts(
+            observations, expected_run_id="run-c"
+        )
+
+
+def test_empty_fleet_directory_is_rejected(tmp_path: Path) -> None:
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    with pytest.raises(ValueError, match="contains no fleet shards"):
+        violation_census.parse_fleet_shards(fleet)
 
 
 def test_observation_artifacts_enforce_bounds(

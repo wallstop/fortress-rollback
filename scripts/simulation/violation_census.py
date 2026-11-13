@@ -31,6 +31,7 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 import violation_sites
@@ -51,6 +52,17 @@ MAX_OBSERVATION_ARTIFACT_BYTES = 65_536
 MAX_COVERAGE_BYTES = 64 * 1024 * 1024
 _LOCATION = re.compile(r"(?P<path>[^:\n]+):(?P<line>[0-9]+)")
 _SOURCE_MARKER = "src/"
+
+
+@dataclass(frozen=True)
+class ObservationSource:
+    """Validated exact test-suite observations from one artifact directory."""
+
+    locations: set[tuple[str, int]]
+    artifact_count: int
+    truncated_artifacts: int
+    ignored_locations: int
+    run_id: str | None
 
 
 def _read_bounded(path: Path, maximum: int) -> bytes:
@@ -119,6 +131,8 @@ def parse_fleet_shards(directory: Path) -> set[tuple[str, int]]:
     if not directory.is_dir():
         raise ValueError(f"{directory} is not a directory")
     paths = sorted(directory.glob("*.json"))
+    if not paths:
+        raise ValueError(f"{directory} contains no fleet shards")
     if len(paths) > MAX_FLEET_SHARDS:
         raise ValueError(
             f"{directory} has {len(paths)} shards (max {MAX_FLEET_SHARDS})"
@@ -164,9 +178,9 @@ def parse_fleet_shards(directory: Path) -> set[tuple[str, int]]:
 
 
 def parse_observation_artifacts(
-    directory: Path,
-) -> tuple[set[tuple[str, int]], int, int]:
-    """Return exact test-suite observations and artifact/truncation counts."""
+    directory: Path, expected_run_id: str | None = None
+) -> ObservationSource:
+    """Return validated exact test-suite observations from ``directory``."""
     if not directory.is_dir():
         raise ValueError(f"{directory} is not a directory")
     paths = sorted(directory.glob("*.json"))
@@ -179,6 +193,8 @@ def parse_observation_artifacts(
         )
     observed: set[tuple[str, int]] = set()
     truncated_artifacts = 0
+    ignored_locations = 0
+    processed_locations = 0
     run_ids: set[str | None] = set()
     for path in paths:
         try:
@@ -196,6 +212,10 @@ def parse_observation_artifacts(
         run_id = artifact.get("run_id")
         if run_id is not None and (not isinstance(run_id, str) or not run_id):
             raise ValueError(f"{path} has an invalid run id")
+        if expected_run_id is not None and run_id != expected_run_id:
+            raise ValueError(
+                f"{path} belongs to run {run_id!r}, not {expected_run_id!r}"
+            )
         run_ids.add(run_id)
         process_id = artifact.get("process_id")
         if type(process_id) is not int or process_id <= 0:
@@ -217,27 +237,36 @@ def parse_observation_artifacts(
             raise ValueError(f"{path} has a non-string location")
         if locations != sorted(set(locations)):
             raise ValueError(f"{path} locations are not sorted and unique")
+        processed_locations += len(locations)
+        if processed_locations > MAX_OBSERVATION_TOTAL_LOCATIONS:
+            raise ValueError(
+                f"{directory} has more than {MAX_OBSERVATION_TOTAL_LOCATIONS} "
+                "observation locations"
+            )
         for location in locations:
             normalized = location.replace("\\", "/")
+            source = _normalize_source_path(normalized)
             try:
-                observed.add(_parse_location(normalized))
+                observed.add(_parse_location(source or normalized))
             except ValueError as error:
                 # Unit tests may construct SpecViolation directly with
                 # test-local labels. A malformed production path still fails
                 # loudly because production locations always look like
                 # `src/...:line`.
-                if normalized.startswith(_SOURCE_MARKER):
+                if source is not None:
                     raise ValueError(
                         f"{path} has a malformed location: {error}"
                     ) from error
-        if len(observed) > MAX_OBSERVATION_TOTAL_LOCATIONS:
-            raise ValueError(
-                f"{directory} has more than {MAX_OBSERVATION_TOTAL_LOCATIONS} "
-                "observed locations"
-            )
+                ignored_locations += 1
     if len(run_ids) > 1:
         raise ValueError(f"{directory} mixes observation run ids")
-    return observed, len(paths), truncated_artifacts
+    return ObservationSource(
+        locations=observed,
+        artifact_count=len(paths),
+        truncated_artifacts=truncated_artifacts,
+        ignored_locations=ignored_locations,
+        run_id=next(iter(run_ids)),
+    )
 
 
 def build_report(
@@ -245,9 +274,8 @@ def build_report(
     locations: list[violation_sites.SiteLocation],
     covered: dict[str, set[int]] | None,
     fleet: set[tuple[str, int]] | None,
-    observations: set[tuple[str, int]] | None = None,
-    observation_artifacts: int = 0,
-    truncated_artifacts: int = 0,
+    observations: ObservationSource | None = None,
+    partial: bool = False,
 ) -> dict[str, object]:
     """Join exercise sources onto the baseline and render a deterministic report."""
     by_location: dict[tuple[str, int], set[str]] = {}
@@ -280,7 +308,7 @@ def build_report(
     observation_locations = 0
     unmatched_observations = 0
     if observations is not None:
-        for observed in observations:
+        for observed in observations.locations:
             ids = by_location.get(observed)
             if ids is None:
                 # Unit tests can report violations from test-only assertions or
@@ -304,12 +332,13 @@ def build_report(
         if observations is None
         else sorted(
             f"{path}:{line}"
-            for path, line in observations
+            for path, line in observations.locations
             if (path, line) not in by_location and path.startswith(_SOURCE_MARKER)
         )
     )
     return {
         "schema_version": CENSUS_SCHEMA_VERSION,
+        "partial": partial,
         "baseline_sites": len(sites),
         "exercised_sites": len(sites) - len(unexercised),
         "unexercised_sites": len(unexercised),
@@ -334,9 +363,11 @@ def build_report(
                 None
                 if observations is None
                 else {
-                    "artifact_count": observation_artifacts,
-                    "truncated_artifacts": truncated_artifacts,
-                    "observed_locations": len(observations),
+                    "artifact_count": observations.artifact_count,
+                    "truncated_artifacts": observations.truncated_artifacts,
+                    "ignored_locations": observations.ignored_locations,
+                    "run_id": observations.run_id,
+                    "observed_locations": len(observations.locations),
                     "matched_locations": observation_locations,
                     "unmatched_locations": unmatched_observations,
                     "unmatched_source_locations": unmatched_source_locations,
@@ -369,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coverage-xml", type=Path)
     parser.add_argument("--fleet-dir", type=Path)
     parser.add_argument("--observations-dir", type=Path)
+    parser.add_argument("--expected-run-id")
+    parser.add_argument("--partial", action="store_true")
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
@@ -401,10 +434,12 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.fleet_dir is None
             else parse_fleet_shards(arguments.fleet_dir)
         )
-        observations, artifact_count, truncated_artifacts = (
-            (None, 0, 0)
+        observations = (
+            None
             if arguments.observations_dir is None
-            else parse_observation_artifacts(arguments.observations_dir)
+            else parse_observation_artifacts(
+                arguments.observations_dir, arguments.expected_run_id
+            )
         )
         report = build_report(
             sites,
@@ -412,8 +447,7 @@ def main(argv: list[str] | None = None) -> int:
             covered,
             fleet,
             observations,
-            artifact_count,
-            truncated_artifacts,
+            arguments.partial,
         )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

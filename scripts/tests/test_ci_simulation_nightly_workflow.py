@@ -129,7 +129,12 @@ def test_violation_site_census_joins_all_exact_sources() -> None:
     }
     fleet_download = census["Download fleet observations"]
     assert fleet_download["continue-on-error"] is True
-    report = census["Generate violation-site exercise report"]["run"]
+    assert fleet_download["with"] == {
+        "name": "simulation-violation-sites-${{ github.run_id }}",
+        "path": "${{ runner.temp }}/violation-sites",
+    }
+    report_step = census["Generate violation-site exercise report"]
+    report = report_step["run"]
     assert (
         "gh run list --workflow=ci-coverage.yml"
         in census["Download latest main test coverage (best effort)"]["run"]
@@ -141,7 +146,13 @@ def test_violation_site_census_joins_all_exact_sources() -> None:
     assert "scripts/simulation/violation_census.py" in report
     assert "--fleet-dir" in report
     assert "--observations-dir" in report
-    assert "-name '*.json'" in report
+    assert report.count("-name '*.json'") == 2
+    assert "--partial" in report
+    assert '--expected-run-id "${{ github.run_id }}"' in report
+    assert report_step["env"]["CENSUS_PARTIAL"] == (
+        "${{ needs.simulation-nightly.result != 'success' || "
+        "needs.violation-site-observations.result != 'success' }}"
+    )
     assert "--coverage-xml" in report
     assert census_job["steps"][-1]["with"]["name"] == (
         "violation-site-census-${{ github.run_id }}"
