@@ -219,6 +219,7 @@ jobs:
           python-version: "3.12"
 
       - name: Download fleet observations
+        id: fleet-download
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
@@ -226,6 +227,7 @@ jobs:
           path: ${{ runner.temp }}/violation-sites
 
       - name: Download exact test-suite observations
+        id: observations-download
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
@@ -281,7 +283,7 @@ jobs:
             --expected-run-id "${{ github.run_id }}" \
             --output "$RUNNER_TEMP/violation-site-census.json"
         env:
-          CENSUS_PARTIAL: ${{ needs.simulation-nightly.result != 'success' || needs.violation-site-observations.result != 'success' }}
+          CENSUS_PARTIAL: ${{ needs.simulation-nightly.result != 'success' || needs.violation-site-observations.result != 'success' || steps.fleet-download.outcome != 'success' || steps.observations-download.outcome != 'success' }}
 
       - name: Upload violation-site exercise report
         uses: actions/upload-artifact@v7

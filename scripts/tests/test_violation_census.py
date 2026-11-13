@@ -169,11 +169,17 @@ def test_report_counts_exact_observations_and_ignores_test_only_locations(
     _write_observations(
         observations_dir,
         42,
-        ["not-a-location", "src/test-only/assertion.rs:1"],
+        [
+            "not-a-location",
+            "src/test-only/assertion.rs:1",
+            "tests/fixtures/src/sample.rs:1",
+        ],
         truncated=True,
     )
 
     observations = violation_census.parse_observation_artifacts(observations_dir)
+    assert ("tests/fixtures/src/sample.rs", 1) in observations.locations
+    assert ("src/sample.rs", 1) not in observations.locations
     report = violation_census.build_report(
         sites,
         locations_now,
@@ -190,9 +196,9 @@ def test_report_counts_exact_observations_and_ignores_test_only_locations(
         "truncated_artifacts": 1,
         "ignored_locations": 1,
         "run_id": None,
-        "observed_locations": 3,
+        "observed_locations": 4,
         "matched_locations": 2,
-        "unmatched_locations": 1,
+        "unmatched_locations": 2,
         "unmatched_source_locations": ["src/test-only/assertion.rs:1"],
     }
 

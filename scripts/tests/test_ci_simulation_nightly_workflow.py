@@ -122,12 +122,14 @@ def test_violation_site_census_joins_all_exact_sources() -> None:
     ]
     assert census_job["if"] == "always()"
     download = census["Download exact test-suite observations"]
+    assert download["id"] == "observations-download"
     assert download["continue-on-error"] is True
     assert download["with"] == {
         "name": "violation-site-observations-${{ github.run_id }}",
         "path": "${{ runner.temp }}/violation-observations",
     }
     fleet_download = census["Download fleet observations"]
+    assert fleet_download["id"] == "fleet-download"
     assert fleet_download["continue-on-error"] is True
     assert fleet_download["with"] == {
         "name": "simulation-violation-sites-${{ github.run_id }}",
@@ -149,9 +151,14 @@ def test_violation_site_census_joins_all_exact_sources() -> None:
     assert report.count("-name '*.json'") == 2
     assert "--partial" in report
     assert '--expected-run-id "${{ github.run_id }}"' in report
-    assert report_step["env"]["CENSUS_PARTIAL"] == (
-        "${{ needs.simulation-nightly.result != 'success' || "
-        "needs.violation-site-observations.result != 'success' }}"
+    assert all(
+        condition in report_step["env"]["CENSUS_PARTIAL"]
+        for condition in (
+            "needs.simulation-nightly.result != 'success'",
+            "needs.violation-site-observations.result != 'success'",
+            "steps.fleet-download.outcome != 'success'",
+            "steps.observations-download.outcome != 'success'",
+        )
     )
     assert "--coverage-xml" in report
     assert census_job["steps"][-1]["with"]["name"] == (

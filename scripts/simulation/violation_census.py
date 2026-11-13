@@ -85,6 +85,16 @@ def _normalize_source_path(filename: str) -> str | None:
     return relative
 
 
+def _normalize_observation_path(location: str) -> str:
+    """Normalize an observation without promoting test-local ``src/`` labels."""
+    normalized = location.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        source = _normalize_source_path(normalized)
+        if source is not None:
+            return source
+    return normalized
+
+
 def parse_coverage(path: Path) -> dict[str, set[int]]:
     """Return executed line numbers per repository-relative source path."""
     try:
@@ -244,16 +254,15 @@ def parse_observation_artifacts(
                 "observation locations"
             )
         for location in locations:
-            normalized = location.replace("\\", "/")
-            source = _normalize_source_path(normalized)
+            candidate = _normalize_observation_path(location)
             try:
-                observed.add(_parse_location(source or normalized))
+                observed.add(_parse_location(candidate))
             except ValueError as error:
                 # Unit tests may construct SpecViolation directly with
                 # test-local labels. A malformed production path still fails
                 # loudly because production locations always look like
                 # `src/...:line`.
-                if source is not None:
+                if candidate.startswith(_SOURCE_MARKER):
                     raise ValueError(
                         f"{path} has a malformed location: {error}"
                     ) from error

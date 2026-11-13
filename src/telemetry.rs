@@ -1288,7 +1288,7 @@ fn report_scoped_observer_drop_failure() {
         ViolationSeverity::Critical,
         ViolationKind::InternalError,
         "scoped observer guard could not borrow the thread-local observer stack during drop",
-        "src/telemetry.rs:ScopedObserverGuard::drop",
+        concat!(file!(), ":", line!()),
     ));
 }
 
@@ -3916,6 +3916,10 @@ mod tests {
         assert!(
             artifact.contains("\"truncated\":true"),
             "the byte-budget snapshot must set the truncation flag"
+        );
+        assert!(
+            artifact.contains("\"src/generated/000/"),
+            "the byte-budget snapshot must retain the earliest locations"
         );
         assert!(
             !artifact.contains("\"src/generated/299/"),
