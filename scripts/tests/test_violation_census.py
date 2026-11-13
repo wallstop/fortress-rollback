@@ -315,6 +315,17 @@ def test_observation_artifacts_require_artifacts_and_matching_process_ids(
         )
 
 
+def test_absolute_test_local_location_is_not_promoted(tmp_path: Path) -> None:
+    observations = tmp_path / "observations"
+    location = "/build/tests/fixtures/src/sample.rs:1"
+    _write_observations(observations, 7, [location])
+
+    source = violation_census.parse_observation_artifacts(observations)
+
+    assert ("/build/tests/fixtures/src/sample.rs", 1) in source.locations
+    assert ("src/sample.rs", 1) not in source.locations
+
+
 def test_empty_fleet_directory_is_rejected(tmp_path: Path) -> None:
     fleet = tmp_path / "fleet"
     fleet.mkdir()

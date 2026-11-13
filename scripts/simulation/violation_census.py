@@ -89,9 +89,13 @@ def _normalize_observation_path(location: str) -> str:
     """Normalize an observation without promoting test-local ``src/`` labels."""
     normalized = location.replace("\\", "/")
     if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
-        source = _normalize_source_path(normalized)
-        if source is not None:
-            return source
+        marker = normalized.find(_SOURCE_MARKER)
+        # Absolute test paths such as `/build/tests/fixtures/src/sample.rs` must
+        # stay test-local; only build-root prefixes belong to the source tree.
+        if marker > 0 and "/tests/" not in normalized[:marker]:
+            source = _normalize_source_path(normalized)
+            if source is not None:
+                return source
     return normalized
 
 
