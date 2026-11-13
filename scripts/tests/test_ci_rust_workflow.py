@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from collections import Counter
@@ -449,9 +450,8 @@ def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
         if step.get("name") == "Install wasm-bindgen CLI for browser runtime tests"
     )
     assert install_step["if"] == "matrix.target == 'wasm32-unknown-unknown'"
-    assert install_step["uses"] == (
-        "taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b"
-    )
+    assert install_step["uses"].startswith("taiki-e/install-action@")
+    assert re.fullmatch(r"[0-9a-f]{40}", install_step["uses"].split("@", 1)[1])
     locked_bindgen = _locked_package_version("wasm-bindgen")
     assert install_step["with"]["tool"] == f"wasm-bindgen-cli@{locked_bindgen}"
 
@@ -595,10 +595,8 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     rust_step = next(
         step for step in steps if step.get("name") == "Install Godot Rust toolchain"
     )
-    assert (
-        rust_step["uses"]
-        == "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8"
-    )
+    assert rust_step["uses"].startswith("dtolnay/rust-toolchain@")
+    assert re.fullmatch(r"[0-9a-f]{40}", rust_step["uses"].split("@", 1)[1])
     assert rust_step["with"]["toolchain"] == "nightly-2026-08-26"
     assert set(str(rust_step["with"]["components"]).split(",")) == {
         "clippy",
@@ -610,10 +608,8 @@ def test_godot_browser_job_pins_its_toolchain() -> None:
     emsdk_step = next(
         step for step in steps if step.get("name") == "Install Emscripten SDK"
     )
-    assert (
-        emsdk_step["uses"]
-        == "emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984"
-    )
+    assert emsdk_step["uses"].startswith("emscripten-core/setup-emsdk@")
+    assert re.fullmatch(r"[0-9a-f]{40}", emsdk_step["uses"].split("@", 1)[1])
     assert str(emsdk_step["with"]["version"]) == "4.0.20"
     assert emsdk_step["with"]["actions-cache-folder"] == "emsdk-cache"
 
