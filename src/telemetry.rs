@@ -35,6 +35,108 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Exact violation-site exercise hook for the nightly census.
+///
+/// Enabled only by the `violation-census` feature. When
+/// `FORTRESS_VIOLATION_CENSUS_DIR` names a directory, each newly observed
+/// reporting location is written to a bounded per-process artifact. The hook is
+/// strictly diagnostic: read and write failures never affect gameplay, and
+/// normal builds compile it out entirely.
+#[cfg(feature = "violation-census")]
+mod violation_census {
+    use crate::sync::Mutex;
+    use std::collections::BTreeSet;
+    use std::fmt::Write as _;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    /// Per-process cap; must not exceed the nightly census parser's
+    /// per-artifact limit.
+    const MAX_LOCATIONS: usize = 256;
+    static OBSERVED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    static DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    /// Records one reporting location, if the census is enabled.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn record(location: &'static str) {
+        let Some(directory) = directory() else {
+            return;
+        };
+        let mut observed = OBSERVED.lock();
+        if observed.len() >= MAX_LOCATIONS || !observed.insert(location) {
+            return;
+        }
+        // Diagnostic only: an unwritable census directory must not change
+        // violation handling or produce a second failure.
+        let _ = write_snapshot(directory, &observed);
+    }
+
+    fn directory() -> Option<&'static Path> {
+        DIRECTORY
+            .get_or_init(|| {
+                std::env::var_os("FORTRESS_VIOLATION_CENSUS_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .as_deref()
+    }
+
+    /// Writes the complete observed set for this process, replacing any
+    /// earlier snapshot.
+    pub(super) fn write_snapshot(
+        directory: &Path,
+        observed: &BTreeSet<&'static str>,
+    ) -> std::io::Result<()> {
+        let name = format!("observations-{}.json", std::process::id());
+        let target = directory.join(&name);
+        let temporary = directory.join(format!("{name}.tmp"));
+        // alloc-bound: `observed` holds at most MAX_LOCATIONS static `file:line` literals.
+        let mut artifact = String::with_capacity(64 + observed.len() * 80);
+        artifact.push_str("{\"schema_version\":1,\"process_id\":");
+        artifact.push_str(&std::process::id().to_string());
+        artifact.push_str(",\"locations\":[");
+        for (index, location) in observed.iter().enumerate() {
+            if index > 0 {
+                artifact.push(',');
+            }
+            artifact.push('"');
+            push_json_escaped(&mut artifact, location);
+            artifact.push('"');
+        }
+        artifact.push_str("]}\n");
+        {
+            let mut file = fs::File::create(&temporary)?;
+            file.write_all(artifact.as_bytes())?;
+        }
+        // Windows cannot replace an existing file with `rename`; the retry
+        // keeps repeated snapshots working without losing the earlier one on
+        // Unix. This path is diagnostic, so a failed replace is ignorable.
+        fs::rename(&temporary, &target).or_else(|_| {
+            fs::remove_file(&target)?;
+            fs::rename(&temporary, &target)
+        })
+    }
+
+    fn push_json_escaped(output: &mut String, value: &str) {
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                control if control < '\u{20}' => {
+                    let _ = write!(output, "\\u{:04x}", u32::from(control));
+                },
+                other => output.push(other),
+            }
+        }
+    }
+}
+
 /// Custom serializer for `Option<Frame>` that outputs clean integers or null.
 ///
 /// - `None` → `null`
@@ -258,6 +360,8 @@ impl SpecViolation {
         message: impl Into<String>,
         location: &'static str,
     ) -> Self {
+        #[cfg(feature = "violation-census")]
+        violation_census::record(location);
         Self {
             severity,
             kind,
@@ -3649,5 +3753,36 @@ mod tests {
             2,
             "the re-entrant violation must also route to the observer (no deadlock)"
         );
+    }
+
+    #[cfg(feature = "violation-census")]
+    #[test]
+    fn violation_census_snapshot_is_sorted_escaped_and_complete() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory =
+            std::env::temp_dir().join(format!("fortress-census-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+
+        let mut observed = std::collections::BTreeSet::new();
+        observed.insert("src/network/compression.rs:282");
+        observed.insert("src/a\"b.rs:1");
+        super::violation_census::write_snapshot(&directory, &observed)
+            .expect("census snapshot writes");
+
+        let artifact = std::fs::read_to_string(
+            directory.join(format!("observations-{}.json", std::process::id())),
+        )
+        .expect("census artifact is readable");
+        assert_eq!(
+            artifact,
+            format!(
+                "{{\"schema_version\":1,\"process_id\":{},\"locations\":[\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"]}}\n",
+                std::process::id()
+            ),
+            "the snapshot must be sorted, JSON-escaped, and hold every location"
+        );
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
     }
 }

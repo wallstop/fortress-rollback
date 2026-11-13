@@ -2043,6 +2043,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | `loom`                    | No-op compatibility name; use `cfg(loom)`             | Existing development manifests    | None                |
 | `graphical-examples`      | Deprecated no-op compatibility flag                   | Existing downstream feature lists | None                |
 | `trace-validation`        | Records bounded internal protocol events              | Development/trace verification    | None                |
+| `violation-census`        | Records exact runtime violation-site hits              | Development/exercise census       | None                |
 | `z3-verification`         | Enables Z3 formal verification tests                  | Development/CI verification       | `z3` crate (system) |
 | `z3-verification-bundled` | Z3 with bundled build (builds from source)            | CI environments without system Z3 | `z3` crate          |
 
@@ -2224,6 +2225,13 @@ These feature flags are primarily for library development and CI, not typical us
 
 Enables bounded internal protocol-event recording for TLA+ trace validation. This unstable
 verification surface compiles out of normal builds and is not intended for application logic.
+
+#### `violation-census`
+
+Enables the exact violation-site exercise hook used by the nightly census. When
+`FORTRESS_VIOLATION_CENSUS_DIR` names a directory, every newly reported
+`report_violation!` location is written to a bounded per-process artifact. The hook compiles out
+of normal builds and is diagnostic only: an unwritable directory never changes violation handling.
 
 #### `z3-verification`
 
