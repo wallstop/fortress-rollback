@@ -16,8 +16,9 @@ use super::harness::{
     TraceSessionState,
 };
 use super::sometimes_state::{
-    publish_targeted_probe, write_organic_shard, CensusAccumulator, NegativeControlEvidence,
-    OrganicShardReport, H_OSC_PROBE, H_SKEW_PROBE, SOMETIMES_STATE_COUNT, SOMETIMES_STATE_IDS,
+    publish_targeted_probe, write_organic_shard, write_violation_sites_shard, CensusAccumulator,
+    NegativeControlEvidence, OrganicShardReport, ViolationSitesShardReport, H_OSC_PROBE,
+    H_SKEW_PROBE, SOMETIMES_STATE_COUNT, SOMETIMES_STATE_IDS,
 };
 use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
 use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
@@ -217,6 +218,7 @@ fn run_nightly_shard(shard: u64) {
         .parse::<u64>()
         .expect("FORTRESS_SIM_SEED_BASE must be an unsigned integer");
     let mut census = CensusAccumulator::default();
+    let mut violation_locations = BTreeSet::new();
 
     for offset in 0..NIGHTLY_SEEDS_PER_SHARD {
         let seed = nightly_seed(run_id, shard, offset);
@@ -228,6 +230,12 @@ fn run_nightly_shard(shard: u64) {
         census
             .record_materialized_schedule([&report], u64::from(schedule.config.steps))
             .expect("organic sometimes-state schedule records");
+        violation_locations.extend(
+            report
+                .violation_census
+                .keys()
+                .map(|signature| signature.location.clone()),
+        );
         if noise == BackgroundNoise::ReliableFifo {
             assert!(
                 report.net_stats.retransmit_delayed > 0,
@@ -239,6 +247,11 @@ fn run_nightly_shard(shard: u64) {
     let shard_index = u32::try_from(shard).expect("nightly shard index fits u32");
     write_organic_shard(&OrganicShardReport::new(run_id, shard_index, &census))
         .expect("organic sometimes-state shard publishes atomically");
+    write_violation_sites_shard(
+        &ViolationSitesShardReport::new(run_id, shard_index, &violation_locations)
+            .expect("violation-sites shard satisfies its contract"),
+    )
+    .expect("violation-sites shard publishes atomically");
 }
 
 macro_rules! nightly_shard_test {
