@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a drop-time scoped-observer failure now reports its real `file:line`
+  location instead of a non-line label, so diagnostic consumers and the violation-site census can
+  parse it.
 - **Pre-existing:** replays recorded by a session that repaired a remote misprediction no longer
   capture the pre-correction speculative checksum for the repaired frames. Recordings now settle
   those checksums after the correction requests execute (or omit a checksum whose saved-state cell
