@@ -744,6 +744,23 @@ mod tests {
     }
 
     #[test]
+    fn construction_falls_back_to_empty_session_on_impossible_player_count() {
+        let observer = Arc::new(CollectingObserver::new());
+        let session: SyncTestSession<TestConfig> =
+            SyncTestSession::with_queue_length(usize::MAX, 8, 2, 0, Some(observer.clone()), 64);
+
+        assert_eq!(session.num_players(), 0);
+        assert_eq!(session.max_prediction(), 0);
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.kind == crate::telemetry::ViolationKind::InternalError),
+            "the allocation failure must be reported before falling back"
+        );
+    }
+
+    #[test]
     fn sync_test_session_with_violation_observer() {
         let observer = Arc::new(CollectingObserver::new());
         let session: SyncTestSession<TestConfig> = SyncTestSession::new(2, 8, 2, 2, Some(observer));

@@ -844,6 +844,50 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    #[derive(Clone, Debug, Default, Deserialize)]
+    struct FailingState;
+
+    impl Serialize for FailingState {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "deliberate test state serialization failure",
+            ))
+        }
+    }
+
+    struct FailingStateConfig;
+
+    impl Config for FailingStateConfig {
+        type Input = TestInput;
+        type State = FailingState;
+        type Address = SocketAddr;
+    }
+
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+    struct FailingInput;
+
+    impl Serialize for FailingInput {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "deliberate test input serialization failure",
+            ))
+        }
+    }
+
+    struct FailingInputConfig;
+
+    impl Config for FailingInputConfig {
+        type Input = FailingInput;
+        type State = VecState;
+        type Address = SocketAddr;
+    }
+
     /// Builds a `SyncLayer` and saves `state` (with `checksum`) at frame `f` by
     /// advancing to `f` then driving `save_current_state` + `cell.save`, mirror
     /// of the sync_layer tests' save pattern.
@@ -875,6 +919,60 @@ mod tests {
         let bytes = serialize_state::<TestConfig>(&original).unwrap();
         let decoded = deserialize_state::<TestConfig>(&bytes).unwrap();
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn serialize_state_reports_failing_state_serialization() {
+        let result = serialize_state::<FailingStateConfig>(&FailingState);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured { .. })
+        ));
+    }
+
+    #[test]
+    fn serialized_state_len_reports_failing_state_serialization() {
+        let result = serialized_state_len::<FailingStateConfig>(&FailingState);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured { .. })
+        ));
+    }
+
+    #[test]
+    fn encode_bridge_inputs_reports_failing_input_serialization() {
+        let inputs = [PlayerInput::new(Frame::new(3), FailingInput)];
+
+        let result = encode_bridge_inputs::<FailingInputConfig>(&inputs);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_bridge_inputs_reports_impossible_player_count() {
+        let result = decode_bridge_inputs::<TestConfig>(&[], usize::MAX);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_wire_len_reports_overflowing_payload_lengths() {
+        let statuses = vec![ConnectionStatus::default(); 2];
+
+        let result = snapshot_wire_len(Frame::new(5), 2, None, usize::MAX, usize::MAX, &statuses);
+
+        assert!(matches!(
+            result,
+            Err(FortressError::SerializationErrorStructured { .. })
+        ));
     }
 
     #[test]

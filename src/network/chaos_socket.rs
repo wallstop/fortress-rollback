@@ -1539,6 +1539,74 @@ mod tests {
     }
 
     #[test]
+    fn receive_all_messages_reports_in_flight_cap_across_polls() {
+        let mut inner = TestSocket::default();
+        let addr = test_addr();
+        let msg = test_message();
+        let cap = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+        inner.to_receive = vec![(addr, msg.clone()); cap];
+
+        let clock = TestClock::new();
+        let config = ChaosConfig::builder().latency_ms(1_000).build();
+        let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
+        assert_eq!(socket.receive_all_messages(), Vec::new());
+        assert_eq!(socket.packets_in_flight(), cap);
+
+        // A later poll starts with a full in-flight queue and a fresh
+        // per-poll acceptance counter, so the in-flight guard is the first
+        // limit hit.
+        socket.inner_mut().to_receive.push((addr, msg));
+        assert_eq!(socket.receive_all_messages(), Vec::new());
+        assert_eq!(socket.packets_in_flight(), cap);
+    }
+
+    #[test]
+    fn deliver_ready_packets_reports_per_poll_ready_cap() {
+        let addr = test_addr();
+        let msg = test_message();
+        let cap = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+        let clock = TestClock::new();
+        let now = clock.current.lock().unwrap().to_owned();
+        let mut socket = ChaosSocket::new(TestSocket::default(), ChaosConfig::passthrough())
+            .with_clock(clock.as_clock_fn());
+        for _ in 0..cap + 1 {
+            socket.in_flight.push_back(InFlightPacket {
+                addr,
+                msg: msg.clone(),
+                queued_at: now,
+                delay: Duration::ZERO,
+            });
+        }
+
+        let ready = socket.deliver_ready_packets();
+
+        assert_eq!(ready.len(), cap);
+        assert_eq!(socket.packets_in_flight(), 1);
+    }
+
+    #[test]
+    fn apply_reordering_reports_buffer_cap_and_clears_batch() {
+        let addr = test_addr();
+        let msg = test_message();
+        let cap = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+        let config = ChaosConfig::builder()
+            .reorder_buffer_size(cap)
+            .reorder_rate(1.0)
+            .seed(7)
+            .build();
+        let mut socket = ChaosSocket::new(TestSocket::default(), config);
+        socket.reorder_buffer = vec![(addr, msg.clone()); cap - 1];
+        let mut messages = vec![(addr, msg); 2];
+
+        socket.apply_reordering(&mut messages);
+
+        // The overflowed incoming batch is dropped; the already-buffered
+        // packets are released because no new messages arrived.
+        assert_eq!(messages.len(), cap - 1);
+        assert_eq!(socket.reorder_buffer, Vec::new());
+    }
+
+    #[test]
     fn test_in_flight_count() {
         let mut inner = TestSocket::default();
         let addr = test_addr();

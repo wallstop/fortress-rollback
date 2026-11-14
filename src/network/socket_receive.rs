@@ -66,60 +66,44 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                     continue;
                 }
 
-                if let Some(buf_slice) = recv_buffer.get(..number_of_bytes) {
-                    match codec::decode_message(buf_slice) {
-                        Ok((msg, _consumed)) => {
-                            if received_messages.len() >= MAX_RECEIVE_MESSAGES_PER_POLL {
-                                metrics.record_receive_cap_saturation();
-                                report_violation!(
-                                    ViolationSeverity::Warning,
-                                    ViolationKind::NetworkProtocol,
-                                    "{} receive batch reached per-poll cap of {} message(s)",
-                                    adapter_name,
-                                    MAX_RECEIVE_MESSAGES_PER_POLL
-                                );
-                                return received_messages;
-                            }
-                            // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts and decoded-message cap.
-                            if received_messages.try_reserve(1).is_err() {
-                                report_violation!(
-                                    ViolationSeverity::Error,
-                                    ViolationKind::NetworkProtocol,
-                                    "Failed to reserve {} received message slot",
-                                    adapter_name
-                                );
-                                return received_messages;
-                            }
-                            metrics.record_message_decoded();
-                            received_messages.push((src_addr, msg));
-                        },
-                        Err(_err) => {
-                            metrics.record_datagram_rejected();
-                            let reject = codec::classify_wire_bytes(buf_slice);
-                            let bit = reject.rate_limit_bit();
-                            if reported_wire_rejects & bit == 0 {
-                                reported_wire_rejects |= bit;
-                                report_violation!(
-                                    ViolationSeverity::Warning,
-                                    ViolationKind::NetworkProtocol,
-                                    "{} rejected datagram from {:?}: {}",
-                                    adapter_name,
-                                    src_addr,
-                                    reject
-                                );
-                            }
-                        },
-                    }
-                } else {
+                // The bounds check above guarantees this slice exists; the
+                // loop-top attempt cap bounds the decoded batch to the same
+                // per-poll maximum, so no separate batch-cap branch is needed.
+                let Some(buf_slice) = recv_buffer.get(..number_of_bytes) else {
                     metrics.record_datagram_rejected();
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::NetworkProtocol,
-                        "{} recv_buffer slice [0..{}] out of bounds (buffer size: {})",
-                        adapter_name,
-                        number_of_bytes,
-                        recv_buffer.len()
-                    );
+                    continue;
+                };
+                match codec::decode_message(buf_slice) {
+                    Ok((msg, _consumed)) => {
+                        // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts.
+                        if received_messages.try_reserve(1).is_err() {
+                            report_violation!(
+                                ViolationSeverity::Error,
+                                ViolationKind::NetworkProtocol,
+                                "Failed to reserve {} received message slot",
+                                adapter_name
+                            );
+                            return received_messages;
+                        }
+                        metrics.record_message_decoded();
+                        received_messages.push((src_addr, msg));
+                    },
+                    Err(_err) => {
+                        metrics.record_datagram_rejected();
+                        let reject = codec::classify_wire_bytes(buf_slice);
+                        let bit = reject.rate_limit_bit();
+                        if reported_wire_rejects & bit == 0 {
+                            reported_wire_rejects |= bit;
+                            report_violation!(
+                                ViolationSeverity::Warning,
+                                ViolationKind::NetworkProtocol,
+                                "{} rejected datagram from {:?}: {}",
+                                adapter_name,
+                                src_addr,
+                                reject
+                            );
+                        }
+                    },
                 }
             },
             // No more messages.
@@ -274,6 +258,35 @@ mod tests {
         assert!(violations
             .iter()
             .all(|violation| violation.message.contains(&addr.to_string())));
+    }
+
+    #[test]
+    fn receive_all_messages_from_reports_oversized_and_unexpected_receive_errors() {
+        let addr: SocketAddr = "127.0.0.1:7003".parse().unwrap();
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(observer.clone());
+        let mut recv_buffer = vec![0; 4];
+        let mut metrics = SocketMetrics::default();
+
+        let mut oversized_reported = false;
+        let oversized =
+            receive_all_messages_from(&mut recv_buffer, "test", &mut metrics, |_buffer| {
+                if oversized_reported {
+                    return Err(io::Error::from(ErrorKind::WouldBlock));
+                }
+                oversized_reported = true;
+                Ok((5, addr))
+            });
+        assert_eq!(oversized, Vec::new());
+
+        let errored = receive_all_messages_from(
+            &mut recv_buffer,
+            "test",
+            &mut metrics,
+            |_buffer| -> io::Result<(usize, SocketAddr)> { Err(io::Error::from(ErrorKind::Other)) },
+        );
+        assert_eq!(errored, Vec::new());
+        assert_eq!(observer.len(), 2);
     }
 
     #[test]

@@ -4882,6 +4882,123 @@ mod tests {
     }
 
     #[test]
+    fn pending_input_matches_reference_len_rejects_width_mismatch() {
+        let protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let reference_width = protocol.last_acked_input.bytes.len();
+
+        assert!(!protocol.pending_input_matches_reference_len(
+            &InputBytes {
+                frame: Frame::new(0),
+                bytes: vec![0; reference_width + 4],
+            },
+            "test",
+        ));
+        assert!(protocol.pending_input_matches_reference_len(
+            &InputBytes {
+                frame: Frame::new(0),
+                bytes: vec![0; reference_width],
+            },
+            "test",
+        ));
+    }
+
+    #[test]
+    fn classify_ack_frame_reports_invalid_and_unmatched_acks() {
+        let protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+
+        assert_eq!(
+            protocol.classify_ack_frame(Frame::new(-2)),
+            AckDisposition::Ignore
+        );
+        assert_eq!(
+            protocol.classify_ack_frame(Frame::new(5)),
+            AckDisposition::Ignore
+        );
+    }
+
+    #[test]
+    fn on_sync_reply_reports_exhausted_roundtrips() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        let random = *protocol.sync_random_requests.iter().next().unwrap();
+        let reply = matching_sync_reply(&protocol, random);
+        protocol.sync_remaining_roundtrips = 0;
+
+        protocol.on_sync_reply(MessageHeader::new(999), reply);
+
+        assert_eq!(protocol.sync_remaining_roundtrips, 0);
+    }
+
+    #[test]
+    fn update_local_frame_advantage_reports_invalid_local_frame() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.recv_inputs.insert(
+            Frame::new(10),
+            InputBytes {
+                frame: Frame::new(10),
+                bytes: vec![0; 4],
+            },
+        );
+
+        // A negative (but non-NULL) local frame passes the early return and
+        // must be rejected by the validity guard.
+        protocol.update_local_frame_advantage(Frame::new(-2));
+    }
+
+    #[cfg(any(debug_assertions, feature = "paranoid"))]
+    #[test]
+    fn floor_round_invariant_checker_reports_prune_and_length_drift() {
+        use crate::telemetry::{
+            push_violation_observer, CollectingObserver, ViolationKind, ViolationObserver,
+        };
+
+        let mut protocol = running_protocol_three_slots();
+        protocol.floor_request_seq = 1;
+        protocol.floor_prune_seq = 2;
+        protocol.round_floor.pop();
+        let observer = Arc::new(CollectingObserver::new());
+        let _guard = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        protocol.check_floor_round_invariants();
+
+        let violations = observer.violations_of_kind(ViolationKind::Invariant);
+        assert_eq!(violations.len(), 2);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.message.contains("floor prune seq")));
+        assert!(violations
+            .iter()
+            .any(|violation| violation.message.contains("round_floor length")));
+    }
+
+    #[test]
+    fn send_pending_output_reports_encode_limit_overflow_and_empty_batch() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.send_queue.clear();
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0, 0, 0, 0],
+        });
+        protocol.last_acked_input.bytes = vec![0, 0, 0, 0];
+        let connect_status = vec![ConnectionStatus::default(); 2];
+
+        // usize::MAX * reference length overflows the configured batch cap.
+        protocol.protocol_config.pending_output_limit = usize::MAX;
+        protocol.send_pending_output(&connect_status);
+
+        // A zero pending-output limit yields an empty batch (not an overflow).
+        protocol.protocol_config.pending_output_limit = 0;
+        protocol.send_pending_output(&connect_status);
+    }
+
+    #[test]
     fn input_ack_rejects_future_ack_without_popping_pending_output() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
@@ -4903,6 +5020,57 @@ mod tests {
 
         assert_eq!(protocol.pending_output.len(), 2);
         assert_eq!(protocol.last_acked_input.frame, Frame::NULL);
+    }
+
+    #[test]
+    fn on_input_rejects_invalid_start_frame() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+
+        protocol.on_input(&Input {
+            start_frame: Frame::NULL,
+            ack_frame: Frame::NULL,
+            bytes: Vec::new(),
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        });
+
+        assert!(!protocol.recv_inputs.contains_key(&Frame::new(0)));
+    }
+
+    #[test]
+    fn on_input_reports_decoded_frame_overflow() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        let reference = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .expect("blank reference input")
+            .bytes
+            .clone();
+        // Each delta frame must match the reference width; two frames from an
+        // i32::MAX start frame overflow on the second offset.
+        let frame_bytes = vec![0_u8; reference.len()];
+        let encoded = crate::network::compression::encode(
+            &reference,
+            [&frame_bytes, &frame_bytes].into_iter(),
+        );
+
+        protocol.on_input(&Input {
+            start_frame: Frame::new(i32::MAX),
+            ack_frame: Frame::NULL,
+            bytes: encoded,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        });
+
+        // The first decoded frame is at i32::MAX; the second overflows the
+        // frame offset and the whole batch is rejected.
+        assert!(!protocol.recv_inputs.contains_key(&Frame::new(i32::MAX)));
     }
 
     #[test]

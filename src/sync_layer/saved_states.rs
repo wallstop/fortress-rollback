@@ -328,6 +328,13 @@ mod tests {
     }
 
     #[test]
+    fn new_falls_back_to_one_cell_on_impossible_max_prediction() {
+        let saved_states: SavedStates<u32> = SavedStates::new(usize::MAX);
+
+        assert_eq!(saved_states.states.len(), 1);
+    }
+
+    #[test]
     fn cells_independent_per_index() {
         let saved_states: SavedStates<u32> = SavedStates::new(2); // 3 cells
 

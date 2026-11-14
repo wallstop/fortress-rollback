@@ -2756,6 +2756,44 @@ mod tests {
         assert_eq!(h1.messages_received_by_kind.get(MessageKind::Input), 2);
     }
 
+    #[test]
+    fn remove_disconnected_hosts_reports_out_of_bounds_index() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session_multi(&[test_addr(7432)], DummySocket)
+            .expect("spectator session builds");
+
+        session.remove_disconnected_hosts(vec![7]);
+
+        assert!(observer.has_violation(ViolationKind::InternalError));
+        assert_eq!(session.num_hosts(), 1);
+    }
+
+    #[test]
+    fn latch_spectator_divergence_reports_only_the_first_conflict() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session_multi(&[test_addr(7433), test_addr(7434)], DummySocket)
+            .expect("spectator session builds");
+        let player = PlayerHandle::new(0);
+        let frame = Frame::new(9);
+
+        session.latch_spectator_divergence(frame, player, test_addr(7433), test_addr(7434));
+        session.latch_spectator_divergence(frame, player, test_addr(7433), test_addr(7434));
+
+        assert_eq!(
+            observer.violations_of_kind(ViolationKind::FrameSync).len(),
+            1
+        );
+        assert!(session.spectator_divergence.is_some());
+    }
+
     /// Locks the documented failover caveat: hosts are never rebuilt, only
     /// compacted, so the counters observed at a fixed index **jump** to the
     /// promoted survivor's running totals rather than resetting.

@@ -7,14 +7,21 @@ or message is a deliberate assertion change and requires regenerating the
 checked-in baseline. Duplicate assertions with the same kind and literal share
 one ID by design.
 
+Both ``report_violation!`` and ``report_violation_to!`` invocations are
+inventoried. Wrapper macros whose expansion reports from the caller's line
+(``safe_frame_add!`` / ``safe_frame_sub!``) are inventoried at each production
+call site, because that call site is the runtime ``file:line`` the observer
+records. Assertions inside a ``macro_rules!`` definition are skipped for the
+same reason: the definition itself is never a runtime location.
+
 The scan is intentionally conservative:
 
 - comments, string literals, ``#[cfg(test)]`` blocks, and ``#[cfg(kani)]`` /
   ``#[cfg(loom)]``-only blocks are ignored;
 - a production invocation that cannot be parsed (non-literal kind or format)
   is a hard error, so a site can never silently disappear from the inventory;
-- forwarding macros whose format literal has no static prefix (for example
-  ``"{}"``) are not assertion sites and are skipped.
+- forwarding-only formats (for example ``"{}"`` or ``"{}: {}"``) carry no
+  static text and are not assertion sites.
 """
 
 from __future__ import annotations
@@ -33,6 +40,22 @@ DEFAULT_SOURCE_ROOT = REPO_ROOT / "src"
 DEFAULT_BASELINE = Path(__file__).with_name("violation-site-baseline.tsv")
 ID_HEX_LENGTH = 16
 _MACRO = "report_violation!"
+_DIRECT_MACRO = "report_violation!"
+_OBSERVER_MACRO = "report_violation_to!"
+# Wrapper macros whose expansion reports from the *caller's* line, so their
+# invocation sites are the runtime locations. The payload mirrors the literal
+# in the wrapper definition; `test_wrapper_messages_match_definitions` keeps
+# the two in sync.
+_WRAPPER_MACROS = {
+    "safe_frame_add!": (
+        "ArithmeticOverflow",
+        '"Frame overflow in {}: {} + {} would overflow"',
+    ),
+    "safe_frame_sub!": (
+        "ArithmeticOverflow",
+        '"Frame underflow in {}: {} - {} would underflow"',
+    ),
+}
 _CFG_SKIP_ATOMS = ("test", "kani", "loom")
 _KIND_RE = re.compile(r"ViolationKind::([A-Za-z_][A-Za-z0-9_]*)")
 _CFG_TOKEN_RE = re.compile(
@@ -444,11 +467,15 @@ def _strip_outer_quotes(literal: str) -> str:
     return literal
 
 
-def _has_static_prefix(literal: str) -> bool:
-    """Return false for forwarding-only formats such as ``"{}"``."""
+def _has_static_text(literal: str) -> bool:
+    """Return false for forwarding-only formats such as ``"{}"``.
+
+    A literal that starts with a placeholder can still be a real assertion
+    (``"{} receive attempts reached the cap"``); only literals made up solely
+    of placeholders and punctuation are forwarding-only.
+    """
     content = _strip_outer_quotes(literal)
-    prefix = content.split("{", 1)[0]
-    return any(char.isalnum() for char in prefix)
+    return any(char.isalnum() for char in re.sub(r"\{[^{}]*\}", "", content))
 
 
 def _is_string_literal(expression: str) -> bool:
@@ -461,10 +488,41 @@ def _is_string_literal(expression: str) -> bool:
     return closed and end == len(stripped)
 
 
+def _macro_definition_ranges(text: str) -> list[tuple[int, int]]:
+    """Return byte ranges for every ``macro_rules!`` body.
+
+    Assertions inside a macro definition report from the *caller's* line, so
+    the definition itself is not a runtime location. Wrapper invocations are
+    inventoried explicitly instead.
+    """
+    ranges: list[tuple[int, int]] = []
+    literal_spans = _literal_spans(text)
+    index = 0
+    while True:
+        start = text.find("macro_rules!", index)
+        if start < 0:
+            break
+        body = text.find("{", start)
+        if body < 0 or _inside(start, literal_spans):
+            index = start + 1
+            continue
+        parsed = _parse_balanced(text, body, "{", "}")
+        if parsed is None:
+            index = start + 1
+            continue
+        ranges.append((start, parsed[1]))
+        index = parsed[1]
+    return ranges
+
+
 def scan_text(text: str, path: Path) -> tuple[list[Site], list[ScanIssue]]:
     """Extract production assertion sites from one Rust source file."""
     entries, issues = _scan_entries(text, path)
     return [site for site, _ in entries], issues
+
+
+def _line_of(text: str, position: int) -> int:
+    return text.count("\n", 0, position) + 1
 
 
 def _scan_entries(
@@ -472,59 +530,86 @@ def _scan_entries(
 ) -> tuple[list[tuple[Site, int]], list[ScanIssue]]:
     """Extract assertion sites and their invocation lines from one source file."""
     stripped = strip_comments(text)
-    skip_ranges = _attribute_ranges(stripped)
+    skip_ranges = [
+        *_attribute_ranges(stripped),
+        *_macro_definition_ranges(stripped),
+    ]
     literal_spans = _literal_spans(stripped)
     entries: list[tuple[Site, int]] = []
     issues: list[ScanIssue] = []
-    index = 0
-    while True:
-        start = stripped.find(_MACRO, index)
-        if start < 0:
-            break
-        index = start + len(_MACRO)
-        if _inside(start, skip_ranges) or _inside(start, literal_spans):
-            continue
-        cursor = index
-        while cursor < len(stripped) and stripped[cursor].isspace():
-            cursor += 1
-        parsed = _parse_balanced(stripped, cursor, "(", ")")
-        if parsed is None:
-            issues.append(ScanIssue(path, stripped.count("\n", 0, start) + 1, "unbalanced macro"))
-            continue
-        arguments, end = parsed
-        parts = _split_arguments(arguments)
-        if len(parts) < 3:
-            issues.append(
-                ScanIssue(path, stripped.count("\n", 0, start) + 1, "fewer than three arguments")
-            )
-            continue
-        kind_expression = parts[1].strip()
-        kind_match = _KIND_RE.search(kind_expression)
-        if kind_match is None or kind_match.end() != len(kind_expression):
-            issues.append(
-                ScanIssue(
-                    path,
-                    stripped.count("\n", 0, start) + 1,
-                    f"non-literal kind expression {parts[1].strip()!r}",
+
+    def record_macro_call(
+        macro: str, kind_index: int | None, message_index: int | None
+    ) -> None:
+        index = 0
+        while True:
+            start = stripped.find(macro, index)
+            if start < 0:
+                break
+            index = start + len(macro)
+            if _inside(start, skip_ranges) or _inside(start, literal_spans):
+                continue
+            cursor = index
+            while cursor < len(stripped) and stripped[cursor].isspace():
+                cursor += 1
+            parsed = _parse_balanced(stripped, cursor, "(", ")")
+            if parsed is None:
+                issues.append(ScanIssue(path, _line_of(stripped, start), "unbalanced macro"))
+                continue
+            arguments, end = parsed
+            if kind_index is None or message_index is None:
+                kind, message = _WRAPPER_MACROS[macro]
+                entries.append(
+                    (
+                        Site(stable_site_id(kind, message), kind, message),
+                        _line_of(stripped, start),
+                    )
                 )
-            )
-            continue
-        message = parts[2].strip()
-        if not _is_string_literal(message):
-            issues.append(
-                ScanIssue(
-                    path,
-                    stripped.count("\n", 0, start) + 1,
-                    f"non-literal format expression {message!r}",
+                index = end
+                continue
+            parts = _split_arguments(arguments)
+            if len(parts) <= message_index:
+                issues.append(
+                    ScanIssue(
+                        path,
+                        _line_of(stripped, start),
+                        f"fewer than {message_index + 1} arguments",
+                    )
                 )
+                continue
+            kind_expression = parts[kind_index].strip()
+            kind_match = _KIND_RE.search(kind_expression)
+            if kind_match is None or kind_match.end() != len(kind_expression):
+                issues.append(
+                    ScanIssue(
+                        path,
+                        _line_of(stripped, start),
+                        f"non-literal kind expression {kind_expression!r}",
+                    )
+                )
+                continue
+            message = parts[message_index].strip()
+            if not _is_string_literal(message):
+                issues.append(
+                    ScanIssue(
+                        path,
+                        _line_of(stripped, start),
+                        f"non-literal format expression {message!r}",
+                    )
+                )
+                continue
+            if not _has_static_text(message):
+                continue
+            kind = kind_match.group(1)
+            entries.append(
+                (Site(stable_site_id(kind, message), kind, message), _line_of(stripped, start))
             )
-            continue
-        if not _has_static_prefix(message):
-            continue
-        kind = kind_match.group(1)
-        line = stripped.count("\n", 0, start) + 1
-        entries.append((Site(stable_site_id(kind, message), kind, message), line))
-        index = end
+            index = end
+
+    record_macro_call(_DIRECT_MACRO, 1, 2)
+    record_macro_call(_OBSERVER_MACRO, 2, 3)
+    for wrapper in _WRAPPER_MACROS:
+        record_macro_call(wrapper, None, None)
     return entries, issues
 
 

@@ -5600,6 +5600,34 @@ mod hot_join_input_queue_tests {
         );
     }
 
+    #[test]
+    fn freeze_at_prevalidated_cut_rejects_an_invalid_cut() {
+        let mut queue = test_queue(0);
+        queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 }));
+        let confirmed = queue.last_confirmed_input;
+
+        queue.freeze_at_prevalidated_cut(Frame::new(99));
+
+        assert!(!queue.is_frozen());
+        assert_eq!(queue.last_confirmed_input, confirmed);
+    }
+
+    #[test]
+    fn reset_to_frame_reports_overflow_without_mutating_queue() {
+        let mut queue = test_queue(0);
+        queue
+            .set_frame_delay(1)
+            .expect("delay 1 is within the ring");
+        queue.add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 1 }));
+        let last_added = queue.last_added_frame;
+        let length = queue.length;
+
+        queue.reset_to_frame(Frame::new(i32::MAX));
+
+        assert_eq!(queue.last_added_frame, last_added);
+        assert_eq!(queue.length, length);
+    }
+
     /// Test 2 (delay variant): reset honors a non-zero frame_delay.
     #[test]
     fn reset_to_frame_with_delay_accepts_at_frame() {

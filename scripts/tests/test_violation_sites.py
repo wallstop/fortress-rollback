@@ -157,10 +157,112 @@ fn bad_format(message: &str) {
 
 
 def test_forwarding_only_formats_are_not_assertion_sites() -> None:
-    text = _site("Invariant", '"{}"') + _site("Invariant", '"{} [context: {}]"')
+    text = _site("Invariant", '"{}"') + _site("Invariant", '"{}: {}"')
     sites, issues = scan_text(text, Path("forwarding.rs"))
     assert sites == []
     assert issues == []
+
+
+def test_placeholder_first_messages_with_static_text_are_sites() -> None:
+    text = _site("NetworkProtocol", '"{} receive attempts reached the cap"')
+    sites, issues = scan_text(text, Path("placeholder.rs"))
+    assert issues == []
+    assert _messages(sites) == ['"{} receive attempts reached the cap"']
+
+
+def test_macro_definition_assertions_are_not_runtime_sites() -> None:
+    text = """
+macro_rules! forward {
+    ($($arg:tt)*) => {
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::Invariant,
+            "{} [context: {}]",
+            $($arg)*
+        );
+    };
+}
+"""
+    sites, issues = scan_text(text, Path("macro-def.rs"))
+    assert issues == []
+    assert sites == []
+
+
+def test_observer_macro_sites_are_inventoried() -> None:
+    text = """
+fn sample() {
+    report_violation_to!(
+        &observer,
+        ViolationSeverity::Warning,
+        ViolationKind::FrameSync,
+        "observer frame mismatch: expected={}, actual={}",
+        1,
+        2
+    );
+}
+"""
+    sites, issues = scan_text(text, Path("observer.rs"))
+    assert issues == []
+    assert len(sites) == 1
+    assert sites[0].kind == "FrameSync"
+    assert sites[0].message == '"observer frame mismatch: expected={}, actual={}"'
+
+
+@pytest.mark.parametrize(
+    ("macro", "kind", "message"),
+    [
+        (
+            "safe_frame_add!",
+            "ArithmeticOverflow",
+            '"Frame overflow in {}: {} + {} would overflow"',
+        ),
+        (
+            "safe_frame_sub!",
+            "ArithmeticOverflow",
+            '"Frame underflow in {}: {} - {} would underflow"',
+        ),
+    ],
+)
+def test_wrapper_call_sites_share_the_wrapper_site(
+    macro: str, kind: str, message: str
+) -> None:
+    text = f"""
+macro_rules! {macro.rstrip("!")} {{
+    ($frame:expr, $delta:expr, $context:expr) => {{
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::ArithmeticOverflow,
+            {message},
+            $frame,
+            $delta
+        );
+    }};
+}}
+
+fn first() {{
+    let frame = {macro}(frame, 1, "first");
+}}
+
+fn second() {{
+    let frame = {macro}(frame, 2, "second");
+}}
+"""
+    sites, issues = scan_text(text, Path("wrapper.rs"))
+    assert issues == []
+    assert [site.site_id for site in sites] == [
+        violation_sites.stable_site_id(kind, message)
+    ] * 2
+
+
+def test_wrapper_messages_match_definitions() -> None:
+    telemetry = (DEFAULT_SOURCE_ROOT / "telemetry.rs").read_text(encoding="utf-8")
+    for macro, (_, message) in violation_sites._WRAPPER_MACROS.items():
+        start = telemetry.find(f"macro_rules! {macro.rstrip('!')} ")
+        assert start >= 0, f"missing definition for {macro}"
+        body_start = telemetry.find("{", start)
+        parsed = violation_sites._parse_balanced(telemetry, body_start, "{", "}")
+        assert parsed is not None
+        assert message in telemetry[start : parsed[1]]
 
 
 def test_baseline_round_trips_multiline_messages() -> None:
