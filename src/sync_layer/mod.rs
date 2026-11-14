@@ -2126,6 +2126,37 @@ mod sync_layer_tests {
     }
 
     #[test]
+    fn set_frozen_value_at_reports_out_of_range_and_missing_queues() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+
+        // Out-of-range handle: rejected before the queue lookup.
+        sync_layer.set_frozen_value_at(PlayerHandle::new(2), Frame::new(0));
+
+        // Valid handle whose ring is missing: rejected by the lookup guard.
+        assert!(sync_layer.input_queues.pop().is_some());
+        sync_layer.set_frozen_value_at(PlayerHandle::new(1), Frame::new(0));
+    }
+
+    #[test]
+    fn add_local_and_remote_input_report_missing_queues() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        assert!(sync_layer.input_queues.pop().is_some());
+        let frame = sync_layer.current_frame();
+
+        let local = sync_layer.add_local_input(
+            PlayerHandle::new(1),
+            PlayerInput::new(frame, TestInput { inp: 1 }),
+        );
+        assert!(local.is_null());
+
+        let remote = sync_layer.add_remote_input(
+            PlayerHandle::new(1),
+            PlayerInput::new(frame, TestInput { inp: 2 }),
+        );
+        assert!(!remote);
+    }
+
+    #[test]
     fn test_advance_frame() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
         assert_eq!(sync_layer.current_frame(), Frame::new(0));

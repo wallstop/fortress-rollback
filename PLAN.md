@@ -14,14 +14,15 @@
    artifact evidence evaluated by the ratchet and enabled, or a recorded rejection. Scope:
    [#403](https://github.com/wallstop/fortress-rollback/issues/403).
 
-2. **P2 — Violation-path coverage census.** The checked-in production `report_violation!`
-   baseline assigns line-independent IDs and rejects unapproved site drift
-   (`scripts/simulation/violation_sites.py --check`, enforced in preflight and CI). The nightly
-   `Violation-Site Exercise Census` joins the baseline with exact test-suite observations from the
-   `violation-census` hook, fleet observations, and main coverage, then publishes the unexercised
-   set. Next: review the first exact-source nightly report and cut the unexercised set with focused
-   tests or deletion of unreachable assertions. **Exit:** a reviewed unexercised-set reduction
-   recorded against the nightly report. Scope: stage 2 of the
+2. **P2 — Violation-path coverage census.** The production baseline now inventories both
+   `report_violation!` and `report_violation_to!` sites plus wrapper-macro (`safe_frame_add/sub`)
+   call sites, and rejects unapproved drift (`scripts/simulation/violation_sites.py --check`).
+   Exact local observations exercise 154 of 284 sites; the remainder are runtime-only internal
+   invariants and allocation-failure fallbacks, dominated by `p2p_session` hot-join transitions.
+   Next: review the next exact-source nightly `Violation-Site Exercise Census` artifact against
+   this baseline and either add targeted fault-injection tests for reachable sites or delete
+   assertions proven unreachable. **Exit:** a reviewed unexercised-set reduction recorded against
+   the nightly report. Scope: stage 2 of the
    [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md).
 
 ## Future

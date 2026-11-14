@@ -524,6 +524,55 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+    struct FailingSerializeInput;
+
+    impl Serialize for FailingSerializeInput {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "deliberate test serialization failure",
+            ))
+        }
+    }
+
+    struct FailingSerializeInputConfig;
+
+    impl Config for FailingSerializeInputConfig {
+        type Input = FailingSerializeInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+    struct FlaggedSerializeInput {
+        fail: bool,
+    }
+
+    impl Serialize for FlaggedSerializeInput {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            if self.fail {
+                return Err(serde::ser::Error::custom(
+                    "deliberate per-player serialization failure",
+                ));
+            }
+            serializer.serialize_u8(0)
+        }
+    }
+
+    struct FlaggedSerializeInputConfig;
+
+    impl Config for FlaggedSerializeInputConfig {
+        type Input = FlaggedSerializeInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     // ==========================================
     // Constructor Tests
     // ==========================================
@@ -553,6 +602,96 @@ mod tests {
         assert!(
             input_bytes.bytes.is_empty(),
             "input_bytes.bytes is expected to be empty"
+        );
+    }
+
+    #[test]
+    fn zeroed_reports_failing_default_input_serialization() {
+        let Err(error) = InputBytes::zeroed::<FailingSerializeInputConfig>(1) else {
+            panic!("a failing Config::Input serializer must fail zeroed input creation");
+        };
+
+        assert!(matches!(
+            error,
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::EndpointCreationFailed,
+            }
+        ));
+    }
+
+    #[test]
+    fn try_from_inputs_reports_failing_default_input_serialization() {
+        let inputs = BTreeMap::new();
+        let Err(error) = InputBytes::try_from_inputs::<FailingSerializeInputConfig>(1, &inputs)
+        else {
+            panic!("a failing Config::Input serializer must fail input serialization");
+        };
+
+        assert!(matches!(
+            error,
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::EndpointCreationFailed,
+            }
+        ));
+    }
+
+    #[test]
+    fn try_from_inputs_reports_per_player_serialization_failure() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(1), FlaggedSerializeInput { fail: true }),
+        );
+
+        let Err(error) = InputBytes::try_from_inputs::<FlaggedSerializeInputConfig>(1, &inputs)
+        else {
+            panic!("a failing per-player serializer must fail input serialization");
+        };
+
+        assert!(matches!(
+            error,
+            FortressError::SerializationErrorStructured {
+                kind: SerializationErrorKind::EndpointCreationFailed,
+            }
+        ));
+    }
+
+    #[test]
+    fn log_input_decode_error_reports_every_rejection_kind() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(observer.clone());
+        let errors = [
+            InputBytesDecodeError::AllocationFailed {
+                requested_players: usize::MAX,
+            },
+            InputBytesDecodeError::ZeroPlayers,
+            InputBytesDecodeError::ByteLengthNotDivisible {
+                byte_len: 5,
+                num_players: 2,
+            },
+            InputBytesDecodeError::PlayerByteRangeOutOfBounds {
+                player: 1,
+                start: 4,
+                end: 8,
+                byte_len: 5,
+            },
+            InputBytesDecodeError::PlayerDecodeFailed { player: 1 },
+            InputBytesDecodeError::PlayerDecodeTrailingBytes {
+                player: 1,
+                consumed: 3,
+                slice_len: 4,
+            },
+        ];
+
+        for error in errors {
+            log_input_decode_error(error);
+        }
+
+        assert_eq!(
+            observer
+                .violations_of_kind(crate::telemetry::ViolationKind::NetworkProtocol)
+                .len(),
+            errors.len()
         );
     }
 

@@ -595,6 +595,17 @@ mod sync_layer_tests {
         ));
     }
 
+    #[test]
+    fn with_config_falls_back_to_one_frame_window_on_allocation_failure() {
+        let ts = TimeSync::with_config(TimeSyncConfig {
+            window_size: usize::MAX,
+        });
+
+        assert_eq!(ts.window_size, 1);
+        assert_eq!(ts.local.len(), 1);
+        assert_eq!(ts.remote.len(), 1);
+    }
+
     /// Test window_size of 1 (minimum valid)
     #[test]
     fn test_window_size_minimum_one() {

@@ -526,6 +526,16 @@ mod compression_tests {
     }
 
     #[test]
+    fn test_encode_mismatched_input_returns_empty_batch() {
+        let ref_bytes = vec![1, 2, 3, 4];
+        let bad_input = vec![1, 2]; // Wrong length
+
+        let encoded = encode(&ref_bytes, std::iter::once(&bad_input));
+
+        assert!(encoded.is_empty(), "encoded is expected to be empty");
+    }
+
+    #[test]
     fn test_delta_encode_mismatched_input_returns_empty_batch() {
         let ref_bytes = vec![1, 2, 3, 4];
         let good_input = vec![5, 6, 7, 8];

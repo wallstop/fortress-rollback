@@ -516,6 +516,28 @@ mod tests {
 
     #[test]
     #[cfg(not(miri))]
+    fn test_udp_socket_send_reports_oversized_payload() {
+        let mut socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
+        let addr = to_loopback_addr(&socket);
+        let msg = Message {
+            header: MessageHeader::new(0x1234),
+            body: MessageBody::Input(crate::network::messages::Input {
+                peer_connect_status: vec![crate::network::messages::ConnectionStatus::default(); 2],
+                start_frame: crate::Frame::new(0),
+                ack_frame: crate::Frame::NULL,
+                bytes: vec![0; IDEAL_MAX_UDP_PACKET_SIZE + 64],
+            }),
+        };
+
+        // Larger than the pre-allocated send buffer: the socket falls back to
+        // allocation and warns that the datagram exceeds the ideal size.
+        socket.send_to(&msg, &addr);
+
+        assert_eq!(socket.socket_metrics().datagrams_sent, 1);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
     fn test_udp_socket_bind_to_specific_port() {
         // Test binding to port 0 (let OS pick)
         let socket = UdpNonBlockingSocket::bind_to_port(0).unwrap();
