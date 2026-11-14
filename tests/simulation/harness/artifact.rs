@@ -1369,7 +1369,7 @@ mod tests {
         let artifact = FailureArtifact::from_report(&schedule, &report);
         artifact
             .validate()
-            .expect("legacy schedule report produces a valid v8 artifact");
+            .expect("legacy schedule report produces a valid current-schema artifact");
     }
 
     #[test]

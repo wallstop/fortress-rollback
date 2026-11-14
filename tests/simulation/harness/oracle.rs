@@ -1052,7 +1052,22 @@ impl Oracle {
                     .filter_map(|(peer, _, observed)| observed.map(|point| (*peer, point)))
                     .min_by_key(|(_, point)| point.frame);
                 let Some((first_author, expected)) = canonical else {
-                    if !live_running_peers.is_empty() {
+                    // All survivors report no stable freeze. The retired slot's
+                    // final confirmed frame is the earliest point at which a
+                    // survivor could have observed the removal; if every
+                    // survivor is still behind that cut, the absence of a freeze
+                    // is not yet a defect. Keep the missing check when at least
+                    // one survivor reached the cut (or when no survivor record
+                    // is available to make that determination).
+                    let removal_cut = end_confirmed
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(Frame::NULL)
+                        .as_i32();
+                    let reached_cut = observations
+                        .iter()
+                        .any(|(_, max_frame, _)| *max_frame >= removal_cut);
+                    if !live_running_peers.is_empty() && (observations.is_empty() || reached_cut) {
                         self.push_failure(OracleFailure::FreezeFrameMissing {
                             slot,
                             live_running_peers,
@@ -2567,6 +2582,40 @@ mod tests {
                     | OracleFailure::FreezeFrameMissing { .. }
             )),
             "speculative post-confirmation tails must not fail (e): {:?}",
+            verdict.failures
+        );
+    }
+
+    /// All survivors are still behind the retired slot's final confirmed
+    /// frame. None of them can have observed the removal yet, so the absence of
+    /// a stable freeze is not a missing-freeze defect. Requiring one would make
+    /// an otherwise healthy lagging mesh fail on a diagnostic it could not have
+    /// satisfied.
+    #[test]
+    fn oracle_ignores_all_survivors_lagging_behind_the_removal_cut() {
+        let mut oracle = Oracle::new(3);
+        oracle.mark_peer_dead(2);
+        let applied = [
+            slot2_records(&[(0, confirmed(30))]),
+            slot2_records(&[(0, confirmed(30))]),
+            BTreeMap::new(),
+        ];
+        let verdict = oracle.finalize_with_applied_inputs(
+            &[BTreeMap::new(), BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(301), Frame::new(301), Frame::new(302)],
+            &[
+                SessionState::Running,
+                SessionState::Running,
+                SessionState::Synchronizing,
+            ],
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::FreezeFrameMissing { .. })),
+            "survivors behind the removal cut cannot report a freeze: {:?}",
             verdict.failures
         );
     }

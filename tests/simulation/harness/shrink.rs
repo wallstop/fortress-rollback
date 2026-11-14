@@ -217,9 +217,10 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         differential: options.differential,
         // PCT change targets are derived from `(seed, n, steps)` rather than
         // stored explicitly, so a peer removal or step truncation re-derives a
-        // different interleaving. That is still deterministic; the shrinker's
-        // reproduction evaluator rejects any candidate whose trace no longer
-        // matches instead of treating it as an equivalent schedule.
+        // different interleaving. Each candidate still replays deterministically,
+        // but shrinking preserves only the stable failure class: a PCT artifact
+        // may minimize to a same-class failure reached through a different
+        // interleaving rather than the original trace.
         pct: options.pct,
     }
 }
