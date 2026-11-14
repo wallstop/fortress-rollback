@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794639877316,
+  "lastUpdate": 1794681921328,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bbabac808dd381a6835627c134bf7c90583fc4bf",
-          "message": "Make dropped-input Miri regression deterministic (#279)\n\n## Summary\n\n- fix the timing-dependent dropped-input regression that broke macOS\nMiri on `main`\n- inject a deterministic protocol clock and deliberately cross the\nquality-report interval\n- assert the real contract—no `Input` message—while proving legitimate\ntimer traffic may coexist\n\nCloses #278.\n\n## Root cause\n\nThe regression added in #275 used the platform monotonic clock and\nrecorded every packet sent by the endpoint. It then asserted that the\nentire socket remained empty across `P2PSession::advance_frame()`.\n\nThat assertion was broader than the behavior under test.\n`advance_frame()` first calls `poll_remote_clients()`; a running\nendpoint may legitimately emit interval-gated control traffic there.\nSlow macOS Miri execution crossed the default 200 ms quality-report\ninterval, so the recorder contained a valid `QualityReport` even though\nthe dropped `Frame::NULL` local input correctly emitted no `Input`\npacket.\n\nThis reached `main` because PR #275's exact-head macOS Miri job did run\nthe test and passed. The wall-clock-sensitive oracle changed outcome\nwith runner/interpreter timing rather than code behavior.\n\n## Fix\n\nThe test now:\n\n1. injects a controlled `ProtocolConfig::clock`;\n2. advances it just beyond the configured quality-report interval;\n3. proves a legitimate `QualityReport` is present; and\n4. verifies that every recorded packet is non-`Input`.\n\nThis makes the former false failure deterministic and keeps the\nassertion mutation-sensitive to the production input-suppression guard.\n\nNo production code, public API, wire format, runtime behavior, or\ndependency changes are included.\n\n## Validation\n\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`\n- default Nextest: 2,887 passed; 71 skipped\n- hot-join Nextest: 3,143 passed; 72 skipped\n- pinned `nightly-2026-02-10` Miri seed 0 targeted regression\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps`\n- Rust 1.86 all-target check\n- agent preflight\n- dependency dry-runs for all four Cargo workspaces: zero compatible\nupdates\n\n## Review Readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (test-only change)\n- Determinism: PASS (wall clock replaced with injected time)\n- Agent preflight: PASS\n- Error handling: N/A (no production change)\n- Tests breadth: PASS (ordinary + exact pinned Miri + full\ndefault/hot-join matrices)\n- Design log reviewed: N/A\n- CHANGELOG reviewed: N/A (test-oracle repair only)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Test oracle and naming only; no runtime or public API changes.\n> \n> **Overview**\n> Repairs the **dropped local input** P2P session test so it no longer\nflakes on slow macOS Miri runs.\n> \n> The test now wires a **deterministic `ProtocolConfig::clock`**, bumps\ntime past the quality-report interval, and checks the real contract:\n**`Input` messages stay suppressed** when local input is dropped to\n`Frame::NULL`, while a legitimate **`QualityReport`** may still be sent\nduring `advance_frame()` polling. The old assertion that the recording\nsocket was completely empty was too strict and failed when\ninterval-gated control traffic crossed the default 200 ms window.\n> \n> **Test-only** change; no production, API, or wire-format updates.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n8dbafec579173522a78d81c1f310852649459e7d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T11:09:17-07:00",
-          "tree_id": "21cdd393562fb21bdb6692e6497abdc7f3110a84",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bbabac808dd381a6835627c134bf7c90583fc4bf"
-        },
-        "date": 1785694668732,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 144885,
-            "range": "± 1766",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48449,
-            "range": "± 1122",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 89",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3140,
-            "range": "± 204",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6940,
             "range": "± 274",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b9ce93840086253f65a0123a8ac1bbea66899ed2",
+          "message": "test(simulation): cut the residual violation-site census (P2) (#417)\n\n## Description\n\nExercise the remaining reachable defensive `report_violation!` guards\nbehind the exact violation-site census, completing stage 2 of the\nfleet-search violation-coverage item. Local exact observations move from\n**202/284 to 243/284 exercised** (82 -> 41 unexercised). Test-only\nchange; no production behavior changed.\n\nThe 41 residual sites are classified in #416:\n\n- 19 allocation/encode/writer fallbacks with no fault-injection hook.\n- 14 unreachable-by-construction postconditions / duplicate guards\n(deletion needs maintainer-approved baseline regeneration).\n- 8 reachable defensive fallbacks needing targeted fault injection\n(snapshot capture serialization, replay recorder failure, endpoint\nre-arm, propagated/timed-out disconnect application).\n\n`PLAN.md` now hands the residual classification to #416 and keeps the\ncalendar-bound seven-window ratchet item.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly (`PLAN.md` only; no\nuser-facing docs or changelog entry for test-only work)\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n(not applicable: test-only)\n- [ ] I have updated relevant examples in the `examples/` directory (not\napplicable)\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `src/sync_layer/mod.rs`: unaddressable `save_current_state` frame\nfallback; reactivated-slot `synchronized_inputs` pre-activation bound.\n- `src/input_queue/mod.rs`: gap-fill missing replication source;\n`reset_to_frame` delayed-frame underflow.\n- `src/sessions/p2p_spectator_session.rs`: missing host connect-status\nrow; canonical commit missing input slot/status.\n- `src/sessions/p2p_session.rs`: missing synchronized inputs;\nout-of-window hot-join activation; staged 2-peer and N-peer serve\nfailure paths; N-peer abort-before-capture; joiner backfill guards;\nremote disconnect snapshot fallbacks; staged survivor pending\nreactivation; constructor guards; queued coordinated-drop guard;\ntruncated spectator batch; 2-peer joiner apply failure; N-peer buffered\njoiner coordinator loss/apply failure.\n- `src/network/protocol/mod.rs`: armed failing `Config::Input`\nserializer for the `enqueue_replicated_input` serialization fallback.\n\n**Manual testing performed:**\n\n- `cargo +1.100.0 fmt --check` (CI-matching toolchain): clean.\n- `cargo +1.100.0 clippy --workspace --all-targets --features\ntokio,json,hot-join,violation-census -- -D warnings`: clean.\n- `cargo +1.100.0 clippy --workspace --all-targets -- -D warnings`:\nclean.\n- `cargo +1.100.0 nextest run --profile ci --features\ntokio,json,hot-join,violation-census`: 3467 passed, 76 skipped.\n- `cargo +1.100.0 nextest run`: 3141 passed, 75 skipped.\n- Exact census: 284 baseline, 243 exercised, 41 unexercised.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n\n## Related Issues\n\n- Relates to #416\n- Relates to #403",
+          "timestamp": "2026-11-14T10:37:01-08:00",
+          "tree_id": "8f629670cbf2ea972ec98d6ecf806dfbb3b5f699",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/b9ce93840086253f65a0123a8ac1bbea66899ed2"
+        },
+        "date": 1794681920271,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60563,
+            "range": "± 1946",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31944,
+            "range": "± 396",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1862,
+            "range": "± 111",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2866,
+            "range": "± 282",
             "unit": "ns/iter"
           }
         ]
