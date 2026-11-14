@@ -1409,7 +1409,10 @@ mod tests {
         /// Verifies parallel socket creation doesn't cause conflicts.
         ///
         /// This test simulates the parallel test execution environment where
-        /// multiple threads may bind sockets simultaneously.
+        /// multiple threads may bind sockets simultaneously. Every socket stays
+        /// bound until all threads have finished binding: dropping a socket
+        /// earlier returns its ephemeral port to the OS, which may then hand the
+        /// same port to a later `bind(0)` and produce a false duplicate.
         #[test]
         fn parallel_ephemeral_binding_no_conflicts() {
             use std::sync::Arc;
@@ -1446,7 +1449,6 @@ mod tests {
                                             thread_id, i, addr
                                         ));
                                     }
-
                                     // Keep socket alive
                                     local_sockets.push(socket);
                                 },
@@ -1460,17 +1462,24 @@ mod tests {
                             }
                         }
 
-                        // Hold sockets until all threads complete
-                        thread::sleep(std::time::Duration::from_millis(10));
-                        drop(local_sockets);
+                        // Hand the still-bound sockets to the main thread so they
+                        // outlive every other thread's binding work.
+                        local_sockets
                     })
                 })
                 .collect();
 
-            // Wait for all threads
+            // Each join returns the sockets bound by that thread; they stay
+            // bound until the end of the test so no port can be reclaimed early.
+            let mut sockets = Vec::new();
             for handle in handles {
-                handle.join().expect("Thread should complete");
+                sockets.extend(handle.join().expect("Thread should complete"));
             }
+            assert_eq!(
+                sockets.len(),
+                40, // 8 threads × 5 sockets
+                "every bound socket must stay alive through the uniqueness check"
+            );
 
             // Check for errors
             let errs = errors.lock().unwrap();

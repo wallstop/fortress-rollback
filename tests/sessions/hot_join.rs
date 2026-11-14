@@ -35,6 +35,7 @@ use crate::common::{
     SyncConfig, TestClock, POLL_INTERVAL_DETERMINISTIC,
 };
 use fortress_rollback::{
+    telemetry::{CollectingObserver, ViolationKind, ViolationSeverity},
     DesyncDetection, DisconnectBehavior, FortressError, FortressEvent, FortressRequest, Frame,
     InputStatus, InputVec, Message, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
     ProtocolConfig, SessionBuilder, SessionState,
@@ -1140,6 +1141,148 @@ fn hot_join_completes_when_first_snapshot_is_dropped() -> Result<(), FortressErr
     assert!(
         compared >= 3,
         "expected at least 3 overlapping confirmed frames; got {compared}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Oversized snapshot: a rejected capture must not wedge the host
+// ============================================================================
+
+/// A host whose configured `hot_join_max_snapshot_wire_bytes` is smaller than
+/// its own encoded state rejects every capture before allocating the serialized
+/// snapshot buffer. The rejection is reported as a violation, no `StateSnapshot`
+/// reaches the wire, the joiner never leaves `HotJoining` while the cap rejects
+/// every serve, and the host keeps advancing solo instead of pausing for a
+/// serve that never opens.
+#[test]
+fn hot_join_oversized_snapshot_capture_failure_keeps_host_running() -> Result<(), FortressError> {
+    let clock = TestClock::new();
+    let (host_socket, joiner_socket, host_addr, joiner_addr) = crate::common::create_channel_pair();
+
+    let snapshots_sent = Arc::new(AtomicUsize::new(0));
+    let host_socket = CountingSocket {
+        inner: host_socket,
+        snapshots_sent: Arc::clone(&snapshots_sent),
+        acks_sent: Arc::new(AtomicUsize::new(0)),
+        drop_outgoing_snapshots: false,
+        drop_outgoing_acks: false,
+    };
+
+    // A one-byte cap cannot fit even the empty snapshot skeleton, so every
+    // capture fails the wire-size validation.
+    let observer = Arc::new(CollectingObserver::new());
+    let mut host = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .with_hot_join(true)
+        .with_hot_join_max_snapshot_wire_bytes(1)?
+        .with_violation_observer(observer.clone())
+        .add_player(PlayerType::Local, PlayerHandle::new(0))?
+        .add_reserved_player(joiner_addr, PlayerHandle::new(1))?
+        .start_p2p_session(host_socket)?;
+
+    host.poll_remote_clients();
+    assert_eq!(host.current_state(), SessionState::Running);
+
+    let mut host_stub = GameStub::new();
+    let mut host_states: BTreeMap<i32, StateStub> = BTreeMap::new();
+    for i in 0..5_u32 {
+        host.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        advance_and_record(
+            &mut host,
+            &mut host_stub,
+            PlayerHandle::new(0),
+            10 + i,
+            &mut host_states,
+        )?;
+    }
+
+    let mut joiner = SessionBuilder::<StubConfig>::new()
+        .with_protocol_config(protocol_config(&clock))
+        .with_num_players(2)?
+        .add_player(PlayerType::Remote(host_addr), PlayerHandle::new(0))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))?
+        .start_hot_join_session(joiner_socket, host_addr)?;
+
+    let start_frame = host.current_frame().as_i32();
+    let mut capture_failure_seen = false;
+    // Bounded polling: the first rejected capture lands within a handful of
+    // polls. The remaining iterations prove the host keeps advancing at its
+    // normal pace for the whole window rather than pausing for a serve.
+    for _ in 0..120 {
+        host.poll_remote_clients();
+        let _ = drain_events(&mut host);
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if host.current_state() == SessionState::Running {
+            let value = 100 + (host.current_frame().as_i32() as u32 % 7);
+            // The host pauses only while a serve is open; a rejected capture
+            // never opens one, so every advance must succeed.
+            advance_session(&mut host, &mut host_stub, PlayerHandle::new(0), value)?;
+        }
+        joiner.poll_remote_clients();
+        clock.advance(POLL_INTERVAL_DETERMINISTIC);
+        if !capture_failure_seen
+            && observer.violations().iter().any(|violation| {
+                violation
+                    .message
+                    .starts_with("Failed to capture hot-join snapshot")
+            })
+        {
+            capture_failure_seen = true;
+            // Checked at the moment the rejection is observed, before the
+            // joiner's own bounded attempt can time out and retry.
+            assert_eq!(
+                joiner.current_state(),
+                SessionState::HotJoining,
+                "a rejected capture must not complete or tear down the join attempt"
+            );
+        }
+    }
+
+    assert_eq!(
+        host.current_state(),
+        SessionState::Running,
+        "a rejected snapshot capture must not disable the host"
+    );
+    assert!(
+        capture_failure_seen,
+        "the host must observe at least one rejected capture"
+    );
+    assert_eq!(
+        snapshots_sent.load(Ordering::Relaxed),
+        0,
+        "no snapshot may reach the wire when its capture was rejected"
+    );
+
+    let violations = observer.violations();
+    let capture_failures: Vec<_> = violations
+        .iter()
+        .filter(|violation| {
+            violation
+                .message
+                .starts_with("Failed to capture hot-join snapshot")
+        })
+        .collect();
+    assert!(
+        !capture_failures.is_empty(),
+        "the host must report the capture failure; got {violations:?}"
+    );
+    for violation in &capture_failures {
+        assert_eq!(violation.kind, ViolationKind::InternalError);
+        assert_eq!(violation.severity, ViolationSeverity::Error);
+    }
+
+    // The host stayed live through every rejected capture: it advanced once per
+    // poll instead of pausing for a serve that never opened. A paused host would
+    // return an empty request batch and leave `current_frame` unchanged.
+    assert!(
+        host.current_frame().as_i32() >= start_frame + 100,
+        "the host must keep advancing solo while every capture is rejected; \
+         start={start_frame}, now={}",
+        host.current_frame()
     );
 
     Ok(())
