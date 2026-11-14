@@ -3971,4 +3971,63 @@ mod tests {
         assert!(artifact.contains("\"truncated\":true"));
         std::fs::remove_dir_all(directory).expect("census directory cleanup");
     }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_respects_the_exact_budget_boundary() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "fortress-census-boundary-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+        let artifact_path = directory.join(format!("observations-{}.json", std::process::id()));
+
+        let empty = std::collections::BTreeSet::new();
+        super::violation_census::write_snapshot(&directory, &empty, false, None)
+            .expect("empty census snapshot writes");
+        let empty_artifact =
+            std::fs::read_to_string(&artifact_path).expect("empty artifact is readable");
+        let prefix = empty_artifact
+            .find("\"locations\":[")
+            .expect("empty artifact has a locations array")
+            + "\"locations\":[".len();
+        let limit = 32 * 1024;
+        let location_len = limit - 32 - prefix - 4;
+        let location: &'static str =
+            Box::leak(format!("src/{}.rs:1", "x".repeat(location_len - 9)).into_boxed_str());
+
+        let mut observed = std::collections::BTreeSet::new();
+        observed.insert(location);
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("boundary census snapshot writes");
+        let artifact =
+            std::fs::read_to_string(&artifact_path).expect("boundary artifact is readable");
+        assert!(
+            artifact.contains(location),
+            "a location at the exact budget boundary must be retained"
+        );
+        assert!(
+            artifact.len() <= limit,
+            "boundary artifact exceeds its budget"
+        );
+
+        observed.insert("src/z.rs:1");
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("over-boundary census snapshot writes");
+        let artifact =
+            std::fs::read_to_string(&artifact_path).expect("over-boundary artifact is readable");
+        assert!(
+            !artifact.contains("src/z.rs:1"),
+            "the next location must not fit once the boundary is reached"
+        );
+        assert!(
+            artifact.len() <= limit,
+            "over-boundary artifact exceeds its budget"
+        );
+        assert!(artifact.contains("\"truncated\":true"));
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
+    }
 }
