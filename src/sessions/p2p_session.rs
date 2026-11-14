@@ -13430,6 +13430,788 @@ mod tests {
         );
     }
 
+    #[test]
+    fn advance_frame_reports_missing_synchronized_inputs() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+        session
+            .add_local_input(PlayerHandle::new(0), 1u8)
+            .expect("queue the local input");
+        // The connect-status table still lists every player, but the sync
+        // layer's input queues are gone: synchronized input assembly must fail
+        // closed and the session must surface the internal inconsistency.
+        session.sync_layer.truncate_input_queues_for_test(0);
+
+        let result = session.advance_frame();
+
+        assert!(matches!(
+            result,
+            Err(FortressError::InternalErrorStructured { .. })
+        ));
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("Failed to get synchronized inputs for frame")),
+            "the missing synchronized inputs must be reported"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn hot_join_serve_skips_activation_outside_rollback_window() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let addr = test_addr(9113);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(addr, PlayerHandle::new(1))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        advance_host_and_save(&mut host);
+        // Move the simulation beyond the rollback window without saving: the
+        // last saved frame (the only legal activation frame) is now too old to
+        // serve, so the request must be skipped rather than served stale.
+        for _ in 0..=host.max_prediction {
+            host.sync_layer.advance_frame();
+        }
+        host.player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("reserved endpoint")
+            .set_pending_join_request_for_test(1);
+
+        host.poll_hot_join();
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("Skipping hot-join serve: activation frame")),
+            "an out-of-window activation frame must be reported"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn staged_legacy_serve_reports_stale_ack_invalid_handle_and_missing_status() {
+        use crate::network::messages::{StateSnapshot, StateSnapshotAck};
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let addr = test_addr(9114);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(addr, PlayerHandle::new(1))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        let snapshot = || StateSnapshot {
+            frame: Frame::new(5),
+            num_players: 2,
+            state_bytes: vec![0],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+        let serve = |frame: Frame| JoinServe {
+            addr,
+            frame,
+            snapshot: snapshot(),
+            polls_since_serve: 0,
+        };
+        let stage_ack = |host: &mut P2PSession<TestConfig>, acked: Frame| {
+            let endpoint = host.player_reg.remotes.get_mut(&addr).expect("endpoint");
+            endpoint.force_running_for_tests();
+            endpoint.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::StateSnapshotAck(StateSnapshotAck { frame: acked }),
+            });
+        };
+
+        // Mismatched ack: the cached serve stays open and the stale frame is
+        // reported instead of reactivating the slot at the wrong frame.
+        host.hot_join
+            .joining
+            .insert(PlayerHandle::new(1), serve(Frame::new(5)));
+        stage_ack(&mut host, Frame::new(99));
+        host.poll_hot_join_host();
+        host.hot_join.joining.remove(&PlayerHandle::new(1));
+
+        // Matching ack for an unknown slot: reactivation fails and the attempt
+        // is reported instead of half-committing.
+        host.hot_join
+            .joining
+            .insert(PlayerHandle::new(99), serve(Frame::new(5)));
+        stage_ack(&mut host, Frame::new(5));
+        host.poll_hot_join_host();
+        host.hot_join.joining.remove(&PlayerHandle::new(99));
+
+        // Matching ack for a valid slot whose status row vanished: the
+        // reactivation must not proceed without a status record to update.
+        host.hot_join
+            .joining
+            .insert(PlayerHandle::new(1), serve(Frame::new(5)));
+        host.local_connect_status.clear();
+        stage_ack(&mut host, Frame::new(5));
+        host.poll_hot_join_host();
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Ignoring hot-join ack for frame")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Failed to reactivate hot-join slot")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "Hot-join slot PlayerHandle(1) has no connection status entry during serve"
+            )),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn staged_npeer_serve_reports_stale_ack_invalid_handle_and_missing_status() {
+        use crate::network::messages::{StateSnapshot, StateSnapshotAck};
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let first = test_addr(9115);
+        let second = test_addr(9116);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(first, PlayerHandle::new(1))
+            .expect("reserved one")
+            .add_reserved_player(second, PlayerHandle::new(2))
+            .expect("reserved two")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        let snapshot = || StateSnapshot {
+            frame: Frame::new(4),
+            num_players: 3,
+            state_bytes: vec![0],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+        let serve = |handle: PlayerHandle, acked: bool| NPeerServe {
+            handle,
+            joiner_addr: first,
+            snapshot_frame: Frame::new(4),
+            activation_frame: Frame::new(5),
+            snapshot: Some(snapshot()),
+            joiner_acked: acked,
+            survivors: std::collections::BTreeSet::new(),
+            pending_acks: std::collections::BTreeSet::new(),
+            polls_since_serve: 0,
+        };
+        let stage_ack = |host: &mut P2PSession<TestConfig>, acked: Frame| {
+            let endpoint = host.player_reg.remotes.get_mut(&first).expect("endpoint");
+            endpoint.force_running_for_tests();
+            endpoint.handle_message(&Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::StateSnapshotAck(StateSnapshotAck { frame: acked }),
+            });
+        };
+
+        // Stale joiner ack: the open serve must keep waiting and report it.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(1), false));
+        stage_ack(&mut host, Frame::new(9));
+        host.poll_npeer_host_serve();
+
+        // Commit barrier reached for an unknown slot: reactivation fails and
+        // the attempt aborts instead of committing partial state.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(99), true));
+        host.poll_npeer_host_serve();
+
+        // Commit barrier reached for a valid slot whose status row vanished:
+        // the commit must report the missing row rather than indexing past it.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(1), true));
+        host.local_connect_status.clear();
+        host.poll_npeer_host_serve();
+
+        // A joiner endpoint that disconnects mid-serve aborts the attempt.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(1), false));
+        host.abort_npeer_serve_for_handle(PlayerHandle::new(1));
+
+        // A post-capture freeze re-adjust that rewrites confirmed history at
+        // or before the captured snapshot invalidates the in-flight bytes.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(1), false));
+        host.abort_npeer_serve_if_snapshot_invalidated(Frame::new(4));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Ignoring N-peer hot-join ack for frame")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Failed to reactivate N-peer hot-join slot")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "N-peer hot-join slot PlayerHandle(1) has no connection status entry at commit"
+            )),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("joiner endpoint disconnected mid-serve")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("freeze convergence re-adjust rewrote confirmed history")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn npeer_serve_aborts_before_capture_when_saved_frame_moved() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let first = test_addr(9118);
+        let second = test_addr(9119);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(first, PlayerHandle::new(1))
+            .expect("reserved one")
+            .add_reserved_player(second, PlayerHandle::new(2))
+            .expect("reserved two")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        advance_host_and_save(&mut host);
+        advance_host_and_save(&mut host);
+        assert_ne!(
+            host.sync_layer.last_saved_frame(),
+            Frame::new(0),
+            "the test needs a saved frame that moved past the pinned snapshot"
+        );
+
+        // A serve opened at snapshot frame 0 has no snapshot yet, and rollback
+        // repair has since moved `last_saved_frame`: recapturing at 0 would
+        // embed a different state than the pinned frame, so the attempt must
+        // abort and let the retry choose a fresh frame.
+        host.hot_join.npeer = Some(NPeerServe {
+            handle: PlayerHandle::new(1),
+            joiner_addr: first,
+            snapshot_frame: Frame::new(0),
+            activation_frame: Frame::new(1),
+            snapshot: None,
+            joiner_acked: false,
+            survivors: std::collections::BTreeSet::new(),
+            pending_acks: std::collections::BTreeSet::new(),
+            polls_since_serve: 0,
+        });
+        host.poll_npeer_host_serve();
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("aborted before capture: last_saved_frame")),
+            "a pinned frame that moved must abort the serve"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn joiner_backfill_reports_guard_failures() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let addr = test_addr(9120);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(addr, PlayerHandle::new(1))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        advance_host_and_save(&mut host);
+
+        // The reserved endpoint is still Synchronizing: the backfill would be
+        // a silent no-op, so it must skip loudly instead.
+        host.backfill_joiner_pending_inputs(&addr, Frame::new(0));
+
+        // Replace the endpoint with a Running one whose pending-output queue
+        // can hold only one frame: the two-frame window cannot fit.
+        use crate::sessions::config::SyncConfig;
+        use crate::time_sync::TimeSyncConfig;
+        use std::time::Duration;
+        advance_host_and_save(&mut host);
+        let mut narrow = UdpProtocol::<TestConfig>::new(
+            vec![PlayerHandle::new(1)],
+            addr,
+            2,
+            1,
+            8,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig {
+                pending_output_limit: 1,
+                ..ProtocolConfig::default()
+            },
+            TimeSyncConfig::default(),
+        )
+        .expect("narrow endpoint constructs");
+        narrow.force_running_for_tests();
+        host.player_reg.remotes.insert(addr, narrow);
+        host.backfill_joiner_pending_inputs(&addr, Frame::new(0));
+
+        // Restore the default capacity, then request an activation frame whose
+        // ring slot does not hold that frame: there is no retained local input
+        // to replay.
+        let mut restored = UdpProtocol::<TestConfig>::new(
+            vec![PlayerHandle::new(1)],
+            addr,
+            2,
+            1,
+            8,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("restored endpoint constructs");
+        restored.force_running_for_tests();
+        host.player_reg.remotes.insert(addr, restored);
+        host.backfill_joiner_pending_inputs(&addr, Frame::new(-2));
+
+        // A queue registry that no longer matches the local player list must
+        // fail the lookup loudly instead of skipping the window silently.
+        host.sync_layer.truncate_input_queues_for_test(0);
+        host.backfill_joiner_pending_inputs(&addr, Frame::new(0));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        for expected in [
+            "its endpoint is not Running",
+            "activation-window input frame(s)",
+            "local input for frame",
+            "last_added_frame failed for registry-derived local handle",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "missing {expected:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_disconnect_snapshot_reports_missing_handles_and_unbounded_frame() {
+        use crate::sessions::config::SyncConfig;
+        use crate::time_sync::TimeSyncConfig;
+        use std::time::Duration;
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session = create_two_player_session();
+        let addr = test_addr(8080);
+        let handle = PlayerHandle::new(1);
+
+        // No handle reports a bounded last frame: the snapshot must fall back
+        // to NULL rather than carrying the i32::MAX sentinel into a disconnect.
+        session.local_connect_status[1].last_frame = Frame::new(i32::MAX);
+        let (_, handles, frame) = session
+            .remote_disconnect_snapshot(handle, None)
+            .expect("registered remote handle resolves");
+        assert_eq!(handles, vec![handle]);
+        assert_eq!(frame, Frame::NULL);
+
+        // An endpoint whose handle bindings vanished still owes the caller the
+        // requested handle instead of an empty set.
+        let empty_endpoint = UdpProtocol::<TestConfig>::new(
+            Vec::new(),
+            addr,
+            2,
+            1,
+            8,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("empty-handle endpoint constructs");
+        session.player_reg.remotes.insert(addr, empty_endpoint);
+        session.local_connect_status[1].last_frame = Frame::new(3);
+        let (_, handles, frame) = session
+            .remote_disconnect_snapshot(handle, None)
+            .expect("registered remote handle still resolves");
+        assert_eq!(handles, vec![handle]);
+        assert_eq!(frame, Frame::new(3));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("had no valid handle statuses during disconnect")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("had no handles during disconnect")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn staged_survivor_reactivation_reports_pending_and_reopen_guards() {
+        use crate::network::messages::{JoinCommitted, ReactivateSlot};
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let joiner = test_addr(8080);
+        let coordinator = test_addr(9122);
+        let mut session = create_two_player_session();
+        let pending = |handle: PlayerHandle, frame: Frame, reopened: bool| PendingReactivation {
+            handle,
+            frame,
+            coordinator_addr: coordinator,
+            joiner_addr: joiner,
+            pre_freeze_status: ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(0),
+                ..ConnectionStatus::default()
+            },
+            pre_freeze_input: Some(1u8),
+            reopened,
+        };
+
+        // A reopened attempt rejects a conflicting directive from its own
+        // coordinator while the attempt is still unresolved.
+        session.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(1), Frame::new(5), true));
+        session.handle_reactivate_directive(
+            &coordinator,
+            &ReactivateSlot {
+                handle: 1,
+                frame: Frame::new(4),
+            },
+        );
+        session.hot_join.pending_reactivation = None;
+
+        // A reopen whose input ring vanished reports the failed reactivation
+        // and cancels the attempt.
+        session.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(1), Frame::new(5), false));
+        session
+            .player_reg
+            .remotes
+            .get_mut(&joiner)
+            .expect("joiner endpoint")
+            .force_running_for_tests();
+        session.sync_layer.truncate_input_queues_for_test(0);
+        session.progress_pending_reactivation();
+        session.hot_join.pending_reactivation = None;
+
+        // A reopen with no status row must report the missing slot rather than
+        // indexing an absent table entry.
+        let mut missing_status = create_two_player_session();
+        missing_status
+            .player_reg
+            .remotes
+            .get_mut(&joiner)
+            .expect("joiner endpoint")
+            .force_running_for_tests();
+        missing_status.local_connect_status.clear();
+        missing_status.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(1), Frame::new(5), false));
+        missing_status.progress_pending_reactivation();
+
+        // The defensive commit-time reopen takes the same fail-closed paths for
+        // a missing ring and a missing status row.
+        session.sync_layer.truncate_input_queues_for_test(0);
+        session.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(1), Frame::new(5), false));
+        session.handle_join_committed_directive(
+            &coordinator,
+            &JoinCommitted {
+                handle: 1,
+                frame: Frame::new(5),
+            },
+        );
+        session.hot_join.pending_reactivation = None;
+
+        let mut restored = create_two_player_session();
+        restored.local_connect_status.clear();
+        restored.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(1), Frame::new(5), false));
+        restored.handle_join_committed_directive(
+            &coordinator,
+            &JoinCommitted {
+                handle: 1,
+                frame: Frame::new(5),
+            },
+        );
+
+        // A reopened pending whose joiner endpoint dies closes locally; an
+        // unknown slot must report the failed refreeze and missing status row.
+        let mut closed = create_two_player_session();
+        closed.hot_join.pending_reactivation =
+            Some(pending(PlayerHandle::new(99), Frame::new(5), true));
+        closed.close_reopened_pending_on_joiner_endpoint_death(&joiner);
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        for expected in [
+            "reopened attempt for slot PlayerHandle(1) frame 5 from 127.0.0.1:9122 is still pending",
+            "Failed to reactivate N-peer slot PlayerHandle(1) at frame 5 on survivor",
+            "has no connection status entry at survivor reopen",
+            "Failed to defensively reactivate N-peer slot PlayerHandle(1)",
+            "has no connection status entry at defensive reopen",
+            "died while the reopened reactivation for slot PlayerHandle(99) frame 5 was pending",
+            "Failed to re-freeze N-peer slot PlayerHandle(99) on attempt close",
+            "has no connection status entry at the pre-reopen restore",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "missing {expected:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn construction_reports_frame_delay_and_reserved_slot_guards() {
+        use crate::input_queue::INPUT_QUEUE_LENGTH;
+        use crate::sessions::builder::DEFAULT_EVENT_QUEUE_SIZE;
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let mut players = PlayerRegistry::new();
+        players
+            .handles
+            .insert(PlayerHandle::new(0), PlayerType::Local);
+        // The reserved handle is outside the configured player count: both the
+        // freeze and the status seeding must report the inconsistency.
+        let hot_join = HotJoinConfig {
+            reserved_slots: std::collections::BTreeSet::from([PlayerHandle::new(7)]),
+            accept_hot_join: true,
+            joiner: None,
+            serve_timeout_polls: 2,
+            max_snapshot_wire_bytes: 1_024,
+            ack_resends: 1,
+        };
+
+        let _session = P2PSession::<TestConfig>::new(
+            2,
+            8,
+            Box::new(DummySocket),
+            players,
+            SaveMode::EveryFrame,
+            DesyncDetection::Off,
+            // The builder rejects delays past the ring capacity; the direct
+            // constructor's defensive guard must report instead of trusting it.
+            INPUT_QUEUE_LENGTH,
+            Some(Arc::clone(&observer) as Arc<dyn ViolationObserver>),
+            ProtocolConfig::default(),
+            INPUT_QUEUE_LENGTH,
+            DEFAULT_EVENT_QUEUE_SIZE,
+            false,
+            None,
+            DisconnectBehavior::Halt,
+            hot_join,
+        );
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        for expected in [
+            "Failed to set frame delay for player PlayerHandle(0) during session construction",
+            "Failed to freeze reserved hot-join slot PlayerHandle(7) during construction",
+            "Reserved hot-join slot PlayerHandle(7) has no connection status entry during construction",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "missing {expected:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn two_peer_joiner_reports_unappliable_snapshot() {
+        use crate::network::messages::StateSnapshot;
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let host = test_addr(9125);
+        let mut joiner: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Remote(host), PlayerHandle::new(0))
+            .expect("remote host")
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .expect("local joiner")
+            .start_hot_join_session(DummySocket, host)
+            .expect("joiner session");
+        joiner
+            .player_reg
+            .remotes
+            .get_mut(&host)
+            .expect("host endpoint")
+            .set_received_snapshot_for_test(StateSnapshot {
+                frame: Frame::new(5),
+                num_players: 2,
+                // A snapshot whose state bytes cannot decode as this Config's
+                // state must be rejected loudly instead of half-applying.
+                state_bytes: Vec::new(),
+                bridge_inputs: Vec::new(),
+                bridge_statuses: Vec::new(),
+                checksum: None,
+            });
+
+        joiner.poll_remote_clients();
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("Failed to apply hot-join snapshot")),
+            "an unappliable snapshot must be reported"
+        );
+    }
+
+    #[test]
+    fn queued_coordinated_drop_reports_non_remote_target() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session = create_two_player_session();
+        session
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(8080))
+            .expect("remote endpoint")
+            .force_running_for_tests();
+        // The automatic-timeout intent queue only ever holds remote handles;
+        // a local handle must fail to start and surface the invariant break.
+        session.coordinated_drop.queued.insert(PlayerHandle::new(0));
+
+        session.drive_coordinated_drop();
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("failed to start queued coordinated drop for PlayerHandle(0)")),
+            "the non-remote drop target must be reported"
+        );
+    }
+
+    #[test]
+    fn spectator_send_reports_truncated_confirmed_input_count() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Spectator(test_addr(9123)), PlayerHandle::new(1))
+            .expect("spectator")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        // The spectator stream expects one input per player, but the status
+        // table lost its only row: the frame must be skipped loudly instead of
+        // sending a short per-frame batch that desyncs the spectator.
+        session.local_connect_status.clear();
+        session.next_spectator_frame = Frame::new(0);
+
+        session
+            .send_confirmed_inputs_to_spectators(Frame::new(0))
+            .expect("the skipped frame still advances the spectator cursor");
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("confirmed_inputs returned 0 inputs but expected 1")),
+            "the short spectator input batch must be reported"
+        );
+    }
+
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }
@@ -26656,6 +27438,58 @@ mod tests {
                 .set_received_snapshot_for_test(seam_snapshot(snapshot_frame, 7, &[1, 2, 3]));
             c2.poll();
             (c2, snapshot_frame, activation_frame)
+        }
+
+        #[test]
+        fn npeer_buffered_snapshot_reports_coordinator_loss_and_apply_failures() {
+            use crate::telemetry::{push_violation_observer, CollectingObserver};
+
+            // Coordinator loss while buffered: the attempt must be discarded
+            // loudly so the app can retry with a fresh session.
+            let observer = Arc::new(CollectingObserver::new());
+            let scope = push_violation_observer(
+                Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+            );
+            let (mut lost, _, _) = seam_staged_real_joiner();
+            lost.session.player_reg.remotes.remove(&addr_a());
+            lost.poll();
+            assert!(
+                observer.violations().iter().any(|violation| violation
+                    .message
+                    .contains("Discarding the buffered N-peer hot-join snapshot")),
+                "coordinator loss must discard the buffered attempt"
+            );
+            drop(scope);
+
+            // State bytes that no longer decode: applying the buffered attempt
+            // on a matching commit must fail closed and report.
+            let observer = Arc::new(CollectingObserver::new());
+            let _scope = push_violation_observer(
+                Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+            );
+            let (mut corrupt_state, _, activation_frame) = seam_staged_real_joiner();
+            if let Some(buffered) = corrupt_state
+                .session
+                .hot_join
+                .joiner
+                .as_mut()
+                .and_then(|joiner| joiner.buffered.as_mut())
+            {
+                buffered.snapshot.state_bytes.clear();
+            }
+            corrupt_state
+                .coordinator_proto_mut()
+                .set_received_join_committed_for_test(JoinCommitted {
+                    handle: 2,
+                    frame: activation_frame,
+                });
+            corrupt_state.poll();
+            assert!(
+                observer.violations().iter().any(|violation| violation
+                    .message
+                    .contains("Failed to apply the buffered N-peer hot-join snapshot")),
+                "an unappliable buffered snapshot must be reported"
+            );
         }
 
         /// A matching lifecycle close that was already in flight when a

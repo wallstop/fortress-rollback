@@ -3794,6 +3794,44 @@ mod tests {
         type Address = SocketAddr;
     }
 
+    /// Input whose serializer fails only when explicitly armed, so endpoint
+    /// construction and default-input size validation still succeed.
+    #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+    struct FailingInput {
+        fail: bool,
+    }
+
+    impl Serialize for FailingInput {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            if self.fail {
+                return Err(serde::ser::Error::custom(
+                    "intentional input serialization failure",
+                ));
+            }
+            serializer.serialize_bool(self.fail)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for FailingInput {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            bool::deserialize(deserializer).map(|fail| Self { fail })
+        }
+    }
+
+    struct FailingInputConfig;
+
+    impl Config for FailingInputConfig {
+        type Input = FailingInput;
+        type State = TestState;
+        type Address = SocketAddr;
+    }
+
     fn test_addr() -> SocketAddr {
         "127.0.0.1:7000".parse().unwrap()
     }
@@ -9338,6 +9376,57 @@ mod tests {
             protocol.pending_output.len(),
             small_limit,
             "enqueue_replicated_input must not push past pending_output_limit"
+        );
+    }
+
+    #[test]
+    fn enqueue_replicated_input_reports_input_serialization_failure() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut protocol: UdpProtocol<FailingInputConfig> = UdpProtocol::new(
+            vec![PlayerHandle::new(0)],
+            test_addr(),
+            2,
+            1,
+            8,
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            60,
+            DesyncDetection::Off,
+            SyncConfig::default(),
+            ProtocolConfig::default(),
+            TimeSyncConfig::default(),
+        )
+        .expect("failing-input endpoint constructs with a valid default");
+        protocol.force_running_for_tests();
+        let mut inputs: BTreeMap<PlayerHandle, PlayerInput<FailingInput>> = BTreeMap::new();
+        inputs.insert(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(0), FailingInput { fail: true }),
+        );
+
+        protocol.enqueue_replicated_input(&inputs);
+
+        assert!(
+            InputBytes::try_from_inputs::<FailingInputConfig>(2, &inputs).is_err(),
+            "the failing serializer must refuse the input map"
+        );
+        assert_eq!(
+            protocol.pending_output.len(),
+            0,
+            "a failed serialization must not stage wire bytes"
+        );
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages.iter().any(|message| message
+                .contains("enqueue_replicated_input failed to serialize input bytes")),
+            "{messages:?}"
         );
     }
 

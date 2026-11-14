@@ -2389,6 +2389,54 @@ mod input_queue_tests {
     }
 
     #[test]
+    fn advance_queue_head_gap_fill_reports_missing_previous_slot() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+        let mut queue = test_queue(0);
+        // A first input at frame 5 forces the initial-delay gap fill. Removing
+        // the ring storage makes the replication source unaddressable, which the
+        // fill loop must report rather than reading a stale slot.
+        queue.first_frame = true;
+        queue.head = 0;
+        queue.inputs.clear();
+
+        assert_eq!(
+            queue.add_input(PlayerInput::new(Frame::new(5), TestInput { inp: 1 })),
+            Frame::NULL
+        );
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.message.contains("in gap fill loop")),
+            "the unaddressable gap-fill source must be reported"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn reset_to_frame_reports_delayed_frame_underflow() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+        let mut queue = test_queue(0);
+        // A delay whose signed width is negative makes `delayed - 1` underflow.
+        // Real callers validate the delay; this stages the internal-corruption
+        // case the checked subtraction exists for.
+        queue.frame_delay = 2_147_483_648;
+
+        queue.reset_to_frame(Frame::new(0));
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("reset_to_frame last_added_frame underflowed")),
+            "the delayed-frame underflow must be reported"
+        );
+    }
+
+    #[test]
     fn test_add_input_wrong_frame() {
         let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
