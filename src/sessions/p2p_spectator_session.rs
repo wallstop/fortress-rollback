@@ -2551,6 +2551,90 @@ mod tests {
     }
 
     #[test]
+    fn spectator_input_guards_reject_malformed_frames_handles_and_staging() {
+        use crate::telemetry::{push_violation_observer, CollectingObserver};
+
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let host = test_addr(7100);
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .expect("num_players")
+            .start_spectator_session(host, DummySocket)
+            .expect("spectator session");
+        let status = || vec![ConnectionStatus::default(); 2];
+
+        assert!(session.inputs_at_frame(Frame::NULL).is_err());
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(-1), 0u8),
+            PlayerHandle::new(0),
+            status(),
+            host,
+        );
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 0u8),
+            PlayerHandle::new(9),
+            status(),
+            host,
+        );
+        session.handle_host_input(
+            9,
+            PlayerInput::new(Frame::new(0), 0u8),
+            PlayerHandle::new(0),
+            status(),
+            host,
+        );
+        session.host_snapshots[0].clear();
+        session.handle_host_input(
+            0,
+            PlayerInput::new(Frame::new(0), 0u8),
+            PlayerHandle::new(0),
+            status(),
+            host,
+        );
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("inputs_at_frame called with invalid frame")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Received input with invalid frame Frame(-1)")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Received input for player PlayerHandle(9)")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Received input from unknown host index 9")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Failed to stage input at frame 0")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
     fn spectator_unknown_source_packets_are_counted_and_warn_once_per_session() {
         use crate::telemetry::CollectingObserver;
 

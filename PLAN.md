@@ -17,8 +17,9 @@
 2. **P2 — Violation-path coverage census.** The production baseline now inventories both
    `report_violation!` and `report_violation_to!` sites plus wrapper-macro (`safe_frame_add/sub`)
    call sites, and rejects unapproved drift (`scripts/simulation/violation_sites.py --check`).
-   Exact local observations exercise 154 of 284 sites; the remainder are runtime-only internal
-   invariants and allocation-failure fallbacks, dominated by `p2p_session` hot-join transitions.
+   Exact local observations exercise 202 of 284 sites; the remainder are runtime-only internal
+   invariants, allocation-failure fallbacks, and unreachable duplicate guards, dominated by
+   `p2p_session` hot-join transitions.
    Next: review the next exact-source nightly `Violation-Site Exercise Census` artifact against
    this baseline and either add targeted fault-injection tests for reachable sites or delete
    assertions proven unreachable. **Exit:** a reviewed unexercised-set reduction recorded against
