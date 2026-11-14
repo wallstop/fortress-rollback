@@ -475,6 +475,9 @@ impl<T: Config> InputQueue<T> {
             let inserted = self.add_input_by_frame(filler, next_frame, reclaim_before);
             if !inserted || self.last_added_frame != next_frame {
                 if inserted {
+                    // Unreachable by construction: `add_input_by_frame` sets
+                    // `last_added_frame` to the inserted frame on every success
+                    // path. Retained as fail-closed defense.
                     report_violation!(
                         ViolationSeverity::Critical,
                         ViolationKind::InputQueue,
@@ -807,6 +810,9 @@ impl<T: Config> InputQueue<T> {
             return;
         };
         let Ok(input) = self.retained_confirmed_input(cut) else {
+            // Unreachable by construction: `validate_freeze_at_cut` succeeded at
+            // the top of this call and nothing mutates the queue in between.
+            // Retained as fail-closed defense.
             report_violation!(
                 ViolationSeverity::Critical,
                 ViolationKind::InputQueue,
@@ -1871,6 +1877,9 @@ impl<T: Config> InputQueue<T> {
                         "InputQueue::advance_queue_head verify"
                     );
                     if input_frame != expected {
+                        // Unreachable by construction: the gap-fill loop above
+                        // inserts every frame up to `input_frame`, and each
+                        // insert is sequential. Retained as fail-closed defense.
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::InputQueue,
@@ -1882,6 +1891,9 @@ impl<T: Config> InputQueue<T> {
                     }
                 },
                 None => {
+                    // Unreachable by construction: `inputs` is a fixed-length
+                    // ring and `previous_position` is always inside it. Retained
+                    // as fail-closed defense.
                     report_violation!(
                         ViolationSeverity::Critical,
                         ViolationKind::InputQueue,

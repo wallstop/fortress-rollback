@@ -4495,6 +4495,10 @@ impl<T: Config> P2PSession<T> {
             self.sync_layer
                 .set_reactivation_floor(handle, activation_frame, frozen_bound)
         {
+            // Unreachable by construction: `reactivate_player_at_frame` just
+            // validated the same handle immediately above, and the warning arm
+            // there returned before this point on failure. Retained as
+            // fail-closed defense.
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::InternalError,
@@ -7387,9 +7391,9 @@ impl<T: Config> P2PSession<T> {
                     };
                 },
                 None => {
-                    // Unreachable: buffer-time validation pinned exactly
-                    // num_players carried statuses. Fail toward the round-1
-                    // stamp (live through S) rather than panicking.
+                    // Unreachable by construction: buffer-time validation pinned
+                    // exactly `num_players` carried statuses. Fail toward the
+                    // round-1 stamp (live through S) rather than panicking.
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::InternalError,
@@ -10501,6 +10505,9 @@ impl<T: Config> P2PSession<T> {
         // we are now at the desired frame
         let actual_frame = self.sync_layer.current_frame();
         if actual_frame != load_target {
+            // Unreachable by construction: `load_frame` sets `current_frame` to
+            // the requested frame on its only success path. Retained as
+            // fail-closed defense.
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::FrameSync,
@@ -10563,6 +10570,9 @@ impl<T: Config> P2PSession<T> {
         // after all this, we should have arrived at the same frame where we started
         let final_frame = self.sync_layer.current_frame();
         if final_frame != current_frame {
+            // Unreachable by construction: the loop above advances exactly
+            // `count = current_frame - load_target` frames after `load_frame`
+            // pinned `load_target`. Retained as fail-closed defense.
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::FrameSync,
@@ -10607,6 +10617,10 @@ impl<T: Config> P2PSession<T> {
             for (handle, input) in inputs.iter_mut().enumerate() {
                 // Validate frame consistency - should be NULL or match expected frame
                 if input.frame != Frame::NULL && input.frame != self.next_spectator_frame {
+                    // Unreachable by construction: `confirmed_inputs` stamps
+                    // every non-NULL returned entry with the requested frame
+                    // (disconnected/frozen slots return NULL, which the guard
+                    // tolerates). Retained as fail-closed defense.
                     report_violation!(
                         ViolationSeverity::Warning,
                         ViolationKind::FrameSync,
@@ -11861,11 +11875,12 @@ impl<T: Config> P2PSession<T> {
 
         for (addr, overrides) in &propagated_by_addr {
             let Some(&representative) = representative_by_addr.get(addr) else {
-                // The two maps are populated together earlier in this function,
-                // so reaching this branch indicates an internal invariant
-                // violation — the safe response is the same as any other
-                // "disconnect observation we could not apply": fail closed
-                // rather than silently dropping the disconnect.
+                // The two maps are populated together earlier in this function.
+                // Unreachable by construction: `propagated_by_addr` and
+                // `representative_by_addr` are filled in the same iteration.
+                // Reaching here therefore means private registry state was
+                // corrupted; fail closed rather than silently dropping the
+                // disconnect.
                 report_violation!(
                     ViolationSeverity::Error,
                     ViolationKind::InternalError,
@@ -11977,6 +11992,15 @@ impl<T: Config> P2PSession<T> {
             if confirmed_frame != Frame::NULL
                 && self.sync_layer.last_saved_frame() != expected_saved_frame
             {
+                // Reachable residual (sparse save mode only): when a
+                // gossip-lowered confirmed frame sits below the resolved
+                // rollback target (itself clamped up to the prediction-window
+                // floor), the re-simulation loop never reaches
+                // `expected_saved_frame`, so no save lands and the invariant
+                // reports. Frames below the floor are the documented
+                // discard-before-convergence residual; the session stays live.
+                // The suite does not construct this sequence (see
+                // `scripts/simulation/violation_census.py`).
                 report_violation!(
                     ViolationSeverity::Error,
                     ViolationKind::StateManagement,
@@ -12334,6 +12358,10 @@ impl<T: Config> P2PSession<T> {
                         self.enqueue_event(FortressEvent::Disconnected { addr });
                     },
                     Some(PlayerType::Local) | None => {
+                        // Unreachable by construction: `resolve_disconnect_handle`
+                        // returns only `Remote`/`Spectator` handles or `None`, and
+                        // the registry-missing case is filtered upstream. Retained
+                        // as fail-closed defense.
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::InternalError,
