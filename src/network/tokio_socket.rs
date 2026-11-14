@@ -446,6 +446,9 @@ impl TokioUdpSocket {
         let buf = match codec::encode_into(msg, &mut self.send_buffer) {
             Ok(len) => {
                 let Some(buf) = self.send_buffer.get(..len) else {
+                    // Unreachable by construction: `encode_into` writes at most
+                    // `send_buffer.len()` bytes, so `len` is a valid prefix.
+                    // Retained as fail-closed defense.
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::NetworkProtocol,

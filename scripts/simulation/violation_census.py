@@ -22,6 +22,29 @@ branch never runs. Fleet and observation artifacts are exact runtime hits and
 should be preferred whenever a site appears there. Observation artifacts can
 also contain test-only assertions that are not production sites; those are
 counted as unmatched and do not fail the report.
+
+Residual unexercised sites (issue #416)
+---------------------------------------
+
+The nightly report can legitimately list unexercised production assertions.
+Their dispositions are:
+
+- **Unreachable by construction** (13 sites): annotated at the source site with
+  an ``Unreachable by construction:`` proof and retained as fail-closed defense.
+- **Allocation / encode fallbacks** (19 sites): need allocator or writer fault
+  injection. The crate exposes no allocation-failure hook and production code is
+  ``#![forbid(unsafe_code)]``, so forcing the small ``try_reserve`` arms requires
+  a custom global allocator; serializer arms would need a ``Config::Input`` that
+  passes the fixed-width measurement phase but fails the write phase. Both stay
+  untested rather than weakening the zero-panic contract.
+- **Sequence-dependent defensive arms** (8 sites): endpoint re-arm, replay
+  recorder, coordinated-drop / propagated-disconnect bookkeeping, and the sparse
+  save-mode ``last_saved_frame`` mismatch. They are reachable only through
+  adversarial sequencing or the same construction/allocation failures, and the
+  current suite does not construct those sequences.
+
+Treat an unexercised site that matches none of these dispositions as a coverage
+gap. The nightly report lists the exact remaining sites by ID.
 """
 
 from __future__ import annotations

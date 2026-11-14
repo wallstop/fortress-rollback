@@ -16,14 +16,7 @@
 
 ## Future
 
-1. **P2 — Classify the residual unexercised violation-site set.** Exact local observations now
-   exercise 243 of 284 sites. The remaining 41 are allocation/encode fallbacks, provably
-   unreachable postconditions, and reachable defensive fallbacks that need fault injection.
-   **Exit:** every residual site is exercised, deleted with a maintainer-approved baseline
-   regeneration, or annotated with a proof of unreachability. Scope:
-   [#416](https://github.com/wallstop/fortress-rollback/issues/416).
-
-2. **P2 — Compare remaining fleet-search techniques against fresh-seed search.** Use the
+1. **P2 — Compare remaining fleet-search techniques against fresh-seed search.** Use the
    [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare PCT,
    prefix branching, and LDFI-lite at equal compute. **Exit:** retain a technique only when it
    materially increases unique useful states or defect discovery per compute, preserves exact

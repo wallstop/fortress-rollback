@@ -2879,6 +2879,9 @@ impl<T: Config> UdpProtocol<T> {
 
             for (i, inp) in recv_inputs.into_iter().enumerate() {
                 let Ok(frame_offset) = i32::try_from(i) else {
+                    // Unreachable by construction: `recv_inputs.len()` is bounded
+                    // by the configured decode byte limit, far below `i32::MAX`.
+                    // Retained as fail-closed defense.
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::NetworkProtocol,
