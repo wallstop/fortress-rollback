@@ -1894,6 +1894,62 @@ mod sync_layer_tests {
     }
 
     #[test]
+    fn save_current_state_reports_unaddressable_frame_and_returns_default_cell() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 8);
+        // A negative current frame cannot be addressed by the saved-state ring.
+        // The defensive fallback must report the internal inconsistency and still
+        // hand back a usable cell instead of panicking.
+        sync_layer.current_frame = Frame::new(-1);
+
+        let request = sync_layer.save_current_state();
+
+        assert!(matches!(
+            request,
+            FortressRequest::SaveGameState { frame, .. } if frame == Frame::new(-1)
+        ));
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("save_current_state: current_frame")),
+            "the unaddressable saved-state frame must be reported"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn synchronized_inputs_reports_reactivation_floor_below_bound() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 8);
+        sync_layer.current_frame = Frame::new(2);
+        // The slot's live-era ring was discarded at activation frame 5, so the
+        // requested frame 2 is only servable while it sits strictly above the
+        // pre-reactivation frozen bound. A bound of 2 is not below the requested
+        // frame, so the layer must fail closed instead of fabricating history.
+        sync_layer.reactivation_floors[0] = Some(ReactivationFloor {
+            activation_frame: Frame::new(5),
+            frozen_bound: Frame::new(2),
+            frozen_input: Some(TestInput { inp: 7 }),
+        });
+
+        let inputs = sync_layer.synchronized_inputs(&[ConnectionStatus::default()]);
+
+        assert!(inputs.is_none(), "the unservable floor must fail closed");
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("at or below its pre-reactivation bound")),
+            "the discarded pre-activation history must be reported"
+        );
+    }
+
+    #[test]
     fn transactional_freeze_rejects_missing_cut_without_freezing_any_handle() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
         for frame in 0..=3 {

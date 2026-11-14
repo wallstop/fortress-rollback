@@ -3800,6 +3800,103 @@ mod tests {
     }
 
     #[test]
+    fn spectator_inputs_at_frame_reports_missing_host_connect_status() {
+        use crate::telemetry::{push_violation_observer, CollectingObserver};
+
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session(test_addr(7300), DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        session.inputs[buffer_index][0] = PlayerInput::new(frame, 4);
+        session.inputs[buffer_index][1] = PlayerInput::new(frame, 5);
+        // The host's connect-status table is sized to every host player by
+        // construction; a shorter snapshot must be surfaced instead of silently
+        // reporting the forwarded input as confirmed.
+        session.host_connect_status.clear();
+
+        let inputs = session
+            .inputs_at_frame(frame)
+            .expect("buffered inputs remain mappable without status");
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].0, 4);
+        assert_eq!(inputs[0].1, InputStatus::Confirmed);
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("host_connect_status missing for player_index 0")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn spectator_canonical_commit_reports_missing_input_slot_and_status() {
+        use crate::telemetry::CollectingObserver;
+
+        let observer = Arc::new(CollectingObserver::new());
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .unwrap()
+            .with_violation_observer(observer.clone())
+            .start_spectator_session(test_addr(7303), DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        session.host_snapshots[0][buffer_index] = Some(HostFrameSnapshot {
+            frame,
+            inputs: vec![
+                Some(PlayerInput::new(frame, 7)),
+                Some(PlayerInput::new(frame, 8)),
+            ],
+            status: Arc::from(vec![ConnectionStatus::default(); 2]),
+        });
+
+        // The canonical snapshot is complete, but the destination ring lost its
+        // per-player slots: the commit must report the missing slot and stop.
+        session.inputs[buffer_index].clear();
+        session.commit_canonical_snapshot(0, frame);
+
+        // Restore the slots but strip the snapshot's status table: the input
+        // commit succeeds while the status commit must report its own gap.
+        session.inputs[buffer_index] = vec![PlayerInput::new(Frame::NULL, 0); session.num_players];
+        if let Some(snapshot) = session.host_snapshots[0][buffer_index].as_mut() {
+            snapshot.status = Arc::from(Vec::<ConnectionStatus>::new());
+        }
+
+        session.commit_canonical_snapshot(0, frame);
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("canonical input slot missing for player 0")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("canonical status missing for player 0")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
     fn spectator_inputs_at_frame_stale_then_newer_slot_returns_too_far_behind() {
         use crate::telemetry::CollectingObserver;
 
