@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794688338283,
+  "lastUpdate": 1794699256467,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "bdcd24ae97634b26d56c61c5384065029140386e",
-          "message": "security: freeze bincode compatibility formats (#282)\n\n## Summary\n\n- pin bincode exactly to 2.0.1 and freeze representative input, state,\nreplay, hot-join, and checksum bytes across the centralized codec\n- protect the immutable suite against rewrites and registration bypasses\nin worktree, index, and pull-request modes\n- replace the stale advisory rationale with a daily, time-bounded\ndisposition that locks version, crates.io source, checksum, and every\nrelevant workspace resolution\n- harden the rewritten release-checkpoint fixture against\nGit-version-sensitive advertised-ref pack negotiation\n\n## Scope\n\nThis is the first bounded entrance gate for #273. It does **not** select\nor deploy a replacement serializer and intentionally does not close the\nissue. Candidate evaluation, malformed-input allocation/recursion\nhardening, performance evidence, and migration remain follow-up\nmilestones.\n\nProgresses #273.\n\n## Validation\n\n- default Nextest: 2,891 passed; 71 skipped\n- hot-join Nextest: 3,148 passed; 72 skipped\n- Python toolchain suite: 2,003 passed\n- release-checkpoint module: 23 passed; rewritten-history case: 25/25\nrepeated\n- strict all-target Clippy with `tokio,json,hot-join`\n- Rust 1.86 all-target check\n- browser WASM and Emscripten hot-join checks\n- cargo-deny advisories/licenses/bans/sources and all canonical\nworkspace locks\n- authoritative 19-gate agent preflight\n- four adversarial passes; final consensus has no actionable findings\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches serialization compatibility, exact dependency pinning, and\nsupply-chain enforcement across workspaces; runtime bytes are asserted\nunchanged but any codec or lock drift will fail CI until dispositions\nare updated.\n> \n> **Overview**\n> Pins **bincode** to **`=2.0.1`** and adds a first bounded gate for\nissue #273: freeze representative serialized bytes without changing\non-wire runtime output.\n> \n> **Immutable compatibility suite** — New\n`serialization_golden_bincode_2_0_1` fixtures pin fixed-width inputs,\nrich state, replay envelopes, hot-join payloads, and checksum-derived\nbytes across the centralized codec (protocol `Message` bytes stay on\nexisting wire goldens). The wire-golden immutability hook now blocks\nrewrites of this suite and requires an active `#[cfg(test)]`\nregistration in `lib.rs`; successors must be separately named, not\nedited in place.\n> \n> **Supply-chain policy** — `RUSTSEC-2025-0141` is documented in\n`supply-chain/advisory-dispositions.toml` (owner, **2026-11-02** review\ndate, exit criteria). `scripts/ci/check-advisory-dispositions.py` fails\nif `deny.toml` ignores drift from that file, versions unpinned, lock\nchecksum/source mismatch, or deadlines pass. Enforcement runs in\n**pre-commit**, **ci-security** (daily schedule), and **agent\npreflight**.\n> \n> **Docs / hygiene** — Design decision log entry, changelog note, and a\nrelease-checkpoint test fix (push rewritten history to an empty remote\ninstead of force-pushing over a populated fixture remote).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n842d9607715f356721463284cd1fb8caf32520cf. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T23:31:12Z",
-          "tree_id": "5c861318956d0952ab25ab8fb2e9edb30ad04857",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/bdcd24ae97634b26d56c61c5384065029140386e"
-        },
-        "date": 1785714305845,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 146873,
-            "range": "± 2685",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46283,
-            "range": "± 324",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 44",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 86",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3140,
-            "range": "± 201",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2830,
             "range": "± 315",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e6ad6c17ccfbdfdbd8a726444920a203ee7a857b",
+          "message": "test(simulation): bound PCT interleaving and fix a lagging-survivor freeze false positive (#421)\n\n## Summary\n\n- Adds an opt-in, bounded PCT peer-interleaving axis to the\ndeterministic simulation harness (`RunOptions::pct`, at most 1,024\npriority assignments). The historical forward order is unchanged when\nunset, and `pct` is mutually exclusive with differential mode.\n- Uses the axis to run a matched equal-compute comparison against the\ncurrent forward-order scheduler on the nightly schedule generator.\n- Fixes a freeze-frame oracle false positive exposed by the comparison:\na survivor whose confirmed prefix ends *before* another survivor's\nobserved freeze frame was treated as an authoritative `None`\ndisagreement.\n- Records the PCT rejection in the fleet-search roadmap and narrows\n`PLAN.md` to the remaining prefix-replay and LDFI-lite comparison\n(scoped by #420).\n\n## Measured comparison\n\nMatched arms: run id `202611140101`, shard 0, 128 schedules, 640,000\nscheduled steps each.\n\n| Arm | unique organic vectors | unique peer-count buckets | unique\nbehavior signatures | failures |\n| --- | ---: | ---: | ---: | ---: |\n| Forward (baseline) | 6 | 13 | 107 | 0 |\n| PCT, K=16 | 6 | 13 | 107 | 0 |\n\nBoth arms observed exactly `{0, 2, 4, 6, 17, 21}` (5-bit OR of the\nregistry; sparse-earlier remains unreachable organically). Every trace\nhash changed, proving the interleaving was applied. No coverage or\ndefect-discovery gain, so PCT stays out of the nightly fleet; the opt-in\naxis is retained for order-sensitivity regressions.\n\n## Bug found and fixed\n\nA 1-change PCT run on the checked-in D14 lossy graceful-remove schedule\nproduced:\n\n```text\nFreezeFrameDivergence { slot: 4, peer: 3, first_author: 0, expected: None,\n  actual: Some(FreezePoint { frame: 302, ... }) }\n```\n\nThe step-302 visit order left peer 0 at confirmed frame 301 while peer 3\nreached 303 and observed the slot-4 freeze at 302. The oracle treated\npeer 0's not-yet-observed `None` as a disagreement. A survivor that has\nnot reached the freeze frame cannot disagree; a survivor that did reach\nit and never observed a stable `Disconnected` run still fails. Pinned\nby:\n\n- `oracle_ignores_lagging_survivor_before_the_freeze_frame` (unit).\n- `pct_lagging_survivor_does_not_fake_a_freeze_divergence` (D14\nintegration + exact replay).\n- `oracle_ignores_all_survivors_lagging_behind_the_removal_cut`\n(all-`None` case).\n\nAdversarial review follow-up also clarified that PCT shrinking preserves\nthe stable failure class rather than the exact original trace, and\nrefreshed the stale artifact-schema message after the v9 bump.\n\n## Verification\n\n- `cargo nextest run --profile ci --test simulation --features hot-join`\n→ 473 passed, 27 skipped.\n- `cargo nextest run --profile ci --features tokio,json` → 3,184 passed,\n75 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` → clean.\n- `cargo clippy --tests --test simulation --features hot-join -- -D\nwarnings` → clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` → all checks\npassed.\n- Plan hygiene, Agent Skill validation/quality, markdownlint, link\ncheck, typos → green.\n\n## Issue notes\n\n- #403 remains calendar-bound (2/7 scheduled post-redesign windows; five\nremain through 2026-11-19).\n- #420 records the entrance gate and acceptance criteria for\nprefix-replay branching and LDFI-lite.\n- No production behavior, wire format, replay format, or public API\nchanges. No changelog entry is required for test-only work.",
+          "timestamp": "2026-11-14T15:26:14-08:00",
+          "tree_id": "321a75ff934b20387dba9e66bddac1c28811f741",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e6ad6c17ccfbdfdbd8a726444920a203ee7a857b"
+        },
+        "date": 1794699255636,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 61319,
+            "range": "± 978",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31905,
+            "range": "± 577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1693,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 98",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3167,
+            "range": "± 198",
             "unit": "ns/iter"
           }
         ]
