@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `violation-census` feature records each reported `report_violation!` source location to a
+  bounded per-process artifact when `FORTRESS_VIOLATION_CENSUS_DIR` is set, giving the nightly
+  exercise census exact test-suite evidence instead of LLVM line-coverage lower bounds. The hook
+  compiles out of normal builds and never changes violation handling.
 - `try_handle_requests!` is the fallible companion to `handle_requests!`: each save/load/advance
   closure returns a `Result`, and the first error aborts the request loop. Canonical examples now
   propagate missing rollback saves and checksum serialization failures instead of warning and
@@ -77,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a drop-time scoped-observer failure now reports its real `file:line`
+  location instead of a non-line label, so diagnostic consumers and the violation-site census can
+  parse it.
 - **Pre-existing:** replays recorded by a session that repaired a remote misprediction no longer
   capture the pre-correction speculative checksum for the repaired frames. Recordings now settle
   those checksums after the correction requests execute (or omit a checksum whose saved-state cell

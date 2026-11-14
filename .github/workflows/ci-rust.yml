@@ -237,7 +237,7 @@ jobs:
         run: cargo nextest run --profile ci --features hot-join --no-capture
 
       - name: Run hot-join clippy
-        run: cargo clippy --workspace --all-targets --features hot-join,tokio,json,sync-send,paranoid,trace-validation -- -D warnings
+        run: cargo clippy --workspace --all-targets --features hot-join,tokio,json,sync-send,paranoid,trace-validation,violation-census -- -D warnings
 
   # Miri undefined behavior check (cross-platform, optimized)
   #
@@ -496,8 +496,12 @@ jobs:
         with:
           cache-key: feature
 
-      - name: Check feature powerset (excluding slow features)
-        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled
+      # `violation-census` is an independent diagnostic feature with no
+      # dependency or cfg interactions; the strict-clippy lane and the nightly
+      # census job compile and exercise it. Excluding it keeps the powerset
+      # bounded instead of doubling the matrix.
+      - name: Check feature powerset (excluding slow and diagnostic features)
+        run: cargo hack check --feature-powerset --exclude-features z3-verification,z3-verification-bundled,violation-census
 
   # Package dry-run
   package-dry-run:

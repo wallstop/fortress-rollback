@@ -419,6 +419,7 @@ def test_hot_join_clippy_covers_supported_feature_composition() -> None:
             "sync-send",
             "paranoid",
             "trace-validation",
+            "violation-census",
         }
     )
 

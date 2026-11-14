@@ -35,6 +35,188 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Exact violation-site exercise hook for the nightly census.
+///
+/// Enabled only by the `violation-census` feature outside Loom builds. When
+/// `FORTRESS_VIOLATION_CENSUS_DIR` names a directory, each newly observed
+/// reporting location is written to a bounded per-process artifact. The hook is
+/// strictly diagnostic: filesystem failures never affect gameplay, and normal
+/// builds compile it out entirely.
+#[cfg(all(feature = "violation-census", not(loom)))]
+mod violation_census {
+    use crate::sync::Mutex;
+    use std::collections::BTreeSet;
+    use std::fmt::Write as _;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+
+    /// Per-process cap; must not exceed the nightly census parser's
+    /// per-artifact limit.
+    const MAX_LOCATIONS: usize = 256;
+    /// Complete artifact budget; keeps escaped output below the parser's
+    /// per-artifact byte limit even when every character is escaped.
+    const MAX_ARTIFACT_BYTES: usize = 32 * 1024;
+    /// Fixed headroom for the closing `]...}` and truncation flag.
+    const FOOTER_BYTES: usize = 32;
+    /// Run identifiers longer than this are ignored rather than widening the
+    /// artifact header past its budget.
+    const MAX_RUN_ID_BYTES: usize = 128;
+    static OBSERVED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    static TRUNCATED: AtomicBool = AtomicBool::new(false);
+    static TRUNCATION_RECORDED: AtomicBool = AtomicBool::new(false);
+    static DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static RUN_ID: OnceLock<Option<String>> = OnceLock::new();
+
+    /// Records one reporting location, if the census is enabled.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn record(location: &'static str) {
+        let Some(directory) = directory() else {
+            return;
+        };
+        let mut observed = OBSERVED.lock();
+        if observed.contains(location) {
+            return;
+        }
+        if observed.len() >= MAX_LOCATIONS {
+            TRUNCATED.store(true, Ordering::Relaxed);
+            if !TRUNCATION_RECORDED.load(Ordering::Relaxed) {
+                record_truncation(directory, &observed);
+            }
+            return;
+        }
+        observed.insert(location);
+        // Diagnostic only: an unwritable census directory must not change
+        // violation handling. Undo the insertion so a later report retries.
+        if write_snapshot(
+            directory,
+            &observed,
+            TRUNCATED.load(Ordering::Relaxed),
+            run_id(),
+        )
+        .is_err()
+        {
+            observed.remove(location);
+        } else if TRUNCATED.load(Ordering::Relaxed) {
+            TRUNCATION_RECORDED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn record_truncation(directory: &Path, observed: &BTreeSet<&'static str>) {
+        if write_snapshot(directory, observed, true, run_id()).is_ok() {
+            TRUNCATION_RECORDED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn directory() -> Option<&'static Path> {
+        DIRECTORY
+            .get_or_init(|| {
+                std::env::var_os("FORTRESS_VIOLATION_CENSUS_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .as_deref()
+    }
+
+    fn run_id() -> Option<&'static str> {
+        RUN_ID
+            .get_or_init(|| {
+                std::env::var("FORTRESS_VIOLATION_CENSUS_RUN_ID")
+                    .ok()
+                    .filter(|value| !value.is_empty() && value.len() <= MAX_RUN_ID_BYTES)
+            })
+            .as_deref()
+    }
+
+    /// Writes a bounded snapshot of the observed set for this process,
+    /// replacing any earlier snapshot. The artifact records the `truncated`
+    /// flag when the count or byte budget dropped part of the set; only I/O
+    /// errors are returned.
+    pub(super) fn write_snapshot(
+        directory: &Path,
+        observed: &BTreeSet<&'static str>,
+        truncated: bool,
+        run_id: Option<&str>,
+    ) -> std::io::Result<()> {
+        let name = format!("observations-{}.json", std::process::id());
+        let target = directory.join(&name);
+        let temporary = directory.join(format!("{name}.tmp"));
+        // alloc-bound: capped at MAX_ARTIFACT_BYTES (32 KiB) plus footer headroom.
+        let mut artifact = String::with_capacity(MAX_ARTIFACT_BYTES);
+        artifact.push_str("{\"schema_version\":1,\"run_id\":");
+        match run_id {
+            None => artifact.push_str("null"),
+            Some(run_id) => {
+                artifact.push('"');
+                push_json_escaped(&mut artifact, run_id);
+                artifact.push('"');
+            },
+        }
+        artifact.push_str(",\"process_id\":");
+        artifact.push_str(&std::process::id().to_string());
+        artifact.push_str(",\"locations\":[");
+        let mut wrote_any = false;
+        let mut omitted = false;
+        // alloc-bound: the loop stops once MAX_ARTIFACT_BYTES is reached.
+        for location in observed {
+            let needed = json_escaped_len(location).saturating_add(4);
+            if artifact.len() + needed + FOOTER_BYTES > MAX_ARTIFACT_BYTES {
+                omitted = true;
+                break;
+            }
+            if wrote_any {
+                artifact.push(',');
+            }
+            artifact.push('"');
+            push_json_escaped(&mut artifact, location);
+            artifact.push('"');
+            wrote_any = true;
+        }
+        artifact.push_str("],\"truncated\":");
+        artifact.push_str(if truncated || omitted {
+            "true"
+        } else {
+            "false"
+        });
+        artifact.push_str("}\n");
+        {
+            let mut file = fs::File::create(&temporary)?;
+            file.write_all(artifact.as_bytes())?;
+        }
+        fs::rename(&temporary, &target)
+    }
+
+    fn json_escaped_len(value: &str) -> usize {
+        value
+            .chars()
+            .map(|character| match character {
+                '"' | '\\' | '\n' | '\r' | '\t' => 2,
+                control if control < '\u{20}' => 6,
+                other => other.len_utf8(),
+            })
+            .sum()
+    }
+
+    fn push_json_escaped(output: &mut String, value: &str) {
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                control if control < '\u{20}' => {
+                    let _ = write!(output, "\\u{:04x}", u32::from(control));
+                },
+                other => output.push(other),
+            }
+        }
+    }
+}
+
 /// Custom serializer for `Option<Frame>` that outputs clean integers or null.
 ///
 /// - `None` → `null`
@@ -249,6 +431,13 @@ impl SpecViolation {
     ///
     /// Marked `#[cold]` because violations should be rare in normal operation.
     /// `#[inline(never)]` prevents error-path code from polluting caller instruction cache.
+    ///
+    /// # Feature: `violation-census`
+    ///
+    /// With the `violation-census` feature (outside Loom builds), this
+    /// constructor also offers `location` to the nightly exercise census when
+    /// `FORTRESS_VIOLATION_CENSUS_DIR` is set. The write is diagnostic; any
+    /// filesystem failure is ignored and never changes the returned violation.
     #[cold]
     #[inline(never)]
     #[must_use]
@@ -258,6 +447,8 @@ impl SpecViolation {
         message: impl Into<String>,
         location: &'static str,
     ) -> Self {
+        #[cfg(all(feature = "violation-census", not(loom)))]
+        violation_census::record(location);
         Self {
             severity,
             kind,
@@ -1097,7 +1288,7 @@ fn report_scoped_observer_drop_failure() {
         ViolationSeverity::Critical,
         ViolationKind::InternalError,
         "scoped observer guard could not borrow the thread-local observer stack during drop",
-        "src/telemetry.rs:ScopedObserverGuard::drop",
+        concat!(file!(), ":", line!()),
     ));
 }
 
@@ -3649,5 +3840,194 @@ mod tests {
             2,
             "the re-entrant violation must also route to the observer (no deadlock)"
         );
+    }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_is_sorted_escaped_replaced_and_complete() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory =
+            std::env::temp_dir().join(format!("fortress-census-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+        let artifact_path = directory.join(format!("observations-{}.json", std::process::id()));
+
+        let mut observed = std::collections::BTreeSet::new();
+        observed.insert("src/network/compression.rs:282");
+        observed.insert("src/a\"b.rs:1");
+        observed.insert("src/a\u{1}b.rs:1");
+        observed.insert("src/a b.rs:1");
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("census snapshot writes");
+
+        assert_eq!(
+            std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
+            format!(
+                "{{\"schema_version\":1,\"run_id\":null,\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\"],\"truncated\":false}}\n",
+                std::process::id()
+            ),
+            "the snapshot must be sorted, JSON-escaped, and hold every location"
+        );
+
+        observed.insert("src/z.rs:1");
+        super::violation_census::write_snapshot(&directory, &observed, true, Some("run-7"))
+            .expect("census snapshot replaces the earlier artifact");
+        assert_eq!(
+            std::fs::read_to_string(&artifact_path).expect("census artifact is readable"),
+            format!(
+                "{{\"schema_version\":1,\"run_id\":\"run-7\",\"process_id\":{},\"locations\":[\"src/a\\u0001b.rs:1\",\"src/a b.rs:1\",\"src/a\\\"b.rs:1\",\"src/network/compression.rs:282\",\"src/z.rs:1\"],\"truncated\":true}}\n",
+                std::process::id()
+            ),
+            "replacement must retain old locations and record the truncation flag"
+        );
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
+    }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_truncates_at_byte_budget() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "fortress-census-budget-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+
+        let mut observed = std::collections::BTreeSet::new();
+        for index in 0..300 {
+            let location: &'static str = Box::leak(
+                format!("src/generated/{index:03}/{}:1", "x".repeat(200)).into_boxed_str(),
+            );
+            observed.insert(location);
+        }
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("bounded census snapshot writes");
+        let artifact = std::fs::read_to_string(
+            directory.join(format!("observations-{}.json", std::process::id())),
+        )
+        .expect("census artifact is readable");
+
+        assert!(
+            artifact.len() <= 32 * 1024,
+            "artifact has {} bytes",
+            artifact.len()
+        );
+        assert!(
+            artifact.len() > 16 * 1024,
+            "the byte budget must use most of its capacity, not a tiny artifact"
+        );
+        assert!(
+            artifact.contains("\"truncated\":true"),
+            "the byte-budget snapshot must set the truncation flag"
+        );
+        assert!(
+            artifact.contains("\"src/generated/000/"),
+            "the byte-budget snapshot must retain the earliest locations"
+        );
+        assert!(
+            artifact.contains("\"src/generated/100/"),
+            "the byte budget must retain a substantial prefix, not a tiny set"
+        );
+        assert!(
+            !artifact.contains("\"src/generated/299/"),
+            "the byte budget must omit later locations"
+        );
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
+    }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_bounds_control_character_expansion() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "fortress-census-escape-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+
+        let mut observed = std::collections::BTreeSet::new();
+        let expandable: &'static str = Box::leak("\u{1}".repeat(6_000).into_boxed_str());
+        observed.insert(expandable);
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("bounded census snapshot writes");
+        let artifact = std::fs::read_to_string(
+            directory.join(format!("observations-{}.json", std::process::id())),
+        )
+        .expect("census artifact is readable");
+
+        assert!(
+            artifact.len() <= 32 * 1024,
+            "control-character escaping must respect the byte budget"
+        );
+        assert!(
+            artifact.contains("\"locations\":[]"),
+            "an over-budget escaped location must be omitted"
+        );
+        assert!(artifact.contains("\"truncated\":true"));
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
+    }
+
+    #[cfg(all(feature = "violation-census", not(loom)))]
+    #[test]
+    fn violation_census_snapshot_respects_the_exact_budget_boundary() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "fortress-census-boundary-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("census directory is writable");
+        let artifact_path = directory.join(format!("observations-{}.json", std::process::id()));
+
+        let empty = std::collections::BTreeSet::new();
+        super::violation_census::write_snapshot(&directory, &empty, false, None)
+            .expect("empty census snapshot writes");
+        let empty_artifact =
+            std::fs::read_to_string(&artifact_path).expect("empty artifact is readable");
+        let prefix = empty_artifact
+            .find("\"locations\":[")
+            .expect("empty artifact has a locations array")
+            + "\"locations\":[".len();
+        let limit = 32 * 1024;
+        let location_len = limit - 32 - prefix - 4;
+        let location: &'static str =
+            Box::leak(format!("src/ {}.rs:1", "x".repeat(location_len - 10)).into_boxed_str());
+
+        let mut observed = std::collections::BTreeSet::new();
+        observed.insert(location);
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("boundary census snapshot writes");
+        let artifact =
+            std::fs::read_to_string(&artifact_path).expect("boundary artifact is readable");
+        assert!(
+            artifact.contains(location),
+            "a location at the exact budget boundary must be retained"
+        );
+        assert!(
+            artifact.len() <= limit,
+            "boundary artifact exceeds its budget"
+        );
+
+        observed.insert("src/z.rs:1");
+        super::violation_census::write_snapshot(&directory, &observed, false, None)
+            .expect("over-boundary census snapshot writes");
+        let artifact =
+            std::fs::read_to_string(&artifact_path).expect("over-boundary artifact is readable");
+        assert!(
+            !artifact.contains("src/z.rs:1"),
+            "the next location must not fit once the boundary is reached"
+        );
+        assert!(
+            artifact.len() <= limit,
+            "over-boundary artifact exceeds its budget"
+        );
+        assert!(artifact.contains("\"truncated\":true"));
+        std::fs::remove_dir_all(directory).expect("census directory cleanup");
     }
 }

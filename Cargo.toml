@@ -278,6 +278,11 @@ trace-validation = []
 # reserved or gracefully-dropped player slot via a state snapshot. Requires
 # Config::State: Serialize + DeserializeOwned (player count stays fixed).
 hot-join = []
+# Enable the exact violation-site exercise census hook. When
+# FORTRESS_VIOLATION_CENSUS_DIR is set, every reported violation appends its
+# source location to a bounded per-process artifact. Compiles out of normal
+# builds; used by the nightly exercise census.
+violation-census = []
 # Enable runtime invariant checking in release builds (for debugging production issues)
 paranoid = []
 # No-op compatibility marker. Actual Loom builds use RUSTFLAGS="--cfg loom";

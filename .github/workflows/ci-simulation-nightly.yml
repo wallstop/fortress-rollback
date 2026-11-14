@@ -144,15 +144,71 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Joins the content-addressed production violation-site baseline against the
-  # test suite's latest main coverage and this run's fleet observations. The
-  # report is informational: it publishes the unexercised set for review without
-  # gating on a coverage threshold.
+  # Runs the full test suite once with the exact census hook enabled. The hook
+  # records every production `report_violation!` location that the suite
+  # actually reports, so the census does not rely on LLVM line attribution. The
+  # primary optional features are enabled so feature-gated assertions count too.
+  violation-site-observations:
+    name: Violation-Site Exact Observations
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master snapshot
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: violation-census
+
+      - name: Prepare exact observation directory
+        run: |
+          set -euo pipefail
+          observations_dir="$RUNNER_TEMP/violation-observations"
+          case "$observations_dir" in
+            "$RUNNER_TEMP"/*) ;;
+            *) echo "refusing unsafe observation path: $observations_dir" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$observations_dir"
+          mkdir -p "$observations_dir"
+
+      - name: Run the full suite with the census hook
+        env:
+          FORTRESS_VIOLATION_CENSUS_DIR: ${{ runner.temp }}/violation-observations
+          FORTRESS_VIOLATION_CENSUS_RUN_ID: ${{ github.run_id }}
+        run: cargo nextest run --profile ci --features tokio,json,hot-join,violation-census
+
+      - name: Upload exact observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: violation-site-observations-${{ github.run_id }}
+          path: ${{ runner.temp }}/violation-observations/
+          if-no-files-found: error
+          retention-days: 30
+
+  # Joins the content-addressed production violation-site baseline against
+  # exact test-suite observations, the latest main coverage, and this run's
+  # fleet observations. The report is informational: it publishes the
+  # unexercised set for review without gating on a coverage threshold.
   violation-site-census:
     name: Violation-Site Exercise Census
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: simulation-nightly
+    timeout-minutes: 15
+    needs: [simulation-nightly, violation-site-observations]
+    # Publish a partial report even when a producer job fails; each source is
+    # joined only when its artifact is present.
+    if: always()
 
     steps:
       - uses: actions/checkout@v7
@@ -163,10 +219,20 @@ jobs:
           python-version: "3.12"
 
       - name: Download fleet observations
+        id: fleet-download
+        continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           name: simulation-violation-sites-${{ github.run_id }}
           path: ${{ runner.temp }}/violation-sites
+
+      - name: Download exact test-suite observations
+        id: observations-download
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: violation-site-observations-${{ github.run_id }}
+          path: ${{ runner.temp }}/violation-observations
 
       - name: Download latest main test coverage (best effort)
         env:
@@ -189,10 +255,35 @@ jobs:
           if [ -f "$RUNNER_TEMP/coverage/cobertura.xml" ]; then
             coverage_args=(--coverage-xml "$RUNNER_TEMP/coverage/cobertura.xml")
           fi
+          fleet_args=()
+          if [ -d "$RUNNER_TEMP/violation-sites" ] \
+            && [ -n "$(find "$RUNNER_TEMP/violation-sites" \
+              -maxdepth 1 -name '*.json' -print -quit)" ]; then
+            fleet_args=(--fleet-dir "$RUNNER_TEMP/violation-sites")
+          fi
+          observation_args=()
+          if [ -d "$RUNNER_TEMP/violation-observations" ] \
+            && [ -n "$(find "$RUNNER_TEMP/violation-observations" \
+              -maxdepth 1 -name '*.json' -print -quit)" ]; then
+            observation_args=(--observations-dir "$RUNNER_TEMP/violation-observations")
+          fi
+          partial_args=()
+          if [ "$CENSUS_PARTIAL" = "true" ]; then
+            partial_args=(--partial)
+          fi
+          if [ "${#coverage_args[@]}" -eq 0 ] && [ "${#fleet_args[@]}" -eq 0 ] \
+            && [ "${#observation_args[@]}" -eq 0 ]; then
+            echo "::warning::no exercise sources available; publishing baseline-only report"
+          fi
           python3 scripts/simulation/violation_census.py \
             "${coverage_args[@]}" \
-            --fleet-dir "$RUNNER_TEMP/violation-sites" \
+            "${fleet_args[@]}" \
+            "${observation_args[@]}" \
+            "${partial_args[@]}" \
+            --expected-run-id "${{ github.run_id }}" \
             --output "$RUNNER_TEMP/violation-site-census.json"
+        env:
+          CENSUS_PARTIAL: ${{ needs.simulation-nightly.result != 'success' || needs.violation-site-observations.result != 'success' || steps.fleet-download.outcome != 'success' || steps.observations-download.outcome != 'success' }}
 
       - name: Upload violation-site exercise report
         uses: actions/upload-artifact@v7
