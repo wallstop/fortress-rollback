@@ -3997,7 +3997,7 @@ mod tests {
         let limit = 32 * 1024;
         let location_len = limit - 32 - prefix - 4;
         let location: &'static str =
-            Box::leak(format!("src/{}.rs:1", "x".repeat(location_len - 9)).into_boxed_str());
+            Box::leak(format!("src/ {}.rs:1", "x".repeat(location_len - 10)).into_boxed_str());
 
         let mut observed = std::collections::BTreeSet::new();
         observed.insert(location);
