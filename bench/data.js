@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794629216578,
+  "lastUpdate": 1794634304311,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "71d9ca03f7aa05528793b0a6bf4ce01fe40f66fa",
-          "message": "Refresh standalone workspace dependencies (#276)\n\n## Summary\n\n- refresh every dependency in the three standalone Cargo workspaces to\nthe newest version allowed by their manifests\n- add the previously omitted `/tests/godot-emscripten` workspace to\nweekly Dependabot coverage\n- leave the root workspace unchanged because `cargo update --workspace`\nreports zero compatible updates\n\n## Compatibility and security\n\n- retains the repository's declared dependency constraints and lockfile\nformat\n- fuzz and Loom workspaces compile with Rust 1.86\n- the Godot Emscripten probe compiles on its supported current toolchain\nfor `wasm32-unknown-emscripten`; its existing `godot 0.5.4` dependency\nrequires Rust 1.94\n- `cargo audit` reports no vulnerabilities or yanked crates; the allowed\nbincode unmaintained advisory remains tracked in #273\n- the macroquad advisory remains tracked separately in #274\n\n## Validation\n\n- `cargo +1.86.0 check --locked --manifest-path fuzz/Cargo.toml`\n- `RUSTFLAGS='--cfg loom' cargo +1.86.0 check --locked --manifest-path\nloom-tests/Cargo.toml`\n- `cargo check --locked --manifest-path\ntests/godot-emscripten/Cargo.toml --target wasm32-unknown-emscripten`\n- `cargo audit --file` for all three refreshed lockfiles\n- `cargo update --dry-run` for all three standalone manifests: zero\nremaining compatible updates\n- repository pre-commit hooks for the staged files\n\n## Review readiness\n\nThis is intentionally separate from #275: it contains only generated\nlockfile refreshes and Dependabot coverage. It has no library source,\npublic API, protocol, or behavior change.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Dependency-only lockfile and CI config changes with no API or runtime\nbehavior changes; risk is limited to toolchain/test compatibility if a\ntransitive update regresses builds.\n> \n> **Overview**\n> Refreshes **Cargo.lock** for the three standalone workspaces (`fuzz/`,\n`loom-tests/`, and `tests/godot-emscripten/`) to the newest versions\nallowed by their manifests, without changing root workspace dependencies\nor any library source.\n> \n> Lockfile churn is mostly transitive bumps (e.g. `syn`, `libc`,\n`wasm-bindgen`, `futures-*`, regex crates) and slimmer Windows-related\ndependency trees where upstream crates dropped older `windows` umbrella\npackages.\n> \n> **Dependabot** now includes weekly grouped updates for\n`/tests/godot-emscripten`, matching the other isolated Cargo workspaces.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n51e40e2a0e3188c369815074b61dee3b6c56021a. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T16:04:28Z",
-          "tree_id": "266f1aefcfa67aaa6c9142447b07fab320313618",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/71d9ca03f7aa05528793b0a6bf4ce01fe40f66fa"
-        },
-        "date": 1785687492328,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 132653,
-            "range": "± 795",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 48373,
-            "range": "± 290",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 109",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3140,
-            "range": "± 204",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2789,
             "range": "± 170",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "482ec27e9e6473f31d3bd08451181b2a5b79258f",
+          "message": "test(simulation): complete and cut the exact violation-site census (#414)\n\nInventory report_violation_to! sites, wrapper-macro call sites, and placeholder-first messages; regenerate the 284-site baseline; delete two redundant receive-path asserts; cover 36 previously unexercised sites with focused tests. Local exact census: 154/284 exercised (130 unexercised), down from 159 unexercised in nightly run 43555370869.",
+          "timestamp": "2026-11-13T21:23:36-08:00",
+          "tree_id": "962e69a2812ca55ab94cdfcfc4361ee3dab7a3bd",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/482ec27e9e6473f31d3bd08451181b2a5b79258f"
+        },
+        "date": 1794634303012,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60534,
+            "range": "± 972",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31110,
+            "range": "± 198",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1862,
+            "range": "± 112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3139,
+            "range": "± 176",
             "unit": "ns/iter"
           }
         ]
