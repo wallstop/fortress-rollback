@@ -1549,14 +1549,14 @@ mod tests {
         let clock = TestClock::new();
         let config = ChaosConfig::builder().latency_ms(1_000).build();
         let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
-        assert!(socket.receive_all_messages().is_empty());
+        assert_eq!(socket.receive_all_messages(), Vec::new());
         assert_eq!(socket.packets_in_flight(), cap);
 
         // A later poll starts with a full in-flight queue and a fresh
         // per-poll acceptance counter, so the in-flight guard is the first
         // limit hit.
         socket.inner_mut().to_receive.push((addr, msg));
-        assert!(socket.receive_all_messages().is_empty());
+        assert_eq!(socket.receive_all_messages(), Vec::new());
         assert_eq!(socket.packets_in_flight(), cap);
     }
 
@@ -1603,7 +1603,7 @@ mod tests {
         // The overflowed incoming batch is dropped; the already-buffered
         // packets are released because no new messages arrived.
         assert_eq!(messages.len(), cap - 1);
-        assert!(socket.reorder_buffer.is_empty());
+        assert_eq!(socket.reorder_buffer, Vec::new());
     }
 
     #[test]

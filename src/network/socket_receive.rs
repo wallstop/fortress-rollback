@@ -277,7 +277,7 @@ mod tests {
                 oversized_reported = true;
                 Ok((5, addr))
             });
-        assert!(oversized.is_empty());
+        assert_eq!(oversized, Vec::new());
 
         let errored = receive_all_messages_from(
             &mut recv_buffer,
@@ -285,7 +285,7 @@ mod tests {
             &mut metrics,
             |_buffer| -> io::Result<(usize, SocketAddr)> { Err(io::Error::from(ErrorKind::Other)) },
         );
-        assert!(errored.is_empty());
+        assert_eq!(errored, Vec::new());
         assert_eq!(observer.len(), 2);
     }
 
