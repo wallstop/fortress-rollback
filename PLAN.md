@@ -16,9 +16,11 @@
 
 ## Future
 
-1. **P2 — Compare remaining fleet-search techniques against fresh-seed search.** Use the
-   [fleet-search roadmap](.agents/skills/dst/references/fleet-search-roadmap.md) to compare PCT,
-   prefix branching, and LDFI-lite at equal compute. **Exit:** retain a technique only when it
-   materially increases unique useful states or defect discovery per compute, preserves exact
-   replay and bounded artifacts, and contributes a minimized regression; otherwise record the
-   rejected experiment and keep the simpler fleet.
+1. **P2 — Compare prefix-replay branching and LDFI-lite against fresh-seed search.** PCT is a
+   measured rejection (see the [fleet-search
+   roadmap](.agents/skills/dst/references/fleet-search-roadmap.md#order-and-entrance-gates)); its
+   opt-in harness axis remains only for order-sensitivity regressions. **Exit:** retain a
+   technique only when it materially increases unique useful states or defect discovery per
+   compute, preserves exact replay and bounded artifacts, and contributes a minimized regression;
+   otherwise record the rejected experiment and keep the simpler fleet. Scope:
+   [#420](https://github.com/wallstop/fortress-rollback/issues/420).

@@ -19,7 +19,16 @@ existing oracle.
    assertion changes intentionally.
 3. **Probabilistic concurrency testing (PCT).** Bias deterministic delivery order with a bounded
    number of priority changes. Compare unique abstract states and failures per unit of compute with
-   the current seeded scheduler before retaining it.
+   the current seeded scheduler before retaining it. **Measured rejection (2026-11-14):** a matched
+   128-schedule / 640,000-step window with 16 priority changes observed the same six schedule-level
+   organic sometimes-state vectors, the same thirteen per-ID peer-count buckets, and the same 107
+   bounded behavior signatures as the forward-order baseline, with zero failures in either arm;
+   every trace hash changed, so the interleaving was applied. The comparison also exposed a
+   freeze-frame oracle false positive for a survivor lagging behind the freeze frame, now fixed and
+   pinned by `oracle_ignores_lagging_survivor_before_the_freeze_frame` and
+   `pct_lagging_survivor_does_not_fake_a_freeze_divergence`. Keep the opt-in harness axis for
+   order-sensitivity regressions; do not enable PCT in the nightly fleet without a new
+   order-sensitive hypothesis.
 4. **Prefix-replay branching.** Resume from replay-safe corpus prefixes that reached rare abstract
    states, then explore alternative bounded suffixes. Require exact prefix identity and demonstrate
    better state discovery per compute budget than fresh-seed search.

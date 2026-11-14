@@ -12,8 +12,8 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
-    phase_control_progress_interval, phase_control_sample_capacity, run, RunOptions, RunReport,
-    TraceSessionState,
+    phase_control_progress_interval, phase_control_sample_capacity, run, PctOptions, RunOptions,
+    RunReport, TraceSessionState,
 };
 use super::sometimes_state::{
     publish_targeted_probe, write_organic_shard, write_violation_sites_shard, CensusAccumulator,
@@ -5118,4 +5118,50 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
     let replay = run(&schedule, &nightly_run_options(&schedule));
     assert_eq!(first.trace_hash, replay.trace_hash);
     assert_eq!(first.sometimes_state, replay.sometimes_state);
+}
+
+/// Permanent regression for the PCT-exposed freeze-frame oracle false
+/// positive. A one-change PCT interleaving at step 302 moves the removed target
+/// (peer 4) to the front; peer 0 then ends with confirmed frame 301 while peer
+/// 3 reaches 303 and observes the slot-4 freeze at frame 302. The oracle used
+/// to read peer 0's unobserved `None` as a disagreement. It must ignore a
+/// survivor whose confirmed prefix ends before the earliest observed freeze,
+/// while still failing a survivor that reached that freeze and never observed a
+/// stable `Disconnected` run.
+#[test]
+fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
+    let schedule: Schedule = serde_json::from_str(include_str!(
+        "known_failures/d14-lossy-graceful-remove.json"
+    ))
+    .expect("checked-in D14 schedule must deserialize");
+    validate_schedule(&schedule).expect("checked-in D14 schedule must be valid");
+    let options = RunOptions {
+        pct: Some(PctOptions {
+            seed: 0xD14,
+            priority_changes: 1,
+        }),
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    assert_eq!(
+        report.final_confirmed,
+        vec![301, 301, 301, 303, 295],
+        "the regression depends on the lagging-survivor interleaving"
+    );
+    assert!(
+        !report
+            .verdict
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, OracleFailure::FreezeFrameDivergence { .. })),
+        "a survivor that has not reached the freeze cannot disagree: {:?}",
+        report.verdict.failures
+    );
+    report.expect_pass(&schedule);
+
+    let replay = run(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "PCT interleaving must replay exactly"
+    );
 }

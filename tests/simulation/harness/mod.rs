@@ -30,7 +30,6 @@ use crate::common::sim_net::{SimNet, SimPayloadMetadata, SimSocket, SimSocketBin
 use crate::common::stubs::{StateStub, StubConfig, StubInput};
 use crate::common::test_clock::TestClock;
 use fortress_rollback::hash::{fnv1a_hash, DeterministicHasher};
-#[cfg(feature = "hot-join")]
 use fortress_rollback::rng::{Pcg32, SeedableRng};
 use fortress_rollback::telemetry::CollectingObserver;
 use fortress_rollback::{
@@ -277,6 +276,35 @@ pub enum PeerDriveOrder {
     Rotating,
 }
 
+/// Bounded probabilistic-concurrency-testing (PCT) peer interleaving.
+///
+/// PCT perturbs a deterministic scheduler with a small, fixed number of
+/// priority changes instead of exploring every interleaving. The harness is
+/// single-threaded, so the observable concurrency is the order in which the
+/// outer loop polls peers within one virtual step. The run starts from a
+/// seeded priority permutation, then applies at most `priority_changes`
+/// priority assignments over the whole run; a later change may target the same
+/// peer or step, so fewer than that many distinct moves can be observable. All
+/// other steps use the current priority order. The initial priorities and
+/// every change are derived from `seed`, so the interleaving replays exactly.
+/// `priority_changes: 0` still uses the seeded initial permutation rather than
+/// the historical forward order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PctOptions {
+    /// Seed for the initial priority permutation and the change schedule.
+    pub seed: u64,
+    /// Number of priority changes over the whole run.
+    pub priority_changes: u32,
+}
+
+impl PctOptions {
+    /// Upper bound accepted from a test configuration. PCT is only a
+    /// perturbation of the base order; larger budgets are a different
+    /// experiment and would make the state space unbounded.
+    pub const MAX_PRIORITY_CHANGES: u32 = 1_024;
+}
+
 /// Test-only mutations that distinguish the nominal fixed-history reference
 /// from the legacy peer-agreement oracle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +410,12 @@ pub struct RunOptions {
     /// Opt into the bounded two-peer fixed-history differential oracle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differential: Option<DifferentialOptions>,
+    /// Opt into a bounded PCT-style peer interleaving. `None` preserves the
+    /// historical forward drive order. Mutually exclusive with
+    /// [`Self::differential`], whose trajectory comparison needs a fixed
+    /// reference order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pct: Option<PctOptions>,
 }
 
 /// Inclusive input-history interval retained by one observer at the receipt
@@ -2682,6 +2716,59 @@ fn peer_drive_indices(order: PeerDriveOrder, step: u32, n: usize) -> Vec<usize> 
     }
 }
 
+/// Deterministic PCT priority state.
+///
+/// One initial priority per peer plus a sorted list of at most
+/// [`PctOptions::MAX_PRIORITY_CHANGES`] `(step, peer, priority)` perturbations.
+/// The order for a step is the current priorities sorted ascending with the
+/// peer index as the stable tie-break.
+struct PctDriveOrder {
+    priorities: Vec<u64>,
+    changes: Vec<(u32, usize, u64)>,
+    next_change: usize,
+}
+
+impl PctDriveOrder {
+    fn new(options: PctOptions, steps: u32, n: usize) -> Self {
+        // Domain-separate the priority stream from the schedule and network
+        // seeds so a PCT run never silently aliases the base trace.
+        let mut rng = Pcg32::seed_from_u64(options.seed ^ 0x9E37_79B9_7F4A_7C15);
+        let priorities = (0..n).map(|_| rng.next_u64()).collect();
+        let change_count = usize::try_from(options.priority_changes)
+            .unwrap_or(usize::MAX)
+            .min(usize::try_from(PctOptions::MAX_PRIORITY_CHANGES).unwrap_or(usize::MAX));
+        let mut changes = Vec::with_capacity(change_count);
+        if steps > 0 {
+            for _ in 0..change_count {
+                let step = rng.next_u32() % steps;
+                let peer = usize::try_from(rng.next_u32()).unwrap_or(usize::MAX) % n.max(1);
+                changes.push((step, peer, rng.next_u64()));
+            }
+            changes.sort_by_key(|(step, _, _)| *step);
+        }
+        Self {
+            priorities,
+            changes,
+            next_change: 0,
+        }
+    }
+
+    fn order(&mut self, step: u32) -> Vec<usize> {
+        while let Some((change_step, peer, priority)) = self.changes.get(self.next_change) {
+            if *change_step > step {
+                break;
+            }
+            if let Some(slot) = self.priorities.get_mut(*peer) {
+                *slot = *priority;
+            }
+            self.next_change += 1;
+        }
+        let mut order: Vec<usize> = (0..self.priorities.len()).collect();
+        order.sort_by_key(|peer| (self.priorities[*peer], *peer));
+        order
+    }
+}
+
 /// Returns the cumulative 60 Hz frame opportunities visible at the beginning
 /// of `step` on a clock running at `ppm` relative to base virtual time.
 fn skew_gated_target(step: u32, step_dt_ms: u64, ppm: i32) -> u64 {
@@ -2995,6 +3082,18 @@ pub(crate) fn validate_run_options(
     let n = schedule.config.n_players;
     if let Some(scope) = &options.component_scope {
         scope.validate(n)?;
+    }
+    if let Some(pct) = options.pct {
+        if options.differential.is_some() {
+            return Err("pct and differential drive orders are mutually exclusive".to_owned());
+        }
+        if pct.priority_changes > PctOptions::MAX_PRIORITY_CHANGES {
+            return Err(format!(
+                "pct priority_changes {} exceeds the {} change cap",
+                pct.priority_changes,
+                PctOptions::MAX_PRIORITY_CHANGES
+            ));
+        }
     }
     if let Some(differential) = options.differential {
         let peer_kills: Vec<_> = schedule
@@ -3739,6 +3838,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut spectator_min_hosts_during_outage: Option<usize> = None;
 
     let differential = options.differential;
+    let mut pct_order = options
+        .pct
+        .map(|pct| PctDriveOrder::new(pct, schedule.config.steps, n));
     let mut differential_confirmed_inputs = differential.map(|_| vec![BTreeMap::new(); n]);
     let mut component_confirmed_inputs = options
         .component_scope
@@ -4343,10 +4445,16 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
         // Differential mode varies the complete peer visit order by index;
         // logical peer storage and every report vector remain peer-indexed.
-        // The legacy default is the historical forward order.
+        // The legacy default is the historical forward order. A PCT
+        // interleaving overrides it with a bounded number of priority changes.
         let drive_order =
             differential.map_or(PeerDriveOrder::Forward, |options| options.drive_order);
-        for i in peer_drive_indices(drive_order, step, n) {
+        let order = if let Some(pct) = pct_order.as_mut() {
+            pct.order(step)
+        } else {
+            peer_drive_indices(drive_order, step, n)
+        };
+        for i in order {
             // Clock-gated opportunities are consumed even while a peer is
             // stalled, dead, or synchronizing. A resumed application must not
             // burst through a wall-clock backlog that it never simulated.
@@ -5733,6 +5841,130 @@ mod tests {
         let encoded = serde_json::to_vec(&options).expect("run options serialize");
         let replay: RunOptions = serde_json::from_slice(&encoded).expect("run options deserialize");
         assert_eq!(replay, options);
+    }
+
+    #[test]
+    fn pct_drive_order_replays_and_bounds_priority_changes() {
+        let options = PctOptions {
+            seed: 7,
+            priority_changes: 4,
+        };
+        let sample = |options| {
+            let mut order = PctDriveOrder::new(options, 64, 5);
+            (0..64).map(|step| order.order(step)).collect::<Vec<_>>()
+        };
+        let first = sample(options);
+        let replay = sample(options);
+        assert_eq!(first, replay, "PCT interleaving must replay exactly");
+        let generated = PctDriveOrder::new(options, 64, 5);
+        assert!(
+            generated.changes.len() <= usize::try_from(options.priority_changes).expect("fits"),
+            "generated change list must respect the PCT budget"
+        );
+        for order in &first {
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, vec![0, 1, 2, 3, 4], "each visit is a permutation");
+        }
+        let changed = first.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert!(
+            changed > 0,
+            "a nonzero PCT budget must move at least one priority"
+        );
+        assert!(
+            changed <= 4,
+            "PCT moved {changed} times for a four-change budget"
+        );
+    }
+
+    #[test]
+    fn pct_drive_order_applies_each_change_at_its_exact_step() {
+        let mut order = PctDriveOrder {
+            priorities: vec![0, 1, 2],
+            changes: vec![(1, 2, 0), (2, 0, 10)],
+            next_change: 0,
+        };
+        assert_eq!(order.order(0), vec![0, 1, 2]);
+        assert_eq!(
+            order.order(1),
+            vec![0, 2, 1],
+            "the step-1 change must apply before that step's visit order"
+        );
+        assert_eq!(
+            order.order(2),
+            vec![2, 1, 0],
+            "the step-2 change must apply before that step's visit order"
+        );
+        assert_eq!(order.order(3), vec![2, 1, 0], "changes are not re-applied");
+    }
+
+    #[test]
+    fn pct_drive_order_without_changes_is_a_fixed_permutation() {
+        let mut order = PctDriveOrder::new(
+            PctOptions {
+                seed: 11,
+                priority_changes: 0,
+            },
+            32,
+            6,
+        );
+        let first = order.order(0);
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5], "order is a permutation");
+        for step in 1..32 {
+            assert_eq!(order.order(step), first);
+        }
+    }
+
+    #[test]
+    fn pct_options_are_bounded_and_exclusive_with_differential_mode() {
+        let schedule = schedule::generate(1, schedule::SimConfig::smoke(2));
+        let too_many = RunOptions {
+            pct: Some(PctOptions {
+                seed: 1,
+                priority_changes: PctOptions::MAX_PRIORITY_CHANGES + 1,
+            }),
+            ..RunOptions::default()
+        };
+        assert!(validate_run_options(&schedule, &too_many)
+            .expect_err("oversized PCT budget must be rejected")
+            .contains("exceeds"));
+
+        let both = RunOptions {
+            pct: Some(PctOptions {
+                seed: 1,
+                priority_changes: 1,
+            }),
+            differential: Some(DifferentialOptions::default()),
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            validate_run_options(&schedule, &both),
+            Err("pct and differential drive orders are mutually exclusive".to_owned())
+        );
+    }
+
+    #[test]
+    fn pct_interleaving_changes_the_trace_without_failing_a_green_run() {
+        let schedule = schedule::generate(9, schedule::SimConfig::smoke(4));
+        let baseline = run(&schedule, &RunOptions::default());
+        let pct = run(
+            &schedule,
+            &RunOptions {
+                pct: Some(PctOptions {
+                    seed: 3,
+                    priority_changes: 16,
+                }),
+                ..RunOptions::default()
+            },
+        );
+        baseline.expect_pass(&schedule);
+        pct.expect_pass(&schedule);
+        assert_ne!(
+            baseline.trace_hash, pct.trace_hash,
+            "PCT must perturb the observable interleaving"
+        );
     }
 
     #[test]
