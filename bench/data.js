@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794634304311,
+  "lastUpdate": 1794639877316,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "79cb86dd4c5011feecc4d4cdf9e7dd265ef8e6eb",
-          "message": "Eliminate empty graceful-drop poll reservations (#277)\n\n## Summary\n\n- add a synchronized one-endpoint P2P allocation contract at N=2, N=4,\nand N=16\n- stop ordinary P2P polling from reserving 256 graceful-drop records per\nremote when bounded endpoint mailboxes are empty\n- preserve queued and active coordinated-drop progress on empty polls,\nwith a direct regression test\n- document the measured improvement and close the broad\nbenchmark/allocation research issue\n\n## Root cause\n\n`P2PSession::poll_coordinated_drop` reserved `remote_count *\nMAX_RECEIVE_MESSAGES_PER_POLL` entries on every poll. A warmed frame\ntherefore allocated 28,672 temporary bytes even when every endpoint's\nbounded graceful-drop mailbox was empty.\n\nThe poll now checked-sums the exact staged message counts and reserves\nonly that amount. Arithmetic overflow and allocation failure still fail\nclosed with `ResourceLimit`; an empty count does not skip the lifecycle\ndriver.\n\n## Measured impact\n\n| Players | Before | After | Contract |\n| ---: | ---: | ---: | ---: |\n| 2 | 5 ops / 28,717 B | 4 ops / 45 B | 4 ops / 128 B |\n| 4 | 5 ops / 28,729 B | 4 ops / 57 B | 4 ops / 128 B |\n| 16 | 6 ops / 29,050 B | 5 ops / 378 B | 5 ops / 512 B |\n\nThe fixture proves synchronization and acknowledged warm-up, exactly one\n`Input` submission, all local-player input bytes, delta/RLE compression,\none pending bounded frame, one application advance, and no rollback\nrequest.\n\n## Validation\n\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- default Nextest: 2,887 passed, 71 skipped\n- hot-join Nextest: 3,143 passed, 72 skipped\n- warning-denied workspace rustdoc\n- doctests: 160 passed, 50 ignored\n- allocation contract: 10 complete debug repetitions plus release\n- repository agent preflight, changelog check, version-sync check,\nMarkdown lint, and link check\n- three-round adversarial review; findings were corrected in the fixture\nand empty-mailbox lifecycle regression\n\nCloses #264.\n\n## Follow-up disposition\n\n#242 remains externally gated by upstream Signal Fish browser E2E work.\nDependency research remains tracked separately by #273 (bincode\nreplacement) and #274 (macroquad example-stack security/replacement);\nthis PR changes no dependency or wire format.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Localized polling/allocation change with regression and\nallocation-contract coverage; coordinated-drop fail-closed paths on\noverflow remain unchanged.\n> \n> **Overview**\n> **`poll_coordinated_drop`** no longer reserves `remote_count × 256`\ngraceful-drop slots on every frame poll when endpoint mailboxes are\nempty. It sums each remote’s staged drop count via new\n**`UdpProtocol::received_drop_message_count`**, reserves only that exact\ncapacity (skipping reservation when zero), and still fails closed on\noverflow or allocation failure.\n> \n> A unit test confirms **empty mailboxes still advance** queued\ncoordinated-drop work (single-survivor commit without inbound control\nmessages). The **allocation contract** adds a warmed two-session\nnetworked send fixture at N=2/4/16 with byte ceilings (45–378 B vs ~29\nKiB before), documenting the fix in **CHANGELOG**.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n086bb2e1f6360c6fc7a56b3bccb64a55e26bfa54. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T10:14:05-07:00",
-          "tree_id": "3f73b33f4e34d1fa6326eadd6edce301044aaf3c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/79cb86dd4c5011feecc4d4cdf9e7dd265ef8e6eb"
-        },
-        "date": 1785691374075,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 129935,
-            "range": "± 4382",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 51528,
-            "range": "± 329",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 21",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3122,
-            "range": "± 256",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3139,
             "range": "± 176",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e64f23ad8d258f0c006d3789d7dcde04fba3d61a",
+          "message": "test: cover reachable violation-site guards (P2) (#415)\n\nExercise the reachable defensive guards behind the remaining unexercised violation-site inventory. Local exact census moves 154/284 -> 202/284 exercised (130 -> 82 unexercised). Test-only change; no production behavior.",
+          "timestamp": "2026-11-13T22:56:20-08:00",
+          "tree_id": "e6c74af16e17544ca19a2200197803cc67e25420",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/e64f23ad8d258f0c006d3789d7dcde04fba3d61a"
+        },
+        "date": 1794639875811,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 43906,
+            "range": "± 187",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25497,
+            "range": "± 213",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 674,
+            "range": "± 76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 869,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6940,
+            "range": "± 274",
             "unit": "ns/iter"
           }
         ]
