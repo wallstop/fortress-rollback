@@ -1026,8 +1026,15 @@ impl Oracle {
                                 == SessionState::Running
                     })
                     .collect();
-                let mut canonical: Option<(usize, Option<FreezePoint>)> = None;
-                let mut any_stable_freeze = false;
+                // Collect each survivor's stable freeze observation together
+                // with its own confirmed ceiling. A survivor whose confirmed
+                // prefix ends *before* the earliest observed freeze has not
+                // seen the transition yet and therefore cannot disagree; it is
+                // excluded from the comparison instead of being treated as an
+                // authoritative `None`. A survivor that confirmed through the
+                // freeze frame but never observed a stable `Disconnected` run
+                // is still a real divergence.
+                let mut observations: Vec<(usize, i32, Option<FreezePoint>)> = Vec::new();
                 for &peer in &live_running_peers {
                     let Some(records) = applied_inputs.get(peer) else {
                         continue;
@@ -1038,10 +1045,24 @@ impl Oracle {
                         .unwrap_or(Frame::NULL)
                         .as_i32();
                     let observed = stable_freeze_point(records, slot, max_frame);
-                    any_stable_freeze |= observed.is_some();
-                    match canonical {
-                        None => canonical = Some((peer, observed)),
-                        Some((first_author, expected)) if expected != observed => {
+                    observations.push((peer, max_frame, observed));
+                }
+                let canonical = observations
+                    .iter()
+                    .filter_map(|(peer, _, observed)| observed.map(|point| (*peer, point)))
+                    .min_by_key(|(_, point)| point.frame);
+                let Some((first_author, expected)) = canonical else {
+                    if !live_running_peers.is_empty() {
+                        self.push_failure(OracleFailure::FreezeFrameMissing {
+                            slot,
+                            live_running_peers,
+                        });
+                    }
+                    continue;
+                };
+                for &(peer, max_frame, observed) in &observations {
+                    match observed {
+                        Some(actual) if actual != expected => {
                             // A hot-join replacement replays the bridge frames
                             // as `Confirmed`, so it can only expose a
                             // pre-activation freeze from its activation frame.
@@ -1052,33 +1073,29 @@ impl Oracle {
                                 .get(peer)
                                 .copied()
                                 .unwrap_or(false)
-                                && match (expected.as_ref(), observed.as_ref()) {
-                                    (Some(expected), Some(observed)) => {
-                                        expected.input == observed.input
-                                    },
-                                    _ => false,
-                                };
+                                && actual.input == expected.input;
                             if !value_only_match {
                                 self.push_failure(OracleFailure::FreezeFrameDivergence {
                                     slot,
                                     peer,
                                     first_author,
-                                    expected,
-                                    actual: observed,
+                                    expected: Some(expected),
+                                    actual: Some(actual),
                                 });
                             }
                         },
                         Some(_) => {},
+                        None if max_frame >= expected.frame => {
+                            self.push_failure(OracleFailure::FreezeFrameDivergence {
+                                slot,
+                                peer,
+                                first_author,
+                                expected: Some(expected),
+                                actual: None,
+                            });
+                        },
+                        None => {},
                     }
-                }
-                if matches!(canonical, Some((_, None)))
-                    && !live_running_peers.is_empty()
-                    && !any_stable_freeze
-                {
-                    self.push_failure(OracleFailure::FreezeFrameMissing {
-                        slot,
-                        live_running_peers,
-                    });
                 }
             }
         }
@@ -2429,11 +2446,11 @@ mod tests {
                 failure,
                 OracleFailure::FreezeFrameDivergence {
                     slot: 2,
-                    peer: 1,
-                    first_author: 0,
-                    expected: None,
-                    actual,
-                } if *actual == Some(FreezePoint { frame: 10, input: fp(30) })
+                    peer: 0,
+                    first_author: 1,
+                    expected,
+                    actual: None,
+                } if *expected == Some(FreezePoint { frame: 10, input: fp(30) })
             )),
             "expected a mixed None/Some freeze-frame divergence, got {:?}",
             verdict.failures
@@ -2444,6 +2461,45 @@ mod tests {
                 .iter()
                 .any(|failure| matches!(failure, OracleFailure::FreezeFrameMissing { .. })),
             "a later stable freeze must suppress the all-missing diagnostic: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// A survivor whose confirmed prefix ends before the earliest observed
+    /// freeze has not seen the transition yet. Comparing its `None` against a
+    /// later survivor's `Some` would make a merely lagging peer look like a
+    /// freeze disagreement; the real disagreement starts only once both
+    /// survivors have confirmed through the freeze frame.
+    #[test]
+    fn oracle_ignores_lagging_survivor_before_the_freeze_frame() {
+        let mut oracle = Oracle::new(3);
+        oracle.mark_peer_dead(2);
+        let applied = [
+            slot2_records(&[(0, confirmed(30))]),
+            slot2_records(&[
+                (0, confirmed(30)),
+                (70, disconnected(30)),
+                (71, disconnected(30)),
+            ]),
+            BTreeMap::new(),
+        ];
+        let verdict = oracle.finalize_with_applied_inputs(
+            &[BTreeMap::new(), BTreeMap::new(), BTreeMap::new()],
+            &applied,
+            &[Frame::new(60), Frame::new(80), Frame::new(9)],
+            &[
+                SessionState::Running,
+                SessionState::Running,
+                SessionState::Synchronizing,
+            ],
+        );
+        assert!(
+            !verdict.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::FreezeFrameDivergence { .. }
+                    | OracleFailure::FreezeFrameMissing { .. }
+            )),
+            "a survivor that has not reached the freeze frame cannot disagree: {:?}",
             verdict.failures
         );
     }
