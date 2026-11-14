@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794552780090,
+  "lastUpdate": 1794629216578,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "0d60cf4b90ff8624d8036316f607cae7a6ce2946",
-          "message": "Eliminate P2P local-input staging allocations (#275)\n\n## What\n\n- replace per-frame `P2PSession` local-input `BTreeMap` staging with\nfallibly preallocated player-indexed slots\n- retain slot storage across frames while preserving sparse handles,\noverwrite, retry, input-drop, and deterministic ordering semantics\n- let protocol serialization consume map-backed or slot-backed inputs\nwithout changing canonical handle order or encoded bytes\n- extend the deterministic allocation ledger to the isolated warmed\nall-local P2P staging path\n\n## Why\n\nIssue #264's allocation ledger identified the next candidate but\nrequired measurement before optimization. The zero-allocation target\nfailed with a stable signature:\n\n- N=2: one allocation / 192 bytes\n- N=4: one allocation / 192 bytes\n- N=16: four allocations / 800 bytes\n\nThe transient cost matched the removed sync-test staging map: N=16\ncontained 672 bytes of map nodes plus the returned `InputVec`'s 128-byte\nspill.\n\n## Result\n\nWith desync detection disabled to isolate staging, the warm-up save\nrequest fulfilled, and application callbacks outside the measured\nregion:\n\n- N=2: zero allocations / zero bytes\n- N=4: zero allocations / zero bytes\n- N=16: one allocation / 128 bytes (the returned `InputVec` spill)\n\nNetwork encoding and checksum history retain their separate bounded\nallocations; this PR does not claim whole networked frames are\nallocation-free.\n\n## Semantics and safety\n\nRegression coverage pins:\n\n- sparse/nonzero local player handles\n- reverse submission preserving ascending player order\n- observable duplicate overwrite\n- missing-input failure followed by retry with only the missing slot\n- `Frame::NULL` local-input rejection suppressing the whole endpoint\nsend\n- map-backed and slot-backed input sources producing identical frame\nmetadata and bytes\n- fallible construction-time reservation with structured errors\n\nNo public signature, config default, or wire layout changes.\n\n## Validation\n\n- allocation target went red with the exact baseline above before\nproduction changes\n- ten consecutive debug allocation runs\n- release-mode allocation contract\n- default Nextest: 2,886 passed, 71 skipped\n- hot-join Nextest: 3,142 passed, 72 skipped\n- `cargo clippy --workspace --all-targets --features tokio,json`\n- warning-denied workspace docs\n- changelog/version checks, 1,393 links, 286 release-automation tests,\nspelling, allocation-bound hook, and full agent preflight\n- independent adversarial review: zero remaining findings\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS\n- Determinism: PASS\n- Agent preflight: PASS\n- Error handling: PASS\n- Tests breadth: PASS\n- Design log reviewed: N/A (private staging representation)\n- CHANGELOG reviewed: YES\n\nProgresses #264.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Internal staging and protocol abstraction only; no public API or wire\nlayout changes. Risk is mainly behavioral parity (sparse handles, drop\nsuppression, encoding order), which the expanded tests target.\n> \n> **Overview**\n> **P2P local-input staging** moves from a per-frame `BTreeMap` to\nconstructor-reserved `Vec<Option<PlayerInput>>` slots indexed by player\nhandle. Slots are cleared with `None` after each advance instead of\n`clear()`, so sparse handles, overwrite, and missing-input retry keep\nworking without rebuilding map nodes each frame.\n> \n> **Wire encoding** gains an internal `InputSource` trait so\n`InputBytes::try_from_inputs` and `send_input` accept either the old map\nor the new slot slice; ascending handle order and encoded bytes stay\nidentical.\n> \n> **Allocation contract** adds warmed all-local `P2PSession` frame\nmeasurements (desync off, warm-up save fulfilled): 2–4 players stay\nheap-free on staging; 16 players keep only the returned `InputVec`\nspill. Network encode and checksum history are outside that ledger.\n> \n> Regression tests cover sparse local handles, dropped-input send\nsuppression, map vs slot encoding parity, and overwrite/advance\nbehavior.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n95a01679fdb10aeaad5ad03f748ba8dc30ad25e0. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T09:03:21-07:00",
-          "tree_id": "374b3a2b6007454278e38b596c04be67b05d3d87",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0d60cf4b90ff8624d8036316f607cae7a6ce2946"
-        },
-        "date": 1785687119048,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 135364,
-            "range": "± 751",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 51920,
-            "range": "± 272",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1405,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3139,
-            "range": "± 241",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2810,
             "range": "± 221",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3db1458d59ae7fe18431e1192f16820bc10ec94a",
+          "message": "test(simulation): make violation-site exercise census exact (#413)\n\n## Summary\n\nCloses #411.\n\nThe nightly violation-site exercise census joined the content-addressed\nproduction\n`report_violation!` baseline with Cobertura line coverage and fleet\nshards. Coverage is only a\nconservative lower bound for macro invocations: LLVM can attribute an\nexpansion to surrounding\nlines, so genuinely executed assertions stayed in the unexercised set.\nThis change adds an exact\nruntime source and folds it into the nightly report.\n\n## Changes\n\n- **Opt-in `violation-census` feature.** `SpecViolation::new` calls a\ncold-path hook that records\neach new `file:line` location in a `parking_lot`-guarded `BTreeSet` (256\nlocations per process).\nWhen `FORTRESS_VIOLATION_CENSUS_DIR` is set, each new location rewrites\na bounded\n`observations-<pid>.json` snapshot with sorted unique entries, an\noptional workflow `run_id`, and\na `truncated` marker when the 256-location or 32 KiB limit drops\nentries. The hook compiles out\nof normal builds and Loom builds, never panics, and treats every\nfilesystem error as diagnostic.\n- **Exact observations job.** The nightly workflow runs the full suite\nwith\n`--features tokio,json,hot-join,violation-census` and uploads the\nbounded artifacts.\n- **Census join.** `violation_census.py` gained `--observations-dir`,\n`--expected-run-id`, and\n`--partial` with artifact-count, per-artifact size, per-artifact\nlocation, and processed-location\ncaps plus schema, run-id, process-id, filename, and order validation.\nAbsolute and Windows paths\nnormalize without promoting test-local `src/` labels. Test-only labels\ncount as unmatched;\nmalformed `src/` locations still fail loudly; unmatched source and\nignored entries are surfaced\n  in the report. Empty fleet or observation inputs are rejected.\n- **Failure behavior.** The census runs with `if: always()`, tolerant\nartifact downloads, and marks\nthe report `partial` when a producer job or either artifact download\nfails.\n- Documented the feature in `Cargo.toml`, the user guide, migration\nguide, wiki mirrors, and\nchangelog, and added it to the cargo-geiger and strict-clippy feature\ncensuses.\n- Fixed a pre-existing non-line `SpecViolation` location on the\nscoped-observer drop path so\n  diagnostic consumers and the census can parse it.\n- Updated the P2 plan item to the exact-source next step.\n\n## Evidence\n\n- Full suite with the hook: **3,399 passed, 76 skipped**; 297 artifacts,\n163 observed locations,\n  max 5 per artifact, 0 over 64 KiB, one run id.\n- Census against those observations: **109/268 exercised** (vs. 25/268\nfrom coverage alone),\n109 matched, 54 unmatched (41 under `src/` surfaced for review), 0\ntruncated.\n  `src/network/compression.rs` no longer appears in the unexercised set.\n- Downloaded the latest main coverage artifact (`fe0b935`, run\n43380911481): coverage-derived IDs\n`0`, exact-observation IDs `109`; the exact source is currently a strict\nsuperset.\n- `cargo clippy --workspace --all-targets --features\ntokio,json,violation-census -- -D warnings`:\nclean. `cargo check --no-default-features --features violation-census`:\nclean. Both census tests\n  pass, including snapshot replacement and byte-budget truncation.\n- `python3 -m pytest scripts/tests/ -q`: **2,227 passed**; `mypy`:\nclean.\n- `ruff check`/`ruff format --check`, `actionlint`,\n`check-plan-hygiene`,\n`check-changelog-unreleased`, `sync-version --check`, `check-links`,\n`check-doc-claims`,\n  `check-unbounded-alloc`, and `agent-preflight.py --auto-fix`: clean.\n\nNo public API change; the hook is feature-gated and absent from normal\nbuilds.",
+          "timestamp": "2026-11-13T19:59:28-08:00",
+          "tree_id": "5a95a3c37f2b3175435b146422036faa597e0b1b",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/3db1458d59ae7fe18431e1192f16820bc10ec94a"
+        },
+        "date": 1794629215530,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39491,
+            "range": "± 393",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25607,
+            "range": "± 154",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1245,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2789,
+            "range": "± 170",
             "unit": "ns/iter"
           }
         ]
