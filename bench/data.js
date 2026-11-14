@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794681921328,
+  "lastUpdate": 1794688338283,
   "repoUrl": "https://github.com/wallstop/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "20caf394a1f157a4cfbe2877f6891f657a3184ad",
-          "message": "security: remove advisory-affected graphical examples (#280)\n\nCloses #274\n\n## Summary\n\n- remove the Macroquad-based ExGame binaries and the advisory-affected\nMacroquad/font stack from every Cargo workspace lock\n- retain `graphical-examples` as an empty deprecated compatibility\nfeature so existing manifests keep resolving without enabling code or\ndependencies\n- remove demo-only dependencies, native graphical packages, stale\ncargo-vet exemptions, and feature-matrix exclusions; ban `macroquad` and\n`ttf-parser` from re-entry\n- keep and harden five portable headless examples, including fail-closed\nstructured error handling and browser-WASM custom-socket compilation\n- document the security boundary, migration path, and dependency design\ndecision\n\n## Security rationale\n\nMacroquad 0.4.16 exposes process-global mutable context through safe\nAPIs used by the deleted render loops and has no patched release for\nRUSTSEC-2025-0035. Its font initialization selected the unmaintained\n`ttf-parser` owner covered by RUSTSEC-2026-0192. Neither crate remains\nin the resolved graph or workspace locks.\n\n## Validation\n\n- default Nextest: 2,887 passed; 71 skipped\n- hot-join Nextest: 3,143 passed; 72 skipped\n- Rust 1.86 all-target check\n- strict workspace Clippy with `tokio,json`\n- all five retained examples compile and run\n- browser `wasm32-unknown-unknown` custom-socket example check\n- cargo-semver-checks: 196/196 checks passed against 0.11.0\n- `cargo audit`: only separately tracked bincode warning (#273)\n- `cargo deny check advisories licenses bans sources`\n- workspace lock/version sync, docs/wiki/link claims, actionlint,\nrelease/toolchain tests, and authoritative agent preflight\n- two independent adversarial review iterations; no blockers remain\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Removes public graphical binaries and changes the default example\nstory (breaking for users who relied on ex_game), but core library\nnetworking behavior is unchanged; supply-chain risk from the advisory\nstack is eliminated.\n> \n> **Overview**\n> Removes the Macroquad-based **ExGame** examples (`ex_game_p2p`,\n`ex_game_spectator`, `ex_game_synctest`) and the **Macroquad** optional\ndependency from the workspace lockfile because Macroquad has no patched\nrelease for soundness issues reachable from safe code\n(RUSTSEC-2025-0035) and pulled in unmaintained **ttf-parser**\n(RUSTSEC-2026-0192).\n> \n> **`graphical-examples`** stays as a **deprecated no-op** feature so\nexisting Cargo manifests keep resolving without enabling code or deps.\n**`cargo deny`** now **bans** `macroquad` and `ttf-parser` to block\nre-entry.\n> \n> **Supply chain & tooling:** Strips graphical dev-deps (`macroquad`,\n`clap`, `tracing-log`), Linux devcontainer graphics/audio packages,\nstale **cargo-vet** exemptions, and **`graphical-examples`** from\nmutation/cargo-hack feature exclusions.\n> \n> **Examples & CI:** README and docs pivot to **headless** examples\n(`configuration`, `custom_socket`, `error_handling`, `request_handling`,\n`sync_test`); several examples use **`Result`** and structured\n**`FortressError`** matching instead of panics. CI adds **`cargo run\n--example error_handling`** on Linux and **`cargo check`** for the\n**`custom_socket`** example on **`wasm32-unknown-unknown`**.\n> \n> **Docs:** CHANGELOG, migration guide (0.11 upgrade), user guide, and\nwiki describe the security boundary and that graphics must live in the\napplication crate.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n9cd8a39121fc959272b8b314d2b7633dc0776f50. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T16:06:08-07:00",
-          "tree_id": "be47194f8f95eae916ea4ba3af8cd01775392766",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/20caf394a1f157a4cfbe2877f6891f657a3184ad"
-        },
-        "date": 1785712459196,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 135324,
-            "range": "± 1737",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46345,
-            "range": "± 258",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1557,
-            "range": "± 106",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3152,
-            "range": "± 243",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2866,
             "range": "± 282",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "90057ce477d8fdbfe33239099e29a425becd32df",
+          "message": "test(simulation): classify residual violation sites and harden the ephemeral port test (#419)\n\n## Description\n\nTwo focused test-integrity changes plus the residual violation-site\nclassification:\n\n1. **#418 — flaky parallel ephemeral binding test.** The test dropped\neach worker's sockets after a fixed `thread::sleep(10ms)` instead of\nholding them until every thread finished binding. A socket bound early\ncould return its ephemeral port to the OS while other threads were still\ncalling `bind(0)`, so a later bind could receive a recycled port that\nthe shared address set still contained and report a false duplicate.\nWorkers now return their still-bound sockets through `join()`, the main\nthread retains all 40 until the uniqueness assertion, and the racy sleep\nis gone.\n\n2. **#416 — residual violation-site classification.** The exact local\ncensus moves from **243/284 to 244/284** exercised:\n- `p2p_session.rs:3704` (\"Failed to capture hot-join snapshot\") is now\nexercised exactly by\n`hot_join_oversized_snapshot_capture_failure_keeps_host_running`: a host\nwhose `hot_join_max_snapshot_wire_bytes` cap rejects every capture\nreports the violation, sends no snapshot, and keeps advancing solo (the\ntest asserts ≥100 frames of progress across 120 polls, so a paused serve\ncannot pass).\n- **13 unreachable-by-construction** checks carry a short `Unreachable\nby construction:` proof and remain as fail-closed defense.\n- **19 allocation/encode fallbacks** and **8 sequence-dependent\ndefensive arms** are recorded as intentionally unexercised without an\nallocator/writer fault hook or adversarial sequencing; the policy is\ndocumented in `scripts/simulation/violation_census.py`.\n- The sparse save-mode `last_saved_frame` mismatch was reclassified as a\n**reachable residual**: when a gossip-lowered confirmed frame sits below\nthe resolved (clamped) rollback target, the re-simulation loop never\nreaches that frame. It is no longer claimed unreachable.\n\n`PLAN.md` drops the completed #416 item; the calendar-bound #403 item\nstays.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `hot_join_oversized_snapshot_capture_failure_keeps_host_running`\n(new): exact lenient-path coverage for the rejected snapshot capture;\nasserts the specific violation kind/severity, zero snapshots on the\nwire, the joiner still `HotJoining` at the first rejection, and ≥100\nhost frames of progress.\n- `parallel_ephemeral_binding_no_conflicts`: keeps every socket bound\nthrough all threads' binds and asserts the retained count.\n\n**Manual testing performed:**\n\n- Exact local census (`--profile ci --features\ntokio,json,hot-join,violation-census`): **3468 passed, 0 failed (1\nslow)**, then `violation_census.py` reports `284 baseline, 244\nexercised, 40 unexercised`, and the observation artifact contains\n`src/sessions/p2p_session.rs:3704`.\n- 50 consecutive `ephemeral_port_tests` runs: 50 × 25 passed, zero\nfailures.\n- `cargo clippy --workspace --all-targets --features\ntokio,json,hot-join`: clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n- `python3 scripts/simulation/violation_sites.py --check`: 284 entries\nmatch.\n- Latest `main` CI at `b9ce938`: all workflows success. `cargo\noutdated`: only MSRV-held versions Dependabot is configured to ignore.\n\n## Related Issues\n\nFixes #418\nCloses #416\nRelates to #403",
+          "timestamp": "2026-11-14T12:24:39-08:00",
+          "tree_id": "35c6d7c66fb0bb3864cef8d559bf1022a3e81402",
+          "url": "https://github.com/wallstop/fortress-rollback/commit/90057ce477d8fdbfe33239099e29a425becd32df"
+        },
+        "date": 1794688337436,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40124,
+            "range": "± 525",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25256,
+            "range": "± 991",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1090,
+            "range": "± 38",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2830,
+            "range": "± 315",
             "unit": "ns/iter"
           }
         ]
