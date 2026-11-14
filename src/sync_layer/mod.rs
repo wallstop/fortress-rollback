@@ -2126,6 +2126,37 @@ mod sync_layer_tests {
     }
 
     #[test]
+    fn set_last_confirmed_frame_reports_first_incorrect_clamp() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn crate::telemetry::ViolationObserver>
+        );
+        let mut sync_layer = SyncLayer::<TestConfig>::new(1, 8);
+        sync_layer.input_queues[0]
+            .add_input(PlayerInput::new(Frame::new(0), TestInput { inp: 10 }));
+        let _prediction = sync_layer.input_queues[0].input(Frame::new(1));
+        sync_layer.input_queues[0]
+            .add_input(PlayerInput::new(Frame::new(1), TestInput { inp: 99 }));
+        assert_eq!(
+            sync_layer.input_queues[0].first_incorrect_frame(),
+            Frame::new(1)
+        );
+        for _ in 0..5 {
+            sync_layer.advance_frame();
+        }
+
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("Clamping confirmed frame 5 to first_incorrect 1")),
+            "confirming past a predicted frame must be reported and clamped"
+        );
+        assert_eq!(sync_layer.last_confirmed_frame(), Frame::new(1));
+    }
+
+    #[test]
     fn set_frozen_value_at_reports_out_of_range_and_missing_queues() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
 

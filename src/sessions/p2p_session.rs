@@ -12927,6 +12927,509 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adjust_gamestate_reports_gossip_lowered_target_clamped_to_floor() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(8)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let mut requests = RequestVec::<TestConfig>::new();
+
+        // A first_incorrect below the zero-clamped prediction-window floor
+        // takes the gossip-lowered-target warning path.
+        session
+            .adjust_gamestate(Frame::new(-4), Frame::new(0), &mut requests)
+            .expect("a target at the current frame only resets predictions");
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("rollback target -4 is below the prediction-window floor 0")),
+            "the clamped rollback target must be reported"
+        );
+    }
+
+    #[test]
+    fn adjust_gamestate_reports_sparse_checkpoint_ahead_of_first_incorrect() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(8)
+            .with_save_mode(SaveMode::Sparse)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        for _ in 0..4 {
+            session.sync_layer.advance_frame();
+        }
+        if let FortressRequest::SaveGameState { cell, frame } =
+            session.sync_layer.save_current_state()
+        {
+            cell.save(frame, Some(0), Some(0));
+        }
+        assert_eq!(session.sync_layer.last_saved_frame(), Frame::new(4));
+        let mut requests = RequestVec::<TestConfig>::new();
+
+        // Sparse saving only tracks frame 4, which sits above first_incorrect
+        // frame 2 and no earlier checkpoint is buffered: the fail-closed gap
+        // report must fire instead of pretending the load frame is valid.
+        session
+            .adjust_gamestate(Frame::new(2), Frame::new(0), &mut requests)
+            .expect("the rollback target is clamped to the live window");
+
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("frame_to_load 4 > first_incorrect 2")),
+            "a sparse checkpoint above the rollback target must be reported"
+        );
+    }
+
+    #[test]
+    fn lockstep_sparse_saving_is_reported_and_forced_to_every_frame() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+
+        let session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(0)
+            .with_save_mode(SaveMode::Sparse)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("lockstep sessions accept sparse saving by downgrading it");
+
+        assert_eq!(
+            session.save_mode,
+            SaveMode::EveryFrame,
+            "lockstep must force EveryFrame saving"
+        );
+        assert!(
+            observer.violations().iter().any(|violation| {
+                violation.kind == ViolationKind::Configuration
+                    && violation
+                        .message
+                        .contains("Sparse saving setting is ignored")
+            }),
+            "the downgrade must be reported"
+        );
+    }
+
+    #[test]
+    fn invalid_handle_input_events_are_reported_without_state_mutation() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9100)), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let handles: Arc<[PlayerHandle]> = Arc::from(Vec::new());
+
+        session.handle_event(
+            Event::Input {
+                input: PlayerInput::new(Frame::new(0), 0u8),
+                player: PlayerHandle::new(9),
+                peer_connect_status: Arc::from(Vec::new()),
+            },
+            Arc::clone(&handles),
+            test_addr(9100),
+        );
+        session.local_connect_status.clear();
+        session.handle_event(
+            Event::Input {
+                input: PlayerInput::new(Frame::new(1), 0u8),
+                player: PlayerHandle::new(1),
+                peer_connect_status: Arc::from(Vec::new()),
+            },
+            handles,
+            test_addr(9100),
+        );
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages.iter().any(|message| message
+                .contains("Received input from invalid player handle PlayerHandle(9)")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("Invalid player handle PlayerHandle(1) when handling input event")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_connection_status_reports_each_handle_guard() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9101)), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        session.local_connect_status.clear();
+
+        session.update_player_disconnects();
+        let _ = session.max_frame_advantage();
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(0),
+            "a status table with no connected entries falls back to frame 0"
+        );
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages.iter().any(|message| message
+                .contains("Invalid player index 0 when checking connection status")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("Invalid player handle PlayerHandle(1) when checking frame advantage")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("No connected players found when computing confirmed_frame")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn disconnect_player_at_frame_reports_missing_handles_and_endpoints() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let remote = test_addr(9107);
+        let spectator = test_addr(9108);
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(remote), PlayerHandle::new(1))
+            .expect("remote player")
+            .add_player(PlayerType::Spectator(spectator), PlayerHandle::new(2))
+            .expect("spectator")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+
+        session.disconnect_player_at_frame(PlayerHandle::new(99), Frame::new(0));
+        session.local_connect_status.clear();
+        session.disconnect_player_at_frame(PlayerHandle::new(1), Frame::new(0));
+        session.player_reg.remotes.remove(&remote);
+        session.disconnect_player_at_frame(PlayerHandle::new(1), Frame::new(0));
+        assert!(session.player_reg.spectators.remove(&spectator).is_some());
+        session.disconnect_player_at_frame(PlayerHandle::new(2), Frame::new(0));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        for expected in [
+            "Invalid player handle PlayerHandle(99) in disconnect_player_at_frame",
+            "Invalid player handle PlayerHandle(1) when marking as disconnected",
+            "No endpoint found for remote address in disconnect_player_at_frame",
+            "No endpoint found for spectator address in disconnect_player_at_frame",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "missing {expected:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn reactivate_directive_reports_owner_and_missing_status_guards() {
+        use crate::network::messages::ReactivateSlot;
+
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let owner = test_addr(9109);
+        let coordinator = test_addr(9110);
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(owner), PlayerHandle::new(1))
+            .expect("remote player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let directive = ReactivateSlot {
+            handle: 1,
+            frame: Frame::new(10),
+        };
+
+        session.handle_reactivate_directive(&owner, &directive);
+        session.local_connect_status.clear();
+        session.handle_reactivate_directive(&coordinator, &directive);
+        session.local_connect_status = vec![ConnectionStatus::default(); 2];
+        session.local_connect_status[1].disconnected = true;
+        session
+            .sync_layer
+            .freeze_player(PlayerHandle::new(1), Frame::new(0))
+            .expect("freeze the dropped slot");
+        session.player_reg.remotes.remove(&owner);
+        session.handle_reactivate_directive(&coordinator, &directive);
+        session.rearm_dropped_slot_for_rejoin(&coordinator, &[PlayerHandle::new(1)]);
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("sent by the slot owner")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no connection status entry")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no remote endpoint at owner address")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Cannot re-arm dropped slot for rejoin")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn converge_reserved_slot_freeze_reports_invalid_and_connected_slots() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(test_addr(9111), PlayerHandle::new(1))
+            .expect("reserved player")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("session");
+
+        session.converge_reserved_slot_freeze(PlayerHandle::new(99), Frame::new(0));
+        session.converge_reserved_slot_freeze(PlayerHandle::new(0), Frame::new(0));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "Invalid player handle PlayerHandle(99) in converge_reserved_slot_freeze"
+            )),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "Reserved/pending hot-join slot PlayerHandle(0) is unexpectedly connected"
+            )),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn npeer_serve_runtime_gates_reject_sparse_no_local_and_delayed_coordinators() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let survivor = std::collections::BTreeSet::from([test_addr(9102)]);
+
+        let mut sparse: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .with_save_mode(SaveMode::Sparse)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9102)), PlayerHandle::new(1))
+            .expect("survivor")
+            .add_reserved_player(test_addr(9103), PlayerHandle::new(2))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged sparse coordinator");
+        sparse.try_open_npeer_serve(
+            test_addr(9103),
+            PlayerHandle::new(2),
+            std::collections::BTreeSet::from([test_addr(9102)]),
+        );
+
+        let mut no_local: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .add_player(PlayerType::Remote(test_addr(9102)), PlayerHandle::new(0))
+            .expect("survivor")
+            .add_player(PlayerType::Remote(test_addr(9104)), PlayerHandle::new(1))
+            .expect("second survivor")
+            .add_reserved_player(test_addr(9103), PlayerHandle::new(2))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged coordinator without a local player");
+        no_local.sync_layer.advance_frame();
+        let _ = no_local.sync_layer.save_current_state();
+        no_local.try_open_npeer_serve(
+            test_addr(9103),
+            PlayerHandle::new(2),
+            std::collections::BTreeSet::from([test_addr(9102), test_addr(9104)]),
+        );
+
+        let mut delayed: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .with_input_delay(1)
+            .expect("input delay")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9102)), PlayerHandle::new(1))
+            .expect("survivor")
+            .add_reserved_player(test_addr(9103), PlayerHandle::new(2))
+            .expect("reserved slot")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged delayed coordinator");
+        delayed.sync_layer.advance_frame();
+        let _ = delayed.sync_layer.save_current_state();
+        delayed.try_open_npeer_serve(test_addr(9103), PlayerHandle::new(2), survivor);
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("requires SaveMode::EveryFrame")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("requires at least one local player")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("last-sent frame")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn npeer_snapshot_validation_rejects_wrong_count_negative_frame_and_bad_bridge() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(3)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(test_addr(9105), PlayerHandle::new(1))
+            .expect("reserved one")
+            .add_reserved_player(test_addr(9106), PlayerHandle::new(2))
+            .expect("reserved two")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged joiner-shaped session");
+
+        let snapshot = |frame: Frame, num_players: usize, bridge_inputs: Vec<u8>| StateSnapshot {
+            frame,
+            num_players,
+            state_bytes: Vec::new(),
+            bridge_inputs,
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+        session.buffer_npeer_snapshot(snapshot(Frame::new(5), 2, vec![0; 6]));
+        session.buffer_npeer_snapshot(snapshot(Frame::new(-1), 3, vec![0; 3]));
+        session.buffer_npeer_snapshot(snapshot(Frame::new(5), 3, vec![0xff]));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("produced for 2 players, this session has 3")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("Rejecting N-peer hot-join snapshot with negative frame NULL_FRAME")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("bridge inputs failed to decode")),
+            "{messages:?}"
+        );
+    }
+
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }

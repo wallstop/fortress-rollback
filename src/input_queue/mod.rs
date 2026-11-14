@@ -2122,6 +2122,273 @@ mod input_queue_tests {
     }
 
     #[test]
+    fn discard_confirmed_frames_reports_index_and_offset_guard_failures() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+
+        let mut overflow = test_queue(0);
+        overflow.tail = 0;
+        overflow.head = 1;
+        overflow.length = 2;
+        overflow.inputs[0] = PlayerInput::new(Frame::new(i32::MIN + 1), TestInput { inp: 0 });
+        overflow.last_added_frame = Frame::new(200);
+        overflow.discard_confirmed_frames(Frame::new(100));
+
+        let mut oversized = test_queue(0);
+        oversized.tail = 0;
+        oversized.head = 2;
+        oversized.length = 2;
+        oversized.inputs[0] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        oversized.last_added_frame = Frame::new(10);
+        oversized.discard_confirmed_frames(Frame::new(5));
+
+        let mut misaligned = test_queue(0);
+        misaligned.queue_length = 127;
+        misaligned.tail = 127;
+        misaligned.head = 0;
+        misaligned.length = 2;
+        misaligned.inputs[127] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        misaligned.last_added_frame = Frame::new(10);
+        misaligned.discard_confirmed_frames(Frame::new(1));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Discard frame distance")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Discard offset 5 exceeds queue length 2")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Failed to advance tail 127 by 1")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn input_reports_offset_mapping_and_prediction_bookkeeping_failures() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+
+        let mut unmapped = test_queue(0);
+        unmapped.queue_length = 127;
+        unmapped.tail = 127;
+        unmapped.length = 2;
+        unmapped.inputs[127] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        assert!(unmapped.input(Frame::new(1)).is_none());
+
+        let mut mismatched = test_queue(0);
+        mismatched.tail = 127;
+        mismatched.length = 2;
+        mismatched.inputs[127] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        mismatched.inputs[0] = PlayerInput::new(Frame::new(99), TestInput { inp: 0 });
+        assert!(mismatched.input(Frame::new(1)).is_none());
+
+        let mut null_prediction = test_queue(0);
+        null_prediction.tail = 0;
+        null_prediction.length = 1;
+        null_prediction.inputs[0] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        // A corrupted last-added frame of -2 makes the synthesized prediction
+        // entry frame -1 (NULL), taking the defense-in-depth prediction guard.
+        null_prediction.last_added_frame = Frame::new(-2);
+        assert!(null_prediction.input(Frame::new(1)).is_none());
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Failed to map requested-frame offset 1")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Prediction frame is null")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Circular buffer index mismatch")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn add_input_by_frame_reports_structural_guard_failures() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+
+        let mut non_sequential = test_queue(0);
+        non_sequential.last_added_frame = Frame::new(0);
+        assert!(!non_sequential.add_input_by_frame(
+            PlayerInput::new(Frame::new(5), TestInput { inp: 5 }),
+            Frame::new(5),
+            None
+        ));
+
+        let mut underflow = test_queue(0);
+        underflow.last_added_frame = Frame::NULL;
+        assert!(!underflow.add_input_by_frame(
+            PlayerInput::new(Frame::new(i32::MIN), TestInput { inp: 0 }),
+            Frame::new(i32::MIN),
+            None
+        ));
+
+        let mut missing_previous = test_queue(0);
+        missing_previous.last_added_frame = Frame::new(0);
+        missing_previous.head = 0;
+        missing_previous.inputs.clear();
+        assert!(!missing_previous.add_input_by_frame(
+            PlayerInput::new(Frame::new(1), TestInput { inp: 1 }),
+            Frame::new(1),
+            None
+        ));
+
+        let mut missing_tail = test_queue(0);
+        missing_tail.length = missing_tail.queue_length;
+        missing_tail.tail = missing_tail.queue_length;
+        assert!(!missing_tail.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            None
+        ));
+
+        let mut tail_advance = test_queue(0);
+        tail_advance.queue_length = 127;
+        tail_advance.tail = 127;
+        tail_advance.length = 127;
+        tail_advance.inputs[127] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        assert!(!tail_advance.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            Some(Frame::new(0))
+        ));
+
+        let mut invalid_head = test_queue(0);
+        invalid_head.head = 128;
+        assert!(!invalid_head.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            None
+        ));
+
+        let mut head_advance = test_queue(0);
+        head_advance.queue_length = 127;
+        head_advance.head = 127;
+        assert!(!head_advance.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            None
+        ));
+
+        let mut length_overflow = test_queue(0);
+        length_overflow.length = usize::MAX;
+        assert!(!length_overflow.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            None
+        ));
+
+        let mut queue_overflow = test_queue(0);
+        queue_overflow.length = 200;
+        assert!(!queue_overflow.add_input_by_frame(
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            Frame::new(0),
+            None
+        ));
+
+        let mut realigned = test_queue(0);
+        realigned.last_added_frame = Frame::new(0);
+        realigned.inputs[127] = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
+        realigned.prediction = PlayerInput::new(Frame::new(5), TestInput { inp: 0 });
+        assert!(realigned.add_input_by_frame(
+            PlayerInput::new(Frame::new(1), TestInput { inp: 1 }),
+            Frame::new(1),
+            None
+        ));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        for expected in [
+            "Input frame 5 is not sequential",
+            "Frame underflow in InputQueue::add_input_by_frame prev",
+            "Invalid previous_position 127 in add_input_by_frame",
+            "Invalid tail index 128 while reclaiming",
+            "Failed to advance tail 127 while reclaiming",
+            "Invalid head index 128 in add_input_by_frame",
+            "Failed to advance head 127 within queue length 127",
+            "Queue length overflow while adding input",
+            "Queue overflow: length 201 exceeds capacity 128",
+            "Frame 1 doesn't match prediction frame 5",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "missing {expected:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn advance_queue_head_and_reset_report_invalid_positions() {
+        let observer = std::sync::Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(std::sync::Arc::clone(&observer)
+            as std::sync::Arc<dyn crate::telemetry::ViolationObserver>);
+
+        let mut advance = test_queue(0);
+        advance.first_frame = false;
+        advance.head = 0;
+        advance.inputs.clear();
+        assert_eq!(advance.advance_queue_head(Frame::new(1), None), Frame::NULL);
+
+        let mut phantom = test_queue(0);
+        phantom.frame_delay = 0;
+        phantom.inputs.clear();
+        phantom.reset_to_frame(Frame::new(1));
+
+        let messages: Vec<String> = observer
+            .violations()
+            .into_iter()
+            .map(|violation| violation.message)
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message
+                    .contains("Invalid previous_position 127 in advance_queue_head")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("phantom previous slot index 0 out of bounds")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
     fn test_add_input_wrong_frame() {
         let mut queue = test_queue(0);
         let input = PlayerInput::new(Frame::new(0), TestInput { inp: 0 });
