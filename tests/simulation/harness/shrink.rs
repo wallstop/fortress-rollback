@@ -215,6 +215,12 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         corrupt_spectator_status_from: options.corrupt_spectator_status_from,
         component_scope: remap_component_scope(options.component_scope.clone(), removed),
         differential: options.differential,
+        // PCT change targets are derived from `(seed, n, steps)` rather than
+        // stored explicitly, so a peer removal or step truncation re-derives a
+        // different interleaving. That is still deterministic; the shrinker's
+        // reproduction evaluator rejects any candidate whose trace no longer
+        // matches instead of treating it as an equivalent schedule.
+        pct: options.pct,
     }
 }
 
@@ -1237,6 +1243,7 @@ mod tests {
                 component: vec![0, 0, 1, 1],
             }),
             differential: None,
+            pct: None,
         };
         let (candidate, mapped) = remove_peer(&schedule, &options, 1).expect("can remove peer");
 

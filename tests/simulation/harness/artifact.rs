@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema version for [`FailureArtifact`].
-// Version 8 preserves opt-in differential drive/mutation options and the
-// ReferenceInput/ReferenceState/ReferenceStateMissing failure vocabulary. Older artifacts are
-// rejected explicitly rather than silently dropping that replay surface.
-pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 8;
+// Version 9 adds the opt-in PCT peer-interleaving replay options. Version 8
+// preserves the differential drive/mutation options and the
+// ReferenceInput/ReferenceState/ReferenceStateMissing failure vocabulary. Older
+// artifacts are rejected explicitly rather than silently dropping their replay
+// surface.
+pub const FAILURE_ARTIFACT_SCHEMA_VERSION: u32 = 9;
 /// Maximum serialized artifact size accepted at the filesystem boundary.
 pub const MAX_FAILURE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 /// Oracle failures are capped at 64 per run; artifacts preserve at most that cap.
@@ -1096,7 +1098,7 @@ mod tests {
     };
     use crate::simulation::harness::{
         run, EndpointControlSample, HostileGossipMode, HostileGossipOptions, LinkQueueSample,
-        ProgressSample, RunOptions, TraceGameState, TraceNetStats, TraceSessionState,
+        PctOptions, ProgressSample, RunOptions, TraceGameState, TraceNetStats, TraceSessionState,
         TRACE_TAIL_CAPACITY,
     };
 
@@ -1200,6 +1202,38 @@ mod tests {
         assert_eq!(decoded.trace_tail.len(), TRACE_TAIL_CAPACITY);
 
         std::fs::remove_dir_all(&root).expect("temporary artifact tree removes");
+    }
+
+    #[test]
+    fn artifact_round_trips_pct_replay_options_and_reproduces_the_trace() {
+        let schedule = crate::simulation::harness::schedule::generate(
+            23,
+            crate::simulation::harness::schedule::SimConfig::smoke(3),
+        );
+        let options = RunOptions {
+            corrupt_state_from: Some((1, 5)),
+            pct: Some(PctOptions {
+                seed: 0x5054_4354,
+                priority_changes: 4,
+            }),
+            ..RunOptions::default()
+        };
+        let report = run(&schedule, &options);
+        assert!(!report.verdict.passed(), "control run must fail");
+        let artifact = FailureArtifact::from_report(&schedule, &report);
+        artifact.validate().expect("PCT artifact satisfies schema");
+
+        let encoded = serde_json::to_vec(&artifact).expect("PCT artifact serializes");
+        let decoded: FailureArtifact =
+            serde_json::from_slice(&encoded).expect("PCT artifact deserializes");
+        assert_eq!(decoded, artifact);
+        assert_eq!(decoded.replay_options, options);
+
+        let replay = run(&decoded.schedule, &decoded.replay_options);
+        assert_eq!(
+            replay.trace_hash, decoded.trace_hash,
+            "stored PCT options must reproduce the exact trace"
+        );
     }
 
     #[test]
