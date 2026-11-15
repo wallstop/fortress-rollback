@@ -68,7 +68,7 @@ The recurring break is iterating a `ProofVec` by reference. `ProofVec<T>` is
 which exposes only `push`, `get`, `get_mut`, `len`, `first`, `iter`, `iter_mut`
 and `clone` for `Copy` elements:
 
-```rust
+```text
 // WRONG: compiles everywhere except the cfg(kani) tree
 for queue in &self.input_queues { /* ... */ }
 

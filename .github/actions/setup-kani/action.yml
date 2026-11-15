@@ -82,8 +82,11 @@ runs:
             # patch release satisfy the install while the cache key still names
             # the pinned version.
             cargo install --locked kani-verifier --version "=${{ steps.pin.outputs.version }}"
-            cargo kani setup
           fi
+          # Always run setup: the binary cache restores `~/.kani` but not the
+          # rustup toolchain its `toolchain` symlink targets, so a cache hit
+          # without this leaves a dangling link and `cargo kani` fails.
+          cargo kani setup
 
     - name: Verify Kani toolchain
       shell: bash

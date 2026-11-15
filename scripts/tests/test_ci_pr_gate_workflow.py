@@ -165,6 +165,7 @@ def test_kani_compile_gate_path_detection_fails_closed() -> None:
         (("Cargo.toml",), "true"),
         (("tests/network-peer/Cargo.toml",), "true"),
         ((".github/actions/install-pinned-nightly/action.yml",), "true"),
+        ((".github/actions/install-pinned-nightly/toolchain",), "true"),
         ((".github/actions/setup-kani/action.yml",), "true"),
         ((".kani-version",), "true"),
     ),
