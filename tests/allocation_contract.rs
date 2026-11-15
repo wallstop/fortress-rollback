@@ -476,12 +476,27 @@ fn warmed_spectator_host_frame_stats() -> [Stats; 2] {
     std::array::from_fn(|_| {
         host.add_local_input(PlayerHandle::new(0), 0)
             .expect("add spectator-host measured input");
+        let inputs_before = host
+            .peer_metrics(PlayerHandle::new(1))
+            .expect("read spectator peer metrics before measurement")
+            .messages_sent_by_kind
+            .get(MessageKind::Input);
         let (requests, stats) = measure(|| {
             black_box(
                 host.advance_frame()
                     .expect("advance spectator-host measured frame"),
             )
         });
+        let inputs_after = host
+            .peer_metrics(PlayerHandle::new(1))
+            .expect("read spectator peer metrics after measurement")
+            .messages_sent_by_kind
+            .get(MessageKind::Input);
+        assert_eq!(
+            inputs_after,
+            inputs_before + 1,
+            "the measured frame must forward one confirmed input packet to the spectator"
+        );
         fulfill_save_requests(requests);
         for _ in 0..4 {
             host.poll_remote_clients();
