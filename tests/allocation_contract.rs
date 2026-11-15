@@ -420,6 +420,92 @@ fn warmed_spectator_poll_stats(num_hosts: usize) -> Stats {
     stats
 }
 
+fn warmed_spectator_host_frame_stats() -> [Stats; 2] {
+    use fortress_rollback::PlayerType;
+
+    let (host_socket, spectator_socket, _drop, _sends) = switchable_socket_pair();
+    let host_addr = host_socket.local_addr;
+    let spectator_addr = spectator_socket.local_addr;
+
+    let mut host: P2PSession<AllocationConfig> = SessionBuilder::new()
+        .with_num_players(1)
+        .expect("configure allocation-contract host player count")
+        .with_desync_detection_mode(DesyncDetection::Off)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .expect("add allocation-contract host player")
+        .add_player(PlayerType::Spectator(spectator_addr), PlayerHandle::new(1))
+        .expect("add allocation-contract spectator")
+        .start_p2p_session(host_socket)
+        .expect("construct allocation-contract host session");
+    let mut spectator = SessionBuilder::<AllocationConfig>::new()
+        .with_num_players(1)
+        .expect("configure allocation-contract spectator player count")
+        .with_desync_detection_mode(DesyncDetection::Off)
+        .start_spectator_session(host_addr, spectator_socket)
+        .expect("construct allocation-contract spectator session");
+
+    for _ in 0..256 {
+        host.poll_remote_clients();
+        spectator.poll_remote_clients();
+        if host.current_state() == SessionState::Running
+            && spectator.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+    assert_eq!(host.current_state(), SessionState::Running, "host synced");
+    assert_eq!(
+        spectator.current_state(),
+        SessionState::Running,
+        "spectator synced"
+    );
+
+    for _ in 0..2 {
+        host.add_local_input(PlayerHandle::new(0), 0)
+            .expect("add spectator-host warm-up input");
+        fulfill_save_requests(
+            host.advance_frame()
+                .expect("advance spectator-host warm-up frame"),
+        );
+        for _ in 0..4 {
+            host.poll_remote_clients();
+            spectator.poll_remote_clients();
+        }
+    }
+
+    std::array::from_fn(|_| {
+        host.add_local_input(PlayerHandle::new(0), 0)
+            .expect("add spectator-host measured input");
+        let inputs_before = host
+            .peer_metrics(PlayerHandle::new(1))
+            .expect("read spectator peer metrics before measurement")
+            .messages_sent_by_kind
+            .get(MessageKind::Input);
+        let (requests, stats) = measure(|| {
+            black_box(
+                host.advance_frame()
+                    .expect("advance spectator-host measured frame"),
+            )
+        });
+        let inputs_after = host
+            .peer_metrics(PlayerHandle::new(1))
+            .expect("read spectator peer metrics after measurement")
+            .messages_sent_by_kind
+            .get(MessageKind::Input);
+        assert_eq!(
+            inputs_after,
+            inputs_before + 1,
+            "the measured frame must forward one confirmed input packet to the spectator"
+        );
+        fulfill_save_requests(requests);
+        for _ in 0..4 {
+            host.poll_remote_clients();
+            spectator.poll_remote_clients();
+        }
+        stats
+    })
+}
+
 fn input_event_snapshot_clone_stats(num_players: usize) -> Stats {
     let event: Event<AllocationConfig> = Event::Input {
         input: PlayerInput::new(Frame::new(0), 0),
@@ -602,6 +688,35 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         }
         assert_zero_allocations(&format!("warmed {hosts}-host spectator poll"), first);
     }
+
+    // A built-in adapter poll that finds no queued datagram must not allocate a
+    // batch reservation: applications poll every frame even when the socket is
+    // idle. The first decoded message still gets the typical four-slot batch.
+    let mut idle_socket = fortress_rollback::UdpNonBlockingSocket::bind_to_port(0)
+        .expect("bind allocation-contract UDP socket");
+    let ((), idle_poll_stats) = measure(|| {
+        black_box(idle_socket.receive_all_messages());
+    });
+    assert_zero_allocations("idle built-in UDP receive poll", idle_poll_stats);
+
+    // A serving host sends the confirmed frame's inputs to every spectator once
+    // per advance. The ordered confirmed-input vector now serializes directly,
+    // so this path must retain only the send's own encode buffers instead of a
+    // per-frame handle map (the byte ceiling is the map-regression guard;
+    // operations keep a little headroom for allocator/compression growth).
+    let spectator_host_frames = warmed_spectator_host_frame_stats();
+    for (repetition, stats) in spectator_host_frames.iter().enumerate() {
+        assert_allocation_ceiling(
+            &format!("warmed spectator-host frame repetition {repetition}"),
+            *stats,
+            6,
+            128,
+        );
+    }
+    assert_eq!(
+        spectator_host_frames[0], spectator_host_frames[1],
+        "warmed spectator-host frame repetitions"
+    );
 
     // Every player event decoded from one Input frame observes the same
     // immutable connection-status snapshot. Cloning that internal event must

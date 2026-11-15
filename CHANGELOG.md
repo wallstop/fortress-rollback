@@ -81,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** the steady-state per-frame fold no longer pays for redundant
+  mesh scans. `P2PSession::confirmed_frame` now reuses the slot-independent
+  relay-topology predicate it already computed instead of recomputing it inside
+  every per-slot bound (the N=16 steady-mesh fold drops from ~1.84 µs to
+  ~0.74 µs locally). Serving a spectator now serializes the ordered confirmed
+  inputs directly instead of rebuilding a handle-keyed map every frame, and
+  built-in UDP and Tokio adapters no longer reserve a four-message receive batch
+  on polls that decode no datagram.
 - **Pre-existing:** a drop-time scoped-observer failure now reports its real `file:line`
   location instead of a non-line label, so diagnostic consumers and the violation-site census can
   parse it.

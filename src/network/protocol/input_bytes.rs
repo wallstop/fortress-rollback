@@ -45,6 +45,23 @@ impl<T: Config> InputSource<T> for [Option<PlayerInput<T::Input>>] {
     }
 }
 
+/// Complete per-slot input vectors in ascending [`PlayerHandle`] order, as
+/// produced by [`SyncLayer::confirmed_inputs`]. Index `i` is the input for
+/// handle `i`, and every registered slot is present (a disconnected slot is a
+/// blank entry), so this borrows the vector directly instead of rebuilding a
+/// per-frame handle-keyed map on the spectator-send path.
+///
+/// [`SyncLayer::confirmed_inputs`]: crate::sync_layer::SyncLayer::confirmed_inputs
+impl<T: Config> InputSource<T> for [PlayerInput<T::Input>] {
+    fn get(&self, handle: PlayerHandle) -> Option<&PlayerInput<T::Input>> {
+        self.get(handle.as_usize())
+    }
+
+    fn serializable_len(&self, num_players: usize) -> usize {
+        self.len().min(num_players)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InputBytesDecodeError {
     AllocationFailed {
@@ -808,6 +825,31 @@ mod tests {
 
         assert_eq!(from_slots.frame, from_map.frame);
         assert_eq!(from_slots.bytes, from_map.bytes);
+    }
+
+    #[test]
+    fn ordered_slice_input_source_matches_map_with_blanks_and_truncation() {
+        let frame = Frame::new(50);
+        let blank = PlayerInput::blank_input(Frame::NULL);
+        let player_one = PlayerInput::new(frame, TestInput { inp: 11 });
+        let player_two = PlayerInput::new(frame, TestInput { inp: 22 });
+
+        let mut map = BTreeMap::new();
+        map.insert(PlayerHandle::new(0), blank);
+        map.insert(PlayerHandle::new(1), player_one);
+        map.insert(PlayerHandle::new(2), player_two);
+        let ordered = [blank, player_one, player_two];
+
+        for num_players in [1_usize, 3] {
+            let from_map = InputBytes::try_from_inputs::<TestConfig>(num_players, &map).unwrap();
+            let from_slice =
+                InputBytes::try_from_inputs::<TestConfig>(num_players, ordered.as_slice()).unwrap();
+            assert_eq!(
+                (from_slice.frame, from_slice.bytes),
+                (from_map.frame, from_map.bytes),
+                "ordered slice must match the map for {num_players} players"
+            );
+        }
     }
 
     #[test]

@@ -8060,8 +8060,9 @@ impl<T: Config> P2PSession<T> {
         let mut confirmed_frame = Frame::new(i32::MAX);
 
         // The double-failure-relay fold-membership-asymmetry gate is
-        // slot-independent — compute it once and reuse it for the floor-round
-        // hold check (`slot_round_incomplete`) below.
+        // slot-independent — compute it once and reuse it for the per-slot
+        // bounds (`remote_slot_confirmed_bound_with_topology`) and the
+        // floor-round hold check (`slot_round_incomplete`) below.
         let relay_topology = self.pessimistic_floor_relay_topology();
 
         for (idx, con_stat) in self.local_connect_status.iter().enumerate() {
@@ -8071,7 +8072,9 @@ impl<T: Config> P2PSession<T> {
                 // `disconnect_player` both reject local handles), so the local
                 // slot always contributes its own last added frame.
                 confirmed_frame = std::cmp::min(confirmed_frame, con_stat.last_frame);
-            } else if let Some(bound) = self.remote_slot_confirmed_bound(handle, con_stat) {
+            } else if let Some(bound) =
+                self.remote_slot_confirmed_bound_with_topology(handle, con_stat, relay_topology)
+            {
                 // Post-prune fresh-ack HOLD (the double-failure-relay floor round,
                 // `AsyncAckSoundRoundSeq`, S55 — closing the connected-relay
                 // reorder facet and subsuming the S49 cold-cache facet). When a
@@ -8273,7 +8276,7 @@ impl<T: Config> P2PSession<T> {
             self.local_connect_status
                 .get(target.as_usize())
                 .and_then(|local| {
-                    self.remote_slot_confirmed_bound_observation(target, local)
+                    self.remote_slot_confirmed_bound_observation(target, local, relay_topology)
                         .bound
                 });
         Some(HostileGossipDiagnostic {
@@ -10624,7 +10627,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         while self.next_spectator_frame <= confirmed_frame {
-            let mut inputs = self
+            let inputs = self
                 .sync_layer
                 .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status)?;
 
@@ -10643,8 +10646,10 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            let mut input_map = BTreeMap::new();
-            for (handle, input) in inputs.iter_mut().enumerate() {
+            // Validate the frame stamps before the ordered slice is serialized
+            // directly (no per-frame handle map). Ascending handle order and
+            // completeness are construction invariants of `confirmed_inputs`.
+            for (handle, input) in inputs.iter().enumerate() {
                 // Validate frame consistency - should be NULL or match expected frame
                 if input.frame != Frame::NULL && input.frame != self.next_spectator_frame {
                     // Unreachable by construction: `confirmed_inputs` stamps
@@ -10660,13 +10665,12 @@ impl<T: Config> P2PSession<T> {
                         handle
                     );
                 }
-                input_map.insert(PlayerHandle::new(handle), *input);
             }
 
             // send it to all spectators.
             for endpoint in self.player_reg.spectators.values_mut() {
                 if endpoint.is_running() {
-                    endpoint.send_input(&input_map, &self.local_connect_status);
+                    endpoint.send_input(inputs.as_slice(), &self.local_connect_status);
                 }
             }
 
@@ -11123,7 +11127,28 @@ impl<T: Config> P2PSession<T> {
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
     ) -> Option<Frame> {
-        let observation = self.remote_slot_confirmed_bound_observation(handle, local_status);
+        self.remote_slot_confirmed_bound_with_topology(
+            handle,
+            local_status,
+            self.pessimistic_floor_relay_topology(),
+        )
+    }
+
+    /// [`Self::remote_slot_confirmed_bound`] with the slot-independent
+    /// relay-topology gate supplied by the caller.
+    ///
+    /// [`Self::confirmed_frame`] folds every slot and already computes the gate
+    /// once; without this entry point each per-slot fold would rescan every
+    /// remote endpoint to recompute the same predicate, making the steady-mesh
+    /// fold pay an extra O(N²) pass.
+    fn remote_slot_confirmed_bound_with_topology(
+        &self,
+        handle: PlayerHandle,
+        local_status: &ConnectionStatus,
+        relay_topology: bool,
+    ) -> Option<Frame> {
+        let observation =
+            self.remote_slot_confirmed_bound_observation(handle, local_status, relay_topology);
         if observation.lower_floor_consumed {
             self.record_sometimes_state(SOMETIMES_LOWER_FLOOR_CONSUMED);
         }
@@ -11133,10 +11158,15 @@ impl<T: Config> P2PSession<T> {
     /// Computes the production fold and its exact lower-floor predicate without
     /// mutating the observation census. Hidden diagnostics use this pure path so
     /// reading diagnostic state can never manufacture coverage.
+    ///
+    /// `relay_topology` is the slot-independent
+    /// [`Self::pessimistic_floor_relay_topology`] result; folds that call this
+    /// once per slot pass the shared value so the predicate is not rescanned.
     fn remote_slot_confirmed_bound_observation(
         &self,
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
+        relay_topology: bool,
     ) -> RemoteSlotConfirmedBoundObservation {
         // N-peer pending-reactivation shield, bound leg (companion to the
         // fold shield in `update_player_disconnects`): while this survivor
@@ -11236,7 +11266,7 @@ impl<T: Config> P2PSession<T> {
         // N>=4 relay topology: this session has PRUNED a remote AND >= 2 remotes
         // still run. Outside it, the one-hop fold below is sound (S41 *stale-echo*
         // NOTABUG), and consuming the floor only adds needless pacing lag.
-        let consume_round_floor = self.pessimistic_floor_relay_topology();
+        let consume_round_floor = relay_topology;
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
         let mut lower_floor_consumed = false;
