@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794716869214,
+  "lastUpdate": 1794728988354,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "734c802dbcb5bbfb0930fbf12e278a33ce3233ce",
-          "message": "Close remaining hardening issues (#284)\n\n## What\n\nThis single Session 160 closeout PR resolves the repository's remaining\nopen hardening work:\n\n- fixes #278's Windows Miri spectator false failure by giving\nintegration-style spectator tests a frozen protocol clock;\n- records #281's measured `uv` no-go and refreshes all available\nPython/browser dependencies;\n- fixes the Git 2.54 rewritten-history fixture by keeping the prepared\nsource commit explicitly reachable;\n- completes #273 by replacing unmaintained `bincode` 2.0.1 with exact\n`bincode-next` 2.1.0, removing RUSTSEC-2025-0141's exception, banning\nthe original package, and bounding zero-sized replay decode work.\n\n## Compatibility and safety\n\n- The dependency remains available internally as `bincode`, so codec\ncall sites and public APIs are unchanged.\n- Every immutable bincode 2.0.1 network/replay/hot-join/checksum vector\npasses byte-for-byte.\n- `bincode-next` 2.1.0 is the newest release compatible with Rust 1.86;\n3.x requires Rust 1.90.\n- Replay decode rejects more than 1,048,576 cumulative zero-sized inputs\nbefore entering the hostile frame's loop. The fixed ceiling preserves\nexisting `ReplayDecodeConfig` struct literals.\n- Cargo audit is clean; cargo-deny now rejects reintroduction of the\noriginal unmaintained package.\n\n## Performance\n\nPaired Criterion measurements on the same host:\n\n- message roundtrip: about 3.5% faster;\n- input serialization: unchanged;\n- `encode_into`: within noise;\n- trivial decode: about 0.07 ns/call slower (below one CPU cycle), while\noverall roundtrip improved.\n\nAll results are far inside the CI regression gate's 1.50 median-ratio\nthreshold.\n\n## Validation\n\n- default Nextest: 2,900 passed, 71 skipped;\n- hot-join Nextest: 3,154 passed, 72 skipped;\n- focused Miri: zero-sized replay tests 4/4 and immutable vectors 4/4;\n- libFuzzer: 10,000 replay-decode + 10,000 message-parser cases;\n- Rust 1.86, strict Clippy, semver (196 checks), no-default-features,\nbrowser WASM runtime, Emscripten, fuzz, Loom, allocation contract:\npassed;\n- exact MkDocs, Markdown, wiki consistency, 1,389 links, strict rustdoc,\n160 doctests: passed;\n- all-file agent preflight: passed, including 286 release and 66\nCI-toolchain tests.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic/determinism: PASS\n- Error handling/test breadth: PASS\n- Agent preflight: PASS\n- Design log/CHANGELOG: YES\n\nFixes #273.\nFixes #278.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Serialization and replay decode are contract-critical paths; risk is\nmoderated by immutable golden bytes and a targeted decode ceiling, but\nany serializer regression would affect network, replay, and checksum\ncompatibility.\n> \n> **Overview**\n> Closes remaining hardening work by swapping unmaintained **bincode\n2.0.1** for exact **bincode-next 2.1.0** behind the existing internal\n`bincode` dependency alias. Wire/replay/checksum bytes and public codec\nAPIs stay unchanged (golden vectors still pass); **cargo-deny** bans the\noriginal package and the **RUSTSEC-2025-0141** advisory exception is\nremoved. Dependabot ignores **bincode-next** 3.x until Rust MSRV rises\npast 1.86.\n> \n> **Replay decode** now rejects more than **1,048,576** cumulative\nzero-sized inputs before the per-frame input loop, closing CPU\nwork-amplification that byte and allocation limits cannot bound for\nzero-sized `Config::Input` types. `ReplayDecodeConfig` shape is\nunchanged.\n> \n> **Spectator unit tests** use a frozen protocol clock so Miri/Windows\nruns do not spuriously hit disconnect timeouts during staging loops.\n**ARM64 cross-compile** and **`cargo_linker`** use a global\n**`RUSTFLAGS`** override instead of empty per-target flags so GCC-based\nCI can override incompatible **lld** link args from\n`.cargo/config.toml`.\n> \n> A **release checkpoint** test keeps the prepared commit reachable via\nan explicit ref so Git 2.54 maintenance does not prune objects\nmid-fixture. Docs/wiki/changelog and minor Python/browser doc-tool bumps\nalign with the above.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n168fd27ccf47198b924c5a58b636ea33ea606728. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T23:51:07-07:00",
-          "tree_id": "601aa6c709c7a220110668cf311c425c372fbba2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/734c802dbcb5bbfb0930fbf12e278a33ce3233ce"
-        },
-        "date": 1785740381307,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 121847,
-            "range": "± 523",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 36493,
-            "range": "± 131",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1245,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 81",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3158,
-            "range": "± 215",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5667,
             "range": "± 285",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8ecd550794978d4be9e3cb580faac0e3a47f114a",
+          "message": "test(simulation): enable the organic sometimes-state presence ratchet (#403) (#425)\n\nCloses #403.\n\n## Summary\n\nEnable the organic sometimes-state presence ratchet from seven\npost-redesign nightly windows\n(issue #403), completing the final stage-1 measurement step of the\nfleet-search roadmap.\n\n- Adds `RATCHET_RETAINED_IDS` with the four IDs that recorded organic\n`schedules_hit >= 1` in\n  all seven windows.\n- Adds `OrganicSummary::has_presence` as the single presence predicate\nshared by the seven-window\n  evaluator and the new per-window gate.\n- Extracts `enforce_retained_presence`, called by the nightly census\nmerge: a retained ID with\nzero organic schedules now fails `CI - Simulation Tests (Nightly)`. The\nworkflow step is named\n  to show it gates.\n- The ignored seven-window evaluator now fails when the evidence is\nrejected and asserts its\nretained set equals the checked-in constant, so the evidence and the\ngate cannot drift.\n- Tests cover registry-wide gate membership, peer-session hits not\nsubstituting for schedule\n  presence, the three-qualifying threshold, and the nightly wiring.\n\n## Evidence\n\n| Window (UTC) | Run | Trigger | prediction | floor | nudge | sparse |\ninput ring |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n| 2026-11-13 04:11 | 43363930081 | schedule | 40 | 620 | 895 | 0 | 40 |\n| 2026-11-14 04:11 | 43555370869 | schedule | 40 | 617 | 897 | 0 | 40 |\n| 2026-11-15 04:11 | 43675676701 | schedule | 40 | 615 | 897 | 0 | 40 |\n| 2026-11-15 05:32 | 43681492566 | workflow_dispatch | 40 | 614 | 894 |\n0 | 40 |\n| 2026-11-15 05:57 | 43683288193 | workflow_dispatch | 40 | 615 | 898 |\n0 | 40 |\n| 2026-11-15 06:29 | 43685697209 | workflow_dispatch | 40 | 616 | 886 |\n0 | 40 |\n| 2026-11-15 06:56 | 43687685677 | workflow_dispatch | 40 | 620 | 900 |\n0 | 40 |\n\nEvery window is the full nightly workload (1,000 schedules / 5,000,000\nsteps / 9,000 peer\nsessions) seeded from its unique run ID. Windows 4-7 were dispatched on\n`main` at `fc6a5f55` so\nthe seven-window gate could be measured today; the scheduled sequence\nwould otherwise complete on\n2026-11-19. They are the same nightly workflow, redesign, workload, and\nartifact contract as the\nscheduled windows, with independent seeds. The scheduled windows from\n2026-11-16 onward are the\nfirst live gate checks.\n\nChecked-in evaluator output:\n\n```text\nrollback.at_prediction_limit.v1: 7/7 windows (eligible=true)\nfloor_round.lower_floor_consumable.v1: 7/7 windows (eligible=true)\nconnect_status.nudge_sent.v1: 7/7 windows (eligible=true)\nrollback.sparse_earlier_checkpoint_selected.v1: 0/7 windows (eligible=false)\ninput_ring.within_one_slot_of_capacity.v1: 7/7 windows (eligible=true)\nretained: [\"rollback.at_prediction_limit.v1\", \"floor_round.lower_floor_consumable.v1\", \"connect_status.nudge_sent.v1\", \"input_ring.within_one_slot_of_capacity.v1\"]\n```\n\n## Verification\n\n- `cargo fmt --check`\n- `cargo clippy --workspace --all-targets --features\nhot-join,tokio,json,sync-send,paranoid,trace-validation,violation-census\n-- -D warnings`\n- `cargo tfull` — 3,198 passed, 75 skipped\n- `cargo test --test simulation --features hot-join\n'simulation::sometimes_state::tests::'` — 25 passed\n- `python3 -m pytest scripts/tests` — 2,240 passed, 1 skipped\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`,\n`actionlint`, plan hygiene, agent skills, markdownlint, typos\n\nNo changelog entry: test/CI-only behavior.",
+          "timestamp": "2026-11-15T07:37:43Z",
+          "tree_id": "a38d2c2e9f5b527359e63566eadf8496c57f4f59",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/8ecd550794978d4be9e3cb580faac0e3a47f114a"
+        },
+        "date": 1794728987176,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40143,
+            "range": "± 1618",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25345,
+            "range": "± 224",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2767,
+            "range": "± 162",
             "unit": "ns/iter"
           }
         ]
