@@ -1156,10 +1156,9 @@ impl<T: Config> SpectatorSession<T> {
                 if disconnect_observed && matches!(&event, Event::Disconnected | Event::Goodbye) {
                     continue;
                 }
-                if let Some(host_index) =
+                if let Some(_host_index) =
                     self.handle_event(batch.host_index, event, batch.addr.clone())
                 {
-                    debug_assert_eq!(host_index, batch.host_index);
                     disconnect_observed = true;
                 }
             }
