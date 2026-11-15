@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intervals before a transport is allocated. Network session constructors apply the same validation
   automatically.
 
+### Fixed
+
+- **Pre-existing:** a spectator now records a host's final reliable input when the `Goodbye`
+  datagram is decoded before that input within the same poll. Previously the host was tombstoned
+  on the first `Goodbye` event and the already-drained input was skipped, leaving the spectator
+  permanently stalled on `PredictionThreshold` for that frame.
+- **Pre-existing:** coordinated graceful-drop prepares now require exactly the current survivor
+  set. A prepare that omitted (or invented) a running survivor is rejected instead of letting a
+  single peer mint a survivor-quorum certificate for an uninvolved third slot, and stale-era
+  prepares are rejected after membership changes.
+
 ### Changed
 
 - **Breaking:** the development-only `z3-verification` feature now uses `z3` 0.21 and requires

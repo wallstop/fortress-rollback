@@ -1140,17 +1140,31 @@ impl<T: Config> SpectatorSession<T> {
         }
 
         while let Some(batch) = self.host_event_batches.pop_front() {
+            // A graceful host disconnects by sending Goodbye *after* its final
+            // reliable inputs, but UDP does not preserve datagram order: the
+            // Goodbye can be decoded first within the same drained batch. Process
+            // every event in this poll before tombstoning the host so a reversed
+            // (Goodbye, Input) order still records the final prefix. Hosts are
+            // removed after the loop; later-poll stragglers remain out of scope.
+            let mut disconnect_observed = false;
             for event in batch.events {
                 if self.disconnected_hosts.contains(&batch.host_index) {
+                    continue;
+                }
+                // Collapse duplicate terminal events while still allowing a
+                // final input that was decoded after the first one.
+                if disconnect_observed && matches!(&event, Event::Disconnected | Event::Goodbye) {
                     continue;
                 }
                 if let Some(host_index) =
                     self.handle_event(batch.host_index, event, batch.addr.clone())
                 {
-                    if !self.disconnected_hosts.contains(&host_index) {
-                        self.disconnected_hosts.push(host_index);
-                    }
+                    debug_assert_eq!(host_index, batch.host_index);
+                    disconnect_observed = true;
                 }
+            }
+            if disconnect_observed && !self.disconnected_hosts.contains(&batch.host_index) {
+                self.disconnected_hosts.push(batch.host_index);
             }
         }
 
@@ -4655,6 +4669,32 @@ mod tests {
         let status = vec![ConnectionStatus::default(); 2];
 
         queue_host_disconnect_input(&mut session, 0, frame, [11, 22], status);
+        session.poll_remote_clients();
+
+        assert_eq!(session.num_hosts(), 0);
+        assert!(session.spectator_divergence.is_none());
+        assert_eq!(session.last_recv_frame, frame);
+        let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+        assert_eq!(session.inputs[buffer_index][0].input, 11_u8);
+        assert_eq!(session.inputs[buffer_index][1].input, 22_u8);
+    }
+
+    #[test]
+    fn spectator_goodbye_before_final_input_preserves_the_input() {
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .unwrap()
+            .start_spectator_session(test_addr(7319), DummySocket)
+            .unwrap();
+        let frame = Frame::new(0);
+        let status = vec![ConnectionStatus::default(); 2];
+
+        session.hosts[0].force_running_for_tests();
+        session.hosts[0].handle_message(&Message {
+            header: MessageHeader::new(1),
+            body: MessageBody::Goodbye(Goodbye { reason: 0 }),
+        });
+        session.hosts[0].handle_message(&spectator_input_message(frame, [11, 22], status));
         session.poll_remote_clients();
 
         assert_eq!(session.num_hosts(), 0);

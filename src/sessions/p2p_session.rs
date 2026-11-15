@@ -1134,6 +1134,17 @@ impl<T: Config> P2PSession<T> {
             ))
     }
 
+    /// Records a terminal coordinated-drop operation so replayed control
+    /// messages for it are ignored. The history is bounded to one entry per
+    /// player: the supersede/abort paths are peer-driven and may run every
+    /// poll, so an untrimmed deque would grow without bound.
+    fn coordinated_drop_close_operation(&mut self, operation: DropOperationId) {
+        self.coordinated_drop.closed.push_back(operation);
+        while self.coordinated_drop.closed.len() > self.num_players {
+            self.coordinated_drop.closed.pop_front();
+        }
+    }
+
     fn coordinated_drop_broadcast(&mut self, message: DropControlMessage, targets: &[DropTarget]) {
         for endpoint in self.player_reg.remotes.values_mut() {
             let is_target = endpoint.handles().iter().any(|handle| {
@@ -1479,10 +1490,7 @@ impl<T: Config> P2PSession<T> {
                 &attempt.targets,
             );
         }
-        self.coordinated_drop.closed.push_back(attempt.operation);
-        while self.coordinated_drop.closed.len() > self.num_players {
-            self.coordinated_drop.closed.pop_front();
-        }
+        self.coordinated_drop_close_operation(attempt.operation);
         self.enter_fail_closed_disconnect_state_at(attempt.held_at);
         report_violation!(
             ViolationSeverity::Error,
@@ -1579,6 +1587,13 @@ impl<T: Config> P2PSession<T> {
                 .windows(2)
                 .any(|pair| matches!(pair, [left, right] if left >= right))
         {
+            return false;
+        }
+        // A prepare is a survivor-quorum certificate. Accepting a participant
+        // list that omits (or invents) a currently running survivor would let a
+        // single peer mint a certificate for an uninvolved third slot, and
+        // would also accept stale-era prepares after membership changed.
+        if !self.coordinated_drop_prepare_matches_current_membership(prepare) {
             return false;
         }
         prepare.targets.iter().all(|target| {
@@ -1693,7 +1708,7 @@ impl<T: Config> P2PSession<T> {
                     .queued
                     .insert(PlayerHandle::new(usize::from(target.handle)));
             }
-            self.coordinated_drop.closed.push_back(superseded.operation);
+            self.coordinated_drop_close_operation(superseded.operation);
         }
 
         let first_target = prepare
@@ -2233,7 +2248,7 @@ impl<T: Config> P2PSession<T> {
                         .queued
                         .insert(PlayerHandle::new(usize::from(target.handle)));
                 }
-                self.coordinated_drop.closed.push_back(attempt.operation);
+                self.coordinated_drop_close_operation(attempt.operation);
             }
         } else {
             self.coordinated_drop_fail_closed(abort.reason, false);
@@ -2415,10 +2430,7 @@ impl<T: Config> P2PSession<T> {
                         self.coordinated_drop.queued.insert(handle);
                     }
                 }
-                self.coordinated_drop.closed.push_back(prepare.operation);
-                while self.coordinated_drop.closed.len() > self.num_players {
-                    self.coordinated_drop.closed.pop_front();
-                }
+                self.coordinated_drop_close_operation(prepare.operation);
                 continue;
             }
             if let Err(reason) = self.coordinated_drop_accept_prepare(prepare) {
@@ -2464,10 +2476,7 @@ impl<T: Config> P2PSession<T> {
         if now.saturating_duration_since(active.started_at) >= timeout {
             if active.phase == CoordinatedDropPhase::Committed {
                 let operation = active.operation;
-                self.coordinated_drop.closed.push_back(operation);
-                while self.coordinated_drop.closed.len() > self.num_players {
-                    self.coordinated_drop.closed.pop_front();
-                }
+                self.coordinated_drop_close_operation(operation);
                 self.coordinated_drop.active = None;
                 return;
             }
@@ -2592,10 +2601,7 @@ impl<T: Config> P2PSession<T> {
         });
         if let Some((complete, operation)) = committed_resolution {
             if complete {
-                self.coordinated_drop.closed.push_back(operation);
-                while self.coordinated_drop.closed.len() > self.num_players {
-                    self.coordinated_drop.closed.pop_front();
-                }
+                self.coordinated_drop_close_operation(operation);
                 self.coordinated_drop.active = None;
             }
             return;
@@ -11734,6 +11740,19 @@ impl<T: Config> P2PSession<T> {
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
     fn update_player_disconnects(&mut self) {
+        // All-local (and all-remotes-gone) sessions have no peer gossip to fold
+        // and local slots can never be disconnected through this path. This is
+        // the only exact early-out: any live coordinated-drop state must still
+        // be driven.
+        if self.player_reg.remotes.is_empty()
+            && self.coordinated_drop.active.is_none()
+            && self.coordinated_drop.deferred_prepares.is_empty()
+            && self.coordinated_drop.queued.is_empty()
+            && self.coordinated_drop.committed.is_empty()
+        {
+            return;
+        }
+
         // Lazily captured immediately before the first mutation. One update
         // can apply several endpoint folds, so every later failure must retain
         // the prefix safe before the first fold. Keeping this lazy avoids a
@@ -14772,6 +14791,61 @@ mod tests {
         assert_eq!(metrics.socket.oldest_queued_ms, 21);
     }
 
+    fn create_three_endpoint_session() -> P2PSession<TestConfig> {
+        SessionBuilder::new()
+            .with_num_players(3)
+            .unwrap()
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("Failed to add local player")
+            .add_player(PlayerType::Remote(test_addr(8080)), PlayerHandle::new(1))
+            .expect("Failed to add remote player 1")
+            .add_player(PlayerType::Remote(test_addr(8081)), PlayerHandle::new(2))
+            .expect("Failed to add remote player 2")
+            .start_p2p_session(DummySocket)
+            .expect("Failed to create session")
+    }
+
+    #[test]
+    fn coordinated_drop_prepare_requires_the_current_survivor_set() {
+        let mut session = create_three_endpoint_session();
+        for addr in [test_addr(8080), test_addr(8081)] {
+            if let Some(endpoint) = session.player_reg.remotes.get_mut(&addr) {
+                endpoint.force_running_for_tests();
+            }
+        }
+
+        let targets = vec![DropTarget {
+            handle: 1,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let mut prepare = DropPrepare {
+            operation,
+            targets,
+            participants: vec![0],
+        };
+
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "a certificate that omits the running survivor must be rejected"
+        );
+        prepare.participants = vec![0, 2];
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "the exact current survivor set must be accepted"
+        );
+        prepare.participants = vec![0, 1];
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "the target slot cannot certify its own drop"
+        );
+    }
+
     fn create_multi_handle_remote_session() -> P2PSession<TestConfig> {
         SessionBuilder::new()
             .with_num_players(3)
@@ -15022,6 +15096,29 @@ mod tests {
                 .get(remote.as_usize())
                 .is_some_and(|status| status.disconnected),
             "the committed operation must freeze the remote slot"
+        );
+    }
+
+    #[test]
+    fn coordinated_drop_closed_history_stays_bounded() {
+        let mut session = create_two_player_session();
+        for sequence in 0..1_000 {
+            session.coordinated_drop_close_operation(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence,
+                target_set_digest: 0,
+            });
+        }
+        assert_eq!(session.coordinated_drop.closed.len(), session.num_players);
+        assert_eq!(
+            session
+                .coordinated_drop
+                .closed
+                .back()
+                .map(|operation| operation.sequence),
+            Some(999),
+            "the newest closed operation must be retained"
         );
     }
 
