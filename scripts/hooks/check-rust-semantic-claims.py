@@ -515,8 +515,8 @@ def _is_scan_path(relative_path: str) -> bool:
 
 def _tracked_rust_files(repo_root: Path) -> list[Path] | None:
     """Return tracked Rust files under the scan roots, or None outside Git."""
-    result = subprocess.run(
-        ["git", "-C", str(repo_root), "ls-files", "-z", "--", "*.rs"],
+    result = subprocess.run(  # noqa: S603 - fixed executable, no shell
+        ["git", "-C", str(repo_root), "ls-files", "-z", "--", "*.rs"],  # noqa: S607
         capture_output=True,
         check=False,
     )
