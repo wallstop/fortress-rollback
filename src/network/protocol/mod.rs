@@ -2996,25 +2996,7 @@ impl<T: Config> UdpProtocol<T> {
             // delete received inputs that are too old. `recv_inputs` is keyed by
             // frame in ascending order, so pop the stale prefix instead of
             // scanning the whole history on every decoded packet.
-            let last_recv_frame = self.last_recv_frame();
-            let history_frames = self
-                .protocol_config
-                .input_history_multiplier
-                .checked_mul(self.max_prediction)
-                .and_then(|frames| i32::try_from(frames).ok())
-                .unwrap_or(i32::MAX);
-            let prune_floor = safe_frame_sub!(
-                last_recv_frame,
-                history_frames,
-                "UdpProtocol::on_input history prune"
-            );
-            while self
-                .recv_inputs
-                .first_key_value()
-                .is_some_and(|(&frame, _)| frame < prune_floor)
-            {
-                self.recv_inputs.pop_first();
-            }
+            self.prune_recv_inputs();
         } else {
             // A stale retransmission can outlive its delta reference after the
             // receiver prunes old input history. The frames are already known,
@@ -3384,6 +3366,34 @@ impl<T: Config> UdpProtocol<T> {
         match self.recv_inputs.last_key_value() {
             Some((&frame, _)) => frame,
             None => Frame::NULL,
+        }
+    }
+
+    /// Drops received inputs older than the configured history window.
+    ///
+    /// `recv_inputs` is keyed by frame in ascending order, so the stale prefix
+    /// is popped in O(pruned) rather than scanning the whole map. The frame at
+    /// exactly `last_recv_frame - history_frames` is retained (inclusive
+    /// floor).
+    fn prune_recv_inputs(&mut self) {
+        let last_recv_frame = self.last_recv_frame();
+        let history_frames = self
+            .protocol_config
+            .input_history_multiplier
+            .checked_mul(self.max_prediction)
+            .and_then(|frames| i32::try_from(frames).ok())
+            .unwrap_or(i32::MAX);
+        let prune_floor = safe_frame_sub!(
+            last_recv_frame,
+            history_frames,
+            "UdpProtocol::on_input history prune"
+        );
+        while self
+            .recv_inputs
+            .first_key_value()
+            .is_some_and(|(&frame, _)| frame < prune_floor)
+        {
+            self.recv_inputs.pop_first();
         }
     }
 
@@ -7128,6 +7138,33 @@ mod tests {
         assert_eq!(
             timeout_count3, 0,
             "SyncTimeout should only be emitted once per timeout"
+        );
+    }
+
+    #[test]
+    fn prune_recv_inputs_retains_the_inclusive_floor() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.protocol_config.input_history_multiplier = 2;
+        protocol.recv_inputs.clear();
+        for frame in [0, 4, 10, 20] {
+            let frame = Frame::new(frame);
+            protocol.recv_inputs.insert(
+                frame,
+                InputBytes {
+                    frame,
+                    bytes: Vec::new(),
+                },
+            );
+        }
+
+        protocol.prune_recv_inputs();
+
+        let frames = protocol.recv_inputs.keys().copied().collect::<Vec<_>>();
+        assert_eq!(
+            frames,
+            vec![Frame::new(4), Frame::new(10), Frame::new(20)],
+            "frames below the floor are pruned; the inclusive floor is retained"
         );
     }
 
