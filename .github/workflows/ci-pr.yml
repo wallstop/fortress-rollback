@@ -21,6 +21,49 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Decide whether the cfg(kani) compile gate is relevant. Rust source and
+  # build inputs can break the Kani-only tree; docs/CI-only PRs skip the
+  # expensive tool install. Any detection failure fails closed (runs the gate).
+  changes:
+    name: Detect Kani-relevant changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kani: ${{ steps.diff.outputs.kani }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Classify changed paths
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_SHA" ]]; then
+            echo "kani=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            echo "::warning::Could not fetch base $BASE_SHA; running the Kani compile gate defensively."
+            echo "kani=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet FETCH_HEAD HEAD -- \
+            'src/**' \
+            'Cargo.toml' \
+            'Cargo.lock' \
+            'build.rs' \
+            'rust-toolchain.toml' \
+            '.cargo/config.toml' \
+            '.kani-version' \
+            '.github/actions/setup-kani/**' \
+            '.github/workflows/ci-pr.yml'; then
+            echo "kani=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "kani=true" >> "$GITHUB_OUTPUT"
+          fi
+
   fast:
     name: Fast Gate (Linux)
     runs-on: ubuntu-latest
@@ -56,6 +99,30 @@ jobs:
 
       - name: Response-time budget note
         run: 'echo "Fast gate target: under 10 minutes wall time."'
+
+  # `cargo kani --only-codegen` type-checks the real cfg(kani) tree (the
+  # stack-backed ProofVec shim and every `#[cfg(kani)]` module) without running
+  # any proof. PR #427 merged a by-reference `ProofVec` iteration that clippy,
+  # tests, and rustdoc all accept but the Kani tiers could not compile; this
+  # check catches that class of break in the required PR gate.
+  kani-compile:
+    name: Kani cfg Compile
+    needs: changes
+    if: needs.changes.outputs.kani == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Kani
+        uses: ./.github/actions/setup-kani
+        with:
+          install-timeout-minutes: '10'
+
+      - name: Type-check the cfg(kani) tree
+        run: cargo kani --only-codegen
+        timeout-minutes: 8
 
   api-census:
     name: Public API Census
@@ -112,7 +179,7 @@ jobs:
 
   gate:
     name: CI Gate
-    needs: [fast, api-census, wasm-check]
+    needs: [changes, fast, api-census, wasm-check, kani-compile]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

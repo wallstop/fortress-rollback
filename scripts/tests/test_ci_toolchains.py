@@ -33,11 +33,14 @@ RELEASE_ACTION = (
 RELEASE_INSTALLER = RELEASE_ACTION.parent / "install.sh"
 RELEASE_PIN = RELEASE_ACTION.parent / "toolchain"
 LOCAL_INSTALLER = "./.github/actions/install-pinned-nightly"
+LOCAL_KANI_SETUP = "./.github/actions/setup-kani"
+KANI_SETUP_ACTION = REPO_ROOT / ".github" / "actions" / "setup-kani" / "action.yml"
 LOCAL_RELEASE_INSTALLER = "./.github/actions/install-pinned-release"
 REQUIRED_NIGHTLY_JOBS = (
     ("ci-safety.yml", "careful", "rust-src", ""),
     ("ci-security.yml", "unused-deps", "", ""),
     ("ci-docs.yml", "doc-coverage", "", ""),
+    ("ci-pr.yml", "kani-compile", "", ""),
     ("ci-verification.yml", "kani-tier1", "", ""),
     ("ci-verification.yml", "kani-tier2", "", ""),
     ("ci-verification.yml", "kani-tier3", "", ""),
@@ -738,8 +741,20 @@ def test_required_nightly_job_uses_canonical_installer(
 ) -> None:
     workflow = _load_yaml(WORKFLOWS / workflow_name)
     job = workflow["jobs"][job_name]
+
+    # Kani jobs install the pinned nightly through the setup-kani composite
+    # action so the pin, cache keys, and install retries have one owner.
+    kani_setup_steps = [
+        step for step in job["steps"] if step.get("uses") == LOCAL_KANI_SETUP
+    ]
+    if kani_setup_steps:
+        assert len(kani_setup_steps) == 1
+        job_steps = _load_yaml(KANI_SETUP_ACTION)["runs"]["steps"]
+    else:
+        job_steps = job["steps"]
+
     installer_steps = [
-        step for step in job["steps"] if step.get("uses") == LOCAL_INSTALLER
+        step for step in job_steps if step.get("uses") == LOCAL_INSTALLER
     ]
 
     assert len(installer_steps) == 1
@@ -751,7 +766,7 @@ def test_required_nightly_job_uses_canonical_installer(
 
     cache_keys = [
         str(step.get("with", {}).get("key", ""))
-        for step in job["steps"]
+        for step in job_steps
         if step.get("uses", "").startswith("actions/cache@")
     ]
     for cache_key in cache_keys:
@@ -872,7 +887,13 @@ def test_nightly_installer_changes_trigger_consuming_workflows(
     ]
     assert checked_events
     for event in checked_events:
-        assert ".github/actions/install-pinned-nightly/**" in on_block[event]["paths"]
+        event_config = on_block[event]
+        # An unfiltered trigger (for example the PR gate) runs on every change,
+        # so it already observes installer updates.
+        if isinstance(event_config, dict) and "paths" in event_config:
+            assert (
+                ".github/actions/install-pinned-nightly/**" in event_config["paths"]
+            )
 
 
 def test_extensionless_release_pin_triggers_documentation_script_tests() -> None:

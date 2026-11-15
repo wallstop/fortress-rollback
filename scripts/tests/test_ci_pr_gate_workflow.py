@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -49,7 +50,13 @@ def test_pr_gate_has_one_aggregate_required_job() -> None:
 
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == {"fast", "api-census", "wasm-check"}
+    assert set(gate["needs"]) == {
+        "changes",
+        "fast",
+        "api-census",
+        "wasm-check",
+        "kani-compile",
+    }
 
     step = gate["steps"][0]
     assert step["env"]["NEEDS_JSON"] == "${{ toJSON(needs) }}"
@@ -59,12 +66,47 @@ def test_pr_gate_has_one_aggregate_required_job() -> None:
     assert '.result == "neutral"' in step["run"]
 
 
+def test_pr_gate_compiles_the_cfg_kani_tree_without_running_proofs() -> None:
+    jobs = _load(PR_GATE)["jobs"]
+    compile_job = jobs["kani-compile"]
+
+    assert compile_job["needs"] == "changes"
+    assert compile_job["if"] == "needs.changes.outputs.kani == 'true'"
+
+    uses = [step.get("uses", "") for step in compile_job["steps"]]
+    runs = [step.get("run", "") for step in compile_job["steps"]]
+    assert "./.github/actions/setup-kani" in uses
+    assert any("cargo kani --only-codegen" in run for run in runs)
+
+    # Compile-only: proof execution flags must never appear in this job.
+    for forbidden in ("--harness", "--tier", "--fail-fast"):
+        assert forbidden not in yaml.safe_dump(compile_job), forbidden
+
+
+def test_kani_compile_gate_path_detection_fails_closed() -> None:
+    jobs = _load(PR_GATE)["jobs"]
+    changes = jobs["changes"]
+
+    assert changes["outputs"]["kani"] == "${{ steps.diff.outputs.kani }}"
+    diff_step = next(step for step in changes["steps"] if step.get("id") == "diff")
+    assert "BASE_SHA" in diff_step["env"]
+    for path in (
+        "'src/**'",
+        "'Cargo.toml'",
+        "'Cargo.lock'",
+        "'.kani-version'",
+        "'.github/actions/setup-kani/**'",
+    ):
+        assert path in diff_step["run"], path
+    # Detection failures must fail closed: a fetch error runs the gate.
+    assert 'echo "kani=true" >> "$GITHUB_OUTPUT"' in diff_step["run"]
+
+
 def test_pr_gate_does_not_run_deep_assurance() -> None:
     text = PR_GATE.read_text(encoding="utf-8")
 
     for forbidden in (
         "cargo miri",
-        "cargo kani",
         "cargo mutants",
         "cargo tarpaulin",
         "TLA+ Model Checking",
@@ -72,6 +114,22 @@ def test_pr_gate_does_not_run_deep_assurance() -> None:
         "Godot Emscripten Browser",
     ):
         assert forbidden not in text, forbidden
+
+
+def test_kani_version_has_one_authority() -> None:
+    pin = (REPO_ROOT / ".kani-version").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", pin), pin
+
+    setup = (REPO_ROOT / ".github" / "actions" / "setup-kani" / "action.yml").read_text(
+        encoding="utf-8"
+    )
+    assert ".kani-version" in setup
+    assert "kani-build-${{ runner.os }}" in setup
+
+    verification = (WORKFLOWS / "ci-verification.yml").read_text(encoding="utf-8")
+    assert "KANI_VERSION" not in verification
+    assert "./.github/actions/setup-kani" in verification
+    assert pin not in verification, "Kani version must live only in .kani-version"
 
 
 def test_deep_workflows_are_merge_queue_or_scheduled_only() -> None:
