@@ -10465,9 +10465,11 @@ impl<T: Config> P2PSession<T> {
             load_target = load_target.max(retained_floor);
             // Sparse save mode may not have a checkpoint at that exact frame;
             // advance to the first loadable one so the rollback still completes.
-            // If no in-window checkpoint exists, leave the original target so
-            // `load_frame` fails closed instead of silently skipping the rollback
-            // and clearing `disconnect_frame`.
+            // With no state at the raised floor the intervening frames cannot be
+            // corrected from any available checkpoint (the same bounded residual
+            // the below-window clamp reports). If no in-window checkpoint exists,
+            // leave the original target so `load_frame` fails closed instead of
+            // silently skipping the rollback and clearing `disconnect_frame`.
             let loadable = (load_target.as_i32()..current_frame.as_i32())
                 .find(|&frame| {
                     self.sync_layer
