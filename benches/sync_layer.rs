@@ -11,7 +11,7 @@
 )]
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use fortress_rollback::{Config, FortressRequest, __internal::SyncLayer};
+use fortress_rollback::{__internal::SyncLayer, Config, FortressRequest};
 use serde::{Deserialize, Serialize};
 use std::hint::black_box;
 use std::net::SocketAddr;
