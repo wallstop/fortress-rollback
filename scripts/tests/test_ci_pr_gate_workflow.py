@@ -220,6 +220,16 @@ def test_kani_version_has_one_authority() -> None:
         'cargo install --locked kani-verifier --version "=${{ steps.pin.outputs.version }}"'
         in setup
     )
+    install_step = next(
+        step
+        for step in yaml.safe_load(setup)["runs"]["steps"]
+        if step.get("name") == "Install Kani with retry"
+    )
+    install_command = install_step["with"]["command"]
+    # Setup must run on cache hits too (the restored binary's toolchain symlink
+    # points into ~/.rustup, which the cache does not cover).
+    assert "cargo kani setup" in install_command
+    assert install_command.index("cargo kani setup") > install_command.index("fi")
 
     for workflow in WORKFLOWS.glob("*.yml"):
         text = workflow.read_text(encoding="utf-8")
