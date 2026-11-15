@@ -75,7 +75,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if rule_types != required_rule_types:
         raise RulesetError(
             "main protection must contain exactly the deletion, non-fast-forward, "
-            "linear-history, and release-state status-check rules"
+            "linear-history, and status-check rules"
         )
     status_rule = rules[-1]
     required_parameters = {

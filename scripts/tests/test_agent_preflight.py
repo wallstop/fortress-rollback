@@ -634,3 +634,108 @@ def test_execute_checks_without_auto_fix_fails(monkeypatch) -> None:
     code = execute_checks(Path("/repo"), [check], auto_fix=False)
 
     assert code == 1
+
+
+def test_check_cache_key_changes_with_input_content(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text("fn one() {}\n", encoding="utf-8")
+    check = PlannedCheck(
+        check_id="unbounded-alloc",
+        description="allocations",
+        command=["tool", "check"],
+    )
+
+    first = agent_preflight.check_cache_key(tmp_path, check, ["src/lib.rs"])
+    source.write_text("fn two() {}\n", encoding="utf-8")
+    second = agent_preflight.check_cache_key(tmp_path, check, ["src/lib.rs"])
+
+    assert first != second
+
+
+def test_execute_checks_reuses_content_addressed_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text("fn one() {}\n", encoding="utf-8")
+    check = PlannedCheck(
+        check_id="unbounded-alloc",
+        description="allocations",
+        command=["tool", "check"],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(_repo_root: Path, command: list[str]) -> tuple[int, str]:
+        calls.append(tuple(command))
+        return 0, ""
+
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
+
+    first_results: list[agent_preflight.CheckResult] = []
+    first = execute_checks(
+        tmp_path,
+        [check],
+        auto_fix=False,
+        results=first_results,
+        cache_dir=tmp_path / "cache",
+        paths=["src/lib.rs"],
+    )
+    second_results: list[agent_preflight.CheckResult] = []
+    second = execute_checks(
+        tmp_path,
+        [check],
+        auto_fix=False,
+        results=second_results,
+        cache_dir=tmp_path / "cache",
+        paths=["src/lib.rs"],
+    )
+
+    assert first == 0
+    assert second == 0
+    assert calls == [("tool", "check")]
+    assert first_results[0].cached is False
+    assert second_results[0].cached is True
+    assert "(cached)" in capsys.readouterr().out
+
+
+def test_execute_checks_does_not_cache_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text("fn one() {}\n", encoding="utf-8")
+    check = PlannedCheck(
+        check_id="unbounded-alloc",
+        description="allocations",
+        command=["tool", "check"],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(_repo_root: Path, command: list[str]) -> tuple[int, str]:
+        calls.append(tuple(command))
+        return 1, "failed"
+
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
+
+    first = execute_checks(
+        tmp_path,
+        [check],
+        auto_fix=False,
+        cache_dir=tmp_path / "cache",
+        paths=["src/lib.rs"],
+    )
+    second = execute_checks(
+        tmp_path,
+        [check],
+        auto_fix=False,
+        cache_dir=tmp_path / "cache",
+        paths=["src/lib.rs"],
+    )
+
+    assert first == 1
+    assert second == 1
+    assert calls == [("tool", "check"), ("tool", "check")]
