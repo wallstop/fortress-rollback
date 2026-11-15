@@ -38,31 +38,7 @@ jobs:
         id: diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$BASE_SHA" ]]; then
-            echo "kani=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
-            echo "::warning::Could not fetch base $BASE_SHA; running the Kani compile gate defensively."
-            echo "kani=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --quiet FETCH_HEAD HEAD -- \
-            'src/**' \
-            'Cargo.toml' \
-            'Cargo.lock' \
-            'build.rs' \
-            'rust-toolchain.toml' \
-            '.cargo/config.toml' \
-            '.kani-version' \
-            '.github/actions/setup-kani/**' \
-            '.github/workflows/ci-pr.yml'; then
-            echo "kani=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "kani=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash scripts/ci/detect-kani-changes.sh
 
   fast:
     name: Fast Gate (Linux)
@@ -110,7 +86,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.kani == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Install retry budget is 3 x 10 min + 2 x 60 s, then an 8 min codegen
+    # ceiling; the job timeout must exceed that so a slow install is retried
+    # instead of being killed mid-attempt.
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v7

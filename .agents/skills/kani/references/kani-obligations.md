@@ -39,7 +39,7 @@ header and run lengths.
 ## Reproduce
 
 ```bash
-export KANI_HOME="$HOME/.kani/kani-0.68.0"   # only if the bundle is not auto-detected
+export KANI_HOME="$HOME/.kani/kani-$(tr -d '[:space:]' < .kani-version)"  # only if the bundle is not auto-detected
 cargo kani --harness proof_frame_buffer_index_invalid_none --default-unwind 2
 cargo kani --harness proof_frame_buffer_index_valid_modulo --default-unwind 2
 cargo kani --harness proof_varint_full_u64_roundtrip_fixed_buffer --default-unwind 12

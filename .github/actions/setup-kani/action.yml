@@ -10,7 +10,7 @@ description: "Install the pinned Kani verifier with binary and build caching"
 
 inputs:
   install-timeout-minutes:
-    description: "Retry wrapper budget for the Kani install step"
+    description: "Per-attempt budget for the Kani install retry wrapper"
     required: false
     default: "15"
 
@@ -25,10 +25,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install pinned Rust nightly
-      id: nightly
-      uses: ./.github/actions/install-pinned-nightly
-
     - name: Resolve pinned Kani version
       id: pin
       shell: bash
@@ -40,6 +36,10 @@ runs:
           exit 1
         fi
         echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install pinned Rust nightly
+      id: nightly
+      uses: ./.github/actions/install-pinned-nightly
 
     - name: Cache Kani
       uses: actions/cache@v6
@@ -70,22 +70,35 @@ runs:
     - name: Install Kani with retry
       uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
       with:
+        # Bounded per-attempt: callers size their job timeout for
+        # max_attempts * this value + the two retry delays.
         timeout_minutes: ${{ inputs.install-timeout-minutes }}
         max_attempts: 3
         retry_wait_seconds: 60
         command: |
           set -euo pipefail
           if ! command -v cargo-kani &> /dev/null; then
-            cargo install --locked kani-verifier --version "${{ steps.pin.outputs.version }}"
+            # `=` makes the requirement exact; a caret range would let a newer
+            # patch release satisfy the install while the cache key still names
+            # the pinned version.
+            cargo install --locked kani-verifier --version "=${{ steps.pin.outputs.version }}"
             cargo kani setup
           fi
 
     - name: Verify Kani toolchain
       shell: bash
+      env:
+        EXPECTED_KANI_VERSION: ${{ steps.pin.outputs.version }}
       run: |
         set -euo pipefail
         echo "=== Environment Diagnostics ==="
         echo "PATH: $PATH"
         echo "Cargo: $(which cargo)"
         echo "Rustc: $(rustc --version)"
-        echo "Kani: $(cargo kani --version)"
+        reported="$(cargo kani --version)"
+        echo "Kani: $reported"
+        installed="$(printf '%s\n' "$reported" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+        if [[ "$installed" != "$EXPECTED_KANI_VERSION" ]]; then
+          echo "::error::Kani version mismatch: pinned $EXPECTED_KANI_VERSION but found '${installed:-unknown}'. A restored cache or install resolved a different release."
+          exit 1
+        fi

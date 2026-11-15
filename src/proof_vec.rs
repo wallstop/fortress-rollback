@@ -28,7 +28,8 @@
 /// A growable vector. In production this is exactly [`Vec<T>`]; under Kani it is
 /// the fixed-capacity `InlineVec`. The two expose the same subset of the `Vec`
 /// API that the rollback containers use (`push`, `get`, `get_mut`, `len`,
-/// `first`, `clone`, `iter`, `iter_mut`), so call sites are identical.
+/// `first`, `iter`, `iter_mut`, and `clone` for `Copy` elements), so call sites
+/// are identical.
 ///
 /// # Compile contract
 ///

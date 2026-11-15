@@ -749,12 +749,16 @@ def test_required_nightly_job_uses_canonical_installer(
     ]
     if kani_setup_steps:
         assert len(kani_setup_steps) == 1
-        job_steps = _load_yaml(KANI_SETUP_ACTION)["runs"]["steps"]
+        composite_steps = _load_yaml(KANI_SETUP_ACTION)["runs"]["steps"]
+        assert not [
+            step for step in job["steps"] if step.get("uses") == LOCAL_INSTALLER
+        ]
     else:
-        job_steps = job["steps"]
+        composite_steps = []
+    all_steps = job["steps"] + composite_steps
 
     installer_steps = [
-        step for step in job_steps if step.get("uses") == LOCAL_INSTALLER
+        step for step in all_steps if step.get("uses") == LOCAL_INSTALLER
     ]
 
     assert len(installer_steps) == 1
@@ -766,7 +770,7 @@ def test_required_nightly_job_uses_canonical_installer(
 
     cache_keys = [
         str(step.get("with", {}).get("key", ""))
-        for step in job_steps
+        for step in all_steps
         if step.get("uses", "").startswith("actions/cache@")
     ]
     for cache_key in cache_keys:

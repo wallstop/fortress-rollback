@@ -210,9 +210,13 @@ RUN for tool in eza git-delta du-dust duf procs sd hyperfine tokei zoxide tealde
 
 # ============================================================================
 # Layer 9: Kani verifier (compiled from source - no pre-built binary available)
-# This is the heaviest layer (~3-4 min). Cached unless kani version changes.
+# This is the heaviest layer (~3-4 min). Cached unless the `.kani-version` pin
+# changes; the exact pin keeps local `cargo kani --only-codegen` behavior aligned
+# with the required PR gate.
 # ============================================================================
-RUN cargo install --locked kani-verifier && \
+COPY .kani-version /tmp/kani-version
+RUN KANI_VERSION="$(tr -d '[:space:]' < /tmp/kani-version)" && \
+    cargo install --locked kani-verifier --version "=${KANI_VERSION}" && \
     (cargo kani setup || echo "Kani setup may need to complete on first use")
 
 # ============================================================================

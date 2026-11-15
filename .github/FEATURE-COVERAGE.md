@@ -19,7 +19,7 @@ considered covered if it only appears in documentation or a compile check.
 | Deterministic simulation | Linux nextest suite | Simulation smoke | Nightly sharded fleet |
 | Replay and checksum corpora | Linux nextest suite | Cross-OS build and test | Extended replay corpus |
 | Wire and parser safety | Linux nextest suite | Cross-OS build and test | Fuzz corpus regression |
-| Kani proofs | None | Kani Tier 1 | Kani Tiers 2 and 3 |
+| Kani `cfg(kani)` compile | `cargo kani --only-codegen` on Rust/build-input changes | Kani Tier 1 proofs | Kani proof Tiers 2 and 3 |
 | TLA+ models | None | TLA+ on `specs/**` changes | Full weekly TLA+ sweep |
 | Z3 proofs | None | Z3 verification | Weekly Z3 sweep |
 | Loom concurrency | None | Loom on Linux | Loom on all runner OSes |
