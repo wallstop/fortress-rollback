@@ -418,7 +418,7 @@ impl<T: Config> SyncLayer<T> {
     /// it; returns [`Frame::NULL`] when no queue retains an input.
     pub(crate) fn oldest_retained_input_frame(&self) -> Frame {
         let mut oldest = Frame::NULL;
-        for queue in &self.input_queues {
+        for queue in self.input_queues.iter() {
             // Empty queues (a peer dropped before its first input, or a
             // hot-join reactivated slot whose ring is blanked) do not constrain
             // the floor: `synchronized_inputs` serves them from frozen/default
