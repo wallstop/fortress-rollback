@@ -53,6 +53,16 @@ jobs:
         run: |
           set -euo pipefail
           toolchain="${{ steps.nightly.outputs.toolchain }}"
+          # cargo-fuzz defaults --target to the triple its own binary was built
+          # for. The resilient installer can deliver the static musl cargo-fuzz
+          # build, whose default is x86_64-unknown-linux-musl; ASan cannot link
+          # against a static libc and the runner lacks that std target. Always
+          # pin the pinned toolchain's host triple instead.
+          host="$(rustc "+${toolchain}" -vV | sed -n 's/^host: //p')"
+          if [ -z "$host" ]; then
+            echo "::error::Could not determine the host triple for ${toolchain}."
+            exit 1
+          fi
           mapfile -t targets < <(cargo "+${toolchain}" fuzz list)
           if [ "${#targets[@]}" -eq 0 ]; then
             echo "::error::No fuzz targets discovered."
@@ -60,5 +70,5 @@ jobs:
           fi
           for target in "${targets[@]}"; do
             echo "== ${target} =="
-            cargo "+${toolchain}" fuzz run "$target" -- -runs=0
+            cargo "+${toolchain}" fuzz run "$target" --target "$host" -- -runs=0
           done
