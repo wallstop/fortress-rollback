@@ -10441,8 +10441,36 @@ impl<T: Config> P2PSession<T> {
         // frames as possible with the corrected disconnect flags; frames below the floor are
         // unrecoverable (the documented discard-before-convergence residual). For any in-window
         // target this `.max(..)` is a no-op, so the normal prediction-miss rollback path is
-        // unchanged. (`window_floor` is computed once at the top of this function.)
-        let load_target = frame_to_load.max(window_floor);
+        // unchanged. (`window_floor` is computed once at the top of this function.) When the clamp
+        // actually fires, the target also moves up to the oldest frame every live input queue still
+        // retains, because confirmation discards through `confirmed - 1`; see below.
+        let mut load_target = frame_to_load.max(window_floor);
+        if frame_to_load < window_floor {
+            // The clamp target may itself be older than the shared retained
+            // input history: normal confirmation discards through
+            // `confirmed - 1`, which can sit above `window_floor`. Starting the
+            // re-simulation there would fail `SynchronizedInputsFailed`, leave
+            // `disconnect_frame` armed, and wedge every later advance. Raise the
+            // target to the oldest frame every live queue can still provide.
+            let retained_floor = self.sync_layer.oldest_retained_input_frame();
+            if !retained_floor.is_null() && retained_floor > load_target {
+                load_target = retained_floor;
+            }
+            // Sparse save mode may not have a checkpoint at that exact frame;
+            // advance to the first loadable one so the rollback still completes.
+            // If no in-window checkpoint exists, leave the original target so
+            // `load_frame` fails closed instead of silently skipping the rollback
+            // and clearing `disconnect_frame`.
+            let mut loadable = load_target;
+            while loadable < current_frame
+                && self.sync_layer.saved_state_by_frame(loadable).is_none()
+            {
+                loadable = safe_frame_add!(loadable, 1, "P2PSession::adjust_gamestate retry");
+            }
+            if loadable < current_frame {
+                load_target = loadable;
+            }
+        }
         if load_target > first_incorrect {
             // Legitimate: the rollback target the disconnect convergence asked for fell below the
             // live prediction window, so we re-simulate from the window floor instead. This is the
@@ -10455,12 +10483,14 @@ impl<T: Config> P2PSession<T> {
                 ViolationSeverity::Warning,
                 ViolationKind::FrameSync,
                 "rollback target {} is below the prediction-window floor {} (current {}, \
-                 max_prediction {}); re-simulating from the floor. Frames below it cannot be \
+                 max_prediction {}); re-simulating from {}. Frames below {} cannot be \
                  corrected for the gossip-lowered disconnect frame.",
                 frame_to_load,
                 window_floor,
                 current_frame,
-                self.max_prediction
+                self.max_prediction,
+                load_target,
+                load_target
             );
         }
 
@@ -12895,6 +12925,12 @@ mod tests {
         session
             .sync_layer
             .set_last_confirmed_frame(Frame::new(4), SaveMode::EveryFrame);
+        // Force an unretained-input failure inside the re-simulation loop. The
+        // legal-window retention fix keeps frames the clamped rollback can
+        // request, so this test models genuinely missing queue state (e.g. a
+        // truncated/discarded history) rather than relying on the old
+        // confirmed-boundary over-discard.
+        session.sync_layer.truncate_input_queues_for_test(0);
 
         let mut requests = RequestVec::<TestConfig>::new();
         let result = session.adjust_gamestate(Frame::new(0), Frame::new(4), &mut requests);
@@ -12952,6 +12988,111 @@ mod tests {
             session.diagnostic_sometimes_state_vector(),
             [false, false, false, false, true],
             "actual InputQueue occupancy must reach exact registry position 4"
+        );
+    }
+
+    #[test]
+    fn sparse_rollback_without_an_in_window_checkpoint_fails_closed() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_save_mode(SaveMode::Sparse)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 16 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        // Only frame 0 becomes a real saved checkpoint.
+        if let FortressRequest::SaveGameState { cell, frame } =
+            session.sync_layer.save_current_state()
+        {
+            cell.save(frame, Some(0), None);
+        }
+        for frame_index in 0..8i32 {
+            let frame = Frame::new(frame_index);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, frame_index as u8)),
+                frame
+            );
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), SaveMode::Sparse);
+
+        let mut requests = RequestVec::<TestConfig>::new();
+        let result = session.adjust_gamestate(Frame::new(1), Frame::new(0), &mut requests);
+
+        assert!(
+            result.is_err(),
+            "without a loadable in-window sparse checkpoint the rollback must fail closed"
+        );
+        assert!(
+            requests.is_empty(),
+            "a failed sparse rollback must not emit a partial load/resim request set"
+        );
+    }
+
+    #[test]
+    fn gossip_lowered_rollback_target_resimulates_within_the_rollback_window() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 16 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for frame_index in 0..12i32 {
+            session
+                .add_local_input(local, frame_index as u8)
+                .expect("queue local input");
+            let requests = session.advance_frame().expect("advance before the drop");
+            for request in requests {
+                if let FortressRequest::SaveGameState { cell, frame } = request {
+                    cell.save(frame, Some(frame_index as u8), None);
+                }
+            }
+        }
+        assert_eq!(session.current_frame(), Frame::new(12));
+
+        // A relayed global-min freeze can arrive below the prediction-window
+        // floor. The rollback clamps the load target up to the floor (8 here),
+        // but normal confirmation has already discarded inputs below
+        // `confirmed - 1`; the re-simulation must still start from the oldest
+        // frame the live queues retain instead of failing and wedging.
+        session.disconnect_frame = Frame::new(2);
+        for frame_index in 12..14i32 {
+            session
+                .add_local_input(local, frame_index as u8)
+                .expect("queue local input");
+            let requests = session
+                .advance_frame()
+                .expect("a clamped disconnect rollback must stay live");
+            for request in requests {
+                if let FortressRequest::SaveGameState { cell, frame } = request {
+                    cell.save(frame, Some(frame_index as u8), None);
+                }
+            }
+        }
+        assert_eq!(session.current_frame(), Frame::new(14));
+        assert!(
+            session.disconnect_frame.is_null(),
+            "a completed resimulation must clear the armed disconnect rollback"
+        );
+        assert!(
+            session.metrics.rollback_count >= 1,
+            "the clamped rollback must actually re-simulate, not silently skip"
         );
     }
 

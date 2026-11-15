@@ -89,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those checksums after the correction requests execute (or omit a checksum whose saved-state cell
   is no longer buffered), so decoding and playing back a correctly played-out match no longer reports
   `ReplayDesync` at every corrected frame.
+- **Pre-existing:** a peer that reports checksum frames in strictly descending order no longer grows
+  the protocol's pending checksum history without bound. The retention pass pruned only relative to
+  the incoming frame, so descending reports evicted nothing and each 32-byte `ChecksumReport` added
+  a map entry even with desync detection off. The history now also enforces the configured
+  `max_checksum_history` as a hard count cap, dropping the lowest frames first.
+- **Pre-existing:** a gossip-lowered disconnect rollback whose clamped target predates the retained
+  confirmed-input history no longer wedges `advance_frame`. The re-simulation now starts at the
+  oldest frame every live input queue still retains (advancing to the first loadable sparse
+  checkpoint when needed), so the rollback completes and clears `disconnect_frame` instead of
+  failing with `SynchronizedInputsFailed` on every later call. If no loadable in-window checkpoint
+  exists, the rollback still fails closed rather than reporting a completed correction.
 - **Pre-existing:** automatic `ContinueWithout` timeouts now require a strict majority of the
   agreed membership to remain reachable in addition to an independent surviving witness. A
   symmetric partition that outlives the disconnect timeout no longer commits complementary
